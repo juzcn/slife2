@@ -96,6 +96,7 @@ class SlifeApp(App[None]):
         agent: str = DEFAULT_AGENT,
         model: str = "",
         model_label: str = "",
+        context_window: int = 0,
         client_factory: Callable[[], AgentClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
@@ -109,6 +110,10 @@ class SlifeApp(App[None]):
         self._agent = agent
         self._model = model
         self._model_label = model_label or model
+        #: The model's budget, from its config, for the percentage in the status
+        #: bar.  Zero when the config does not say, and then no percentage is
+        #: shown rather than one against a number somebody invented.
+        self._context_window = context_window
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
@@ -118,7 +123,7 @@ class SlifeApp(App[None]):
         self._connected = False
         self._connection_text = "connecting"
         self._turn_worker: Worker[None] | None = None
-        self._tokens = 0
+        self._context_tokens = 0
         self._steps = 0
 
     def compose(self) -> ComposeResult:
@@ -251,7 +256,10 @@ class SlifeApp(App[None]):
             ):
                 self._transcript.add_tool_end(call_id, ok, preview_text, chars)
             case TurnFinished(usage=usage, steps=steps):
-                self._tokens += usage.total_tokens
+                # Replaced, not accumulated: this is how big the conversation
+                # is now, which is the only thing a context percentage can be a
+                # percentage of.
+                self._context_tokens = usage.total_tokens
                 self._steps = steps
                 self._transcript.set_usage(usage.total_tokens)
                 self._refresh_status()
@@ -288,7 +296,7 @@ class SlifeApp(App[None]):
         if self._client is not None:
             self._client.reset()
         self._transcript.clear_all()
-        self._tokens = 0
+        self._context_tokens = 0
         self._steps = 0
         self._refresh_status()
 
@@ -304,6 +312,7 @@ class SlifeApp(App[None]):
             agent=self._agent,
             model=self._model_label,
             busy=busy,
-            tokens=self._tokens,
+            context_tokens=self._context_tokens,
+            context_window=self._context_window,
             steps=self._steps,
         )

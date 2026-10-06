@@ -636,7 +636,8 @@ class StatusBar(Static):
         agent: str = "",
         model: str = "",
         busy: bool = False,
-        tokens: int = 0,
+        context_tokens: int = 0,
+        context_window: int = 0,
         steps: int = 0,
         connected: bool = True,
     ) -> None:
@@ -650,8 +651,21 @@ class StatusBar(Static):
             parts.append(f"[{PALETTE['amber']}]working{GLYPHS['ellipsis']}[/]")
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
-        if tokens:
-            parts.append(f"[{PALETTE['dim']}]{GLYPHS['up']} {tokens:,} tokens[/]")
+
+        # The *last* turn's tokens, not a running total: what a context
+        # percentage is a percentage of is the conversation as it now stands,
+        # and a sum over every turn is a number that only ever grows.
+        if context_tokens:
+            if context_window:
+                used = context_tokens / context_window * 100
+                colour = PALETTE["amber"] if used >= 80 else PALETTE["dim"]
+                parts.append(
+                    f"[{colour}]{GLYPHS['up']} {context_tokens:,} ({used:.1f}%)[/]"
+                )
+            else:
+                # No window is configured for this model, and inventing one
+                # would render a percentage that means nothing.
+                parts.append(f"[{PALETTE['dim']}]{GLYPHS['up']} {context_tokens:,}[/]")
         if steps:
             parts.append(
                 f"[{PALETTE['dim']}]{steps} step{'s' if steps != 1 else ''}[/]"

@@ -454,7 +454,7 @@ async def test_a_failing_turn_is_reported() -> None:
 # --- status and cancellation -------------------------------------------------
 
 
-async def test_status_bar_shows_the_agent_the_model_and_the_tokens() -> None:
+async def test_status_bar_shows_the_agent_the_model_and_the_context() -> None:
     app = make_app(answering("hello", tokens=42))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
@@ -462,7 +462,43 @@ async def test_status_bar_shows_the_agent_the_model_and_the_tokens() -> None:
 
     assert "jack" in bar
     assert "deepseek/deepseek-flash" in bar
-    assert "42 tokens" in bar
+    # No window configured for this model, so a count and no percentage.
+    assert "42" in bar
+    assert "%" not in bar
+
+
+async def test_the_context_is_shown_as_a_percentage_of_the_window() -> None:
+    """When the config says how big the model's window is, show how full it is."""
+    client = FakeAgentClient(answering("hello", tokens=25_000))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="deepseek/deepseek-flash",
+        context_window=100_000,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "25,000 (25.0%)" in status(app)
+
+
+async def test_the_context_is_the_latest_turn_not_a_running_total() -> None:
+    """A sum over every turn only ever grows, so it cannot be a context.
+
+    What the percentage is a percentage *of* is the conversation as it stands,
+    which is the last turn's count and not the total of all of them.
+    """
+    client = FakeAgentClient(answering("hello", tokens=30))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="m",
+        context_window=100,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "one")
+        await submit(pilot, "two")
+        # 30 twice would be 60%, which is what accumulating would show.
+        assert "(30.0%)" in status(app)
 
 
 async def test_ctrl_c_cancels_a_running_turn() -> None:
