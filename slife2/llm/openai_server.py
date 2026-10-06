@@ -138,10 +138,7 @@ def translate(event: Any) -> list[ProviderEvent]:
     choice = choices[0]
     delta = getattr(choice, "delta", None)
 
-    # Reasoning arrives on its own field.  Not every gateway uses this name —
-    # it is a de-facto convention rather than part of the format — but reading a
-    # field that is absent costs nothing.
-    thinking = getattr(delta, "reasoning_content", None) or ""
+    thinking = _reasoning(delta)
     if thinking:
         events.append(Chunk(thinking=thinking))
 
@@ -168,6 +165,36 @@ def translate(event: Any) -> list[ProviderEvent]:
         events.append(Finish(stop_reason=str(finish)))
 
     return events
+
+
+#: Field names a gateway may put reasoning in.  There is no standard one —
+#: `reasoning_content` is DeepSeek's and the most common, but the others are in
+#: use, and a gateway whose spelling is not on this list produces reasoning the
+#: transcript silently never shows.  Silent is the problem: nothing errors, the
+#: answer is correct, and the only symptom is a line that should have been
+#: there.
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
+
+
+def _reasoning(delta: Any) -> str:
+    """Read whatever reasoning field this gateway used, if any.
+
+    Also looks in the model's `extra` fields, because an SDK that does not know
+    a name puts it there rather than dropping it — which is how a field that IS
+    present ends up invisible to `getattr`.
+    """
+    for field in _REASONING_FIELDS:
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value:
+            return value
+
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for field in _REASONING_FIELDS:
+            value = extra.get(field)
+            if isinstance(value, str) and value:
+                return value
+    return ""
 
 
 def _usage(raw: Any) -> Usage | None:

@@ -678,3 +678,50 @@ def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
         [], [], ModelSettings(model="m", reasoning=True, max_tokens=2000)
     )
     assert request["thinking"]["budget_tokens"] < 2000
+
+
+def test_reasoning_is_read_whatever_the_gateway_calls_it() -> None:
+    """There is no standard field name, and a missed one is invisible.
+
+    Nothing errors when the spelling is wrong: the answer is correct, the turn
+    succeeds, and the only symptom is a line in the transcript that should have
+    been there.  So every name in use is read, and the SDK's `extra` bag is
+    checked too — an unrecognised field lands there rather than being dropped,
+    where `getattr` would never find it.
+    """
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        event = _oa(
+            choices=[{"index": 0, "delta": {field: "why"}, "finish_reason": None}]
+        )
+        assert openai_translate(event) == [Chunk(thinking="why")], field
+
+
+def test_reasoning_in_an_extra_field_is_still_read() -> None:
+    """An SDK that does not know a field keeps it in `model_extra`."""
+    event = _oa(choices=[{"index": 0, "delta": {}, "finish_reason": None}])
+    # `model_validate` puts unknown keys in `model_extra`, which is the point.
+    event = type(event).model_validate(
+        {
+            "id": "1",
+            "created": 0,
+            "model": "m",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_content": "why"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
+    assert openai_translate(event) == [Chunk(thinking="why")]
+
+
+def test_an_empty_reasoning_field_is_not_an_event() -> None:
+    event = _oa(
+        choices=[
+            {"index": 0, "delta": {"reasoning_content": ""}, "finish_reason": None}
+        ]
+    )
+    assert openai_translate(event) == []
