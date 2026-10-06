@@ -233,6 +233,12 @@ class ChatView(VerticalScroll):
         self, call_id: str, name: str, arguments: dict | None = None
     ) -> None:
         # Closes the current text block but not the turn: text may resume after.
+        #
+        # The block it closes was a step on the way somewhere rather than the
+        # answer, so its reasoning folds away — the final answer keeps its own
+        # open.  This is the only place that distinction is known.
+        if self._streaming is not None:
+            self._streaming.collapse_thinking()
         self._close_block()
         widget = ToolCallWidget(call_id=call_id, name=name, arguments=arguments or {})
         self._tools[call_id] = widget
@@ -301,15 +307,24 @@ class AssistantMessage(Static):
         self._agent = agent
         self._text = ""
         self._thinking = ""
-        #: Collapsed by default.  Reasoning is the model talking to itself: the
-        #: answer is what was asked for, and the reasoning is available to
-        #: anyone who wants to check it rather than shown to everyone.
-        self._thinking_open = False
+        #: Shown by default, folded away only for a step that is not the answer.
+        #:
+        #: Reasoning on the *final* answer is the interesting case — it is how
+        #: you tell whether the model understood the question — so it is shown.
+        #: A step that ended in a tool call is machinery on the way somewhere,
+        #: and reads better as one line; `collapse_thinking` is what a tool call
+        #: does to the block it closes.
+        self._thinking_open = True
         self._tokens = 0
 
     @property
     def thinking(self) -> str:
         return self._thinking
+
+    @property
+    def text(self) -> str:
+        """The answer, without the reasoning that may sit above it."""
+        return self._text
 
     @property
     def thinking_expanded(self) -> bool:
@@ -318,6 +333,12 @@ class AssistantMessage(Static):
     def append_thinking(self, delta: str) -> None:
         self._thinking += delta
         self._refresh()
+
+    def collapse_thinking(self) -> None:
+        """Fold the reasoning away, for a step that is not the answer."""
+        if self._thinking:
+            self._thinking_open = False
+            self._refresh()
 
     def action_toggle_thinking(self) -> None:
         self._thinking_open = not self._thinking_open

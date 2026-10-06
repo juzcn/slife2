@@ -71,6 +71,7 @@ def tool_turn(*, ok: bool = True, result: str = "42"):
     """A scripted client that runs one tool and then answers."""
 
     def respond(prompt: str, on_event):
+        on_event(ThinkingDelta("I should call the tool"))
         on_event(TextDelta("checking"))
         on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
         on_event(
@@ -153,31 +154,35 @@ def reasoning_turn():
     def respond(prompt: str, on_event):
         on_event(ThinkingDelta("let me think about this"))
         on_event(TextDelta("the answer"))
+        on_event(
+            TurnFinished(text="the answer", usage=Usage(), steps=1, stop_reason="stop")
+        )
         return "the answer"
 
     return respond
 
 
-async def test_reasoning_is_folded_away_by_default() -> None:
-    """Reasoning is the model talking to itself; the answer was what was asked for.
+async def test_reasoning_on_the_answer_is_shown() -> None:
+    """The final answer's reasoning is shown, not folded away.
 
-    So it is summarised to a length rather than shown — available to anyone who
-    wants to check it, out of the way for everyone else.
+    It is the interesting case — it is how you tell whether the model understood
+    the question — so it is the one that stays open.  Collapsing is the
+    *intermediate* step's treatment, not the default.
     """
     app = make_app(reasoning_turn())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         widget = app.query_one(AssistantMessage)
+        text = shown(app)
 
-        assert widget.thinking == "let me think about this"
-        assert widget.thinking_expanded is False
-        shown_text = shown(app)
-        assert "Thinking" in shown_text
-        assert f"({len('let me think about this')} chars)" in shown_text
-        assert "let me think about this" not in shown_text
+    assert widget.thinking == "let me think about this"
+    assert widget.thinking_expanded is True
+    assert "Thinking" in text
+    assert "let me think about this" in text
+    assert "the answer" in text
 
 
-async def test_reasoning_can_be_opened() -> None:
+async def test_reasoning_can_be_folded_away() -> None:
     app = make_app(reasoning_turn())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
@@ -185,25 +190,47 @@ async def test_reasoning_can_be_opened() -> None:
         widget.action_toggle_thinking()
         await pilot.pause()
 
-        assert widget.thinking_expanded is True
-        assert "let me think about this" in shown(app)
-        # ...and the answer is still there underneath it.
-        assert "the answer" in shown(app)
+        assert widget.thinking_expanded is False
+        text = shown(app)
+        assert "let me think about this" not in text
+        assert f"({len('let me think about this')} chars)" in text
+        # ...and the answer is untouched by folding the reasoning.
+        assert "the answer" in text
+
+
+async def test_an_intermediate_step_folds_its_reasoning() -> None:
+    """A step that ends in a tool call is machinery, and reads better as a line.
+
+    The distinction is only knowable here: a tool call following a block is what
+    makes that block intermediate, so it is the tool call that folds it.
+    """
+    app = make_app(tool_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        blocks = list(app.query(AssistantMessage))
+
+    assert len(blocks) == 2
+    assert blocks[0].thinking_expanded is False, "the pre-tool step should fold"
+    assert blocks[1].thinking_expanded is True, "the answer should not"
 
 
 async def test_reasoning_is_never_mixed_into_the_answer() -> None:
-    """The two are displayed differently, so they must arrive differently.
+    """The two are displayed differently, so they must arrive separately.
 
-    An adapter that let reasoning through as text would put the model's private
-    working into the middle of its reply — hard to notice, impossible to undo.
+    Asserted on the fields rather than on the rendered transcript: reasoning is
+    *visible* now, so its presence in the output proves nothing.  What matters
+    is that it is the widget's reasoning and not part of its answer — an adapter
+    that let it through as text would put the model's private working into the
+    middle of its reply, which is hard to notice and impossible to undo.
     """
     app = make_app(reasoning_turn())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        text = shown(app)
+        widget = app.query_one(AssistantMessage)
 
-    assert "the answer" in text
-    assert "let me think" not in text
+    assert widget.text == "the answer"
+    assert widget.thinking == "let me think about this"
+    assert "let me think" not in widget.text
 
 
 async def test_final_answer_replaces_what_was_streamed() -> None:
