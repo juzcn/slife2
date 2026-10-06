@@ -50,6 +50,11 @@ class Chunk:
     """One increment of a model response, for display."""
 
     text: str = ""
+    #: The model's reasoning, for the models that report it.  A separate field
+    #: rather than folded into `text` because the two are displayed differently
+    #: — reasoning is collapsed by default — and because a caller that does not
+    #: want to pay for thinking must be able to ignore it wholesale.
+    thinking: str = ""
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
     usage: Usage | None = None
 

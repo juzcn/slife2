@@ -34,6 +34,7 @@ from textual.worker import Worker, WorkerState
 from slife2.config import DEFAULT_AGENT
 from slife2.events import (
     TextDelta,
+    ThinkingDelta,
     ToolCallFinished,
     ToolCallStarted,
     TurnEvent,
@@ -236,6 +237,8 @@ class SlifeApp(App[None]):
         match event:
             case TextDelta(text=text):
                 self._transcript.append_text(text)
+            case ThinkingDelta(text=text):
+                self._transcript.append_thinking(text)
             case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
                 self._transcript.add_tool_start(call_id, name, arguments)
             case ToolCallFinished(

@@ -1,82 +1,126 @@
 # slife2.yaml — one config file, read by every process and by the launcher.
 #
-# `servers:` holds addresses and nothing else.  Every component that listens on
-# a port is named there once, and everything else refers to it by name — so the
-# launcher knows what to start, the agent server knows where to find its model,
-# and none of them can disagree about a port.
+# This is the *working* config: the providers listed here are the ones this
+# machine can actually reach.  With no file at all slife2 falls back to a single
+# built-in OpenAI-compatible provider, which is what a fresh checkout starts
+# with — so deleting this file changes behaviour, on purpose.
 #
-# This file is checked in, and it is safe to check in: it holds no secrets.
-# Every ${VAR} resolves through shell env -> credstore -> literal default, so
-# keys live in the environment or in the credential store (`credstore set
-# DEEPSEEK_API_KEY`), never here.  An unresolved reference is left verbatim
-# rather than raising, so a missing key fails at the API call — where the
-# message can name it — rather than at startup.
+# It is safe to check in: it holds no secrets.  Every ${VAR} resolves through
+# shell env -> credstore -> literal default, so keys live in the credential
+# store (`credstore set DEEPSEEK_API_KEY`), never here.  An unresolved reference
+# is left verbatim rather than raising, so a missing key fails at the API call —
+# where the message can name it — rather than at startup.
 #
-# Every value below is the built-in default, so this file can also be deleted
-# and the four processes will still start with the same ports and providers.
-
-# ── The MCP servers ─────────────────────────────────────────────────────────
-# slife2 starts these on demand and shares them: a second instance attaches to
-# whatever is already running rather than starting a duplicate.  They are
-# daemons — a client exiting never stops one.  `slife2 status` / `slife2 down`
-# manage them.
-servers:
-  agent:
-    host: 127.0.0.1
-    port: 8000
-    path: /mcp
-  llm-openai:
-    host: 127.0.0.1
-    port: 8001
-    path: /mcp
-  llm-anthropic:
-    host: 127.0.0.1
-    port: 8002
-    path: /mcp
-
+# ── Providers ───────────────────────────────────────────────────────────────
+# One entry per provider.  `api` selects the wire protocol, and `base_url` /
+# `api_key` / `server` are shared by every model listed under it:
+#
+#   openai-completions   OpenAI / DeepSeek / Ollama / MiniMax
+#   anthropic-messages   Claude / Bailian (Qwen)
+#
+# A provider gets its own server process, because a process can only hold one
+# endpoint and one key.  slife2 starts the ones the config names, on demand, and
+# shares them between instances.
+#
 # ── Models ──────────────────────────────────────────────────────────────────
-# Each provider names the server that serves it.  A server is started because
-# a provider points at it, so deleting a provider stops a process — there is no
-# second switch to keep in step with this table.
+# Each model entry:
+#   model                 API model name; doubles as the local id, referenced
+#                         elsewhere as "provider/model"
+#   name                  display label for the status bar and logs
+#   reasoning             the model thinks natively
+#   input                 modalities accepted; list image only for vision models
+#   context_window        token budget, shown as a percentage in the status bar
+#   max_tokens            output cap
+#   temperature / top_p   sampling; omitted means the gateway's default
+#   compat.thinking       omit  — send no thinking field (for gateways that
+#                                 reject the standard shape yet reason natively)
+#                         disabled / enabled are also accepted
 #
-# A provider may instead give a bare `url`, for a model server this machine does
-# not manage (already running elsewhere); slife2 then connects but never starts
-# it.
+# An omitted sampling field is *not* the same as a default value: it means send
+# nothing and let the gateway decide.  Several gateways reject a temperature
+# they did not ask for.
+
 providers:
   deepseek:
-    server: llm-openai
-    model: deepseek-flash
-  claude:
-    server: llm-anthropic
-    model: claude-sonnet-5-5
-default: deepseek
+    api: openai-completions
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    server:
+      host: 127.0.0.1
+      port: 8001
+      path: /mcp
+    models:
+      - model: deepseek-flash
+        name: DeepSeek Flash
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1000000
+        max_tokens: 384000
+        temperature: 0.7
+        top_p: 1.0
+
+  scnet:
+    api: openai-completions
+    base_url: https://api.scnet.cn/api/llm/v1
+    api_key: ${SCNET_TOKEN_PLAN}
+    server:
+      host: 127.0.0.1
+      port: 8002
+      path: /mcp
+    models:
+      - model: DeepSeek-V4
+        name: DeepSeek V4 Pro
+        reasoning: true
+        input:
+          - text
+        context_window: 1000000
+        max_tokens: 384000
+        temperature: 0.7
+        top_p: 1.0
+      - model: Kimi-K3
+        name: Kimi K3
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1048576
+        max_tokens: 131072
+        # This gateway rejects the standard thinking shape while reasoning
+        # anyway, so the field is left out entirely.
+        compat:
+          thinking: omit
+
+  bailian:
+    api: anthropic-messages
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
+    api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+    server:
+      host: 127.0.0.1
+      port: 8003
+      path: /mcp
+    models:
+      - model: qwen3.8-max
+        name: Qwen3.8 Max
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 983616
+        max_tokens: 131072
+
+# Which model the agent starts with, as "provider/model".
+default: deepseek/deepseek-flash
 
 # ── The agent loop ──────────────────────────────────────────────────────────
 agent:
+  server:
+    host: 127.0.0.1
+    port: 8000
+    path: /mcp
   # Model calls allowed in one turn before it is cut off.  A model that keeps
   # calling tools would otherwise run indefinitely; the cap ends the turn
   # normally rather than raising.
   max_steps: 16
   system_prompt: "You are slife2, a terminal agent. Be concise."
-
-# ── slife2-llm-openai ───────────────────────────────────────────────────────
-# Any OpenAI-compatible endpoint: OpenAI, DeepSeek, Ollama, vLLM, most gateways.
-llm_openai:
-  base_url: "https://api.deepseek.com/v1"
-  api_key: ${DEEPSEEK_API_KEY}
-  # Ask for token counts on the final stream chunk.  This uses `stream_options`,
-  # an OpenAI extension that some compatible servers reject with a 400 — set it
-  # to false for one of those and the only loss is the token counts.
-  stream_usage: true
-
-# ── slife2-llm-anthropic ────────────────────────────────────────────────────
-llm_anthropic:
-  api_key: ${ANTHROPIC_API_KEY}
-  # Anthropic requires max_tokens on every request; the OpenAI-compatible API
-  # does not, so there is no shared setting for it.
-  max_tokens: 4096
-
-# ── The TUI ─────────────────────────────────────────────────────────────────
-# Defaults to wherever `servers.agent` says, so it is normally omitted.
-tui:
-  url: "http://127.0.0.1:8000/mcp"

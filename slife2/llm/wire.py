@@ -32,12 +32,19 @@ def encode_chunk(chunk: Chunk) -> str:
     `ensure_ascii=True` for the reason given in `slife2.messages`: the payload
     can reach a log on a console whose codepage is not UTF-8.
     """
-    if chunk.text and not chunk.tool_call_deltas and chunk.usage is None:
+    if (
+        chunk.text
+        and not chunk.thinking
+        and not chunk.tool_call_deltas
+        and chunk.usage is None
+    ):
         payload: dict[str, Any] = {"k": "text", "d": chunk.text}
     else:
         payload = {"k": "chunk"}
         if chunk.text:
             payload["d"] = chunk.text
+        if chunk.thinking:
+            payload["th"] = chunk.thinking
         if chunk.tool_call_deltas:
             payload["t"] = [_delta_to_wire(d) for d in chunk.tool_call_deltas]
         if chunk.usage is not None:
@@ -67,6 +74,7 @@ def decode_chunk(message: str) -> Chunk | None:
             deltas = payload.get("t")
             return Chunk(
                 text=str(payload.get("d") or ""),
+                thinking=str(payload.get("th") or ""),
                 tool_call_deltas=tuple(
                     _delta_from_wire(d) for d in deltas if isinstance(d, dict)
                 )

@@ -31,10 +31,23 @@ from anthropic.types import (
 from fastmcp import Client
 from openai.types.chat import ChatCompletionChunk
 
-from slife2.llm.anthropic_server import to_anthropic_messages, to_anthropic_tools
+from slife2.config import ModelSettings
+from slife2.llm.anthropic_server import (
+    DEFAULT_MAX_TOKENS,
+    to_anthropic_messages,
+    to_anthropic_tools,
+)
+from slife2.llm.anthropic_server import (
+    build_request as anthropic_build_request,
+)
 from slife2.llm.anthropic_server import translate as anthropic_translate
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
-from slife2.llm.openai_server import translate as openai_translate
+from slife2.llm.openai_server import (
+    build_request as openai_build_request,
+)
+from slife2.llm.openai_server import (
+    translate as openai_translate,
+)
 from slife2.llm.server_common import ToolCallAccumulator, build_llm_server
 from slife2.llm.wire import decode_chunk
 from slife2.messages import Message, ToolCall, ToolSpec
@@ -227,9 +240,14 @@ def test_anthropic_usage_is_split_across_two_events_without_double_counting() ->
     assert finish == Finish(stop_reason="tool_use")
 
 
-def test_anthropic_ignores_thinking_deltas() -> None:
-    """Extended thinking is not rendered in this cut, and must not leak into
-    the answer as if it were text."""
+def test_anthropic_forwards_thinking_as_its_own_kind() -> None:
+    """Reasoning must arrive as `thinking`, never mixed into the answer.
+
+    The two are displayed differently — reasoning is folded away — so an adapter
+    that let a `thinking_delta` through as text would put the model's private
+    working into the middle of its reply, which is hard to notice and impossible
+    to undo after the fact.
+    """
     event = RawContentBlockDeltaEvent.model_validate(
         {
             "type": "content_block_delta",
@@ -237,7 +255,20 @@ def test_anthropic_ignores_thinking_deltas() -> None:
             "delta": {"type": "thinking_delta", "thinking": "hmm"},
         }
     )
-    assert anthropic_translate(event) == []
+    assert anthropic_translate(event) == [Chunk(thinking="hmm")]
+
+
+def test_openai_forwards_reasoning_content() -> None:
+    event = _oa(
+        choices=[
+            {
+                "index": 0,
+                "delta": {"reasoning_content": "thinking"},
+                "finish_reason": None,
+            }
+        ]
+    )
+    assert openai_translate(event) == [Chunk(thinking="thinking")]
 
 
 # --- Anthropic message conversion -------------------------------------------
@@ -541,3 +572,109 @@ async def test_stream_chat_is_listed_as_a_tool() -> None:
     async with Client(server) as client:
         tools = await client.list_tools()
     assert [t.name for t in tools] == ["stream_chat"]
+
+
+# --- the request an adapter builds -------------------------------------------
+#
+# The parameter surface is asserted directly because *absence* is a real choice
+# here, not an oversight: `None` means "send nothing and let the gateway
+# decide", and a gateway that rejects a temperature it did not ask for is a real
+# thing.  A test that only checked the values would miss the whole point.
+
+
+def test_openai_sends_only_what_was_configured() -> None:
+    bare = ModelSettings(model="m")
+    request = openai_build_request(
+        [Message(role="user", content="hi")], [], bare, stream_usage=False
+    )
+    assert "temperature" not in request
+    assert "top_p" not in request
+    assert "max_tokens" not in request
+    assert "thinking" not in request
+
+    tuned = ModelSettings(model="m", temperature=0.3, top_p=0.9, max_tokens=100)
+    request = openai_build_request(
+        [Message(role="user", content="hi")], [], tuned, stream_usage=True
+    )
+    assert request["temperature"] == 0.3
+    assert request["top_p"] == 0.9
+    assert request["max_tokens"] == 100
+
+
+def test_openai_thinking_is_opt_in() -> None:
+    """The OpenAI-compatible wire has no standard thinking field.
+
+    So an absent `compat.thinking` sends nothing, however much the model likes
+    to reason — the models that reason natively do it unasked and report it in
+    `reasoning_content`, which the adapter reads either way.
+    """
+    native = ModelSettings(model="m", reasoning=True)
+    assert "thinking" not in openai_build_request([], [], native, stream_usage=True)
+
+    asked = ModelSettings(
+        model="m", reasoning=True, thinking="enabled", max_tokens=1000
+    )
+    request = openai_build_request([], [], asked, stream_usage=True)
+    assert request["thinking"]["type"] == "enabled"
+    # Half the budget, because the other half is what the answer is made of.
+    assert request["thinking"]["budget_tokens"] == 500
+
+    refused = ModelSettings(model="m", reasoning=True, thinking="disabled")
+    assert (
+        openai_build_request([], [], refused, stream_usage=True)["thinking"]["type"]
+        == "disabled"
+    )
+
+    omitted = ModelSettings(model="m", thinking="omit")
+    assert "thinking" not in openai_build_request([], [], omitted, stream_usage=True)
+
+
+def test_anthropic_sends_max_tokens_always() -> None:
+    """Anthropic requires it, so absent cannot mean omit here."""
+    request = anthropic_build_request([], [], ModelSettings(model="m"))
+    assert request["max_tokens"] == DEFAULT_MAX_TOKENS
+
+    request = anthropic_build_request([], [], ModelSettings(model="m", max_tokens=999))
+    assert request["max_tokens"] == 999
+
+
+def test_anthropic_enables_thinking_for_a_reasoning_model() -> None:
+    """Unlike the OpenAI-compatible wire, this parameter is part of the protocol.
+
+    A model that reasons natively will not do it unless asked, and there is no
+    ambiguity about the shape — so `reasoning: true` is enough.
+    """
+    plain = anthropic_build_request([], [], ModelSettings(model="m", max_tokens=8000))
+    assert "thinking" not in plain
+
+    reasoning = ModelSettings(model="m", reasoning=True, max_tokens=8000)
+    request = anthropic_build_request([], [], reasoning)
+    assert request["thinking"]["type"] == "enabled"
+    assert request["thinking"]["budget_tokens"] == 4000
+
+    # ...but a gateway that rejects the field can still say so.
+    omitted = ModelSettings(model="m", reasoning=True, thinking="omit")
+    assert "thinking" not in anthropic_build_request([], [], omitted)
+
+
+def test_anthropic_drops_sampling_when_thinking_is_on() -> None:
+    """The real API rejects temperature and top_p alongside thinking.
+
+    Sending them would be a 400 on every call, which is the kind of thing worth
+    encoding in a test rather than discovering against a live endpoint.
+    """
+    settings = ModelSettings(
+        model="m", reasoning=True, temperature=0.7, top_p=1.0, max_tokens=8000
+    )
+    request = anthropic_build_request([], [], settings)
+    assert "thinking" in request
+    assert "temperature" not in request
+    assert "top_p" not in request
+
+
+def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
+    """A model that spends everything thinking returns nothing."""
+    request = anthropic_build_request(
+        [], [], ModelSettings(model="m", reasoning=True, max_tokens=2000)
+    )
+    assert request["thinking"]["budget_tokens"] < 2000

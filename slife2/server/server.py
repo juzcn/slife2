@@ -105,10 +105,15 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
             yield {}
             return
 
-        provider = config.provider()
-        logger.info("connecting to the model server at %s", provider.url)
+        provider_name, provider, model = config.resolve()
+        logger.info(
+            "provider %s at %s, model %s",
+            provider_name,
+            provider.server.url,
+            model.model,
+        )
         client, mcp_backend = await open_backend(
-            provider.url, provider.model, name=provider.model
+            provider.server.url, model.model, name=f"{provider_name}/{model.model}"
         )
         try:
             loop_holder["loop"] = make_loop(mcp_backend)
@@ -190,24 +195,25 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
 
 def resolve_settings(config: Config) -> ServerSettings:
     """Where this server listens, per the config."""
-    return config.server("agent")
+    return config.agent.server
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
     config = load(args.config)
-    settings = resolve_settings(config)
+    settings = config.agent.server
 
-    provider = config.provider()
+    provider_name, provider, model = config.resolve()
     logger.info(
-        "serving %s on http://%s:%d%s (model: %s at %s)",
+        "serving %s on http://%s:%d%s (model: %s/%s at %s)",
         SERVER_NAME,
         args.host or settings.host,
         args.port or settings.port,
         settings.path,
-        provider.model,
-        provider.url,
+        provider_name,
+        model.model,
+        provider.server.url,
     )
     serve(build_server(config), settings, args)
     return 0

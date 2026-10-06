@@ -1,8 +1,11 @@
-"""slife2-llm-anthropic — the Messages API, behind MCP.
+"""slife2-llm-anthropic — one provider's Messages API, behind MCP.
 
-Same shape as `slife2-llm-openai`: one process holding one API key, exposing one
-`stream_chat` tool.  What differs is the adapter, and Anthropic disagrees with
-the neutral format in three ways that all have to be handled here:
+Started as `slife2-llm-anthropic --provider bailian`, one process per provider
+so each holds exactly one endpoint and one key.
+
+What differs from the OpenAI-compatible adapter is the wire format, and the
+Messages API disagrees with the neutral model in three ways that all have to be
+handled here:
 
 1. **System prompts are not messages.**  They are a separate top-level
    parameter, so system turns are lifted out of the list.
@@ -10,9 +13,7 @@ the neutral format in three ways that all have to be handled here:
    `tool_use` content blocks rather than a `tool_calls` field on the message.
 3. **Roles must alternate.**  Every tool result in a step has to be folded into
    a single `user` turn, and a user text that follows it merged in — strict
-   endpoints (Bedrock, Bailian) return 400 on two `user` turns in a row.  OpenAI
-   accepts the naive form, so this is the one place the two backends genuinely
-   diverge rather than just renaming fields.
+   endpoints (Bedrock, Bailian) return 400 on two `user` turns in a row.
 
 Because all of that is translation between the neutral model and one SDK, it
 belongs on this side of the wire: the agent loop stays free of it.
@@ -24,7 +25,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from slife2.config import AnthropicSettings, load
+from slife2.config import ConfigError, ModelSettings, ProviderSettings, load
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
     build_llm_server,
@@ -38,8 +39,13 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-llm-anthropic"
 
-#: This server's key in the config's `servers:` table.
-CONFIG_KEY = "llm-anthropic"
+#: Output cap when a model entry does not set one.  Anthropic requires the
+#: field, so "absent" cannot mean "omit" here the way it does for sampling.
+DEFAULT_MAX_TOKENS = 4096
+
+#: How much of the output budget a thinking model may spend reasoning.  Half,
+#: because the other half is what the answer is made of.
+THINKING_BUDGET_SHARE = 0.5
 
 
 def to_anthropic_messages(
@@ -122,6 +128,60 @@ def to_anthropic_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
     ]
 
 
+def thinking_parameter(
+    settings: ModelSettings, max_tokens: int
+) -> dict[str, Any] | None:
+    """The `thinking` block to send, or None to send none.
+
+    Unlike the OpenAI-compatible wire, this parameter is part of the protocol, so
+    `reasoning: true` is enough to ask for it — a model that reasons natively is
+    not going to do it unless told, and there is no ambiguity about the shape.
+
+    `compat.thinking: omit` or `disabled` suppress it, for a gateway that
+    rejects the field while reasoning anyway.
+    """
+    if not settings.reasoning or settings.thinking in ("omit", "disabled"):
+        return None
+    budget = max(1024, int(max_tokens * THINKING_BUDGET_SHARE))
+    return {"type": "enabled", "budget_tokens": budget}
+
+
+def build_request(
+    messages: list[Message],
+    tools: list[ToolSpec],
+    settings: ModelSettings,
+) -> dict[str, Any]:
+    """The request body, containing only what the config asked for."""
+    system, converted = to_anthropic_messages(messages)
+    max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
+
+    request: dict[str, Any] = {
+        "model": settings.model,
+        "messages": converted,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    if system:
+        request["system"] = system
+    if tools:
+        request["tools"] = to_anthropic_tools(tools)
+
+    # Only what was configured: `None` means say nothing, not "use a default".
+    if settings.temperature is not None:
+        request["temperature"] = settings.temperature
+    if settings.top_p is not None:
+        request["top_p"] = settings.top_p
+
+    thinking = thinking_parameter(settings, max_tokens)
+    if thinking is not None:
+        request["thinking"] = thinking
+        # A thinking budget must leave room for an answer, and this endpoint
+        # rejects temperature and top_p alongside extended thinking.
+        request.pop("temperature", None)
+        request.pop("top_p", None)
+    return request
+
+
 def translate(event: Any) -> list[ProviderEvent]:
     """Turn one raw Anthropic stream event into provider events.
 
@@ -131,11 +191,6 @@ def translate(event: Any) -> list[ProviderEvent]:
     count the output — `message_start` already reports `output_tokens: 1` for
     the message it just opened — so each half is emitted as a partial `Usage`
     and the accumulator adds them correctly.
-
-    `thinking_delta` and `signature_delta` are deliberately not translated in
-    this cut: extended thinking needs a display decision the TUI has not made
-    yet.  They are dropped rather than forwarded as text, because rendering a
-    model's private reasoning as its answer would be worse than not showing it.
     """
     events: list[ProviderEvent] = []
     kind = getattr(event, "type", "")
@@ -164,6 +219,12 @@ def translate(event: Any) -> list[ProviderEvent]:
             text = getattr(delta, "text", "") or ""
             if text:
                 events.append(Chunk(text=text))
+        elif delta_type == "thinking_delta":
+            # Reasoning, reported as its own kind rather than folded into the
+            # answer — the two are displayed differently and must not mix.
+            thinking = getattr(delta, "thinking", "") or ""
+            if thinking:
+                events.append(Chunk(thinking=thinking))
         elif delta_type == "input_json_delta":
             events.append(
                 Chunk(
@@ -181,8 +242,6 @@ def translate(event: Any) -> list[ProviderEvent]:
         usage = getattr(message, "usage", None)
         if usage is not None:
             events.append(Chunk(usage=Usage(prompt_tokens=_int(usage, "input_tokens"))))
-        # A model that opens with text already has a content block; nothing to
-        # do here, the deltas carry it.
 
     elif kind == "message_delta":
         usage = getattr(event, "usage", None)
@@ -202,44 +261,31 @@ def _int(source: Any, attribute: str) -> int:
     return int(getattr(source, attribute, 0) or 0)
 
 
-def build_streamer(settings: AnthropicSettings) -> Streamer:
-    """Build the provider adapter for one configuration.
-
-    Like the OpenAI one, the SDK client is created on first use so the API key
-    is resolved only when a call actually happens.
-    """
+def build_streamer(provider: ProviderSettings) -> Streamer:
+    """The adapter for one provider.  The client is created on first use."""
     client: Any = None
 
     def _client() -> Any:
         nonlocal client
         if client is None:
-            key = settings.api_key
+            key = provider.api_key
             if not key or key.startswith("${"):
                 raise RuntimeError(
-                    f"{SERVER_NAME}: the API key did not resolve "
-                    f"(config value {settings.api_key_ref!r}). Export it, or "
+                    f"{SERVER_NAME}: the API key for provider "
+                    f"{provider.base_url!r} did not resolve "
+                    f"(config value {provider.api_key_ref!r}). Export it, or "
                     f"store it with `credstore set <NAME>`."
                 )
             from anthropic import AsyncAnthropic
 
-            client = AsyncAnthropic(api_key=key)
+            client = AsyncAnthropic(api_key=key, base_url=provider.base_url)
         return client
 
     async def stream(
         messages: list[Message], tools: list[ToolSpec], model: str
     ) -> AsyncIterator[ProviderEvent]:
-        system, converted = to_anthropic_messages(messages)
-        request: dict[str, Any] = {
-            "model": model,
-            "messages": converted,
-            "max_tokens": settings.max_tokens,
-            "stream": True,
-        }
-        if system:
-            request["system"] = system
-        if tools:
-            request["tools"] = to_anthropic_tools(tools)
-
+        settings = provider.model(model)
+        request = build_request(messages, tools, settings)
         response = await _client().messages.create(**request)
         async for event in response:
             for out in translate(event):
@@ -248,11 +294,11 @@ def build_streamer(settings: AnthropicSettings) -> Streamer:
     return stream
 
 
-def build_server(settings: AnthropicSettings, *, streamer: Streamer | None = None):
+def build_server(provider: ProviderSettings, *, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_llm_server(
         name=SERVER_NAME,
-        streamer=streamer if streamer is not None else build_streamer(settings),
+        streamer=streamer if streamer is not None else build_streamer(provider),
     )
 
 
@@ -260,17 +306,38 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
     config = load(args.config)
-    settings = config.llm_anthropic
-    address = config.server(CONFIG_KEY)
+    try:
+        provider_name, provider = _select(config, args.provider)
+    except ConfigError as exc:
+        print(f"{SERVER_NAME}: {exc}")
+        return 2
+
+    address = provider.server
     logger.info(
-        "serving %s on http://%s:%d%s",
+        "serving %s for provider %s on http://%s:%d%s",
         SERVER_NAME,
+        provider_name,
         args.host or address.host,
         args.port or address.port,
         address.path,
     )
-    serve(build_server(settings), address, args)
+    serve(build_server(provider), address, args)
     return 0
+
+
+def _select(config, name: str | None) -> tuple[str, ProviderSettings]:
+    """The provider this process serves — see the OpenAI server for why."""
+    if not name:
+        raise ConfigError(
+            "started without --provider; this server serves one provider and "
+            f"needs to know which (configured: {', '.join(sorted(config.providers))})"
+        )
+    provider = config.provider(name)
+    if provider.module != "slife2.llm.anthropic_server":
+        raise ConfigError(
+            f"provider {name!r} speaks {provider.api!r}, not anthropic-messages"
+        )
+    return name, provider
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,7 +1,8 @@
-"""Config loading and secret resolution.
+"""Config loading: providers, models, and the resolution chain for secrets.
 
-No marker: these are `unit` by the default run, and the point of the file is
-that they touch the filesystem only through `tmp_path`.
+The shape is slife v1's, so the tests are about the parts that shape has to get
+right — several models per provider, a `provider/model` reference that is
+unambiguous, and parameters that are absent rather than defaulted.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from slife2.config import (
+    API_BACKENDS,
     CONFIG_ENV_VAR,
     ConfigError,
     default_config,
@@ -17,56 +19,193 @@ from slife2.config import (
     resolve_secret,
 )
 
+A_PROVIDER = """
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    server: {port: 9001}
+    models:
+      - model: big
+        context_window: 100000
+        max_tokens: 4000
+        temperature: 0.3
+      - model: small
+default: local/small
+"""
 
-def test_the_checked_in_config_equals_the_built_in_defaults() -> None:
-    """`slife2.yaml` claims every value in it is the built-in default.
 
-    That claim is what lets the file be deleted without changing behaviour, and
-    it is only true while two places agree — the defaults in `config.py` and the
-    values in the YAML.  Changing a model name is a one-line edit in each, which
-    is exactly the kind of pair that drifts.
+def write(tmp_path, text: str):
+    path = tmp_path / "slife2.yaml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# --- the built-in defaults ---------------------------------------------------
+
+
+def test_the_defaults_are_one_working_provider() -> None:
+    """No config file should still give something that can answer.
+
+    Deliberately *not* equal to the checked-in `slife2.yaml`, which lists the
+    providers this machine can reach — a config carrying somebody's provider
+    table would be wrong for everybody else.
     """
-    from pathlib import Path
-
-    checked_in = Path(__file__).resolve().parents[1] / "slife2.yaml"
-    if not checked_in.is_file():  # a wheel install has no repository
-        pytest.skip("no checked-in slife2.yaml here")
-    assert load(checked_in) == default_config()
+    config = default_config()
+    assert list(config.providers) == ["deepseek"]
+    assert config.default == "deepseek/deepseek-flash"
 
 
-def test_defaults_point_each_process_at_its_own_port() -> None:
-    """The servers must not collide on a port out of the box."""
-    cfg = default_config()
-    assert len({s.port for s in cfg.servers.values()}) == len(cfg.servers)
+def test_the_defaults_resolve() -> None:
+    name, provider, model = default_config().resolve()
+    assert name == "deepseek"
+    assert provider.api in API_BACKENDS
+    assert model.model == "deepseek-flash"
+    assert provider.server.url.startswith("http://")
 
 
-def test_tui_url_follows_the_agent_server() -> None:
-    """The TUI's URL is derived, never independently written.
+def test_every_api_has_a_backend_module() -> None:
+    for api, module in API_BACKENDS.items():
+        assert module.startswith("slife2.llm."), api
 
-    A second hard-coded address is the one that silently disagrees after a port
-    change, so this asserts the derivation rather than the value.
+
+# --- providers and models ----------------------------------------------------
+
+
+def test_a_provider_carries_its_credentials_and_its_models(tmp_path) -> None:
+    config = load(write(tmp_path, A_PROVIDER))
+    provider = config.provider("local")
+    assert provider.api == "openai-completions"
+    assert provider.base_url == "https://example.test/v1"
+    assert provider.server.port == 9001
+    assert list(provider.models) == ["big", "small"]
+
+
+def test_a_model_keeps_only_what_was_configured(tmp_path) -> None:
+    """Absent is a real value, not a missing one.
+
+    `None` means "send nothing and let the gateway decide".  A gateway that
+    rejects a temperature it did not ask for is a real thing, so a default
+    quietly substituted here would be a bug in the field most likely to be
+    blamed on the gateway.
     """
-    cfg = default_config()
-    assert cfg.tui_url == cfg.server("agent").url
+    provider = load(write(tmp_path, A_PROVIDER)).provider("local")
+    big = provider.model("big")
+    small = provider.model("small")
+
+    assert (big.temperature, big.top_p, big.max_tokens) == (0.3, None, 4000)
+    assert (small.temperature, small.top_p, small.max_tokens) == (None, None, None)
+    assert small.context_window == 0
 
 
-def test_default_provider_resolves() -> None:
-    cfg = default_config()
-    provider = cfg.provider()
-    assert provider.model
-    assert provider.url.startswith("http")
+def test_a_model_name_falls_back_to_its_id(tmp_path) -> None:
+    provider = load(write(tmp_path, A_PROVIDER)).provider("local")
+    assert provider.model("small").label == "small"
+    assert provider.model("small").input == ("text",)
 
 
-def test_unknown_provider_names_the_known_ones() -> None:
-    cfg = default_config()
-    with pytest.raises(ConfigError, match="deepseek"):
-        cfg.provider("nope")
+def test_vision_is_opted_into_by_listing_image(tmp_path) -> None:
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-completions
+    server: {port: 9001}
+    models:
+      - model: sees
+        input: [text, image]
+      - model: blind
+""",
+    )
+    provider = load(path).provider("p")
+    assert provider.model("sees").accepts_images is True
+    assert provider.model("blind").accepts_images is False
+
+
+def test_an_unknown_api_is_refused(tmp_path) -> None:
+    path = write(
+        tmp_path,
+        "providers:\n  p:\n    api: carrier-pigeon\n    models: [{model: m}]\n",
+    )
+    with pytest.raises(ConfigError, match="carrier-pigeon"):
+        load(path)
+
+
+def test_a_provider_without_models_is_refused(tmp_path) -> None:
+    path = write(
+        tmp_path, "providers:\n  p:\n    api: openai-completions\n    models: []\n"
+    )
+    with pytest.raises(ConfigError, match="models"):
+        load(path)
+
+
+def test_a_model_entry_without_a_name_is_refused(tmp_path) -> None:
+    path = write(
+        tmp_path,
+        "providers:\n  p:\n    api: openai-completions\n    models: [{name: x}]\n",
+    )
+    with pytest.raises(ConfigError, match="model"):
+        load(path)
+
+
+# --- references --------------------------------------------------------------
+
+
+def test_a_reference_is_provider_slash_model(tmp_path) -> None:
+    config = load(write(tmp_path, A_PROVIDER))
+    name, provider, model = config.resolve("local/big")
+    assert (name, model.model) == ("local", "big")
+    assert provider.server.url == config.providers["local"].server.url
+
+
+def test_a_bare_provider_name_means_its_first_model(tmp_path) -> None:
+    """Someone typing `--model deepseek` means the obvious thing."""
+    config = load(write(tmp_path, A_PROVIDER))
+    assert config.resolve("local")[2].model == "big"
+
+
+def test_an_unknown_provider_names_the_known_ones(tmp_path) -> None:
+    config = load(write(tmp_path, A_PROVIDER))
+    with pytest.raises(ConfigError, match="local"):
+        config.resolve("nope/x")
+
+
+def test_an_unknown_model_names_the_known_ones(tmp_path) -> None:
+    config = load(write(tmp_path, A_PROVIDER))
+    with pytest.raises(ConfigError, match="big"):
+        config.resolve("local/nope")
+
+
+def test_the_default_can_be_a_whole_reference(tmp_path) -> None:
+    config = load(write(tmp_path, A_PROVIDER))
+    assert config.default == "local/small"
+    assert config.resolve()[2].model == "small"
+
+
+def test_the_default_falls_back_to_the_first_model(tmp_path) -> None:
+    """A config that names providers but no default still has to run."""
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-completions
+    server: {port: 9001}
+    models:
+      - model: only
+""",
+    )
+    assert load(path).default == "p/only"
+
+
+# --- file discovery ----------------------------------------------------------
 
 
 def test_missing_unnamed_config_is_not_an_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No file anywhere means the defaults *are* the config."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
     assert find_config_path() is None
@@ -74,110 +213,45 @@ def test_missing_unnamed_config_is_not_an_error(
 
 
 def test_missing_named_config_is_an_error(tmp_path) -> None:
-    """Asking for a file that is not there must not silently use defaults."""
     with pytest.raises(ConfigError, match="not found"):
         load(tmp_path / "absent.yaml")
 
 
 def test_env_var_names_a_config_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = tmp_path / "custom.yaml"
-    path.write_text("agent:\n  max_steps: 3\n", encoding="utf-8")
+    path = write(tmp_path, A_PROVIDER)
     monkeypatch.setenv(CONFIG_ENV_VAR, str(path))
-    assert load().agent.max_steps == 3
+    assert "local" in load().providers
 
 
-def test_explicit_path_beats_the_env_var(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    env_path = tmp_path / "env.yaml"
-    env_path.write_text("agent:\n  max_steps: 1\n", encoding="utf-8")
-    arg_path = tmp_path / "arg.yaml"
-    arg_path.write_text("agent:\n  max_steps: 2\n", encoding="utf-8")
+def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
+    env_path = write(tmp_path, A_PROVIDER)
+    other = tmp_path / "other.yaml"
+    other.write_text("default: ''\n", encoding="utf-8")
     monkeypatch.setenv(CONFIG_ENV_VAR, str(env_path))
-    assert load(arg_path).agent.max_steps == 2
-
-
-def test_working_directory_config_is_found(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "slife2.yaml").write_text("agent:\n  max_steps: 7\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
-    assert load().agent.max_steps == 7
+    # `other.yaml` has no providers, so it falls back to the defaults, which do
+    # not include `local` — enough to tell the two apart.
+    assert "local" not in load(other).providers
 
 
 def test_malformed_yaml_is_fatal(tmp_path) -> None:
-    path = tmp_path / "broken.yaml"
-    path.write_text("agent: [unclosed\n", encoding="utf-8")
     with pytest.raises(ConfigError):
-        load(path)
+        load(write(tmp_path, "providers: [unclosed\n"))
 
 
 def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
-    path = tmp_path / "list.yaml"
-    path.write_text("- one\n- two\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="mapping"):
-        load(path)
+        load(write(tmp_path, "- one\n- two\n"))
 
 
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
     """A file that sets one thing must not blank everything else."""
-    path = tmp_path / "partial.yaml"
-    path.write_text("agent:\n  max_steps: 5\n", encoding="utf-8")
-    cfg = load(path)
-    assert cfg.agent.max_steps == 5
-    assert cfg.server("llm-openai").port == default_config().server("llm-openai").port
-    assert cfg.providers  # the provider table survived
+    config = load(write(tmp_path, "agent:\n  max_steps: 5\n"))
+    assert config.agent.max_steps == 5
+    assert config.providers  # the provider table survived
+    assert config.agent.server.port == default_config().agent.server.port
 
 
-def test_provider_table_replaces_the_default(tmp_path) -> None:
-    path = tmp_path / "providers.yaml"
-    path.write_text(
-        "default: local\nproviders:\n  local: {server: llm-openai, model: llama3}\n",
-        encoding="utf-8",
-    )
-    cfg = load(path)
-    # A providers block replaces the default table rather than merging into it.
-    assert list(cfg.providers) == ["local"]
-    assert cfg.provider().model == "llama3"
-    # ...and it takes its address from `servers`, so the two cannot disagree.
-    assert cfg.provider().url == cfg.server("llm-openai").url
-
-
-def test_a_provider_naming_an_unknown_server_is_refused(tmp_path) -> None:
-    """A typo here would otherwise be a server the launcher silently never starts."""
-    path = tmp_path / "typo.yaml"
-    path.write_text(
-        "providers:\n  local: {server: llm-openal, model: llama3}\n", encoding="utf-8"
-    )
-    with pytest.raises(ConfigError, match="llm-openal"):
-        load(path)
-
-
-def test_a_provider_with_a_bare_url_is_external(tmp_path) -> None:
-    """No `server:` means somebody else's server — reachable, but not managed.
-
-    This is what keeps the launcher from trying to start a model that lives on
-    another machine.
-    """
-    path = tmp_path / "external.yaml"
-    path.write_text(
-        "providers:\n  remote: {url: 'https://models.example/mcp', model: m}\n",
-        encoding="utf-8",
-    )
-    provider = load(path).provider("remote")
-    assert provider.server is None
-    assert provider.url == "https://models.example/mcp"
-
-
-def test_an_unknown_server_key_is_refused(tmp_path) -> None:
-    path = tmp_path / "bogus.yaml"
-    path.write_text("servers:\n  llm-gemini: {port: 8003}\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match="llm-gemini"):
-        load(path)
-
-
-# --- secret resolution -------------------------------------------------------
+# --- secrets -----------------------------------------------------------------
 
 
 def test_plaintext_passes_through() -> None:
@@ -195,11 +269,7 @@ def test_default_is_used_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_unset_without_default_stays_literal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leniency is the contract: the failure lands where the value is *used*.
-
-    Raising here would take down a process that may never read this key, and the
-    error at the API call names the variable anyway.
-    """
+    """Leniency is the contract: the failure lands where the value is *used*."""
     monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
@@ -210,24 +280,20 @@ def test_reference_embedded_in_a_larger_string(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_non_string_scalars_become_strings() -> None:
-    """YAML hands back ints for unquoted scalars; a numeric key is still a key."""
     assert resolve_secret(12345) == "12345"
 
 
 def test_braces_that_are_not_references_are_untouched() -> None:
-    """A prompt containing `${...}` must not be treated as a lookup."""
     assert resolve_secret("use ${1+1} here") == "use ${1+1} here"
 
 
 def test_api_key_is_resolved_lazily(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The raw reference is what the config holds; the key is read on demand.
 
-    This is what keeps the TUI process — which never needs a provider key — from
-    opening the OS keyring at startup.
+    This is what keeps the TUI process — which never needs a provider key —
+    from opening the OS keyring at startup.
     """
-    path = tmp_path / "lazy.yaml"
-    path.write_text("llm_openai:\n  api_key: ${SLIFE2_TEST_KEY}\n", encoding="utf-8")
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved-later")
-    cfg = load(path)
-    assert cfg.llm_openai.api_key_ref == "${SLIFE2_TEST_KEY}"
-    assert cfg.llm_openai.api_key == "resolved-later"
+    provider = load(write(tmp_path, A_PROVIDER)).provider("local")
+    assert provider.api_key_ref == "${SLIFE2_TEST_KEY:-none}"
+    assert provider.api_key == "resolved-later"

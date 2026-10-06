@@ -37,6 +37,11 @@ WidgetT = TypeVar("WidgetT", bound=Static)
 #: the row is to be readable at a glance, so it is a glance's worth.
 PRIMARY_ARG_CHARS = 72
 
+#: How much reasoning an expanded thinking block shows.  Reasoning runs long —
+#: it is the model talking to itself — and past a few hundred characters nobody
+#: is reading it, they are skimming for the shape of it.
+THINKING_PREVIEW_CHARS = 500
+
 #: How many result lines the expanded panel renders before summarising.  The
 #: panel also caps at 60% of the viewport in CSS and scrolls; this is the guard
 #: for pathological output, which would otherwise be parsed and laid out in
@@ -183,6 +188,19 @@ class ChatView(VerticalScroll):
         self._streaming.set_text(self._streaming_text)
         self.follow_tail()
 
+    def append_thinking(self, delta: str) -> None:
+        """Add reasoning to the current block, if a turn is still open.
+
+        Dropped after the turn's result for the same reason deltas are: a late
+        fragment appended under a finished answer is worse than a missing one.
+        """
+        if not self._turn_open:
+            return
+        if self._streaming is None:
+            self._streaming = self._open_block()
+        self._streaming.append_thinking(delta)
+        self.follow_tail()
+
     def finish_assistant(self, text: str) -> None:
         """Close the turn with the authoritative answer.
 
@@ -274,11 +292,60 @@ class AssistantMessage(Static):
 
     can_focus = True
 
+    BINDINGS = [
+        Binding("enter,space", "toggle_thinking", "Toggle thinking", show=False),
+    ]
+
     def __init__(self, agent: str = "") -> None:
         super().__init__()
         self._agent = agent
         self._text = ""
+        self._thinking = ""
+        #: Collapsed by default.  Reasoning is the model talking to itself: the
+        #: answer is what was asked for, and the reasoning is available to
+        #: anyone who wants to check it rather than shown to everyone.
+        self._thinking_open = False
         self._tokens = 0
+
+    @property
+    def thinking(self) -> str:
+        return self._thinking
+
+    @property
+    def thinking_expanded(self) -> bool:
+        return self._thinking_open
+
+    def append_thinking(self, delta: str) -> None:
+        self._thinking += delta
+        self._refresh()
+
+    def action_toggle_thinking(self) -> None:
+        self._thinking_open = not self._thinking_open
+        self._refresh()
+
+    def on_click(self) -> None:
+        """A click expands, and never collapses — a click is also how text gets
+        selected, and collapsing would destroy the selection."""
+        if not self._thinking_open and self._thinking:
+            self._thinking_open = True
+            self._refresh()
+
+    def _thinking_block(self) -> Text:
+        """The reasoning, as one line or as a block."""
+        label = f"{GLYPHS['thinking']} Thinking"
+        if not self._thinking_open:
+            line = Text(
+                f"{label} ({len(self._thinking):,} chars) {GLYPHS['collapsed']}",
+                style=f"italic {PALETTE['dim']}",
+            )
+            return line
+
+        shown = self._thinking
+        if len(shown) > THINKING_PREVIEW_CHARS:
+            shown = shown[:THINKING_PREVIEW_CHARS] + GLYPHS["ellipsis"]
+        line = Text(f"{label}{GLYPHS['ellipsis']}\n", style=f"italic {PALETTE['dim']}")
+        line.append(shown, style=PALETTE["dim"])
+        return line
 
     def set_text(self, text: str) -> None:
         self._text = text
@@ -290,6 +357,9 @@ class AssistantMessage(Static):
 
     def _refresh(self) -> None:
         line = Text()
+        if self._thinking:
+            line.append_text(self._thinking_block())
+            line.append("\n")
         if self._agent:
             # The same treatment as the user's `You> `: a signature in bold
             # amber, so the two sides of a conversation are marked the same way

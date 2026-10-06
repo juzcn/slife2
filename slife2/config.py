@@ -1,16 +1,42 @@
 """slife2.yaml — one config file, read by every process and by the launcher.
 
-The shape has one organising idea: **`servers:` holds addresses, and nothing
-else.**  Every component that listens on a port is named there, once, and every
-other section refers to it by name — so the launcher knows where to look for a
-server, the agent server knows where to find its model, and none of them can
-disagree about a port.
+The shape is slife v1's, because it already answers the questions a model
+configuration has to answer:
+
+    providers:
+      deepseek:
+        api: openai-completions          # the wire protocol
+        base_url: https://api.deepseek.com
+        api_key: ${DEEPSEEK_API_KEY}
+        server: {host: 127.0.0.1, port: 8001, path: /mcp}
+        models:
+          - model: deepseek-flash        # the API name, and the local id
+            name: DeepSeek Flash         # what to call it on screen
+            reasoning: true
+            input: [text, image]
+            context_window: 1000000
+            max_tokens: 384000
+            temperature: 0.7
+            top_p: 1.0
+
+Three things are worth stating outright.
+
+**A provider holds its own credentials, and therefore its own process.**  A
+server process can only hold one `base_url` and one key, so two
+OpenAI-compatible providers cannot share one — the launcher starts one server
+per provider, and a key exists only in the process that needs it.  This is why
+`server:` sits inside the provider rather than in a separate address table.
+
+**A model is named `provider/model`.**  That is the reference used in `default`
+and on the command line, and it is unambiguous in a file where several providers
+may offer a model of the same name.
+
+**Every model parameter is optional.**  Omitted means "say nothing and let the
+gateway decide", which is not the same as passing a default — slife learned that
+the hard way, and the fields carry the same meaning here.
 
 Secrets
 -------
-Values are resolved through the same lenient chain v1 uses, so a config file can
-be committed and shared:
-
 1. ``keyring:<service>/<key>``  -> credstore
 2. ``${VAR}``                   -> os.environ -> credstore
 3. ``${VAR:-default}``          -> os.environ -> credstore -> literal default
@@ -18,12 +44,9 @@ be committed and shared:
 
 Resolution never raises.  A missing secret degrades to its literal form
 (``"${DEEPSEEK_API_KEY}"``), which fails loudly at the API call where it is a
-readable error, rather than at startup where it is not.
-
-Resolution is *lazy*: the LLM settings keep the raw reference and only touch
-credstore when ``api_key`` is read.  The TUI process therefore never opens the
-OS keyring, and a headless CI run never reaches for a backend that does not
-exist.
+readable error, rather than at startup where it is not.  It is also *lazy*: the
+provider keeps the raw reference and only touches credstore when `api_key` is
+read, so the TUI process never opens the OS keyring.
 """
 
 from __future__ import annotations
@@ -47,10 +70,13 @@ class ConfigError(Exception):
     """
 
 
-#: Names of the MCP servers this distribution ships.  The launcher can only
-#: start what it has a module for, so an unknown name in `servers:` is a typo
-#: worth reporting rather than a server it quietly fails to run.
-KNOWN_SERVERS = ("agent", "llm-openai", "llm-anthropic")
+#: The wire protocols this distribution implements, and the server module that
+#: speaks each.  `api` selects one; an unknown value is a typo worth reporting
+#: rather than a provider that quietly never starts.
+API_BACKENDS: dict[str, str] = {
+    "openai-completions": "slife2.llm.openai_server",
+    "anthropic-messages": "slife2.llm.anthropic_server",
+}
 
 #: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
 #: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
@@ -89,9 +115,6 @@ def _credstore_lookup(key: str) -> str | None:
 def resolve_secret(value: object) -> str:
     """Resolve one config value through the chain in the module docstring.
 
-    Handles references embedded in a larger string as well as whole-value ones,
-    so ``base_url: "https://${HOST}/v1"`` behaves as the reader expects.
-
     Takes `object` because YAML hands back ints and bools for unquoted scalars,
     and an API key written as a bare number should become a string rather than
     an exception.
@@ -99,8 +122,6 @@ def resolve_secret(value: object) -> str:
     if not isinstance(value, str):
         return str(value)
 
-    # `keyring:` URIs are whole-value only; a URI spliced into a larger string
-    # is ambiguous and is left alone.
     try:
         from credstore import is_keyring_uri, resolve_uri
 
@@ -136,148 +157,175 @@ class ServerSettings:
 
 
 @dataclass(frozen=True)
-class ProviderSettings:
-    """One model the agent loop can talk to, and who serves it.
+class ModelSettings:
+    """One model a provider serves, and how to call it.
 
-    `server` names an entry in `servers:` — the launcher starts those on demand
-    and shares them.  A provider may instead carry a bare `url` pointing at a
-    server this installation does not manage (something already running
-    elsewhere), in which case `server` is None and the launcher leaves it alone.
+    Every numeric field is optional and `None` means *omit it*, which is not the
+    same as passing a sensible-looking default: several gateways reject a
+    `temperature` they did not ask for, and a model that reasons natively may
+    refuse a `thinking` field entirely.  Saying nothing is the safe value, so
+    saying nothing is what an absent field means.
     """
 
+    #: The API's model name, and the local id — `"deepseek/deepseek-flash"` in
+    #: references is built from the provider name plus this.
     model: str
-    url: str
-    server: str | None = None
+    #: What to show a person.  Falls back to `model` when absent.
+    name: str = ""
+    #: The model thinks natively, so reasoning is worth asking for.
+    reasoning: bool = False
+    #: Modalities accepted.  Carried so a caller can refuse to attach an image
+    #: to a model that cannot read one; slife2 attaches nothing yet, so today
+    #: this is the config that says so.
+    input: tuple[str, ...] = ("text",)
+    #: Token budget, used for the context percentage in the status bar.
+    context_window: int = 0
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    #: `compat.thinking` — `enabled`, `disabled`, or `omit` for gateways that
+    #: reject the standard shape while reasoning anyway.
+    thinking: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or self.model
+
+    @property
+    def accepts_images(self) -> bool:
+        return "image" in self.input
 
 
 @dataclass(frozen=True)
-class AgentSettings:
-    """How the agent loop behaves.  Not an identity — that is `--agent`."""
+class ProviderSettings:
+    """A model server: one wire protocol, one endpoint, one set of credentials.
 
-    max_steps: int = 16
-    system_prompt: str = "You are slife2, a terminal agent. Be concise."
+    `api_key` is read lazily — the raw reference is kept and credstore is only
+    consulted on access — so a process that never serves this provider never
+    opens the keyring for it.
+    """
 
-
-@dataclass(frozen=True)
-class OpenAISettings:
-    """The openai-compatible LLM server: what it calls, and with what key."""
-
-    base_url: str | None = None
-    #: The reference exactly as written in the file — `${DEEPSEEK_API_KEY}`, a
-    #: `keyring:` URI, or a literal.  Read `api_key` to resolve it.
-    api_key_ref: str = ""
-    #: Ask the provider to report token usage on the final stream chunk.
-    #: OpenAI and DeepSeek do this via `stream_options`, which is an extension:
-    #: some OpenAI-compatible servers reject the parameter outright with a 400.
-    #: Turn it off for one of those and the only loss is the token counts.
-    stream_usage: bool = True
+    api: str
+    base_url: str
+    api_key_ref: str
+    server: ServerSettings
+    models: dict[str, ModelSettings] = field(default_factory=dict)
 
     @property
     def api_key(self) -> str:
         """The resolved key.  Touches credstore, so call it where it is needed."""
         return resolve_secret(self.api_key_ref)
 
+    @property
+    def module(self) -> str:
+        """The server module that speaks this provider's protocol."""
+        return API_BACKENDS[self.api]
+
+    def model(self, model_id: str = "") -> ModelSettings:
+        """Look up a model by its API name, defaulting to the first.
+
+        Raises:
+            ConfigError: If the id is unknown.  A message naming the models this
+                provider does offer is more use than a KeyError, and this is a
+                config mistake rather than a runtime one.
+        """
+        if not model_id:
+            if not self.models:
+                raise ConfigError("provider has no models")
+            return next(iter(self.models.values()))
+        try:
+            return self.models[model_id]
+        except KeyError:
+            known = ", ".join(self.models) or "(none)"
+            raise ConfigError(
+                f"provider offers no model {model_id!r}; known: {known}"
+            ) from None
+
 
 @dataclass(frozen=True)
-class AnthropicSettings:
-    """The Anthropic LLM server: what it calls, and with what key."""
+class AgentSettings:
+    """How the agent loop behaves, and where it listens.  Not an identity."""
 
-    api_key_ref: str = ""
-    #: Anthropic requires a max_tokens on every request; the OpenAI-compatible
-    #: API does not, so there is no shared setting for it.
-    max_tokens: int = 4096
-
-    @property
-    def api_key(self) -> str:
-        """The resolved key.  See :attr:`OpenAISettings.api_key`."""
-        return resolve_secret(self.api_key_ref)
+    server: ServerSettings = field(default_factory=ServerSettings)
+    max_steps: int = 16
+    system_prompt: str = "You are slife2, a terminal agent. Be concise."
 
 
 @dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
 
-    #: name -> where it listens.  The single source of truth for addresses.
-    servers: dict[str, ServerSettings] = field(default_factory=dict)
     providers: dict[str, ProviderSettings] = field(default_factory=dict)
-    default_provider: str = ""
     agent: AgentSettings = field(default_factory=AgentSettings)
-    llm_openai: OpenAISettings = field(default_factory=OpenAISettings)
-    llm_anthropic: AnthropicSettings = field(default_factory=AnthropicSettings)
-    tui_url: str = ""
+    #: `"provider/model"`, the model the agent starts with.
+    default: str = ""
 
-    def server(self, name: str) -> ServerSettings:
-        """Where a named server listens.
-
-        Raises:
-            ConfigError: If the name is unknown — which at this point means a
-                caller asked for a server that is not in `KNOWN_SERVERS`.
-        """
+    def provider(self, name: str) -> ProviderSettings:
         try:
-            return self.servers[name]
-        except KeyError:
-            known = ", ".join(sorted(self.servers)) or "(none)"
-            raise ConfigError(f"unknown server {name!r}; known: {known}") from None
-
-    def provider(self, name: str | None = None) -> ProviderSettings:
-        """Look up a provider, defaulting to the configured default.
-
-        Raises:
-            ConfigError: If the name is unknown, or nothing is configured.  Both
-                are config mistakes that deserve a message naming the valid
-                choices rather than a KeyError.
-        """
-        key = name or self.default_provider
-        if not key:
-            raise ConfigError("no provider configured; set `default:`")
-        try:
-            return self.providers[key]
+            return self.providers[name]
         except KeyError:
             known = ", ".join(sorted(self.providers)) or "(none)"
-            raise ConfigError(f"unknown provider {key!r}; known: {known}") from None
+            raise ConfigError(f"unknown provider {name!r}; known: {known}") from None
+
+    def resolve(
+        self, reference: str = ""
+    ) -> tuple[str, ProviderSettings, ModelSettings]:
+        """Split a `provider/model` reference, defaulting to `default`.
+
+        A bare provider name is accepted and means that provider's first model,
+        because someone typing `--model deepseek` means the obvious thing.
+
+        Raises:
+            ConfigError: If the reference is malformed or names something that
+                does not exist.
+        """
+        reference = reference or self.default
+        if not reference:
+            raise ConfigError("no model configured; set `default: provider/model`")
+
+        name, _, model_id = reference.partition("/")
+        provider = self.provider(name)
+        return name, provider, provider.model(model_id)
+
+    def url_for(self, reference: str = "") -> str:
+        """The endpoint serving a reference — what a client should connect to."""
+        return self.resolve(reference)[1].server.url
 
 
 def default_config() -> Config:
     """The config used when no file is found.
 
-    Everything here is also what `slife2.yaml` says, which is why that file can
-    be deleted without changing behaviour — see the file's own header.
+    Deliberately a single OpenAI-compatible provider: it is the shape the
+    project is developed against, and a second provider nobody has credentials
+    for would only make `slife2 status` report a server that can never start.
     """
-    servers = {
-        "agent": ServerSettings(port=8000),
-        "llm-openai": ServerSettings(port=8001),
-        "llm-anthropic": ServerSettings(port=8002),
-    }
-    providers = {
-        "deepseek": ProviderSettings(
-            model="deepseek-flash", url=servers["llm-openai"].url, server="llm-openai"
-        ),
-        "claude": ProviderSettings(
-            model="claude-sonnet-5-5",
-            url=servers["llm-anthropic"].url,
-            server="llm-anthropic",
-        ),
-    }
+    deepseek = ProviderSettings(
+        api="openai-completions",
+        base_url="https://api.deepseek.com",
+        api_key_ref="${DEEPSEEK_API_KEY}",
+        server=ServerSettings(port=8001),
+        models={
+            "deepseek-flash": ModelSettings(
+                model="deepseek-flash",
+                name="DeepSeek Flash",
+                reasoning=True,
+                input=("text", "image"),
+                context_window=1_000_000,
+                max_tokens=384_000,
+                temperature=0.7,
+                top_p=1.0,
+            )
+        },
+    )
     return Config(
-        servers=servers,
-        providers=providers,
-        default_provider="deepseek",
+        providers={"deepseek": deepseek},
         agent=AgentSettings(),
-        llm_openai=OpenAISettings(
-            base_url="https://api.deepseek.com/v1",
-            api_key_ref="${DEEPSEEK_API_KEY}",
-        ),
-        llm_anthropic=AnthropicSettings(api_key_ref="${ANTHROPIC_API_KEY}"),
-        tui_url=servers["agent"].url,
+        default="deepseek/deepseek-flash",
     )
 
 
 def find_config_path(explicit: str | Path | None = None) -> Path | None:
-    """Locate the config file: argument, then env var, then working directory.
-
-    Returns None when nothing is named and nothing is there, which is not an
-    error — see :func:`load`.
-    """
+    """Locate the config file: argument, then env var, then working directory."""
     if explicit is not None:
         return Path(explicit)
     from_env = os.environ.get(CONFIG_ENV_VAR)
@@ -292,9 +340,6 @@ def load(explicit: str | Path | None = None) -> Config:
 
     A named path that does not exist *is* an error (the user asked for that
     file); an unnamed one that does not exist is not.
-
-    Raises:
-        ConfigError: If a file exists but cannot be read or parsed.
     """
     explicit_given = explicit is not None or os.environ.get(CONFIG_ENV_VAR)
     path = find_config_path(explicit)
@@ -316,12 +361,11 @@ def load(explicit: str | Path | None = None) -> Config:
     return _build(raw)
 
 
-def _mapping(raw: Any) -> dict[str, Any]:
-    """Coerce a config value to a mapping, or raise a message naming the section."""
+def _mapping(raw: Any, where: str) -> dict[str, Any]:
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise ConfigError("expected a mapping")
+        raise ConfigError(f"{where}: expected a mapping")
     return raw
 
 
@@ -329,79 +373,40 @@ def _build(raw: dict[str, Any]) -> Config:
     """Assemble a Config from a parsed mapping, defaulting what is absent."""
     base = default_config()
 
-    # --- servers ------------------------------------------------------------
-    servers = dict(base.servers)
-    for name, spec in _mapping(raw.get("servers")).items():
-        if name not in KNOWN_SERVERS:
-            raise ConfigError(
-                f"servers.{name}: not a server this distribution ships "
-                f"(known: {', '.join(KNOWN_SERVERS)})"
-            )
-        try:
-            servers[str(name)] = _server_settings(spec, servers[str(name)])
-        except ConfigError as exc:
-            raise ConfigError(f"servers.{name}: {exc}") from exc
+    providers_raw = _mapping(raw.get("providers"), "providers")
+    providers = (
+        {str(name): _provider(spec, str(name)) for name, spec in providers_raw.items()}
+        if providers_raw
+        else dict(base.providers)
+    )
 
-    # --- providers ----------------------------------------------------------
-    providers_raw = _mapping(raw.get("providers"))
-    if providers_raw:
-        providers: dict[str, ProviderSettings] = {}
-        for name, spec in providers_raw.items():
-            providers[str(name)] = _provider_settings(spec, servers, str(name))
-    else:
-        providers = {
-            name: replace(p, url=servers[p.server].url)
-            for name, p in base.providers.items()
-            if p.server in servers
-        }
-
-    # --- the rest -----------------------------------------------------------
-    agent_raw = _mapping(raw.get("agent"))
-    openai_raw = _mapping(raw.get("llm_openai"))
-    anthropic_raw = _mapping(raw.get("llm_anthropic"))
-    tui_raw = _mapping(raw.get("tui"))
-
+    agent_raw = _mapping(raw.get("agent"), "agent")
     agent = AgentSettings(
+        server=_server(agent_raw.get("server"), base.agent.server, "agent.server"),
         max_steps=int(agent_raw.get("max_steps") or base.agent.max_steps),
         system_prompt=str(agent_raw.get("system_prompt") or base.agent.system_prompt),
     )
 
     return Config(
-        servers=servers,
         providers=providers,
-        default_provider=str(raw.get("default") or base.default_provider),
         agent=agent,
-        llm_openai=OpenAISettings(
-            base_url=(
-                str(openai_raw["base_url"])
-                if openai_raw.get("base_url")
-                else base.llm_openai.base_url
-            ),
-            api_key_ref=str(openai_raw.get("api_key") or base.llm_openai.api_key_ref),
-            stream_usage=bool(
-                openai_raw.get("stream_usage", base.llm_openai.stream_usage)
-            ),
-        ),
-        llm_anthropic=AnthropicSettings(
-            api_key_ref=str(
-                anthropic_raw.get("api_key") or base.llm_anthropic.api_key_ref
-            ),
-            max_tokens=int(
-                anthropic_raw.get("max_tokens") or base.llm_anthropic.max_tokens
-            ),
-        ),
-        # The TUI's URL defaults to wherever the agent server was told to
-        # listen, not to a second hard-coded address that could disagree.
-        tui_url=str(tui_raw.get("url") or servers["agent"].url),
+        default=str(raw.get("default") or _first_reference(providers)),
     )
 
 
-def _server_settings(raw: Any, default: ServerSettings) -> ServerSettings:
-    """Build ServerSettings from a config mapping, falling back per field."""
+def _first_reference(providers: dict[str, ProviderSettings]) -> str:
+    """`provider/model` for the first configured model, as a fallback default."""
+    for name, provider in providers.items():
+        if provider.models:
+            return f"{name}/{next(iter(provider.models))}"
+    return ""
+
+
+def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
     if raw is None:
         return default
     if not isinstance(raw, dict):
-        raise ConfigError("expected a mapping with host/port/path")
+        raise ConfigError(f"{where}: expected a mapping with host/port/path")
     return ServerSettings(
         host=str(raw.get("host") or default.host),
         port=int(raw.get("port") or default.port),
@@ -409,32 +414,90 @@ def _server_settings(raw: Any, default: ServerSettings) -> ServerSettings:
     )
 
 
-def _provider_settings(
-    raw: Any, servers: dict[str, ServerSettings], name: str
-) -> ProviderSettings:
-    """Build a provider, resolving its URL from `servers` when it names one."""
+def _provider(raw: Any, name: str) -> ProviderSettings:
     if not isinstance(raw, dict):
         raise ConfigError(f"providers.{name}: expected a mapping")
 
-    model = str(raw.get("model") or "")
-    if not model:
-        raise ConfigError(f"providers.{name}: needs a `model`")
-
-    server_name = raw.get("server")
-    if server_name is not None:
-        server_name = str(server_name)
-        if server_name not in servers:
-            known = ", ".join(sorted(servers)) or "(none)"
-            raise ConfigError(
-                f"providers.{name}: unknown server {server_name!r}; known: {known}"
-            )
-        return ProviderSettings(
-            model=model, url=servers[server_name].url, server=server_name
+    api = str(raw.get("api") or "")
+    if api not in API_BACKENDS:
+        raise ConfigError(
+            f"providers.{name}: unknown api {api!r}; known: {', '.join(API_BACKENDS)}"
         )
 
-    url = raw.get("url")
-    if not url:
-        raise ConfigError(f"providers.{name}: needs either a `server` name or a `url`")
-    # A bare url means a server this installation does not manage — already
-    # running elsewhere — so the launcher will not try to start it.
-    return ProviderSettings(model=model, url=str(url), server=None)
+    models_raw = raw.get("models")
+    if not isinstance(models_raw, list) or not models_raw:
+        raise ConfigError(f"providers.{name}: needs a non-empty `models:` list")
+
+    models: dict[str, ModelSettings] = {}
+    for entry in models_raw:
+        model = _model(entry, name)
+        models[model.model] = model
+
+    return ProviderSettings(
+        api=api,
+        base_url=str(raw.get("base_url") or ""),
+        api_key_ref=str(raw.get("api_key") or ""),
+        server=_server(
+            raw.get("server"), ServerSettings(port=8001), f"providers.{name}.server"
+        ),
+        models=models,
+    )
+
+
+def _model(raw: Any, provider: str) -> ModelSettings:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"providers.{provider}: each model must be a mapping")
+    model = str(raw.get("model") or "")
+    if not model:
+        raise ConfigError(f"providers.{provider}: a model entry needs `model:`")
+
+    compat = raw.get("compat") or {}
+    if not isinstance(compat, dict):
+        raise ConfigError(f"providers.{provider}.{model}: compat must be a mapping")
+
+    modalities = raw.get("input")
+    if isinstance(modalities, list):
+        inputs = tuple(str(m) for m in modalities)
+    elif modalities is None:
+        inputs = ("text",)
+    else:
+        inputs = (str(modalities),)
+
+    return ModelSettings(
+        model=model,
+        name=str(raw.get("name") or ""),
+        reasoning=bool(raw.get("reasoning", False)),
+        input=inputs,
+        context_window=int(raw.get("context_window") or 0),
+        max_tokens=_optional_int(raw.get("max_tokens")),
+        temperature=_optional_float(raw.get("temperature")),
+        top_p=_optional_float(raw.get("top_p")),
+        thinking=str(compat.get("thinking") or ""),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+__all__ = [
+    "API_BACKENDS",
+    "CONFIG_ENV_VAR",
+    "DEFAULT_AGENT",
+    "DEFAULT_CONFIG_NAME",
+    "AgentSettings",
+    "Config",
+    "ConfigError",
+    "ModelSettings",
+    "ProviderSettings",
+    "ServerSettings",
+    "default_config",
+    "find_config_path",
+    "load",
+    "resolve_secret",
+    "replace",
+]

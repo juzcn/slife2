@@ -15,11 +15,23 @@ import pytest
 from fakes import FakeAgentClient
 from textual.worker import WorkerState
 
-from slife2.events import TextDelta, ToolCallFinished, ToolCallStarted, TurnFinished
+from slife2.events import (
+    TextDelta,
+    ThinkingDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnFinished,
+)
 from slife2.messages import Usage
 from slife2.tui.app import SlifeApp
 from slife2.tui.theme import GLYPHS, PALETTE
-from slife2.tui.widgets import ChatView, HistoryInput, StatusBar, ToolCallWidget
+from slife2.tui.widgets import (
+    AssistantMessage,
+    ChatView,
+    HistoryInput,
+    StatusBar,
+    ToolCallWidget,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -133,6 +145,65 @@ async def test_the_answer_carries_its_token_count() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         assert "830 tokens" in shown(app)
+
+
+def reasoning_turn():
+    """A scripted client that thinks before it answers."""
+
+    def respond(prompt: str, on_event):
+        on_event(ThinkingDelta("let me think about this"))
+        on_event(TextDelta("the answer"))
+        return "the answer"
+
+    return respond
+
+
+async def test_reasoning_is_folded_away_by_default() -> None:
+    """Reasoning is the model talking to itself; the answer was what was asked for.
+
+    So it is summarised to a length rather than shown — available to anyone who
+    wants to check it, out of the way for everyone else.
+    """
+    app = make_app(reasoning_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        widget = app.query_one(AssistantMessage)
+
+        assert widget.thinking == "let me think about this"
+        assert widget.thinking_expanded is False
+        shown_text = shown(app)
+        assert "Thinking" in shown_text
+        assert f"({len('let me think about this')} chars)" in shown_text
+        assert "let me think about this" not in shown_text
+
+
+async def test_reasoning_can_be_opened() -> None:
+    app = make_app(reasoning_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        widget = app.query_one(AssistantMessage)
+        widget.action_toggle_thinking()
+        await pilot.pause()
+
+        assert widget.thinking_expanded is True
+        assert "let me think about this" in shown(app)
+        # ...and the answer is still there underneath it.
+        assert "the answer" in shown(app)
+
+
+async def test_reasoning_is_never_mixed_into_the_answer() -> None:
+    """The two are displayed differently, so they must arrive differently.
+
+    An adapter that let reasoning through as text would put the model's private
+    working into the middle of its reply — hard to notice, impossible to undo.
+    """
+    app = make_app(reasoning_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        text = shown(app)
+
+    assert "the answer" in text
+    assert "let me think" not in text
 
 
 async def test_final_answer_replaces_what_was_streamed() -> None:

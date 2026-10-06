@@ -29,7 +29,7 @@ from pathlib import Path
 from fastmcp import Client
 
 from slife2 import __version__
-from slife2.config import KNOWN_SERVERS, Config
+from slife2.config import Config
 from slife2.runtime import (
     AgentClaim,
     ClientRecord,
@@ -55,16 +55,17 @@ from slife2.runtime import (
     write_record,
 )
 
-#: name -> (module, the tool that proves it is the server we think it is).
+#: The agent server: a module, and the tool that proves it is the one we think.
 #:
-#: In code rather than in the config.  These are the servers this distribution
-#: ships; letting an operator name an arbitrary command would be a capability
-#: nobody asked for and one more thing to get wrong.
-LAUNCHERS: dict[str, tuple[str, str]] = {
-    "agent": ("slife2.server.server", "run_turn"),
-    "llm-openai": ("slife2.llm.openai_server", "stream_chat"),
-    "llm-anthropic": ("slife2.llm.anthropic_server", "stream_chat"),
-}
+#: In code rather than in the config.  Letting an operator name an arbitrary
+#: command would be a capability nobody asked for and one more thing to get
+#: wrong.  The model servers need no entry here — their module comes from their
+#: provider's `api`, which is already a closed set.
+AGENT_SERVER = ("slife2.server.server", "run_turn")
+
+#: The tool both model servers answer to, and how a provider server is named.
+MODEL_TOOL = "stream_chat"
+PROVIDER_PREFIX = "llm:"
 
 #: How long a server may take to answer after being spawned.  Generous enough
 #: for a cold import of a provider SDK, short enough to be a deadline.
@@ -137,6 +138,10 @@ class ServerSpec:
     host: str
     port: int
     expected_tool: str
+    #: The config provider this server serves, or "" for the agent server.  A
+    #: model server is started with `--provider <name>` so it knows which
+    #: credentials and models are its own.
+    provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,38 +161,43 @@ class Outcome:
 def specs(config: Config) -> list[ServerSpec]:
     """The servers this config needs, in the order they must be started.
 
-    A server is needed because the config names it: the agent server always, and
-    every LLM server some provider points at.  So deleting a provider stops a
-    process, with no second decision point to keep in step — and a provider
-    carrying a bare `url` is somebody else's server, not ours to start.
+    One model server **per provider**, because a process can only hold one
+    endpoint and one key — so the set is derived from the provider table rather
+    than from a separate address list.  Deleting a provider stops a process,
+    with no second switch to keep in step.
 
     **Order matters.**  The agent server connects to its model server once, in
-    its FastMCP lifespan, so the LLM servers must be answering before it starts.
-    Starting them together races, and the failure is confusing: the agent server
-    comes up healthy and every turn fails because its upstream was not there.
+    its FastMCP lifespan, so the model servers must be answering before it
+    starts.  Starting them together races, and the failure is confusing: the
+    agent server comes up healthy and every turn fails because its upstream was
+    not there.
     """
-    needed = {"agent"}
-    for provider in config.providers.values():
-        if provider.server is not None:
-            needed.add(provider.server)
-
-    ordered = [n for n in KNOWN_SERVERS if n != "agent" and n in needed]
-    ordered.append("agent")
-
-    result = []
-    for name in ordered:
-        module, tool = LAUNCHERS[name]
-        address = config.server(name)
+    result: list[ServerSpec] = []
+    for name, provider in config.providers.items():
         result.append(
             ServerSpec(
-                name=name,
-                module=module,
-                url=address.url,
-                host=address.host,
-                port=address.port,
-                expected_tool=tool,
+                name=f"{PROVIDER_PREFIX}{name}",
+                module=provider.module,
+                url=provider.server.url,
+                host=provider.server.host,
+                port=provider.server.port,
+                expected_tool=MODEL_TOOL,
+                provider=name,
             )
         )
+
+    module, tool = AGENT_SERVER
+    address = config.agent.server
+    result.append(
+        ServerSpec(
+            name="agent",
+            module=module,
+            url=address.url,
+            host=address.host,
+            port=address.port,
+            expected_tool=tool,
+        )
+    )
     return result
 
 
@@ -240,6 +250,8 @@ def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
         "--port",
         str(spec.port),
     ]
+    if spec.provider:
+        argv += ["--provider", spec.provider]
     if config_path is not None:
         argv += ["--config", str(config_path)]
     return argv

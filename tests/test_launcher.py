@@ -18,7 +18,11 @@ from pathlib import Path
 import pytest
 
 from slife2 import launcher
-from slife2.config import Config, ProviderSettings, ServerSettings, default_config
+from slife2.config import (
+    Config,
+    default_config,
+    load,
+)
 from slife2.launcher import AgentInUse, ServerSpec, Status
 
 pytestmark = pytest.mark.unit
@@ -34,61 +38,52 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 # --- which servers are needed ------------------------------------------------
 
 
-def test_the_agent_server_is_always_needed() -> None:
-    assert "agent" in {s.name for s in launcher.specs(default_config())}
+def test_one_server_per_provider() -> None:
+    """A provider gets its own process, because a process holds one endpoint.
 
-
-def test_only_servers_a_provider_names_are_needed() -> None:
-    """Deleting a provider stops a process, with no second switch to keep in step."""
+    The set is derived from the provider table rather than from a separate
+    address list, so deleting a provider stops a process with no second switch
+    to keep in step.
+    """
     config = default_config()
-    config = Config(
-        servers=config.servers,
-        providers={"deepseek": config.providers["deepseek"]},
-        default_provider="deepseek",
-        agent=config.agent,
-        llm_openai=config.llm_openai,
-        llm_anthropic=config.llm_anthropic,
-        tui_url=config.tui_url,
+    names = [spec.name for spec in launcher.specs(config)]
+    assert names == ["llm:deepseek", "agent"]
+
+
+def test_a_provider_server_knows_which_provider_it_serves() -> None:
+    """`--provider` is how it finds its own credentials and model list."""
+    spec = next(s for s in launcher.specs(default_config()) if s.provider)
+    assert spec.provider == "deepseek"
+    assert "--provider" in launcher._argv(spec, Path("slife2.yaml"))
+
+
+def test_the_agent_server_has_no_provider() -> None:
+    spec = next(s for s in launcher.specs(default_config()) if s.name == "agent")
+    assert spec.provider == ""
+    assert "--provider" not in launcher._argv(spec, Path("slife2.yaml"))
+
+
+def test_the_api_chooses_the_module(tmp_path) -> None:
+    """Two providers on different protocols need two different servers."""
+    path = tmp_path / "two.yaml"
+    path.write_text(
+        """
+providers:
+  a:
+    api: openai-completions
+    server: {port: 9001}
+    models: [{model: m}]
+  b:
+    api: anthropic-messages
+    server: {port: 9002}
+    models: [{model: n}]
+default: a/m
+""",
+        encoding="utf-8",
     )
-    assert {s.name for s in launcher.specs(config)} == {"agent", "llm-openai"}
-
-
-def test_an_external_provider_is_not_managed() -> None:
-    """A model server on someone else's machine is reachable, not startable."""
-    config = default_config()
-    external = Config(
-        servers=config.servers,
-        providers={
-            "remote": ProviderSettings(model="m", url="https://models.example/mcp")
-        },
-        default_provider="remote",
-        agent=config.agent,
-        llm_openai=config.llm_openai,
-        llm_anthropic=config.llm_anthropic,
-        tui_url=config.tui_url,
-    )
-    assert [s.name for s in launcher.specs(external)] == ["agent"]
-
-
-def test_two_providers_on_one_server_need_it_once() -> None:
-    config = default_config()
-    shared = Config(
-        servers=config.servers,
-        providers={
-            "a": ProviderSettings(
-                model="m1", url=config.server("llm-openai").url, server="llm-openai"
-            ),
-            "b": ProviderSettings(
-                model="m2", url=config.server("llm-openai").url, server="llm-openai"
-            ),
-        },
-        default_provider="a",
-        agent=config.agent,
-        llm_openai=config.llm_openai,
-        llm_anthropic=config.llm_anthropic,
-        tui_url=config.tui_url,
-    )
-    assert [s.name for s in launcher.specs(shared)] == ["llm-openai", "agent"]
+    modules = {s.name: s.module for s in launcher.specs(load(path))}
+    assert modules["llm:a"] == "slife2.llm.openai_server"
+    assert modules["llm:b"] == "slife2.llm.anthropic_server"
 
 
 def test_model_servers_start_before_the_agent_server() -> None:
@@ -97,13 +92,13 @@ def test_model_servers_start_before_the_agent_server() -> None:
     Starting them together races, and the failure is confusing rather than
     obvious: the agent server comes up healthy and every turn fails.
     """
-    names = [s.name for s in launcher.specs(default_config())]
+    names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-1] == "agent"
-    assert names == ["llm-openai", "llm-anthropic", "agent"]
+    assert all(name.startswith("llm:") for name in names[:-1])
 
 
 def test_specs_carry_where_each_server_listens() -> None:
-    spec = next(s for s in launcher.specs(default_config()) if s.name == "llm-openai")
+    spec = next(s for s in launcher.specs(default_config()) if s.provider)
     assert (spec.host, spec.port, spec.expected_tool) == (
         "127.0.0.1",
         8001,
@@ -116,12 +111,13 @@ def test_specs_carry_where_each_server_listens() -> None:
 
 
 SPEC = ServerSpec(
-    name="llm-openai",
+    name="llm:deepseek",
     module="slife2.llm.openai_server",
     url="http://127.0.0.1:8001/mcp",
     host="127.0.0.1",
     port=8001,
     expected_tool="stream_chat",
+    provider="deepseek",
 )
 
 
@@ -385,23 +381,11 @@ def test_stop_leaves_a_reused_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None
         launcher, "terminate", lambda pid, **k: killed.append(pid) or True
     )
 
-    outcomes = launcher.stop(_config_with_only_openai())
+    outcomes = launcher.stop(_config_with_only_deepseek())
     assert killed == [], "it terminated a pid it could not prove was ours"
     assert any("pid reused" in o.detail for o in outcomes)
     assert runtime.read_record(SPEC.url) is None  # the stale record is gone
 
 
-def _config_with_only_openai() -> Config:
-    base = default_config()
-    return Config(
-        servers={
-            "agent": ServerSettings(port=8000),
-            "llm-openai": ServerSettings(port=8001),
-        },
-        providers={"deepseek": base.providers["deepseek"]},
-        default_provider="deepseek",
-        agent=base.agent,
-        llm_openai=base.llm_openai,
-        llm_anthropic=base.llm_anthropic,
-        tui_url=base.tui_url,
-    )
+def _config_with_only_deepseek() -> Config:
+    return default_config()

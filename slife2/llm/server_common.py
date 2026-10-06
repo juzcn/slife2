@@ -208,11 +208,19 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
 
 
 def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:
-    """The three flags every server here accepts."""
+    """The flags every server here accepts."""
     parser = argparse.ArgumentParser(prog=description, description=description)
     parser.add_argument("--config", default=None, help="path to slife2.yaml")
     parser.add_argument("--host", default=None, help="override the listen address")
     parser.add_argument("--port", default=None, type=int, help="override the port")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help=(
+            "which configured provider this model server serves. Required by "
+            "the model servers: each holds exactly one provider's credentials."
+        ),
+    )
     return parser.parse_args(argv)
 
 

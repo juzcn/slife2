@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from slife2.events import (
     NULL_OBSERVER,
     TextDelta,
+    ThinkingDelta,
     ToolCallFinished,
     ToolCallStarted,
     TurnEvent,
@@ -85,13 +86,12 @@ class AgentLoop:
 
         for step in range(1, self._max_steps + 1):
             stream = self._backend.stream(messages, specs)
-            text_parts: list[str] = []
 
             # Phase A: exhaust the stream before doing anything with it.  A tool
             # must not run inside this loop -- that would hold the provider's
             # response stream open across the tool call, risking its read
             # deadline and pinning a socket for no reason.
-            await self._drain(stream.chunks, text_parts, observer)
+            await self._drain(stream.chunks, observer)
 
             result = await stream.result
             total_usage = total_usage + result.usage
@@ -160,10 +160,7 @@ class AgentLoop:
         )
 
     async def _drain(
-        self,
-        chunks: AsyncIterator[Chunk],
-        text_parts: list[str],
-        observer: TurnObserver,
+        self, chunks: AsyncIterator[Chunk], observer: TurnObserver
     ) -> None:
         """Forward a stream's chunks to the observer, closing it either way.
 
@@ -173,8 +170,13 @@ class AgentLoop:
         """
         try:
             async for chunk in chunks:
+                # Reasoning is forwarded as its own kind, never merged into the
+                # answer: it is the model talking to itself, and a transcript
+                # that mixes the two is unreadable in a way that is hard to
+                # notice and impossible to undo.
+                if chunk.thinking:
+                    await self._emit(observer, ThinkingDelta(chunk.thinking))
                 if chunk.text:
-                    text_parts.append(chunk.text)
                     await self._emit(observer, TextDelta(chunk.text))
         finally:
             aclose = getattr(chunks, "aclose", None)

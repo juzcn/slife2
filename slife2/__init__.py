@@ -59,7 +59,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--url", default=None, help="override the agent server's endpoint"
     )
     parser.add_argument(
-        "--provider", default=None, help="which configured provider to use"
+        "--model",
+        default=None,
+        help=(
+            "which model to start with, as provider/model "
+            "(default: the config's `default`)"
+        ),
     )
     parser.add_argument(
         "--keep-servers",
@@ -158,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config: Config = load(args.config)
-        provider = config.provider(args.provider)
+        provider_name, provider, model = config.resolve(args.model)
+        tui_url = args.url or provider.server.url
     except ConfigError as exc:
         # A config mistake is worth a one-line message rather than a traceback:
         # nothing has started yet, and the fix is in the file being named.
@@ -188,11 +194,9 @@ def main(argv: list[str] | None = None) -> int:
             code = _ensure(config, find_config_path(args.config))
             if code == 0:
                 app = SlifeApp(
-                    args.url or config.tui_url,
+                    tui_url,
                     agent=args.agent,
-                    model_label=(
-                        f"{args.provider or config.default_provider}/{provider.model}"
-                    ),
+                    model_label=f"{provider_name}/{model.model}",
                 )
                 app.run()
     except AgentInUse as exc:

@@ -53,6 +53,18 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ThinkingDelta:
+    """A piece of the model's reasoning.
+
+    Carried separately from `TextDelta` because it is shown separately — folded
+    away unless asked for — and because a model that reasons natively produces
+    a great deal of it that nobody reads.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
 class ToolCallStarted:
     """The model asked for a tool and the loop is about to run it."""
 
@@ -97,7 +109,9 @@ class TurnFinished:
     stop_reason: str
 
 
-TurnEvent = TextDelta | ToolCallStarted | ToolCallFinished | TurnFinished
+TurnEvent = (
+    TextDelta | ThinkingDelta | ToolCallStarted | ToolCallFinished | TurnFinished
+)
 
 
 class TurnObserver(Protocol):
@@ -144,6 +158,8 @@ def encode(event: TurnEvent) -> str:
     match event:
         case TextDelta(text):
             payload = {"t": "text", "d": text}
+        case ThinkingDelta(text=text):
+            payload = {"t": "thinking", "d": text}
         case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
             payload = {
                 "t": "tool_start",
@@ -204,6 +220,8 @@ def decode(message: str) -> TurnEvent | None:
     match payload.get("t"):
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
+        case "thinking" if isinstance(payload.get("d"), str):
+            return ThinkingDelta(text=payload["d"])
         case "tool_start" if isinstance(payload.get("name"), str):
             arguments = payload.get("args")
             return ToolCallStarted(
