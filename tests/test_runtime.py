@@ -323,6 +323,32 @@ def test_tcp_listening_is_true_for_an_open_one() -> None:
 # --- span (the daemon requirement) -------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="console windows are a Windows concern"
+)
+def test_a_spawned_server_gets_no_console_window(tmp_path) -> None:
+    """A daemon that flashes a window on every start is not a daemon.
+
+    This asserts through the real `spawn()` because the plausible flag is the
+    wrong one: `DETACHED_PROCESS` reads as "no console" and actually means "does
+    not *inherit* the parent's console", leaving the child with a window of its
+    own.  Measured, `DETACHED_PROCESS` yields a live handle (~723768) and
+    `CREATE_NO_WINDOW` yields 0 — and passing both is accepted, with the window
+    coming back, so getting this wrong is silent apart from the flashing.
+    """
+    result = tmp_path / "console.txt"
+    probe = (
+        "import ctypes, pathlib\n"
+        f"pathlib.Path(r'{result}').write_text(\n"
+        "    str(ctypes.windll.kernel32.GetConsoleWindow()))\n"
+    )
+    proc = runtime.spawn([sys.executable, "-c", probe], url="http://127.0.0.1:8077/mcp")
+    proc.wait(timeout=30)
+
+    assert result.exists(), "the probe did not run"
+    assert result.read_text().strip() == "0", "the daemon opened a console window"
+
+
 def test_a_spawned_server_outlives_its_spawner() -> None:
     """The one property this whole layer exists for.
 

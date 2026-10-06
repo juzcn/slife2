@@ -635,20 +635,27 @@ def _posix_flock(key: str, timeout: float):
 def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
     """Start a server as a daemon that outlives this process.
 
-    Three platform details are load-bearing, and all three are about *surviving*:
+    Two Windows flags, and both were chosen by measurement rather than by
+    reading, because the plausible-looking choice is wrong here:
 
+    * **`CREATE_NO_WINDOW`, not `DETACHED_PROCESS`.**  `DETACHED_PROCESS` sounds
+      like "no console", and is not: it means the child does not *inherit* the
+      parent's console, and a console-subsystem program still ends up with one.
+      Measured with `GetConsoleWindow()` in the child, `DETACHED_PROCESS` gives a
+      live window handle (~723768) and `CREATE_NO_WINDOW` gives 0.  The two are
+      not even mutually exclusive — passing both is accepted, and the window
+      comes back, so `DETACHED_PROCESS` wins the console allocation.  A daemon
+      that flashes a window on every start is not a daemon.
     * **`CREATE_BREAKAWAY_FROM_JOB`.**  A child inherits its parent's job object
       unless it asks not to.  If the client is itself inside a kill-on-close job
-      — a CI runner, some terminal and IDE task hosts — then a merely detached
-      child is still inside that job and dies with it, silently defeating the
-      whole point.  Breakaway takes the child out.
-    * **`DETACHED_PROCESS`, and not `CREATE_NO_WINDOW`.**  Those two are mutually
-      exclusive and `CreateProcess` fails on the pair.  `DETACHED_PROCESS` is the
-      one that means "no console at all", which is what makes the child immune to
-      its parent's console closing.
-    * **`cwd` set away from the repository.**  A daemon must not hold a working
-      directory open, and `--config` is passed as an absolute path, so moving it
-      cannot change which config the child reads.
+      — a CI runner, some terminal and IDE task hosts — then the child dies with
+      that job, silently defeating the whole point.  Breakaway takes it out; the
+      `except` below covers a job that forbids breakaway, because losing the
+      escape hatch beats failing to start.
+
+    Also `cwd` is set away from the repository: a daemon must not hold a working
+    directory open, and `--config` is absolute, so moving it cannot change which
+    config the child reads.
     """
     log = log_path(url)
     _truncate_if_huge(log)
@@ -662,7 +669,7 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
             "cwd": str(runtime_dir()),
         }
         if sys.platform == "win32":
-            base = subprocess.DETACHED_PROCESS
+            base = subprocess.CREATE_NO_WINDOW
             try:
                 return subprocess.Popen(
                     argv,
