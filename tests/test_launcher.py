@@ -8,6 +8,7 @@ mutex is recursive within a thread and an in-process test would prove nothing.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -205,6 +206,22 @@ def test_the_spawn_command_uses_this_interpreter(
 # --- the agent name is exclusive ---------------------------------------------
 
 
+def wait_until_free(name: str, *, timeout: float = 8.0) -> None:
+    """Block until nobody holds `name`.
+
+    A process killed by a test releases its mutex at teardown, which is not
+    instantaneous, so a test that killed the previous holder can lose a race it
+    ought to win.  Waiting for the name to come free is the honest fix; the
+    alternative is asserting on a timing.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with contextlib.suppress(AgentInUse):
+            with launcher.claim_agent(name):
+                return
+        time.sleep(0.1)
+
+
 def test_two_instances_cannot_share_an_agent_name() -> None:
     """Proved across processes: a same-process test would prove nothing."""
     holder = subprocess.Popen(
@@ -213,7 +230,7 @@ def test_two_instances_cannot_share_an_agent_name() -> None:
             "-c",
             "import time\n"
             "from slife2.launcher import claim_agent\n"
-            "with claim_agent('jack'):\n"
+            "with claim_agent('alpha'):\n"
             "    print('claimed', flush=True)\n"
             "    time.sleep(5)\n",
         ],
@@ -225,8 +242,8 @@ def test_two_instances_cannot_share_an_agent_name() -> None:
     try:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "claimed"
-        with pytest.raises(AgentInUse, match="jack"):
-            with launcher.claim_agent("jack"):
+        with pytest.raises(AgentInUse, match="alpha"):
+            with launcher.claim_agent("alpha"):
                 pass
     finally:
         holder.kill()
@@ -241,7 +258,7 @@ def test_the_name_is_released_when_its_holder_is_killed() -> None:
             "-c",
             "import time\n"
             "from slife2.launcher import claim_agent\n"
-            "with claim_agent('jack'):\n"
+            "with claim_agent('beta'):\n"
             "    print('claimed', flush=True)\n"
             "    time.sleep(30)\n",
         ],
@@ -255,7 +272,8 @@ def test_the_name_is_released_when_its_holder_is_killed() -> None:
         assert holder.stdout.readline().strip() == "claimed"
         holder.kill()
         holder.wait()
-        with launcher.claim_agent("jack"):
+        wait_until_free("beta")
+        with launcher.claim_agent("beta"):
             pass
     finally:
         if holder.poll() is None:
@@ -271,9 +289,9 @@ def test_the_same_process_cannot_claim_a_name_twice() -> None:
     would quietly succeed — the lock is a cross-process guard and says nothing
     about re-entry.
     """
-    with launcher.claim_agent("jack"):
-        with pytest.raises(AgentInUse, match="jack"):
-            with launcher.claim_agent("jack"):
+    with launcher.claim_agent("gamma"):
+        with pytest.raises(AgentInUse, match="gamma"):
+            with launcher.claim_agent("gamma"):
                 pass
 
 
@@ -281,9 +299,9 @@ def test_a_live_client_is_visible_to_others() -> None:
     """This is what makes "the last one out" answerable at all."""
     from slife2 import runtime
 
-    with launcher.claim_agent("jack"):
+    with launcher.claim_agent("delta"):
         live = runtime.live_clients()
-        assert [c.agent for c in live] == ["jack"]
+        assert [c.agent for c in live] == ["delta"]
         # A second instance would see us...
         assert [c.agent for c in launcher.others_running()] == []
         # ...and we are the only one, so the servers would be ours to stop.
@@ -330,17 +348,17 @@ def test_a_killed_client_stops_counting() -> None:
 
 def test_different_names_do_not_collide() -> None:
     """The servers are shared; only the label is exclusive."""
-    with launcher.claim_agent("jack"):
-        with launcher.claim_agent("slife2"):
+    with launcher.claim_agent("epsilon"):
+        with launcher.claim_agent("zeta"):
             pass
 
 
 def test_the_claim_is_cleared_on_the_way_out() -> None:
     from slife2 import runtime
 
-    with launcher.claim_agent("jack"):
-        assert runtime.read_claim("jack") is not None
-    assert runtime.read_claim("jack") is None
+    with launcher.claim_agent("eta"):
+        assert runtime.read_claim("eta") is not None
+    assert runtime.read_claim("eta") is None
 
 
 # --- stop --------------------------------------------------------------------

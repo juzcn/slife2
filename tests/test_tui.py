@@ -165,6 +165,19 @@ async def test_model_output_is_not_parsed_as_markup() -> None:
         assert hostile in shown(app)
 
 
+async def test_the_prompt_is_addressed_to_this_agent() -> None:
+    """The placeholder names the agent, not the program.
+
+    It is the only place the name is read before anything has been said, which
+    is exactly why a hard-coded one is easy to miss: it looks right for the
+    default and is wrong for every other name.
+    """
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert app.query_one(HistoryInput).placeholder == "Message jack…"
+
+
 async def test_enter_submits_and_clears_the_box() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:

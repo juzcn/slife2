@@ -123,7 +123,10 @@ class SlifeApp(App[None]):
         # conversation reads `You> ...` / `jack> ...` on both sides.
         yield ChatView(self._agent)
         yield HistoryInput(
-            placeholder="Message slife2…",
+            # The agent's name, not the program's: the prompt is addressed to
+            # whoever this instance is, and it is the one place the name is
+            # read before anything has been said.
+            placeholder=f"Message {self._agent}…",
             id="user-input",
             # `focus` rather than `indent`: Tab in a prompt should reach the
             # rest of the app, not insert whitespace nobody can see.

@@ -357,12 +357,19 @@ def claim_agent(name: str) -> Generator[None]:
     try:
         with exclusive(agent_key(name), timeout=AGENT_CLAIM_TIMEOUT_SECONDS):
             _HELD_NAMES.add(name)
-            write_claim(AgentClaim.now(name))
-            client = register_client(name)
             try:
-                yield
+                # Everything after the `add` is inside the `try`, including the
+                # bookkeeping.  A name that is added and then not released
+                # because something between the two raised is a name this
+                # process can never claim again — and "released however the
+                # body exits" is the whole point of holding it.
+                write_claim(AgentClaim.now(name))
+                client = register_client(name)
+                try:
+                    yield
+                finally:
+                    unregister_client(client)
             finally:
-                unregister_client(client)
                 clear_claim(name)
                 _HELD_NAMES.discard(name)
     except TimeoutError:
