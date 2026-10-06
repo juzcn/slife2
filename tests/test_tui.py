@@ -537,6 +537,25 @@ async def test_a_missing_attachment_is_reported_and_the_prompt_still_goes() -> N
     assert client.images == [[]]
 
 
+async def test_the_status_bar_stops_saying_working_when_the_turn_ends() -> None:
+    """The bar has to be told about the transition, not asked during it.
+
+    `_run_turn` ends with a `finally` that refreshes the status, and that line
+    runs while the worker is still `RUNNING` — it is the last statement of the
+    worker's own body.  So it reports "working" for the turn that has just
+    finished, and nothing afterwards corrects it: the bar says working until the
+    next turn, and then until the one after that.
+    """
+    app = make_app(answering("hello"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        worker = app._turn_worker
+        assert worker is not None
+        await worker.wait()
+        await pilot.pause()
+        assert "working" not in status(app)
+
+
 @pytest.mark.asyncio
 async def test_ctrl_c_cancels_a_running_turn() -> None:
     """A terminal where you cannot stop a runaway turn is not usable."""

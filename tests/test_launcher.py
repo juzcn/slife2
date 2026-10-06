@@ -168,6 +168,20 @@ def _register(spec: ServerSpec, *, config: str = "") -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
+    """A programming error must not look like an absent server.
+
+    `asyncio.run` raises when a loop is already running, and an
+    `except Exception` around it turns "you called this wrong" into "nothing is
+    running" — a wrong answer that looks exactly like a right one.  That is what
+    this used to do, quietly, with a `coroutine was never awaited` warning as
+    the only sign.
+    """
+    with pytest.raises(RuntimeError, match="cannot run inside an event loop"):
+        launcher.probe("http://127.0.0.1:9/mcp", "x", timeout=0.2)
+
+
 def test_a_registered_server_is_reused_and_nothing_is_spawned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

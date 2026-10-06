@@ -223,8 +223,23 @@ def probe(
     through and which would then fail in the middle of a turn.
 
     Blocks, and so cannot be called from inside a running event loop.  It never
-    is: the launcher runs before the TUI starts its loop.
+    is in production — the launcher runs before the TUI starts its loop — and
+    calling it from one anyway is a **programming error, not an absent server**.
+    That distinction has to be made here rather than caught below: `asyncio.run`
+    raises when a loop is already running, and an `except Exception` around it
+    turns "you called this wrong" into "nothing is running" — a wrong answer
+    that looks like a right one.
     """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass  # no loop of our own to conflict with, which is the normal case
+    else:
+        raise RuntimeError(
+            "probe() is synchronous and cannot run inside an event loop; "
+            "call the launcher before starting one, or from a thread"
+        )
+
     try:
         return asyncio.run(_probe_async(url, expected_tool, timeout))
     except Exception:
