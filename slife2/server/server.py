@@ -46,6 +46,7 @@ from slife2.llm.client import close_backend, open_backend
 from slife2.llm.server_common import configure_logging, parse_serve_args, serve
 from slife2.loop import AgentLoop
 from slife2.messages import Message
+from slife2.prompt import render as render_system_prompt
 from slife2.tools import ToolRegistry, builtin_tools
 
 logger = logging.getLogger(__name__)
@@ -179,10 +180,18 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
         # caller's history, so it is applied afresh each turn and can be changed
         # by editing the config.  Skipped when the caller already supplied one,
         # so this cannot produce two.
-        if config.agent.system_prompt and not (working and working[0].role == "system"):
-            working.insert(
-                0, Message(role="system", content=config.agent.system_prompt)
-            )
+        #
+        # Rendered here rather than at startup because the agent name arrives
+        # *with the request*: this server is shared, so two instances are two
+        # names asking one process, and a prompt rendered once would give the
+        # first caller's name to everybody.
+        if not (working and working[0].role == "system"):
+            # Imported as a function rather than as the module: the tool's
+            # own parameter is called `prompt`, and `prompt.render(...)` would
+            # be asking a string to render itself.
+            system = render_system_prompt(config.agent.system_prompt, agent_name=agent)
+            if system:
+                working.insert(0, Message(role="system", content=system))
 
         # Everything from here on is what the caller has to remember.
         offset = len(working)

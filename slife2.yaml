@@ -123,4 +123,15 @@ agent:
   # calling tools would otherwise run indefinitely; the cap ends the turn
   # normally rather than raising.
   max_steps: 16
-  system_prompt: "You are slife2, a terminal agent. Be concise."
+  # The system prompt is a Jinja2 template, rendered per turn with the agent
+  # name — `run_turn(..., agent="jack")` reaches it — because the server is
+  # shared and stateless, so two instances on one server are two names asking
+  # the same process.
+  #
+  # Left out, the template the distribution ships is used.  A path here is
+  # looked for relative to this file, which is the useful place for one you are
+  # editing:
+  #
+  #   system_prompt: "prompts/jack.j2"
+  #
+  # Inside it, `{{ agent_name }}` is the name the instance was started with.

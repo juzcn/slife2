@@ -248,7 +248,11 @@ class AgentSettings:
 
     server: ServerSettings = field(default_factory=ServerSettings)
     max_steps: int = 16
-    system_prompt: str = "You are slife2, a terminal agent. Be concise."
+    #: A Jinja2 template for the system prompt — an absolute path by the time
+    #: this is built, or "" for the one the distribution ships.  A template
+    #: rather than a string because the prompt has a hole in it where the agent
+    #: name goes, and the hole has to be *somewhere* the caller can see.
+    system_prompt: str = ""
 
 
 @dataclass(frozen=True)
@@ -358,7 +362,7 @@ def load(explicit: str | Path | None = None) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
 
-    return _build(raw)
+    return _build(raw, config_dir=path.parent)
 
 
 def _mapping(raw: Any, where: str) -> dict[str, Any]:
@@ -369,8 +373,12 @@ def _mapping(raw: Any, where: str) -> dict[str, Any]:
     return raw
 
 
-def _build(raw: dict[str, Any]) -> Config:
-    """Assemble a Config from a parsed mapping, defaulting what is absent."""
+def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
+    """Assemble a Config from a parsed mapping, defaulting what is absent.
+
+    `config_dir` is where a relative `system_prompt` is looked for, so a
+    template can sit next to the config that names it.
+    """
     base = default_config()
 
     providers_raw = _mapping(raw.get("providers"), "providers")
@@ -384,7 +392,9 @@ def _build(raw: dict[str, Any]) -> Config:
     agent = AgentSettings(
         server=_server(agent_raw.get("server"), base.agent.server, "agent.server"),
         max_steps=int(agent_raw.get("max_steps") or base.agent.max_steps),
-        system_prompt=str(agent_raw.get("system_prompt") or base.agent.system_prompt),
+        system_prompt=_template_path(
+            agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
+        ),
     )
 
     return Config(
@@ -392,6 +402,24 @@ def _build(raw: dict[str, Any]) -> Config:
         agent=agent,
         default=str(raw.get("default") or _first_reference(providers)),
     )
+
+
+def _template_path(raw: Any, config_dir: Path | None, default: str) -> str:
+    """Resolve `agent.system_prompt` to a template file, or the shipped default.
+
+    A relative path is looked for beside the config that named it — the useful
+    place for a prompt somebody is editing — and leaving the field out means the
+    template the distribution ships.  A path that is not there is a config
+    mistake, and failing at load says so once rather than on every turn.
+    """
+    if not raw:
+        return default
+    path = Path(str(raw))
+    if not path.is_absolute():
+        path = (config_dir / path) if config_dir else path
+    if not path.is_file():
+        raise ConfigError(f"agent.system_prompt: no such template: {path}")
+    return str(path)
 
 
 def _first_reference(providers: dict[str, ProviderSettings]) -> str:

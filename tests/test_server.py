@@ -234,9 +234,19 @@ async def test_an_interrupted_turn_leaves_the_caller_history_intact() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_comes_from_the_config() -> None:
+def template(tmp_path, body: str):
+    """A system prompt template on disk, as the config expects."""
+    path = tmp_path / "system.j2"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_is_a_template(tmp_path) -> None:
     backend = answering("ok")
-    server = build_server(config(system_prompt="be terse"), backend=backend)
+    server = build_server(
+        config(system_prompt=template(tmp_path, "be terse")), backend=backend
+    )
     await call(server, messages=[], prompt="hi")
 
     seen = backend.calls[0][0]
@@ -245,17 +255,59 @@ async def test_the_system_prompt_comes_from_the_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_not_handed_back_to_the_caller() -> None:
+async def test_the_template_is_rendered_per_turn_with_the_agent_name(tmp_path) -> None:
+    """One template, personalised by whoever is asking.
+
+    Rendered per turn rather than once, because the agent name arrives *with the
+    request* — the server is shared, so two instances are two names asking one
+    process.  Rendering at startup would hand the first caller's name to
+    everybody, which is the failure this asserts against.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="ok")),
+        ScriptedTurn(result=StreamChatResult(text="ok")),
+    )
+    server = build_server(
+        config(system_prompt=template(tmp_path, "You are {{ agent_name }}.")),
+        backend=backend,
+    )
+
+    await call(server, messages=[], prompt="hello", agent="jack")
+    await call(server, messages=[], prompt="hello", agent="jill")
+
+    first = backend.calls[0][0][0]
+    second = backend.calls[1][0][0]
+    assert first.content == "You are jack."
+    assert second.content == "You are jill."
+
+
+@pytest.mark.asyncio
+async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
+    """A prompt that will not render is a config mistake worth naming once."""
+    from slife2.config import ConfigError, load
+
+    path = tmp_path / "slife2.yaml"
+    path.write_text("agent:\n  system_prompt: not-here.j2\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="not-here.j2"):
+        load(path)
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_is_not_handed_back_to_the_caller(tmp_path) -> None:
     """Otherwise it would accumulate one copy per turn in the caller's history."""
-    server = build_server(config(system_prompt="be terse"), backend=answering("ok"))
+    server = build_server(
+        config(system_prompt=template(tmp_path, "be terse")), backend=answering("ok")
+    )
     result = await call(server, messages=[], prompt="hi")
     assert all(m["role"] != "system" for m in result.data["new_messages"])
 
 
 @pytest.mark.asyncio
-async def test_a_caller_supplied_system_message_is_not_doubled() -> None:
+async def test_a_caller_supplied_system_message_is_not_doubled(tmp_path) -> None:
     backend = answering("ok")
-    server = build_server(config(system_prompt="from config"), backend=backend)
+    server = build_server(
+        config(system_prompt=template(tmp_path, "from config")), backend=backend
+    )
     await call(
         server, messages=[{"role": "system", "content": "from caller"}], prompt="hi"
     )
