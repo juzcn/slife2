@@ -272,6 +272,7 @@ def build_server(
         ctx: Context,
         agent: str = DEFAULT_AGENT,
         model: str = "",
+        images: list[str] | None = None,
     ) -> dict[str, Any]:
         """Run one agent turn.
 
@@ -296,6 +297,10 @@ def build_server(
                 config's `default` is used.  Per request rather than per server
                 because one agent server serves every caller, and two instances
                 may well want different models.
+            images: Images to send with the prompt, each a `data:` URL.  Refused
+                unless the model's config lists `image` under `input` — silently
+                dropping an attachment somebody made is worse than saying the
+                model cannot read it.
 
         Returns:
             `text` (the final answer), `new_messages` (append these to the
@@ -304,6 +309,7 @@ def build_server(
         loop = await loop_for(model)
         logger.debug("turn from agent %s on %s", agent, model or "the default")
         working = [Message.from_wire(m) for m in messages]
+        user = _with_images(prompt, images or [], config, model)
 
         # The system prompt comes from this server's config rather than the
         # caller's history, so it is applied afresh each turn and can be changed
@@ -324,7 +330,7 @@ def build_server(
 
         # Everything from here on is what the caller has to remember.
         offset = len(working)
-        result = await loop.run_turn(working, prompt, ProgressObserver(ctx))
+        result = await loop.run_turn(working, user, ProgressObserver(ctx))
         new_messages = [m.to_wire() for m in working[offset:]]
 
         await remember_turn(agent, prompt, model, result, new_messages)
@@ -338,6 +344,32 @@ def build_server(
         }
 
     return mcp
+
+
+def _with_images(
+    prompt: str, images: list[str], config: Config, model: str
+) -> str | list[dict[str, Any]]:
+    """The user's message: text, or text and images.
+
+    The model has to be *able* to read them.  A config that does not list
+    `image` under a model's `input` is the config saying so, and the alternative
+    to refusing is worse than it looks: the images would be dropped somewhere
+    along the way and the user would be left wondering why the model ignored
+    what they attached.
+    """
+    if not images:
+        return prompt
+
+    settings = config.resolve(model)[2]
+    if not settings.accepts_images:
+        raise ValueError(
+            f"{settings.model} cannot read images "
+            f"(its config lists input: {', '.join(settings.input)})"
+        )
+
+    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    parts += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+    return parts
 
 
 def resolve_settings(config: Config) -> ServerSettings:

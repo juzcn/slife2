@@ -40,6 +40,7 @@ from slife2.events import (
     TurnEvent,
     TurnFinished,
 )
+from slife2.tui import attachments
 from slife2.tui.client import AgentClient, MCPAgentClient
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import ChatView, HistoryInput, StatusBar
@@ -209,6 +210,16 @@ class SlifeApp(App[None]):
     async def _run_turn(self, prompt: str) -> None:
         assert self._client is not None
         try:
+            # The `@path` markers stay in the prompt: the transcript should show
+            # what was sent, and taking them out would leave a sentence with a
+            # hole where the attachment was named.
+            images, complaints = attachments.extract(prompt)
+            for complaint in complaints:
+                # Complaints do not stop the prompt.  Losing what somebody typed
+                # because one attachment was wrong is a worse outcome than
+                # sending it without.
+                self._transcript.add_note(complaint)
+
             if not self._connected:
                 # Lazy retry: the server may have started since we launched.
                 await self._connect()
@@ -220,7 +231,7 @@ class SlifeApp(App[None]):
                 )
                 return
 
-            final = await self._client.run_turn(prompt, self._on_event)
+            final = await self._client.run_turn(prompt, self._on_event, images=images)
             self.post_message(TurnDoneMessage(final))
         except asyncio.CancelledError:
             # `action_interrupt` has already noted it in the transcript; all

@@ -59,6 +59,17 @@ In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
 conversation, **Ctrl+Q** quits.
 
+Name an image with `@` and it goes with the prompt:
+
+```
+what is wrong with this layout? @screenshot.png
+```
+
+The marker stays in the transcript, so the record shows what was sent. Only
+local files, and only when the model's config lists `image` under `input` — a
+model that cannot read images says so rather than quietly ignoring what you
+attached.
+
 ## Where things live
 
 **One data directory holds everything** — the config that says what to run, the

@@ -132,6 +132,9 @@ class FakeAgentClient:
         self._connect_error = connect_error
         self.connected = False
         self.prompts: list[str] = []
+        #: The images sent with each prompt, so a test can assert the attachment
+        #: reached the client rather than only that the file was read.
+        self.images: list[list[str]] = []
         self.resets = 0
 
     async def connect(self) -> None:
@@ -145,6 +148,13 @@ class FakeAgentClient:
     def reset(self) -> None:
         self.resets += 1
 
-    async def run_turn(self, prompt: str, on_event: Callable[[TurnEvent], None]) -> str:
+    async def run_turn(
+        self,
+        prompt: str,
+        on_event: Callable[[TurnEvent], None],
+        *,
+        images: list[str] | None = None,
+    ) -> str:
         self.prompts.append(prompt)
+        self.images.append(images or [])
         return self._respond(prompt, on_event)

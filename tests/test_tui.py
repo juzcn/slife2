@@ -501,11 +501,51 @@ async def test_the_context_is_the_latest_turn_not_a_running_total() -> None:
         assert "(30.0%)" in status(app)
 
 
+async def test_an_at_path_is_read_and_sent_with_the_prompt(tmp_path) -> None:
+    """The client gets a `data:` URL, and the transcript keeps the marker.
+
+    Keeping it matters: the record should show what was sent, and removing the
+    marker would leave a sentence with a hole where the attachment was named.
+    """
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"pretend png bytes")
+    client = FakeAgentClient(answering("I see it"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, f"what is this? @{shot.as_posix()}")
+        assert f"@{shot.as_posix()}" in shown(app)
+
+    assert len(client.images) == 1
+    assert client.images[0][0].startswith("data:image/png;base64,")
+
+
+async def test_a_missing_attachment_is_reported_and_the_prompt_still_goes() -> None:
+    """Losing what somebody typed because an attachment was wrong is worse.
+
+    So the complaint is written to the transcript and the prompt is sent
+    anyway — with no images, rather than not at all.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "look at @nope.png")
+        assert "nope.png" in shown(app)
+
+    assert client.prompts == ["look at @nope.png"]
+    assert client.images == [[]]
+
+
+@pytest.mark.asyncio
 async def test_ctrl_c_cancels_a_running_turn() -> None:
     """A terminal where you cannot stop a runaway turn is not usable."""
     started = asyncio.Event()
 
-    async def never_finishes(prompt, on_event):
+    async def never_finishes(prompt, on_event, *, images=None):
+        # `images` is keyword-only on the real client, so a stand-in that
+        # omitted it would fail on every call rather than never finishing —
+        # which is a different test.
         started.set()
         await asyncio.sleep(30)
         return "never"

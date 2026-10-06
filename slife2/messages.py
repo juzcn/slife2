@@ -101,10 +101,16 @@ class Message:
 
     `content` is optional because an assistant turn that only calls tools has no
     text, and a tool result's payload is also carried on `content`.
+
+    It is a string *or* a list of content parts — the OpenAI shape, where a
+    message carrying an image is a list of `{"type": "text"}` and
+    `{"type": "image_url"}` blocks.  Keeping that as the neutral form means a
+    plain message stays plain (the common case, and the one that has to stay
+    readable), and only a message with an attachment pays for the structure.
     """
 
     role: Role
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None
     #: Assistant turns only — the calls this turn is asking for.
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: Tool turns only — which call this is the result of.

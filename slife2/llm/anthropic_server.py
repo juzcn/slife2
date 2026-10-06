@@ -56,6 +56,54 @@ DEFAULT_MAX_TOKENS = 4096
 THINKING_BUDGET_SHARE = 0.5
 
 
+def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
+    """Neutral content — a string or OpenAI content parts — as Anthropic blocks.
+
+    The two APIs disagree about images in the usual way: OpenAI nests a data URL
+    under `image_url`, Anthropic wants the media type and the base64 payload as
+    separate fields.  A part this function does not recognise is dropped rather
+    than passed through, because passing an unknown block to the Messages API is
+    a 400 on every call that contains one.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+
+    blocks: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        match part.get("type"):
+            case "text":
+                text = part.get("text") or ""
+                if text:
+                    blocks.append({"type": "text", "text": text})
+            case "image_url":
+                source = _image_source(part.get("image_url"))
+                if source is not None:
+                    blocks.append({"type": "image", "source": source})
+    return blocks
+
+
+def _image_source(raw: Any) -> dict[str, Any] | None:
+    """A `data:` URL as Anthropic's base64 source, or None if it is not one.
+
+    Only inline data is accepted.  A remote URL would have to be fetched, and
+    fetching a URL a model or a user named is a capability this component has no
+    business having — so it is refused rather than quietly turned into a request
+    somebody did not make.
+    """
+    url = (raw or {}).get("url") if isinstance(raw, dict) else None
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    header, _, data = url.partition(",")
+    media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+    if not data:
+        return None
+    return {"type": "base64", "media_type": media_type, "data": data}
+
+
 def to_anthropic_messages(
     messages: list[Message],
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -84,7 +132,10 @@ def to_anthropic_messages(
 
     for message in messages:
         if message.role == "system":
-            if message.content:
+            # The system prompt is a string parameter here, and a system message
+            # carrying content parts is not a thing either API supports — so a
+            # list is taken for the text in it and nothing else.
+            if isinstance(message.content, str) and message.content:
                 system_parts.append(message.content)
             continue
 
@@ -95,16 +146,19 @@ def to_anthropic_messages(
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": message.content or "",
+                        # Tool results are text; anything else would have to be
+                        # rendered, and a result that is not a string is a bug
+                        # upstream rather than something to guess at here.
+                        "content": message.content
+                        if isinstance(message.content, str)
+                        else "",
                     }
                 ],
             )
             continue
 
         if message.role == "assistant":
-            blocks: list[dict[str, Any]] = []
-            if message.content:
-                blocks.append({"type": "text", "text": message.content})
+            blocks = to_anthropic_blocks(message.content)
             for call in message.tool_calls:
                 blocks.append(
                     {
@@ -119,7 +173,7 @@ def to_anthropic_messages(
             _append("assistant", blocks)
             continue
 
-        _append("user", [{"type": "text", "text": message.content or ""}])
+        _append("user", to_anthropic_blocks(message.content))
 
     return "\n\n".join(system_parts), converted
 

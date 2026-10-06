@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 from slife2.events import (
     NULL_OBSERVER,
@@ -69,7 +70,7 @@ class AgentLoop:
     async def run_turn(
         self,
         messages: list[Message],
-        user_text: str,
+        user: str | list[dict[str, Any]],
         observer: TurnObserver = NULL_OBSERVER,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
@@ -77,8 +78,13 @@ class AgentLoop:
         `messages` is mutated in place: the loop appends the user message, every
         assistant message, and every tool result.  The caller owns the list and
         therefore owns the conversation's lifetime and bounds.
+
+        `user` is what the user said — text, or content parts when something came
+        with it.  It is appended here rather than by the caller because the loop
+        is what owns the shape of a turn, and a caller that appended its own user
+        message would be a second place that knows it.
         """
-        messages.append(Message(role="user", content=user_text))
+        messages.append(Message(role="user", content=user))
 
         specs = self._tools.specs
         total_usage = Usage()

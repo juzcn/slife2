@@ -37,11 +37,19 @@ class AgentClient(Protocol):
         """Forget the conversation so the next turn starts fresh."""
         ...
 
-    async def run_turn(self, prompt: str, on_event: Callable[[TurnEvent], None]) -> str:
+    async def run_turn(
+        self,
+        prompt: str,
+        on_event: Callable[[TurnEvent], None],
+        *,
+        images: list[str] | None = None,
+    ) -> str:
         """Run a turn, calling `on_event` as it goes.
 
         Returns the final assistant text, which is authoritative — `on_event`
         is a display channel and its events may be dropped or delayed.
+
+        `images` are `data:` URLs to send with the prompt.
         """
         ...
 
@@ -114,7 +122,13 @@ class MCPAgentClient:
         """Forget the conversation.  Costs nothing — the server has no copy."""
         self._history.clear()
 
-    async def run_turn(self, prompt: str, on_event: Callable[[TurnEvent], None]) -> str:
+    async def run_turn(
+        self,
+        prompt: str,
+        on_event: Callable[[TurnEvent], None],
+        *,
+        images: list[str] | None = None,
+    ) -> str:
         if self._client is None:
             raise ConnectionError("not connected")
 

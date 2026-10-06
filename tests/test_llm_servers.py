@@ -34,6 +34,7 @@ from openai.types.chat import ChatCompletionChunk
 from slife2.config import ModelSettings
 from slife2.llm.anthropic_server import (
     DEFAULT_MAX_TOKENS,
+    to_anthropic_blocks,
     to_anthropic_messages,
     to_anthropic_tools,
 )
@@ -726,3 +727,74 @@ def test_an_empty_reasoning_field_is_not_an_event() -> None:
         ]
     )
     assert openai_translate(event) == []
+
+
+# --- images ------------------------------------------------------------------
+#
+# The two APIs disagree about images the usual way: OpenAI nests a data URL
+# under `image_url`, Anthropic wants the media type and the payload as separate
+# fields.  The neutral form is OpenAI's, so the conversion lives here.
+
+
+def test_a_string_becomes_one_text_block() -> None:
+    assert to_anthropic_blocks("hello") == [{"type": "text", "text": "hello"}]
+    assert to_anthropic_blocks("") == []
+    assert to_anthropic_blocks(None) == []
+
+
+def test_content_parts_become_text_and_image_blocks() -> None:
+    blocks = to_anthropic_blocks(
+        [
+            {"type": "text", "text": "what is this?"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            },
+        ]
+    )
+    assert blocks == [
+        {"type": "text", "text": "what is this?"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+        },
+    ]
+
+
+def test_a_remote_image_url_is_not_fetched() -> None:
+    """Fetching an address a prompt named is a request nobody made.
+
+    So it is dropped here rather than turned into a request — and dropping is
+    safe because the agent server has already refused to send it.
+    """
+    blocks = to_anthropic_blocks(
+        [{"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]
+    )
+    assert blocks == []
+
+
+def test_an_unrecognised_part_is_dropped() -> None:
+    """Passing an unknown block through is a 400 on every call containing one."""
+    blocks = to_anthropic_blocks(
+        [{"type": "video", "video": {}}, {"type": "text", "text": "hi"}]
+    )
+    assert blocks == [{"type": "text", "text": "hi"}]
+
+
+def test_a_user_message_with_an_image_survives_conversion() -> None:
+    _, messages = to_anthropic_messages(
+        [
+            Message(
+                role="user",
+                content=[
+                    {"type": "text", "text": "look"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,BBBB"},
+                    },
+                ],
+            )
+        ]
+    )
+    assert messages[0]["content"][0] == {"type": "text", "text": "look"}
+    assert messages[0]["content"][1]["source"]["media_type"] == "image/jpeg"

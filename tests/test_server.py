@@ -212,6 +212,73 @@ async def test_a_turn_succeeds_with_no_memory_server(tmp_path, monkeypatch) -> N
     assert result.data["text"] == "the answer"
 
 
+@pytest.mark.asyncio
+async def test_images_reach_the_model_as_content_parts() -> None:
+    """A prompt with an image is a list of parts, not a string."""
+    from slife2.config import ModelSettings, ProviderSettings, replace
+
+    backend = answering("I see it")
+    vision = replace(
+        default_config(),
+        providers={
+            "deepseek": ProviderSettings(
+                api="openai-completions",
+                base_url="https://example.test",
+                api_key_ref="${K:-x}",
+                models={
+                    "deepseek-flash": ModelSettings(
+                        model="deepseek-flash", input=("text", "image")
+                    )
+                },
+            )
+        },
+    )
+    server = build_server(vision, backend=backend)
+    await call(
+        server,
+        messages=[],
+        prompt="what is this?",
+        images=["data:image/png;base64,AAAA"],
+    )
+
+    sent = backend.calls[0][0][-1]
+    assert isinstance(sent.content, list)
+    assert sent.content[0] == {"type": "text", "text": "what is this?"}
+    assert sent.content[1]["image_url"]["url"].endswith("AAAA")
+
+
+@pytest.mark.asyncio
+async def test_images_are_refused_by_a_model_that_cannot_read_them() -> None:
+    """Dropping an attachment somebody made is worse than saying no.
+
+    The config listing only `text` under `input` is the config saying so, and
+    the alternative is a model that quietly ignores what was sent.  Note that
+    the *default* model is a vision model, so this has to be built explicitly —
+    which is the point: the check reads the config rather than assuming.
+    """
+    from slife2.config import ModelSettings, ProviderSettings, replace
+
+    text_only = replace(
+        default_config(),
+        providers={
+            "deepseek": ProviderSettings(
+                api="openai-completions",
+                base_url="https://example.test",
+                api_key_ref="${K:-x}",
+                models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
+            )
+        },
+    )
+    with pytest.raises(Exception, match="cannot read images"):
+        await call(
+            build_server(text_only, backend=answering("ok")),
+            messages=[],
+            prompt="look",
+            images=["data:image/png;base64,AAAA"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_history_sent_by_the_caller_is_used() -> None:
     """The caller owns memory; sending it back is what continues a conversation."""
     backend = answering("second answer")
