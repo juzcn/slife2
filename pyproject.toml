@@ -1,0 +1,102 @@
+[project]
+name = "slife2"
+version = "0.1.0"
+description = "Terminal-based AI agent — slife v2, a clean-slate rebuild"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "juzcn", email = "zhangjun@cueb.edu.cn" },
+]
+requires-python = ">=3.13"
+# Empty on purpose: v2 starts with no dependencies and earns each one when the
+# design calls for it, rather than inheriting v1's list.
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Terminals",
+]
+
+[project.scripts]
+slife2 = "slife2:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["slife2"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/slife2",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[build-system]
+# Unpinned, unlike slife — v1 caps hatchling below 1.27 only so `twine check`
+# accepts the Metadata-Version it emits, which is a constraint of its *publish*
+# pipeline.  slife2 has none yet; add the cap alongside the publish workflow.
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+]
+
+[tool.uv.workspace]
+# The workspace root is *also* a workspace member and must not list itself, so
+# `members` names only the additional packages.  slife2 is a workspace of one:
+# a sibling package joins by adding its directory and one entry here.
+members = []
+
+[tool.pytest.ini_options]
+minversion = "9.1"
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "module"
+addopts = "-q --tb=short --strict-markers --strict-config --no-header --color=yes --durations=10"
+filterwarnings = [
+    # CPython 3.13+: unittest.mock._AsyncMockMixin creates unawaited
+    # coroutine wrappers at class-definition time.  GC may collect them
+    # during any module import — not just unittest.mock.
+    # https://github.com/python/cpython/issues/126242
+    "ignore:coroutine .* was never awaited:RuntimeWarning",
+]
+markers = [
+    "asyncio: mark a test as an async test",
+    "slow: mark a test as slow (excluded from quick test runs with -m 'not slow')",
+    "unit: fast, isolated unit test (no I/O, no subprocess)",
+    "integration: test requiring I/O, network, or subprocess",
+    "e2e: end-to-end test requiring a full running system",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+# The formatter owns line width: it wraps what it can and leaves long strings
+# and URLs alone, so E501 would only ever fire on lines it cannot fix.
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+include = ["slife2"]
+exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "**/node_modules", "**/.*"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportOptionalSubscript = true
+reportInvalidTypeForm = true
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
