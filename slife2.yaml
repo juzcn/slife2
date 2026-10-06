@@ -1,7 +1,9 @@
-# slife2.yaml — one config file, read by all four processes.
+# slife2.yaml — one config file, read by every process and by the launcher.
 #
-# Each component reads only its own section, so addresses are written once and
-# cannot drift apart.
+# `servers:` holds addresses and nothing else.  Every component that listens on
+# a port is named there once, and everything else refers to it by name — so the
+# launcher knows what to start, the agent server knows where to find its model,
+# and none of them can disagree about a port.
 #
 # This file is checked in, and it is safe to check in: it holds no secrets.
 # Every ${VAR} resolves through shell env -> credstore -> literal default, so
@@ -13,40 +15,53 @@
 # Every value below is the built-in default, so this file can also be deleted
 # and the four processes will still start with the same ports and providers.
 
-# ── slife2-agent ────────────────────────────────────────────────────────────
-# The agent loop.  A server to the TUI, a client to a model server below.
-agent:
-  server:
+# ── The MCP servers ─────────────────────────────────────────────────────────
+# slife2 starts these on demand and shares them: a second instance attaches to
+# whatever is already running rather than starting a duplicate.  They are
+# daemons — a client exiting never stops one.  `slife2 status` / `slife2 down`
+# manage them.
+servers:
+  agent:
     host: 127.0.0.1
     port: 8000
     path: /mcp
+  llm-openai:
+    host: 127.0.0.1
+    port: 8001
+    path: /mcp
+  llm-anthropic:
+    host: 127.0.0.1
+    port: 8002
+    path: /mcp
 
+# ── Models ──────────────────────────────────────────────────────────────────
+# Each provider names the server that serves it.  A server is started because
+# a provider points at it, so deleting a provider stops a process — there is no
+# second switch to keep in step with this table.
+#
+# A provider may instead give a bare `url`, for a model server this machine does
+# not manage (already running elsewhere); slife2 then connects but never starts
+# it.
+providers:
+  deepseek:
+    server: llm-openai
+    model: deepseek-chat
+  claude:
+    server: llm-anthropic
+    model: claude-sonnet-5-5
+default: deepseek
+
+# ── The agent loop ──────────────────────────────────────────────────────────
+agent:
   # Model calls allowed in one turn before it is cut off.  A model that keeps
   # calling tools would otherwise run indefinitely; the cap ends the turn
   # normally rather than raising.
   max_steps: 16
-
   system_prompt: "You are slife2, a terminal agent. Be concise."
-
-  # Which model server to use.  `url` is the other end of an MCP connection, so
-  # switching providers is changing a URL — the agent loop holds no provider SDK
-  # and never sees an API key.
-  providers:
-    deepseek:
-      url: "http://127.0.0.1:8001/mcp"
-      model: deepseek-chat
-    claude:
-      url: "http://127.0.0.1:8002/mcp"
-      model: claude-sonnet-5-5
-  default: deepseek
 
 # ── slife2-llm-openai ───────────────────────────────────────────────────────
 # Any OpenAI-compatible endpoint: OpenAI, DeepSeek, Ollama, vLLM, most gateways.
 llm_openai:
-  server:
-    host: 127.0.0.1
-    port: 8001
-    path: /mcp
   base_url: "https://api.deepseek.com/v1"
   api_key: ${DEEPSEEK_API_KEY}
   # Ask for token counts on the final stream chunk.  This uses `stream_options`,
@@ -56,16 +71,12 @@ llm_openai:
 
 # ── slife2-llm-anthropic ────────────────────────────────────────────────────
 llm_anthropic:
-  server:
-    host: 127.0.0.1
-    port: 8002
-    path: /mcp
   api_key: ${ANTHROPIC_API_KEY}
   # Anthropic requires max_tokens on every request; the OpenAI-compatible API
   # does not, so there is no shared setting for it.
   max_tokens: 4096
 
-# ── slife2 ──────────────────────────────────────────────────────────────────
-# The TUI.  The URL defaults to wherever the agent server was told to listen.
+# ── The TUI ─────────────────────────────────────────────────────────────────
+# Defaults to wherever `servers.agent` says, so it is normally omitted.
 tui:
   url: "http://127.0.0.1:8000/mcp"

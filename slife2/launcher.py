@@ -1,0 +1,454 @@
+"""Bringing up the shared MCP servers, and attaching to the ones already there.
+
+Every server in this system is shared infrastructure.  `slife2` ensures the ones
+its config needs are running and attaches to whatever it finds, so a second
+instance is one command and no duplicate process appears.  Nothing here is
+per-agent: an agent name is a label, and isolation, where it exists at all, is
+an MCP server's own business.
+
+The decision that everything else follows from: **a probe is the only authority
+on whether a server is running.**  A listening port proves something is there; a
+record proves something was there once.  Only `tools/list` answering with the
+tool we expect proves that *our* server is up, which is why the record is never
+consulted for liveness and a stale one can never wedge a start.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import enum
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Generator
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastmcp import Client
+
+from slife2 import __version__
+from slife2.config import KNOWN_SERVERS, Config
+from slife2.runtime import (
+    AgentClaim,
+    ClientRecord,
+    ServerRecord,
+    agent_key,
+    clear_claim,
+    clear_record,
+    exclusive,
+    live_clients,
+    pid_alive,
+    read_claim,
+    read_record,
+    register_client,
+    same_client,
+    same_process,
+    spawn,
+    start_lock,
+    tail_log,
+    tcp_listening,
+    terminate,
+    unregister_client,
+    write_claim,
+    write_record,
+)
+
+#: name -> (module, the tool that proves it is the server we think it is).
+#:
+#: In code rather than in the config.  These are the servers this distribution
+#: ships; letting an operator name an arbitrary command would be a capability
+#: nobody asked for and one more thing to get wrong.
+LAUNCHERS: dict[str, tuple[str, str]] = {
+    "agent": ("slife2.server.server", "run_turn"),
+    "llm-openai": ("slife2.llm.openai_server", "stream_chat"),
+    "llm-anthropic": ("slife2.llm.anthropic_server", "stream_chat"),
+}
+
+#: How long a server may take to answer after being spawned.  Generous enough
+#: for a cold import of a provider SDK, short enough to be a deadline.
+READY_TIMEOUT_SECONDS = 30.0
+
+#: How long to wait for one `tools/list`.  Long enough that a slow but real
+#: server is not misread as absent.
+PROBE_TIMEOUT_SECONDS = 2.0
+
+#: How long to wait for another instance to release an agent name.  Short on
+#: purpose: unlike starting a server, there is nothing to wait for — a name is
+#: either free or it is not — so a long wait would only delay a refusal.
+AGENT_CLAIM_TIMEOUT_SECONDS = 0.2
+
+
+class Status(enum.Enum):
+    """What a server turned out to be."""
+
+    RUNNING = "running"
+    #: Answering correctly, but started by hand — there is no record of it.
+    #: Reused with a warning, because refusing would be pedantry.
+    UNMANAGED = "running (external)"
+    #: The port is held by something that is not this server.
+    CONFLICT = "port held by something else"
+    STARTED = "started"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    NOT_RUNNING = "not running"
+
+
+class AgentInUse(Exception):
+    """Another instance is already running under this agent name.
+
+    An agent name is an identity, and two live instances claiming one identity
+    is a contradiction rather than a configuration — so it is refused instead of
+    resolved.  Note what this is *not*: it does not partition anything.  The
+    servers stay shared; only the name is exclusive.
+    """
+
+    def __init__(self, name: str, holder: AgentClaim | None) -> None:
+        where = ""
+        if holder is not None and pid_alive(holder.pid):
+            where = f" (pid {holder.pid}"
+            where += f", since {holder.started_at})" if holder.started_at else ")"
+        super().__init__(f"agent {name!r} is already running{where}")
+        self.name = name
+        self.holder = holder
+
+
+class StartFailed(Exception):
+    """A server was spawned and did not come up.
+
+    Carries the child's log tail, because the alternative — "did not become
+    ready" with nothing else — sends the reader hunting for a log file at the
+    exact moment they are least inclined to.
+    """
+
+    def __init__(self, message: str, log_tail: str = "") -> None:
+        super().__init__(message)
+        self.log_tail = log_tail
+
+
+@dataclass(frozen=True)
+class ServerSpec:
+    """One server, as the launcher sees it."""
+
+    name: str
+    module: str
+    url: str
+    host: str
+    port: int
+    expected_tool: str
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What happened to one server."""
+
+    spec: ServerSpec
+    status: Status
+    record: ServerRecord | None = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in (Status.RUNNING, Status.UNMANAGED, Status.STARTED)
+
+
+def specs(config: Config) -> list[ServerSpec]:
+    """The servers this config needs, in the order they must be started.
+
+    A server is needed because the config names it: the agent server always, and
+    every LLM server some provider points at.  So deleting a provider stops a
+    process, with no second decision point to keep in step — and a provider
+    carrying a bare `url` is somebody else's server, not ours to start.
+
+    **Order matters.**  The agent server connects to its model server once, in
+    its FastMCP lifespan, so the LLM servers must be answering before it starts.
+    Starting them together races, and the failure is confusing: the agent server
+    comes up healthy and every turn fails because its upstream was not there.
+    """
+    needed = {"agent"}
+    for provider in config.providers.values():
+        if provider.server is not None:
+            needed.add(provider.server)
+
+    ordered = [n for n in KNOWN_SERVERS if n != "agent" and n in needed]
+    ordered.append("agent")
+
+    result = []
+    for name in ordered:
+        module, tool = LAUNCHERS[name]
+        address = config.server(name)
+        result.append(
+            ServerSpec(
+                name=name,
+                module=module,
+                url=address.url,
+                host=address.host,
+                port=address.port,
+                expected_tool=tool,
+            )
+        )
+    return result
+
+
+async def _probe_async(url: str, expected_tool: str, timeout: float) -> bool:
+    client: Client = Client(url, timeout=timeout)
+    await client.__aenter__()
+    try:
+        names = {tool.name for tool in await client.list_tools()}
+        return expected_tool in names
+    finally:
+        await client.__aexit__(None, None, None)
+
+
+def probe(
+    url: str, expected_tool: str, *, timeout: float = PROBE_TIMEOUT_SECONDS
+) -> bool:
+    """Whether the server at `url` is up *and* is the one we expect.
+
+    The tool check is what makes this better than a connection test: it catches
+    the port being held by a different MCP server, which a connect would wave
+    through and which would then fail in the middle of a turn.
+
+    Blocks, and so cannot be called from inside a running event loop.  It never
+    is: the launcher runs before the TUI starts its loop.
+    """
+    try:
+        return asyncio.run(_probe_async(url, expected_tool, timeout))
+    except Exception:
+        return False
+
+
+def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
+    """The command that starts a server.
+
+    `sys.executable -m` rather than the console script: it guarantees the daemon
+    runs in the same interpreter and virtual environment as the client that
+    spawned it, and it does not depend on the scripts directory being on PATH —
+    which it is not, under `uv run`.
+
+    Host and port are pinned to what this client already decided, so editing the
+    config between load and spawn cannot move an endpoint out from under a
+    server that was started for it.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        spec.module,
+        "--host",
+        spec.host,
+        "--port",
+        str(spec.port),
+    ]
+    if config_path is not None:
+        argv += ["--config", str(config_path)]
+    return argv
+
+
+def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
+    """Block until the spawned server answers, or explain why it never did.
+
+    The child is checked on **every** poll, not only at the deadline.  A server
+    that dies at import — a bad config, a missing SDK, a port something grabbed
+    in the meantime — reports that in about fifty milliseconds with its log, where
+    a launcher that only watched the clock would sit out the full thirty seconds
+    and then blame a timeout.
+    """
+    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    delay = 0.05
+
+    while True:
+        if proc.poll() is not None:
+            raise StartFailed(
+                f"{spec.name} exited with code {proc.returncode} before it was ready",
+                tail_log(spec.url),
+            )
+        if probe(spec.url, spec.expected_tool):
+            return
+        if time.monotonic() >= deadline:
+            # We own a process that has never served anything, so cleaning it up
+            # is unambiguous.  A server that *had* served would be someone's.
+            terminate(proc.pid)
+            raise StartFailed(
+                f"{spec.name} did not answer within {READY_TIMEOUT_SECONDS:.0f}s",
+                tail_log(spec.url),
+            )
+        time.sleep(delay)
+        delay = min(delay * 2, 0.5)
+
+
+def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
+    """Make sure a server is up, reusing one that already is.
+
+    Probed before the lock as well as inside it.  The unlocked probe is the fast
+    path — almost every launch finds everything already running and never
+    contends — and the probe inside the lock is what makes the wait meaningful:
+    whoever held it has just started the server, so the answer changes.
+    """
+    if probe(spec.url, spec.expected_tool):
+        return Outcome(spec, _running_status(spec), read_record(spec.url))
+
+    if tcp_listening(spec.host, spec.port):
+        # Something is there and it is not us.  Spawning would fail to bind and
+        # surface as a traceback in a log nobody is reading.
+        return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
+
+    try:
+        with start_lock(spec.url):
+            if probe(spec.url, spec.expected_tool):
+                return Outcome(spec, _running_status(spec), read_record(spec.url))
+            if tcp_listening(spec.host, spec.port):
+                return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
+
+            proc = spawn(_argv(spec, config_path), url=spec.url)
+            _wait_ready(spec, proc)
+            record = ServerRecord.now(
+                name=spec.name,
+                url=spec.url,
+                pid=proc.pid,
+                config=str(config_path) if config_path else "",
+                version=__version__,
+            )
+            write_record(record)
+            return Outcome(spec, Status.STARTED, record)
+    except StartFailed as exc:
+        return Outcome(spec, Status.FAILED, detail=f"{exc}\n{exc.log_tail}".strip())
+    except TimeoutError as exc:
+        return Outcome(spec, Status.FAILED, detail=str(exc))
+
+
+def _running_status(spec: ServerSpec) -> Status:
+    return Status.RUNNING if read_record(spec.url) else Status.UNMANAGED
+
+
+def _conflict_detail(spec: ServerSpec) -> str:
+    return (
+        f"port {spec.port} is held by something that is not {spec.name} "
+        f"(no {spec.expected_tool!r} tool at {spec.url})"
+    )
+
+
+#: Names claimed in *this* process.
+#:
+#: The kernel lock alone is not enough.  A Windows named mutex is recursive for
+#: the thread that holds it, and a POSIX `flock` belongs to the open file
+#: description, so a second claim inside one process quietly succeeds — the lock
+#: is a cross-process guard and says nothing about re-entry.  This set supplies
+#: the missing half, so "a name is claimed once" is true regardless.
+_HELD_NAMES: set[str] = set()
+
+
+@contextlib.contextmanager
+def claim_agent(name: str) -> Generator[None]:
+    """Hold the exclusive right to run under `name` for the life of the client.
+
+    The kernel owns the lock, so an instance that crashes — or is killed —
+    releases the name immediately, with no stale-claim cleanup and no window
+    where a dead process still owns a name.  A client record is registered
+    alongside it so other instances can tell whether anyone else is still using
+    the shared servers; see :func:`others_running`.
+
+    Raises:
+        AgentInUse: If another live instance already answers to this name.
+    """
+    if name in _HELD_NAMES:
+        raise AgentInUse(name, read_claim(name))
+
+    try:
+        with exclusive(agent_key(name), timeout=AGENT_CLAIM_TIMEOUT_SECONDS):
+            _HELD_NAMES.add(name)
+            write_claim(AgentClaim.now(name))
+            client = register_client(name)
+            try:
+                yield
+            finally:
+                unregister_client(client)
+                clear_claim(name)
+                _HELD_NAMES.discard(name)
+    except TimeoutError:
+        raise AgentInUse(name, read_claim(name)) from None
+
+
+def others_running() -> list[ClientRecord]:
+    """Clients other than this process that are still using the servers.
+
+    Read from pid liveness rather than any counter, so a client that was killed
+    — and therefore never got to deregister — does not keep the servers alive
+    forever.  The start token guards against a recycled pid counting as a live
+    client.
+    """
+    return [
+        record
+        for record in live_clients()
+        if record.pid != os.getpid() or not same_client(record)
+    ]
+
+
+def ensure_all(config: Config, *, config_path: Path | None = None) -> list[Outcome]:
+    """Bring up everything this config needs, LLM servers first."""
+    return [ensure(spec, config_path=config_path) for spec in specs(config)]
+
+
+def statuses(config: Config) -> list[Outcome]:
+    """What each server this config needs is doing right now."""
+    results = []
+    for spec in specs(config):
+        if probe(spec.url, spec.expected_tool):
+            results.append(Outcome(spec, _running_status(spec), read_record(spec.url)))
+        elif tcp_listening(spec.host, spec.port):
+            results.append(
+                Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
+            )
+        else:
+            results.append(Outcome(spec, Status.NOT_RUNNING))
+    return results
+
+
+def stop(config: Config) -> list[Outcome]:
+    """Stop the servers this config names, and only ones we can prove are ours.
+
+    "Prove" is doing real work in that sentence.  A record holds a pid, and
+    Windows reuses pids, so by the time this runs the number in the file may
+    belong to something else entirely.  The start token is what distinguishes
+    them; without a match the process is left alone and reported, because
+    killing an innocent process is a much worse failure than leaving a daemon
+    running.
+    """
+    results = []
+    for spec in specs(config):
+        record = read_record(spec.url)
+        if record is None:
+            status = (
+                Status.UNMANAGED
+                if probe(spec.url, spec.expected_tool)
+                else Status.NOT_RUNNING
+            )
+            results.append(
+                Outcome(spec, status, detail="no record; not started by slife2")
+            )
+            continue
+
+        if not same_process(record):
+            clear_record(spec.url)
+            results.append(
+                Outcome(
+                    spec,
+                    Status.STOPPED,
+                    detail=(
+                        f"record points at pid {record.pid}, which is no longer "
+                        f"{spec.name} (pid reused); left alone"
+                    ),
+                )
+            )
+            continue
+
+        gone = terminate(record.pid)
+        clear_record(spec.url)
+        results.append(
+            Outcome(
+                spec,
+                Status.STOPPED if gone else Status.FAILED,
+                detail="" if gone else f"pid {record.pid} did not exit",
+            )
+        )
+    return results

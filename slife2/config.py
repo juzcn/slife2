@@ -1,9 +1,10 @@
-"""slife2.yaml — one config file, read by all four processes.
+"""slife2.yaml — one config file, read by every process and by the launcher.
 
-Each component reads only its own section, so the addresses are written once and
-cannot drift apart: the TUI derives its URL from what the agent server is told to
-listen on, and the agent server's provider table points at the ports the LLM
-servers are told to listen on.
+The shape has one organising idea: **`servers:` holds addresses, and nothing
+else.**  Every component that listens on a port is named there, once, and every
+other section refers to it by name — so the launcher knows where to look for a
+server, the agent server knows where to find its model, and none of them can
+disagree about a port.
 
 Secrets
 -------
@@ -19,17 +20,17 @@ Resolution never raises.  A missing secret degrades to its literal form
 (``"${DEEPSEEK_API_KEY}"``), which fails loudly at the API call where it is a
 readable error, rather than at startup where it is not.
 
-Resolution is *lazy*: :class:`OpenAISettings` keeps the raw reference and only
-touches credstore when ``api_key`` is read.  The TUI process therefore never
-opens the OS keyring, and a headless CI run never reaches for a backend that
-does not exist.
+Resolution is *lazy*: the LLM settings keep the raw reference and only touch
+credstore when ``api_key`` is read.  The TUI process therefore never opens the
+OS keyring, and a headless CI run never reaches for a backend that does not
+exist.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,11 @@ class ConfigError(Exception):
     """
 
 
+#: Names of the MCP servers this distribution ships.  The launcher can only
+#: start what it has a module for, so an unknown name in `servers:` is a typo
+#: worth reporting rather than a server it quietly fails to run.
+KNOWN_SERVERS = ("agent", "llm-openai", "llm-anthropic")
+
 #: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
 #: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
 #: lookup.
@@ -56,6 +62,9 @@ CONFIG_ENV_VAR = "SLIFE2_CONFIG"
 
 #: The file looked for in the working directory when nothing else is named.
 DEFAULT_CONFIG_NAME = "slife2.yaml"
+
+#: The agent label used when `--agent` is not given.
+DEFAULT_AGENT = "slife2"
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -128,45 +137,31 @@ class ServerSettings:
 
 @dataclass(frozen=True)
 class ProviderSettings:
-    """One LLM MCP server the agent loop may talk to."""
+    """One model the agent loop can talk to, and who serves it.
 
-    url: str
+    `server` names an entry in `servers:` — the launcher starts those on demand
+    and shares them.  A provider may instead carry a bare `url` pointing at a
+    server this installation does not manage (something already running
+    elsewhere), in which case `server` is None and the launcher leaves it alone.
+    """
+
     model: str
+    url: str
+    server: str | None = None
 
 
 @dataclass(frozen=True)
 class AgentSettings:
-    """The agent loop's own settings."""
+    """How the agent loop behaves.  Not an identity — that is `--agent`."""
 
-    server: ServerSettings = field(default_factory=ServerSettings)
     max_steps: int = 16
     system_prompt: str = "You are slife2, a terminal agent. Be concise."
-    providers: dict[str, ProviderSettings] = field(default_factory=dict)
-    default: str = ""
-
-    def provider(self, name: str | None = None) -> ProviderSettings:
-        """Look up a provider, defaulting to the configured default.
-
-        Raises:
-            ConfigError: If the name is unknown, or nothing is configured.  Both
-                are config mistakes that deserve a message naming the valid
-                choices rather than a KeyError.
-        """
-        key = name or self.default
-        if not key:
-            raise ConfigError("no provider configured; set agent.default")
-        try:
-            return self.providers[key]
-        except KeyError:
-            known = ", ".join(sorted(self.providers)) or "(none)"
-            raise ConfigError(f"unknown provider {key!r}; known: {known}") from None
 
 
 @dataclass(frozen=True)
 class OpenAISettings:
-    """The openai-compatible LLM server: where it listens, what it calls."""
+    """The openai-compatible LLM server: what it calls, and with what key."""
 
-    server: ServerSettings = field(default_factory=lambda: ServerSettings(port=8001))
     base_url: str | None = None
     #: The reference exactly as written in the file — `${DEEPSEEK_API_KEY}`, a
     #: `keyring:` URI, or a literal.  Read `api_key` to resolve it.
@@ -185,9 +180,8 @@ class OpenAISettings:
 
 @dataclass(frozen=True)
 class AnthropicSettings:
-    """The Anthropic LLM server: where it listens, what it calls."""
+    """The Anthropic LLM server: what it calls, and with what key."""
 
-    server: ServerSettings = field(default_factory=lambda: ServerSettings(port=8002))
     api_key_ref: str = ""
     #: Anthropic requires a max_tokens on every request; the OpenAI-compatible
     #: API does not, so there is no shared setting for it.
@@ -203,49 +197,78 @@ class AnthropicSettings:
 class Config:
     """Every section of one config file, already defaulted."""
 
-    agent: AgentSettings
-    llm_openai: OpenAISettings
-    llm_anthropic: AnthropicSettings
-    tui_url: str
+    #: name -> where it listens.  The single source of truth for addresses.
+    servers: dict[str, ServerSettings] = field(default_factory=dict)
+    providers: dict[str, ProviderSettings] = field(default_factory=dict)
+    default_provider: str = ""
+    agent: AgentSettings = field(default_factory=AgentSettings)
+    llm_openai: OpenAISettings = field(default_factory=OpenAISettings)
+    llm_anthropic: AnthropicSettings = field(default_factory=AnthropicSettings)
+    tui_url: str = ""
 
+    def server(self, name: str) -> ServerSettings:
+        """Where a named server listens.
 
-def _server_settings(raw: Any, default: ServerSettings) -> ServerSettings:
-    """Build ServerSettings from a config mapping, falling back per field."""
-    if not isinstance(raw, dict):
-        return default
-    host = str(raw.get("host") or default.host)
-    port = int(raw.get("port") or default.port)
-    path = str(raw.get("path") or default.path)
-    return ServerSettings(host=host, port=port, path=path)
+        Raises:
+            ConfigError: If the name is unknown — which at this point means a
+                caller asked for a server that is not in `KNOWN_SERVERS`.
+        """
+        try:
+            return self.servers[name]
+        except KeyError:
+            known = ", ".join(sorted(self.servers)) or "(none)"
+            raise ConfigError(f"unknown server {name!r}; known: {known}") from None
+
+    def provider(self, name: str | None = None) -> ProviderSettings:
+        """Look up a provider, defaulting to the configured default.
+
+        Raises:
+            ConfigError: If the name is unknown, or nothing is configured.  Both
+                are config mistakes that deserve a message naming the valid
+                choices rather than a KeyError.
+        """
+        key = name or self.default_provider
+        if not key:
+            raise ConfigError("no provider configured; set `default:`")
+        try:
+            return self.providers[key]
+        except KeyError:
+            known = ", ".join(sorted(self.providers)) or "(none)"
+            raise ConfigError(f"unknown provider {key!r}; known: {known}") from None
 
 
 def default_config() -> Config:
     """The config used when no file is found.
 
-    Ports are assigned so the four processes do not collide, and the provider
-    table points at the two LLM servers' default ports.  Nothing here is a
-    secret, so this is usable as-is for a first run once a key is exported.
+    Everything here is also what `slife2.yaml` says, which is why that file can
+    be deleted without changing behaviour — see the file's own header.
     """
-    agent_server = ServerSettings(port=8000)
-    openai_server = ServerSettings(port=8001)
-    anthropic_server = ServerSettings(port=8002)
+    servers = {
+        "agent": ServerSettings(port=8000),
+        "llm-openai": ServerSettings(port=8001),
+        "llm-anthropic": ServerSettings(port=8002),
+    }
     providers = {
-        "deepseek": ProviderSettings(url=openai_server.url, model="deepseek-chat"),
-        "claude": ProviderSettings(url=anthropic_server.url, model="claude-sonnet-5-5"),
+        "deepseek": ProviderSettings(
+            model="deepseek-chat", url=servers["llm-openai"].url, server="llm-openai"
+        ),
+        "claude": ProviderSettings(
+            model="claude-sonnet-5-5",
+            url=servers["llm-anthropic"].url,
+            server="llm-anthropic",
+        ),
     }
     return Config(
-        agent=AgentSettings(
-            server=agent_server, providers=providers, default="deepseek"
-        ),
+        servers=servers,
+        providers=providers,
+        default_provider="deepseek",
+        agent=AgentSettings(),
         llm_openai=OpenAISettings(
-            server=openai_server,
             base_url="https://api.deepseek.com/v1",
             api_key_ref="${DEEPSEEK_API_KEY}",
         ),
-        llm_anthropic=AnthropicSettings(
-            server=anthropic_server, api_key_ref="${ANTHROPIC_API_KEY}"
-        ),
-        tui_url=agent_server.url,
+        llm_anthropic=AnthropicSettings(api_key_ref="${ANTHROPIC_API_KEY}"),
+        tui_url=servers["agent"].url,
     )
 
 
@@ -293,46 +316,62 @@ def load(explicit: str | Path | None = None) -> Config:
     return _build(raw)
 
 
+def _mapping(raw: Any) -> dict[str, Any]:
+    """Coerce a config value to a mapping, or raise a message naming the section."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("expected a mapping")
+    return raw
+
+
 def _build(raw: dict[str, Any]) -> Config:
     """Assemble a Config from a parsed mapping, defaulting what is absent."""
     base = default_config()
 
-    agent_raw = raw.get("agent") or {}
-    if not isinstance(agent_raw, dict):
-        raise ConfigError("agent: expected a mapping")
+    # --- servers ------------------------------------------------------------
+    servers = dict(base.servers)
+    for name, spec in _mapping(raw.get("servers")).items():
+        if name not in KNOWN_SERVERS:
+            raise ConfigError(
+                f"servers.{name}: not a server this distribution ships "
+                f"(known: {', '.join(KNOWN_SERVERS)})"
+            )
+        try:
+            servers[str(name)] = _server_settings(spec, servers[str(name)])
+        except ConfigError as exc:
+            raise ConfigError(f"servers.{name}: {exc}") from exc
 
-    agent_server = _server_settings(agent_raw.get("server"), base.agent.server)
+    # --- providers ----------------------------------------------------------
+    providers_raw = _mapping(raw.get("providers"))
+    if providers_raw:
+        providers: dict[str, ProviderSettings] = {}
+        for name, spec in providers_raw.items():
+            providers[str(name)] = _provider_settings(spec, servers, str(name))
+    else:
+        providers = {
+            name: replace(p, url=servers[p.server].url)
+            for name, p in base.providers.items()
+            if p.server in servers
+        }
 
-    providers_raw = agent_raw.get("providers") or {}
-    if not isinstance(providers_raw, dict):
-        raise ConfigError("agent.providers: expected a mapping")
-    providers = {
-        str(name): ProviderSettings(
-            url=str(spec.get("url") or ""),
-            model=str(spec.get("model") or ""),
-        )
-        for name, spec in providers_raw.items()
-        if isinstance(spec, dict)
-    } or base.agent.providers
+    # --- the rest -----------------------------------------------------------
+    agent_raw = _mapping(raw.get("agent"))
+    openai_raw = _mapping(raw.get("llm_openai"))
+    anthropic_raw = _mapping(raw.get("llm_anthropic"))
+    tui_raw = _mapping(raw.get("tui"))
 
     agent = AgentSettings(
-        server=agent_server,
         max_steps=int(agent_raw.get("max_steps") or base.agent.max_steps),
         system_prompt=str(agent_raw.get("system_prompt") or base.agent.system_prompt),
-        providers=providers,
-        default=str(agent_raw.get("default") or base.agent.default),
     )
 
-    openai_raw = raw.get("llm_openai") or {}
-    anthropic_raw = raw.get("llm_anthropic") or {}
-    tui_raw = raw.get("tui") or {}
-    if not all(isinstance(s, dict) for s in (openai_raw, anthropic_raw, tui_raw)):
-        raise ConfigError("llm_openai / llm_anthropic / tui: expected mappings")
-
     return Config(
+        servers=servers,
+        providers=providers,
+        default_provider=str(raw.get("default") or base.default_provider),
         agent=agent,
         llm_openai=OpenAISettings(
-            server=_server_settings(openai_raw.get("server"), base.llm_openai.server),
             base_url=(
                 str(openai_raw["base_url"])
                 if openai_raw.get("base_url")
@@ -344,9 +383,6 @@ def _build(raw: dict[str, Any]) -> Config:
             ),
         ),
         llm_anthropic=AnthropicSettings(
-            server=_server_settings(
-                anthropic_raw.get("server"), base.llm_anthropic.server
-            ),
             api_key_ref=str(
                 anthropic_raw.get("api_key") or base.llm_anthropic.api_key_ref
             ),
@@ -356,5 +392,49 @@ def _build(raw: dict[str, Any]) -> Config:
         ),
         # The TUI's URL defaults to wherever the agent server was told to
         # listen, not to a second hard-coded address that could disagree.
-        tui_url=str(tui_raw.get("url") or agent.server.url),
+        tui_url=str(tui_raw.get("url") or servers["agent"].url),
     )
+
+
+def _server_settings(raw: Any, default: ServerSettings) -> ServerSettings:
+    """Build ServerSettings from a config mapping, falling back per field."""
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ConfigError("expected a mapping with host/port/path")
+    return ServerSettings(
+        host=str(raw.get("host") or default.host),
+        port=int(raw.get("port") or default.port),
+        path=str(raw.get("path") or default.path),
+    )
+
+
+def _provider_settings(
+    raw: Any, servers: dict[str, ServerSettings], name: str
+) -> ProviderSettings:
+    """Build a provider, resolving its URL from `servers` when it names one."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"providers.{name}: expected a mapping")
+
+    model = str(raw.get("model") or "")
+    if not model:
+        raise ConfigError(f"providers.{name}: needs a `model`")
+
+    server_name = raw.get("server")
+    if server_name is not None:
+        server_name = str(server_name)
+        if server_name not in servers:
+            known = ", ".join(sorted(servers)) or "(none)"
+            raise ConfigError(
+                f"providers.{name}: unknown server {server_name!r}; known: {known}"
+            )
+        return ProviderSettings(
+            model=model, url=servers[server_name].url, server=server_name
+        )
+
+    url = raw.get("url")
+    if not url:
+        raise ConfigError(f"providers.{name}: needs either a `server` name or a `url`")
+    # A bare url means a server this installation does not manage — already
+    # running elsewhere — so the launcher will not try to start it.
+    return ProviderSettings(model=model, url=str(url), server=None)

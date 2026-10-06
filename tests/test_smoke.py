@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 import slife2
-from slife2 import main
+from slife2 import _parse_args, main
 
 pytestmark = pytest.mark.unit
 
@@ -65,6 +65,25 @@ def test_help_exits_cleanly(capsys) -> None:
         main(["--help"])
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
-    # The help text names the sibling processes: there are four of them, and
-    # starting only this one is a mistake worth heading off.
-    assert "slife2-agent" in out
+    # The help names the subcommands, since they are the part of the CLI nobody
+    # guesses at.
+    assert "status" in out
+    assert "down" in out
+
+
+def test_agent_defaults_to_slife2() -> None:
+    assert _parse_args([]).agent == "slife2"
+    assert _parse_args(["--agent", "jack"]).agent == "jack"
+
+
+def test_a_leading_subcommand_is_taken_as_one() -> None:
+    """`slife2 status` is a command; `slife2 --agent jack` is the TUI.
+
+    The subcommand is only recognised in the first position, which is what lets
+    the common invocation stay a plain flag call.
+    """
+    assert _parse_args(["status"]).command == "status"
+    assert _parse_args(["down"]).command == "down"
+    assert _parse_args([]).command == "run"
+    assert _parse_args(["--agent", "jack"]).command == "run"
+    assert _parse_args(["status", "--config", "x.yaml"]).command == "status"

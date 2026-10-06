@@ -11,7 +11,8 @@ decisions look arbitrary until you know what happens if you undo them.
 
 ## 1. The shape
 
-Four processes, three of them MCP servers:
+Four processes, three of them MCP servers — brought up on demand by `slife2`
+and shared by every instance (see §4):
 
 ```
 slife2                    TUI, MCP client              (no provider key, no SDK)
@@ -122,7 +123,52 @@ them. Here there is one client, the state is the conversation it is already
 displaying, and a handle would add a store, a lifetime policy, and an
 expiry-error path to buy nothing.
 
-## 4. Compatibility notes
+## 4. Shared servers, and the launcher
+
+The servers are **shared infrastructure**, not four terminals a user babysits.
+`slife2` brings up what its config needs and attaches to whatever is already
+running, so a second instance is one command and no duplicate process appears.
+
+Four decisions carry that:
+
+**A probe decides whether a server is alive.** Only `tools/list` answering with
+the tool we expect proves that *our* server is up; a listening port proves
+something is there, and a record file proves something was there once. So the
+record is never consulted for liveness, and a stale one cannot wedge a start.
+
+**A lock is a kernel object.** A Windows named mutex, a POSIX `flock`. The
+operating system releases both when the holder dies, however it dies — so there
+is no stale-lock protocol, no "is the holder still alive", and no window where
+the answer is wrong. An `O_EXCL` lockfile was rejected precisely because all of
+that would have to be written by hand and could still be wrong.
+
+**A pid is not an identity.** Windows recycles pids, so by the time `down` runs,
+the number in a record may belong to something else. Each record carries a
+process start token, and `down` refuses to signal a pid it cannot prove is ours —
+because leaving a daemon running is a far better failure than killing whatever
+the user happened to be running.
+
+**A child must escape its parent's job.** A process created without
+`CREATE_BREAKAWAY_FROM_JOB` inherits its parent's job object, and if the parent
+is inside a kill-on-close job — a CI runner, some terminal hosts — a merely
+"detached" child dies with it. v1 does the opposite on purpose: it assigns
+children to a kill-on-close job so they die with their parent. Here the
+requirement is exactly inverted, and it is a requirement about *survival*, so it
+is worth knowing which way it points.
+
+On top of that sits one piece of bookkeeping: each client registers itself, and
+the **last one out** stops the servers. Without it, the daemon rule would mean an
+ordinary exit leaves four processes running until the next reboot. The count is
+by pid liveness rather than a counter, so a client that was killed — and so
+never deregistered — cannot keep them alive forever.
+
+`--agent NAME` does **not** participate in any of this. It is a label: it titles
+the window, it is passed through to the agent server, and it is exclusive (two
+live instances may not share a name). It creates no port, no process, and no
+config section. Isolation, if it ever appears, belongs inside an MCP server —
+which is why the label reaches one.
+
+## 5. Compatibility notes
 
 Two things about the 2026-07-28 revision that the code depends on, both verified
 by running against the real server rather than by reading:
@@ -139,7 +185,7 @@ by running against the real server rather than by reading:
   what happened here, and what a live call caught after the unit tests, built
   from synthetic OpenAI-shaped chunks, had all passed.
 
-## 5. The agent loop
+## 6. The agent loop
 
 `loop.py` is a pure function over a message list. It does not own the
 conversation, know what MCP is, know which provider answered, or know whether
@@ -169,7 +215,7 @@ Three load-bearing details:
   broken observer cannot end a turn — the loop swallows its exceptions, but
   deliberately lets `CancelledError` through.
 
-## 6. Deferred
+## 7. Deferred
 
 Named so they are decisions rather than oversights:
 

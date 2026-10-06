@@ -31,6 +31,7 @@ from textual.binding import Binding
 from textual.message import Message as TextualMessage
 from textual.worker import Worker, WorkerState
 
+from slife2.config import DEFAULT_AGENT
 from slife2.events import (
     TextDelta,
     ToolCallFinished,
@@ -90,15 +91,25 @@ class SlifeApp(App[None]):
         self,
         url: str,
         *,
+        agent: str = DEFAULT_AGENT,
         model_label: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
     ) -> None:
+        # `App.__init__` takes no title, so it is assigned after the fact; the
+        # attribute is reactive and the header picks it up.
         super().__init__()
+        # The agent label is the window title.  It changes nothing else: there is
+        # no per-agent port, process or config, because the servers are shared
+        # infrastructure and an identity is not a piece of topology.
+        self.title = f"slife2 - {agent}"
         self._url = url
+        self._agent = agent
         self._model_label = model_label
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
-        self._client_factory = client_factory or (lambda: MCPAgentClient(url))
+        self._client_factory = client_factory or (
+            lambda: MCPAgentClient(url, agent=agent)
+        )
         self._client: AgentClient | None = None
         self._connected = False
         self._connection_text = "connecting"
@@ -255,6 +266,7 @@ class SlifeApp(App[None]):
             busy = True
         self.query_one(StatusBar).update_status(
             connection=self._connection_text,
+            agent=self._agent,
             model=self._model_label,
             busy=busy,
             tokens=self._tokens,

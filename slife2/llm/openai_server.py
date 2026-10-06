@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-llm-openai"
 
+#: This server's key in the config's `servers:` table.
+CONFIG_KEY = "llm-openai"
+
 
 def translate(event: Any) -> list[ProviderEvent]:
     """Turn one SDK stream chunk into provider events.
@@ -161,15 +164,17 @@ def build_server(settings: OpenAISettings, *, streamer: Streamer | None = None):
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
-    settings = load(args.config).llm_openai
+    config = load(args.config)
+    settings = config.llm_openai
+    address = config.server(CONFIG_KEY)
     logger.info(
         "serving %s on http://%s:%d%s",
         SERVER_NAME,
-        args.host or settings.server.host,
-        args.port or settings.server.port,
-        settings.server.path,
+        args.host or address.host,
+        args.port or address.port,
+        address.path,
     )
-    serve(build_server(settings), settings.server, args)
+    serve(build_server(settings), address, args)
     return 0
 
 

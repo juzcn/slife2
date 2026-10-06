@@ -20,20 +20,38 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.13.
 ```bash
 uv sync
 credstore set DEEPSEEK_API_KEY         # or export it
+uv run slife2
 ```
 
-Four processes, four terminals:
+That is the whole thing. `slife2` brings up the MCP servers its config needs,
+attaches to any that are already running, and starts the TUI.
+
+```
+slife2 [--agent NAME] [--keep-servers]   ensure the servers, then run the TUI
+slife2 status                            what is running, and where
+slife2 down                              stop the servers this config names
+```
+
+**The servers are shared.** A second `slife2` — under any `--agent` — finds them
+already running and reuses them; nothing is started twice and nothing is
+per-agent. They are daemons, so closing one TUI does not interrupt another, and
+when the **last** instance exits it stops what is running. `--keep-servers`
+leaves them up instead.
+
+`--agent NAME` (default `slife2`) names the instance. It is a label: it titles
+the window, it is passed through to the agent server, and it is **exclusive** —
+two live instances may not share a name. It does not partition anything; the
+servers stay shared. Isolation, where it is ever needed, belongs inside an MCP
+server rather than in the process layout.
+
+Each server is also its own console script, so a process manager can run one
+without passing an argument:
 
 ```bash
-uv run slife2-llm-openai       # an OpenAI-compatible model,  :8001
-uv run slife2-llm-anthropic    # the Anthropic Messages API,  :8002
 uv run slife2-agent            # the agent loop,             :8000
-uv run slife2                  # the TUI
+uv run slife2-llm-openai       # an OpenAI-compatible model, :8001
+uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
 ```
-
-Each is a separate console script rather than a subcommand, so a process manager
-can start any of them without passing an argument. Only the ones you use need to
-be running — the agent connects to the model server its config names.
 
 In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
@@ -58,6 +76,8 @@ fails at the API call where the message can name it, rather than at startup.
 
 ```
 slife2/
+├─ launcher.py        # which servers are needed, and attaching to the running ones
+├─ runtime.py         # daemon records, logs, and the kernel-backed locks
 ├─ config.py          # slife2.yaml, and the ${VAR} / keyring: resolution chain
 ├─ messages.py        # the neutral message model — what crosses `stream_chat`
 ├─ events.py          # the turn event vocabulary, and its progress encoding

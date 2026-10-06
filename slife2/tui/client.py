@@ -13,7 +13,9 @@ from collections.abc import Callable
 from typing import Protocol
 
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
+from slife2.config import DEFAULT_AGENT
 from slife2.events import TurnEvent, decode
 
 logger = logging.getLogger(__name__)
@@ -54,8 +56,17 @@ class MCPAgentClient:
     That keeps the wire format the server's business.
     """
 
-    def __init__(self, url: str, *, timeout: float | None = TURN_TIMEOUT_SECONDS):
+    def __init__(
+        self,
+        url: str,
+        *,
+        agent: str = DEFAULT_AGENT,
+        timeout: float | None = TURN_TIMEOUT_SECONDS,
+    ):
         self._url = url
+        #: Who this client says it is.  Opaque to the server today; see
+        #: `slife2.server.server.run_turn`.
+        self._agent = agent
         self._timeout = timeout
         self._client: Client | None = None
         self._history: list[dict[str, object]] = []
@@ -109,16 +120,30 @@ class MCPAgentClient:
             if event is not None:
                 on_event(event)
 
-        result = await self._client.call_tool(
-            "run_turn",
-            {"messages": self._history, "prompt": prompt},
-            progress_handler=on_progress,
-            # Passing a progress handler is what makes the SDK attach a progress
-            # token, and `report_progress` on the server is a *silent no-op*
-            # without one.  Omitting it produces a turn that works perfectly and
-            # shows nothing until the very end — see `slife2.events`.
-            timeout=self._timeout,
-        )
+        try:
+            result = await self._client.call_tool(
+                "run_turn",
+                {"messages": self._history, "prompt": prompt, "agent": self._agent},
+                progress_handler=on_progress,
+                # Passing a progress handler is what makes the SDK attach a
+                # progress token, and `report_progress` on the server is a
+                # *silent no-op* without one.  Omitting it produces a turn that
+                # works perfectly and shows nothing until the very end — see
+                # `slife2.events`.
+                timeout=self._timeout,
+            )
+        except ToolError:
+            # The server answered and the turn failed inside it — a bad API key,
+            # a model that does not exist.  The connection is fine, so keep it.
+            raise
+        except Exception:
+            # The transport itself is gone.  Dropping the client here is what
+            # lets the app's lazy retry actually reconnect: `connect()` returns
+            # early while `self._client` is set, so without this the app would
+            # stay "connected" to a dead server for the rest of the session and
+            # every subsequent turn would fail the same way.
+            await self.close()
+            raise
 
         data = result.data or {}
         # Extend only after the call succeeded: a cancelled or failed turn

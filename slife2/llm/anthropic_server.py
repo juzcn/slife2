@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-llm-anthropic"
 
+#: This server's key in the config's `servers:` table.
+CONFIG_KEY = "llm-anthropic"
+
 
 def to_anthropic_messages(
     messages: list[Message],
@@ -256,15 +259,17 @@ def build_server(settings: AnthropicSettings, *, streamer: Streamer | None = Non
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
-    settings = load(args.config).llm_anthropic
+    config = load(args.config)
+    settings = config.llm_anthropic
+    address = config.server(CONFIG_KEY)
     logger.info(
         "serving %s on http://%s:%d%s",
         SERVER_NAME,
-        args.host or settings.server.host,
-        args.port or settings.server.port,
-        settings.server.path,
+        args.host or address.host,
+        args.port or address.port,
+        address.path,
     )
-    serve(build_server(settings), settings.server, args)
+    serve(build_server(settings), address, args)
     return 0
 
 

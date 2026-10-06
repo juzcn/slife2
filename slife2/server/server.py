@@ -33,7 +33,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from slife2.config import Config, ServerSettings, load
+from slife2.config import DEFAULT_AGENT, Config, ServerSettings, load
 from slife2.events import TurnEvent, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import close_backend, open_backend
@@ -105,7 +105,7 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
             yield {}
             return
 
-        provider = config.agent.provider()
+        provider = config.provider()
         logger.info("connecting to the model server at %s", provider.url)
         client, mcp_backend = await open_backend(
             provider.url, provider.model, name=provider.model
@@ -128,7 +128,10 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
 
     @mcp.tool
     async def run_turn(
-        messages: list[dict[str, Any]], prompt: str, ctx: Context
+        messages: list[dict[str, Any]],
+        prompt: str,
+        ctx: Context,
+        agent: str = DEFAULT_AGENT,
     ) -> dict[str, Any]:
         """Run one agent turn.
 
@@ -145,6 +148,10 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
             messages: The conversation so far, as previously returned.  Treat
                 these as opaque — pass back what you were given.
             prompt: What the user just said.
+            agent: Who is asking.  This server treats it as opaque — it is
+                recorded in the log and is the designated place for per-agent
+                behaviour if any ever appears, because isolation between agents
+                belongs inside an MCP server rather than in the process layout.
 
         Returns:
             `text` (the final answer), `new_messages` (append these to the
@@ -154,6 +161,7 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
         if loop is None:  # pragma: no cover - the lifespan always sets this
             raise RuntimeError("the agent server is not initialised")
 
+        logger.debug("turn from agent %s", agent)
         working = [Message.from_wire(m) for m in messages]
 
         # The system prompt comes from this server's config rather than the
@@ -182,7 +190,7 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
 
 def resolve_settings(config: Config) -> ServerSettings:
     """Where this server listens, per the config."""
-    return config.agent.server
+    return config.server("agent")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -191,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load(args.config)
     settings = resolve_settings(config)
 
-    provider = config.agent.provider()
+    provider = config.provider()
     logger.info(
         "serving %s on http://%s:%d%s (model: %s at %s)",
         SERVER_NAME,

@@ -19,14 +19,9 @@ from slife2.config import (
 
 
 def test_defaults_point_each_process_at_its_own_port() -> None:
-    """The four processes must not collide on a port out of the box."""
+    """The servers must not collide on a port out of the box."""
     cfg = default_config()
-    ports = {
-        cfg.agent.server.port,
-        cfg.llm_openai.server.port,
-        cfg.llm_anthropic.server.port,
-    }
-    assert len(ports) == 3
+    assert len({s.port for s in cfg.servers.values()}) == len(cfg.servers)
 
 
 def test_tui_url_follows_the_agent_server() -> None:
@@ -36,12 +31,12 @@ def test_tui_url_follows_the_agent_server() -> None:
     change, so this asserts the derivation rather than the value.
     """
     cfg = default_config()
-    assert cfg.tui_url == cfg.agent.server.url
+    assert cfg.tui_url == cfg.server("agent").url
 
 
 def test_default_provider_resolves() -> None:
     cfg = default_config()
-    provider = cfg.agent.provider()
+    provider = cfg.provider()
     assert provider.model
     assert provider.url.startswith("http")
 
@@ -49,7 +44,7 @@ def test_default_provider_resolves() -> None:
 def test_unknown_provider_names_the_known_ones() -> None:
     cfg = default_config()
     with pytest.raises(ConfigError, match="deepseek"):
-        cfg.agent.provider("nope")
+        cfg.provider("nope")
 
 
 def test_missing_unnamed_config_is_not_an_error(
@@ -115,22 +110,55 @@ def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
     path.write_text("agent:\n  max_steps: 5\n", encoding="utf-8")
     cfg = load(path)
     assert cfg.agent.max_steps == 5
-    assert cfg.llm_openai.server.port == default_config().llm_openai.server.port
-    assert cfg.agent.providers  # the provider table survived
+    assert cfg.server("llm-openai").port == default_config().server("llm-openai").port
+    assert cfg.providers  # the provider table survived
 
 
 def test_provider_table_replaces_the_default(tmp_path) -> None:
     path = tmp_path / "providers.yaml"
     path.write_text(
-        "agent:\n"
-        "  default: local\n"
-        "  providers:\n"
-        "    local: {url: 'http://127.0.0.1:9999/mcp', model: llama3}\n",
+        "default: local\nproviders:\n  local: {server: llm-openai, model: llama3}\n",
         encoding="utf-8",
     )
     cfg = load(path)
-    assert list(cfg.agent.providers) == ["local"]
-    assert cfg.agent.provider().model == "llama3"
+    # A providers block replaces the default table rather than merging into it.
+    assert list(cfg.providers) == ["local"]
+    assert cfg.provider().model == "llama3"
+    # ...and it takes its address from `servers`, so the two cannot disagree.
+    assert cfg.provider().url == cfg.server("llm-openai").url
+
+
+def test_a_provider_naming_an_unknown_server_is_refused(tmp_path) -> None:
+    """A typo here would otherwise be a server the launcher silently never starts."""
+    path = tmp_path / "typo.yaml"
+    path.write_text(
+        "providers:\n  local: {server: llm-openal, model: llama3}\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="llm-openal"):
+        load(path)
+
+
+def test_a_provider_with_a_bare_url_is_external(tmp_path) -> None:
+    """No `server:` means somebody else's server — reachable, but not managed.
+
+    This is what keeps the launcher from trying to start a model that lives on
+    another machine.
+    """
+    path = tmp_path / "external.yaml"
+    path.write_text(
+        "providers:\n  remote: {url: 'https://models.example/mcp', model: m}\n",
+        encoding="utf-8",
+    )
+    provider = load(path).provider("remote")
+    assert provider.server is None
+    assert provider.url == "https://models.example/mcp"
+
+
+def test_an_unknown_server_key_is_refused(tmp_path) -> None:
+    path = tmp_path / "bogus.yaml"
+    path.write_text("servers:\n  llm-gemini: {port: 8003}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="llm-gemini"):
+        load(path)
 
 
 # --- secret resolution -------------------------------------------------------

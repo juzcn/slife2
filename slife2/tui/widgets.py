@@ -172,12 +172,13 @@ class StatusBar(Static):
         self,
         *,
         connection: str,
+        agent: str = "",
         model: str = "",
         busy: bool = False,
         tokens: int = 0,
         steps: int = 0,
     ) -> None:
-        parts = ["[bold]slife2[/bold]", connection]
+        parts = [f"[bold]{agent or 'slife2'}[/bold]", connection]
         if model:
             parts.append(model)
         if busy:
