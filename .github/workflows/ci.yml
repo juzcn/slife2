@@ -27,9 +27,14 @@ jobs:
       - name: Build wheel
         run: uv build --out-dir dist
 
+      # `shell: bash` is load-bearing, not a style choice.  The default shell on
+      # a Windows runner is PowerShell, which does not expand globs — it passes
+      # `dist/slife2-*.whl` through literally and uv rejects it with "The wheel
+      # filename ... is invalid: Must have a Python tag".  bash is present on
+      # all three runners and expands it as intended.
       - name: Install
-        run: |
-          uv pip install dist/slife2-*.whl pytest pytest-asyncio
+        shell: bash
+        run: uv pip install dist/slife2-*.whl pytest pytest-asyncio
 
       - name: Run tests
         run: uv run pytest -v --tb=short --no-header --maxfail=5
