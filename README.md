@@ -82,9 +82,18 @@ runtime state of what is running, and the turns they produced:
   turns/                           <agent>.turn.db — not reconstructible
 ```
 
-The default is the platform's data location (`%LOCALAPPDATA%\slife2` on Windows,
-`$XDG_DATA_HOME/slife2` elsewhere). The split that remains is the one that
-matters: deleting `runtime/` costs nothing, deleting `turns/` costs the memory.
+**Where that folder is depends on what you are running.** In a checkout it is
+the checkout itself — which is what makes the `slife2.yaml` in front of you the
+one in use — and otherwise it is `~/.slife2`, per-user and independent of
+wherever the command happened to be started. `--data-dir DIR` (or
+`$SLIFE2_DATA_DIR`) overrides both.
+
+A checkout therefore keeps generated state in the working tree, which is why
+`.gitignore` covers `runtime/` and `turns/`. It does *not* cover `slife2.yaml`:
+that file is the point of the arrangement.
+
+The split that remains is the one that matters: deleting `runtime/` costs
+nothing, deleting `turns/` costs the memory.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data

@@ -186,3 +186,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# slife2's data directory, when it is the checkout itself.
+#
+# A checkout keeps its data beside itself so the checked-in slife2.yaml is the
+# one in use and turns/ is a directory you can open.  That puts generated state
+# in the working tree, which is exactly what this keeps out of it: runtime/ is a
+# daemon's bookkeeping and turns/ is a database, and neither belongs in a
+# commit.  slife2.yaml itself is deliberately NOT ignored — it holds no
+# secrets, and it is the file the whole arrangement exists to read.
+runtime/
+turns/
