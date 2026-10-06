@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.config import (
     DEFAULT_AGENT,
@@ -48,6 +49,7 @@ from slife2.llm.server_common import configure_logging, parse_serve_args, serve
 from slife2.loop import AgentLoop
 from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
+from slife2.runtime import tcp_listening
 from slife2.tools import ToolRegistry, builtin_tools
 
 logger = logging.getLogger(__name__)
@@ -92,11 +94,17 @@ class ProgressObserver:
         await self._ctx.report_progress(self._count, None, encode(event))
 
 
-def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMCP:
+def build_server(
+    config: Config,
+    *,
+    backend: LLMBackend | None = None,
+    memory_client: Client | None = None,
+) -> FastMCP:
     """Build the agent MCP server.
 
-    `backend` is injectable so the whole server can be exercised over the
-    in-memory transport with no LLM server and no network.
+    `backend` and `memory_client` are injectable so the whole server — model
+    call, tools, memory write — can be exercised over the in-memory transport
+    with no network at all.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -106,20 +114,61 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
     """
     model_backends: dict[str, LLMBackend] = {}
     clients: dict[str, Client] = {}
-    memory_client: Client | None = None
+    #: The memory client once we have one — injected, or opened on first use.
+    memory_conn: Client | None = memory_client
+    #: Whether *we* opened it, and so whether we should close it.  An injected
+    #: client belongs to whoever made it.
+    memory_owned = memory_client is None
+    #: Set once the memory server has been found absent, so the attempt is not
+    #: repeated.  See `memory`.
+    memory_off = False
 
-    async def memory() -> Client:
-        """The client for the memory server, opened on first use.
+    async def memory() -> Client | None:
+        """The client for the memory server, or None once we know there isn't one.
 
-        Not opened at startup: a server that is never asked to remember
-        anything should not require a memory component to exist.
+        **A server that is not there is remembered as not being there.**  The
+        write is best-effort, so a missing memory server costs nothing but the
+        attempt — and the attempt is not free: it is a connection that has to
+        time out, paid on every turn, for a component whose whole contribution
+        is a record nobody is waiting for.  Trying once and giving up turns an
+        unbounded tax into a single one.
+
+        The cost is that a memory server started *later* is not picked up until
+        this process restarts.  That is the trade, and it is the right way
+        round: `slife2` starts its components together, so the case is a
+        deliberate `slife2 down` and not something to wait for.
         """
-        nonlocal memory_client
-        if memory_client is None:
-            url = config.server("memory").url
-            memory_client = Client(url, timeout=MEMORY_TIMEOUT_SECONDS)
-            await memory_client.__aenter__()
-        return memory_client
+        nonlocal memory_conn, memory_off
+        if memory_off:
+            return None
+        if memory_conn is None:
+            address = config.server("memory")
+            # Ask the port before asking the protocol.  A refused TCP connect
+            # comes back at once, where building an MCP client against nothing
+            # spends a couple of seconds in the transport's own retries — and
+            # that cost lands on the first answer of the session, which is the
+            # one somebody is watching for.
+            if not tcp_listening(address.host, address.port):
+                memory_off = True
+                logger.warning(
+                    "no memory server on %s:%d; turns will not be recorded",
+                    address.host,
+                    address.port,
+                )
+                return None
+
+            client: Client = Client(address.url, timeout=MEMORY_TIMEOUT_SECONDS)
+            try:
+                await client.__aenter__()
+            except Exception:  # noqa: BLE001 - absent is an expected state
+                memory_off = True
+                logger.warning(
+                    "no memory server at %s; turns will not be recorded",
+                    address.url,
+                )
+                return None
+            memory_conn = client
+        return memory_conn
 
     async def remember_turn(
         agent: str, prompt: str, model: str, result, new_messages: list[dict]
@@ -131,9 +180,19 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
         a reason for a conversation that just succeeded to be reported as
         failed.  So every failure is logged and swallowed, and the caller gets
         its answer either way.
+
+        A `ToolError` is *not* a reason to stop trying.  It means the memory
+        server answered and refused this one request — an agent name that cannot
+        be a filename, say — and that is one caller's problem rather than
+        everyone's.  Anything else is the transport, and the transport going
+        away is what `memory` remembers.
         """
+        nonlocal memory_off
+        client = await memory()
+        if client is None:
+            return
+
         try:
-            client = await memory()
             await client.call_tool(
                 "remember",
                 {
@@ -145,8 +204,14 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
                     "steps": result.steps,
                 },
             )
+        except ToolError as exc:
+            logger.warning("memory refused the turn for %s: %s", agent, exc)
         except Exception:  # noqa: BLE001 - see the docstring
-            logger.warning("could not persist the turn for %s", agent, exc_info=True)
+            memory_off = True
+            logger.warning(
+                "memory stopped answering; turns will no longer be recorded",
+                exc_info=True,
+            )
 
     def make_loop(active: LLMBackend) -> AgentLoop:
         return AgentLoop(
@@ -186,9 +251,9 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
                 await close_backend(client)
             clients.clear()
             model_backends.clear()
-            if memory_client is not None:
+            if memory_owned and memory_conn is not None:
                 with contextlib.suppress(Exception):
-                    await memory_client.__aexit__(None, None, None)
+                    await memory_conn.__aexit__(None, None, None)
 
     mcp: FastMCP = FastMCP(
         SERVER_NAME,

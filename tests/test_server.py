@@ -161,6 +161,57 @@ async def test_one_server_serves_two_instances_without_mixing_them() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
+    """The turn lands in the caller's own database, and nowhere else.
+
+    Both halves matter.  Written at all, because a memory component that nothing
+    calls is a component that does nothing; and written to *that agent's* file,
+    because isolation between agents is the reason the file is per-agent in the
+    first place.
+    """
+    import sqlite3
+
+    from slife2.memory_server import build_server as build_memory
+    from slife2.paths import DATA_ENV_VAR, turns_dir
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    async with Client(build_memory(config())) as memory_client:
+        server = build_server(
+            config(),
+            backend=answering("hello"),
+            memory_client=memory_client,
+        )
+        async with Client(server) as client:
+            await client.call_tool(
+                "run_turn",
+                {"messages": [], "prompt": "what is 2+2?", "agent": "jack"},
+            )
+
+    jack = turns_dir() / "jack.turn.db"
+    assert jack.is_file(), "the turn was not recorded"
+    rows = sqlite3.connect(jack).execute("SELECT agent, prompt FROM turns").fetchall()
+    assert rows == [("jack", "what is 2+2?")]
+
+    # ...and no other agent's database was created along the way.
+    assert [p.name for p in turns_dir().glob("*.db")] == ["jack.turn.db"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_succeeds_with_no_memory_server(tmp_path, monkeypatch) -> None:
+    """Memory is an enhancement; its absence is not a reason to fail.
+
+    The store here is a URL that nothing is listening on, which is what a
+    `slife2 down` looks like from the agent server's side.
+    """
+    from slife2.paths import DATA_ENV_VAR
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    server = build_server(config(), backend=answering("the answer"))
+    result = await call(server, messages=[], prompt="hi", agent="jack")
+    assert result.data["text"] == "the answer"
+
+
 async def test_history_sent_by_the_caller_is_used() -> None:
     """The caller owns memory; sending it back is what continues a conversation."""
     backend = answering("second answer")

@@ -57,10 +57,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from slife2.paths import data_dir
-
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+
+from slife2.paths import data_dir
 
 
 class ConfigError(Exception):
@@ -564,7 +564,6 @@ def _optional_float(value: Any) -> float | None:
 
 __all__ = [
     "API_BACKENDS",
-    "CONFIG_ENV_VAR",
     "DEFAULT_AGENT",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",

@@ -26,10 +26,10 @@ from fastmcp import Context, FastMCP
 
 from slife2 import __version__
 from slife2.config import ServerSettings
-from slife2.paths import DATA_ENV_VAR
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
 from slife2.messages import Message, StreamChatResult, ToolCall, ToolSpec, Usage
+from slife2.paths import DATA_ENV_VAR
 from slife2.runtime import ServerRecord, clear_record, write_record
 
 logger = logging.getLogger(__name__)

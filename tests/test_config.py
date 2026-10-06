@@ -204,7 +204,9 @@ providers:
 # --- file discovery ----------------------------------------------------------
 
 
-def test_missing_config_is_not_an_error(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_config_is_not_an_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     assert find_config_path() is None
     assert load() == default_config()
@@ -215,7 +217,9 @@ def test_missing_named_config_is_an_error(tmp_path) -> None:
         load(tmp_path / "absent.yaml")
 
 
-def test_env_var_names_the_data_directory(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_var_names_the_data_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """One knob: point it at a folder and the config is looked for inside it."""
     write(tmp_path, A_PROVIDER)
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
