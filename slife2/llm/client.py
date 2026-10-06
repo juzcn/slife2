@@ -1,0 +1,182 @@
+"""The agent loop's only backend: an MCP client pointed at an LLM server.
+
+This is the adapter that makes the architecture work.  `stream_chat` is an
+ordinary tool call — it returns once, at the end — but progress notifications
+arrive *during* it, so the two have to be recombined into the async iterator the
+loop expects.  A queue does that: the progress callback pushes chunks as they
+arrive, and the iterator drains them until the call finishes.
+
+Everything above this file is unchanged by the fact that the model now lives in
+another process, which is the point.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastmcp import Client
+
+from slife2.llm.base import Chunk, Stream
+from slife2.llm.wire import decode_chunk
+from slife2.messages import Message, StreamChatResult, ToolSpec
+
+logger = logging.getLogger(__name__)
+
+#: Pushed into the queue when the tool call finishes, so the drain loop knows to
+#: stop.  A distinct sentinel rather than `None`, because `None` is a legal
+#: queue value and using it would make "finished" and "empty chunk"
+#: indistinguishable.
+_DONE = object()
+
+#: How long one `stream_chat` call may take before it is abandoned.
+#:
+#: Generous on purpose: the default is short enough that a slow model ends the
+#: call mid-stream, which looks like a bug in the loop rather than a timeout.
+#: This bounds a hung provider, not a thinking one.
+DEFAULT_TIMEOUT_SECONDS = 600.0
+
+
+class MCPBackend:
+    """An :class:`~slife2.llm.base.LLMBackend` backed by an MCP server.
+
+    Switching providers is constructing this with a different client and model —
+    the loop cannot tell the difference, and no provider SDK is importable from
+    this process.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        model: str,
+        *,
+        name: str = "mcp",
+        timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        self.name = name
+        self._client = client
+        self._model = model
+        self._timeout = timeout
+
+    def stream(self, messages: list[Message], tools: list[ToolSpec]) -> Stream:
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        task = asyncio.create_task(self._call(messages, tools, queue))
+        return Stream(chunks=self._drain(queue, task), result=self._resolve(task))
+
+    async def _call(
+        self, messages: list[Message], tools: list[ToolSpec], queue: asyncio.Queue[Any]
+    ) -> StreamChatResult:
+        """Make the call, pushing decoded chunks into `queue` as they arrive.
+
+        The `finally` is what keeps the drain loop from hanging forever when the
+        call fails: without the sentinel, an exception here would leave the
+        iterator waiting on a queue nobody will ever push to again.
+        """
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            chunk = decode_chunk(message or "")
+            if chunk is not None:
+                queue.put_nowait(chunk)
+
+        try:
+            result = await self._client.call_tool(
+                "stream_chat",
+                {
+                    "messages": [m.to_wire() for m in messages],
+                    "tools": [t.to_wire() for t in tools],
+                    "model": self._model,
+                },
+                progress_handler=on_progress,
+                timeout=self._timeout,
+            )
+            return StreamChatResult.from_wire(result.data)
+        finally:
+            queue.put_nowait(_DONE)
+
+    async def _drain(
+        self, queue: asyncio.Queue[Any], task: asyncio.Task[StreamChatResult]
+    ) -> AsyncIterator[Chunk]:
+        """Yield chunks until the call signals it is done."""
+        try:
+            while True:
+                item = await queue.get()
+                if item is _DONE:
+                    return
+                yield item
+        finally:
+            # Reached on normal completion, on failure, or when the turn is
+            # cancelled mid-stream.  Cancelling a finished task is a no-op.
+            if not task.done():
+                task.cancel()
+            # A turn abandoned by cancellation is one nobody will await, and an
+            # exception retrieved by nobody is reported later as "never
+            # retrieved" against whatever code happens to be running.  Retrieving
+            # it here does not stop a caller that *does* await from seeing it --
+            # awaiting a task re-raises every time.
+            task.add_done_callback(_consume)
+
+    @staticmethod
+    async def _resolve(task: asyncio.Task[StreamChatResult]) -> StreamChatResult:
+        """The authoritative result, re-raising whatever the call raised."""
+        return await task
+
+
+def _consume(task: asyncio.Task[StreamChatResult]) -> None:
+    """Retrieve a finished task's exception so it is not reported as unhandled."""
+    if task.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        task.exception()
+
+
+async def open_backend(
+    url: str,
+    model: str,
+    *,
+    name: str = "mcp",
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[Client, MCPBackend]:
+    """Connect to an LLM server and return `(client, backend)`.
+
+    The client is returned alongside so the caller owns its lifetime — the agent
+    server opens it once in its lifespan and keeps it for the process, because
+    reconnecting per turn would pay a handshake per step.
+    """
+    client: Client = Client(url, timeout=timeout)
+    await client.__aenter__()
+    try:
+        await _probe(client, "stream_chat", url)
+    except Exception:
+        # A server that is not there — or is the wrong server — should say so
+        # now, while the message can still name the URL, rather than at the
+        # first turn.
+        await client.__aexit__(None, None, None)
+        raise
+    return client, MCPBackend(client, model, name=name, timeout=timeout)
+
+
+async def _probe(client: Client, expected_tool: str, url: str) -> None:
+    """Check the server is alive and is the one we think it is.
+
+    Not `ping`: the 2026-07-28 revision removed the protocol-level ping, and a
+    client that still calls it gets ``MCPError: Method not found`` from every
+    conforming server.  `tools/list` is the documented replacement, and it
+    doubles as a check that we have been pointed at the right kind of server —
+    which "connection refused" would never catch.
+    """
+    names = {tool.name for tool in await client.list_tools()}
+    if expected_tool not in names:
+        raise ConnectionError(
+            f"{url}: no {expected_tool!r} tool (found: {sorted(names) or 'none'})"
+        )
+
+
+async def close_backend(client: Client) -> None:
+    """Release a client opened by :func:`open_backend`."""
+    with contextlib.suppress(Exception):
+        await client.__aexit__(None, None, None)

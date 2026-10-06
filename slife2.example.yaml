@@ -1,0 +1,67 @@
+# slife2.yaml — one config file, read by all four processes.
+#
+# Each component reads only its own section, so addresses are written once and
+# cannot drift apart.  Copy this to `slife2.yaml` and edit.
+#
+# Every ${VAR} resolves through: shell env -> credstore -> literal default.
+# Secrets belong in the environment or in the credential store (`credstore set
+# DEEPSEEK_API_KEY`), never in this file.  An unresolved reference is left
+# verbatim rather than raising, so a missing key fails at the API call — where
+# the message can name it — rather than at startup.
+
+# ── slife2-agent ────────────────────────────────────────────────────────────
+# The agent loop.  A server to the TUI, a client to a model server below.
+agent:
+  server:
+    host: 127.0.0.1
+    port: 8000
+    path: /mcp
+
+  # Model calls allowed in one turn before it is cut off.  A model that keeps
+  # calling tools would otherwise run indefinitely; the cap ends the turn
+  # normally rather than raising.
+  max_steps: 16
+
+  system_prompt: "You are slife2, a terminal agent. Be concise."
+
+  # Which model server to use.  `url` is the other end of an MCP connection, so
+  # switching providers is changing a URL — the agent loop holds no provider SDK
+  # and never sees an API key.
+  providers:
+    deepseek:
+      url: "http://127.0.0.1:8001/mcp"
+      model: deepseek-chat
+    claude:
+      url: "http://127.0.0.1:8002/mcp"
+      model: claude-sonnet-5-5
+  default: deepseek
+
+# ── slife2-llm-openai ───────────────────────────────────────────────────────
+# Any OpenAI-compatible endpoint: OpenAI, DeepSeek, Ollama, vLLM, most gateways.
+llm_openai:
+  server:
+    host: 127.0.0.1
+    port: 8001
+    path: /mcp
+  base_url: "https://api.deepseek.com/v1"
+  api_key: ${DEEPSEEK_API_KEY}
+  # Ask for token counts on the final stream chunk.  This uses `stream_options`,
+  # an OpenAI extension that some compatible servers reject with a 400 — set it
+  # to false for one of those and the only loss is the token counts.
+  stream_usage: true
+
+# ── slife2-llm-anthropic ────────────────────────────────────────────────────
+llm_anthropic:
+  server:
+    host: 127.0.0.1
+    port: 8002
+    path: /mcp
+  api_key: ${ANTHROPIC_API_KEY}
+  # Anthropic requires max_tokens on every request; the OpenAI-compatible API
+  # does not, so there is no shared setting for it.
+  max_tokens: 4096
+
+# ── slife2 ──────────────────────────────────────────────────────────────────
+# The TUI.  The URL defaults to wherever the agent server was told to listen.
+tui:
+  url: "http://127.0.0.1:8000/mcp"

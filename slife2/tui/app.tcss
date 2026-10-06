@@ -1,0 +1,28 @@
+/* The conversation takes the space; the input and status bar are fixed. */
+
+Screen {
+    layout: vertical;
+}
+
+#transcript {
+    height: 1fr;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#prompt {
+    height: 5;
+    border: tall $accent;
+    margin: 0 1;
+}
+
+#prompt:focus {
+    border: tall $accent-lighten-2;
+}
+
+#status {
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    color: $text-muted;
+}
