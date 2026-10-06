@@ -19,7 +19,6 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.13.
 
 ```bash
 uv sync
-cp slife2.example.yaml slife2.yaml     # then edit the model servers
 credstore set DEEPSEEK_API_KEY         # or export it
 ```
 
@@ -43,9 +42,11 @@ conversation, **Ctrl+Q** quits.
 ## Configuration
 
 One `slife2.yaml`, read by all four processes, each taking its own section — so
-addresses are written once and cannot drift apart. `slife2.example.yaml` is
-documented and complete; discovery is `--config PATH` → `$SLIFE2_CONFIG` →
-`./slife2.yaml` → built-in defaults.
+addresses are written once and cannot drift apart. It is checked in and
+documented in place, because **it holds no secrets**: every key in it is a
+`${VAR}` reference resolved at runtime. Discovery is `--config PATH` →
+`$SLIFE2_CONFIG` → `./slife2.yaml` → built-in defaults, so a checkout works
+without any of them.
 
 Secrets are never written in the file. `${VAR}` resolves through shell env →
 [credstore](https://pypi.org/project/credstore/) → literal default, and a

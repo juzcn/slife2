@@ -61,9 +61,9 @@ include = [
     "/DESIGN.md",
     "/LICENSE",
     "/pyproject.toml",
-    # Ships with the sdist, not the wheel: it is a documented starting point for
-    # an operator, not something an importer reads.
-    "/slife2.example.yaml",
+    # The working config, checked in deliberately: it holds no secrets, because
+    # every key in it is a ${VAR} reference resolved at runtime.
+    "/slife2.yaml",
 ]
 
 [build-system]

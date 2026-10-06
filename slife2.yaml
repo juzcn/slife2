@@ -1,13 +1,17 @@
 # slife2.yaml — one config file, read by all four processes.
 #
 # Each component reads only its own section, so addresses are written once and
-# cannot drift apart.  Copy this to `slife2.yaml` and edit.
+# cannot drift apart.
 #
-# Every ${VAR} resolves through: shell env -> credstore -> literal default.
-# Secrets belong in the environment or in the credential store (`credstore set
-# DEEPSEEK_API_KEY`), never in this file.  An unresolved reference is left
-# verbatim rather than raising, so a missing key fails at the API call — where
-# the message can name it — rather than at startup.
+# This file is checked in, and it is safe to check in: it holds no secrets.
+# Every ${VAR} resolves through shell env -> credstore -> literal default, so
+# keys live in the environment or in the credential store (`credstore set
+# DEEPSEEK_API_KEY`), never here.  An unresolved reference is left verbatim
+# rather than raising, so a missing key fails at the API call — where the
+# message can name it — rather than at startup.
+#
+# Every value below is the built-in default, so this file can also be deleted
+# and the four processes will still start with the same ports and providers.
 
 # ── slife2-agent ────────────────────────────────────────────────────────────
 # The agent loop.  A server to the TUI, a client to a model server below.
