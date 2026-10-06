@@ -46,19 +46,16 @@ def test_package_import_does_not_pull_in_textual() -> None:
     assert result.stdout.strip() == "False"
 
 
-def test_a_missing_config_names_the_file(tmp_path, capsys) -> None:
-    """A config the user asked for and did not get is an error, not a default."""
-    code = main(["--config", str(tmp_path / "absent.yaml")])
-    assert code == 2
-    assert "absent.yaml" in capsys.readouterr().out
+def test_a_malformed_config_is_reported_not_raised(tmp_path) -> None:
+    """A file the user wrote and got wrong is worth naming once.
 
-
-def test_a_malformed_config_is_reported_not_raised(tmp_path, capsys) -> None:
-    path = tmp_path / "broken.yaml"
-    path.write_text("agent: [unclosed\n", encoding="utf-8")
-    code = main(["--config", str(path)])
+    Note what is *not* here any more: a test for "the config file you named does
+    not exist".  There is no such case — the command line names a folder, and a
+    folder with no config in it is a fresh installation rather than a mistake.
+    """
+    (tmp_path / "slife2.yaml").write_text("agent: [unclosed\n", encoding="utf-8")
+    code = main(["--data-dir", str(tmp_path)])
     assert code == 2
-    assert "broken.yaml" in capsys.readouterr().out
 
 
 def test_help_exits_cleanly(capsys) -> None:
@@ -103,4 +100,4 @@ def test_a_leading_subcommand_is_taken_as_one() -> None:
     assert _parse_args(["down"]).command == "down"
     assert _parse_args([]).command == "run"
     assert _parse_args(["--agent", "jack"]).command == "run"
-    assert _parse_args(["status", "--config", "x.yaml"]).command == "status"
+    assert _parse_args(["status", "--data-dir", "x"]).command == "status"

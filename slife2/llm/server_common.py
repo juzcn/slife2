@@ -26,6 +26,7 @@ from fastmcp import Context, FastMCP
 
 from slife2 import __version__
 from slife2.config import ServerSettings
+from slife2.paths import DATA_ENV_VAR
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
 from slife2.messages import Message, StreamChatResult, ToolCall, ToolSpec, Usage
@@ -219,10 +220,23 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
 def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:
     """The flags every server here accepts."""
     parser = argparse.ArgumentParser(prog=description, description=description)
-    parser.add_argument("--config", default=None, help="path to slife2.yaml")
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "where slife2 keeps everything: slife2.yaml, the runtime state of "
+            "what is running, and the turns it produced"
+        ),
+    )
     parser.add_argument("--host", default=None, help="override the listen address")
     parser.add_argument("--port", default=None, type=int, help="override the port")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.data_dir:
+        # Set in the environment rather than passed down: the servers this one
+        # starts must look in the same folder, and an inherited variable is
+        # harder to forget than an argument.
+        os.environ[DATA_ENV_VAR] = args.data_dir
+    return args
 
 
 def serve(

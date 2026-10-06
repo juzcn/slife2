@@ -48,6 +48,7 @@ classifiers = [
 [project.scripts]
 slife2 = "slife2:main"
 slife2-agent = "slife2.server.server:main"
+slife2-memory = "slife2.memory_server:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"
 slife2-llm-anthropic = "slife2.llm.anthropic_server:main"
 

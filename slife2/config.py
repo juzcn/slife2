@@ -57,6 +57,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from slife2.paths import data_dir
+
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -83,10 +85,7 @@ API_BACKENDS: dict[str, str] = {
 #: lookup.
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
-#: Environment variable naming an explicit config file.
-CONFIG_ENV_VAR = "SLIFE2_CONFIG"
-
-#: The file looked for in the working directory when nothing else is named.
+#: The config file's name inside the data directory.
 DEFAULT_CONFIG_NAME = "slife2.yaml"
 
 #: The agent label used when `--agent` is not given.
@@ -350,6 +349,9 @@ def default_config() -> Config:
     return Config(
         servers={
             "agent": ServerSettings(port=8000),
+            # A component of its own: keeping turns is one job, and it is not a
+            # wire protocol like the model backends.
+            "memory": ServerSettings(port=8010),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
@@ -362,13 +364,18 @@ def default_config() -> Config:
 
 
 def find_config_path(explicit: str | Path | None = None) -> Path | None:
-    """Locate the config file: argument, then env var, then working directory."""
+    """The config file, which lives *inside* the data directory.
+
+    The directory is the knob — `--data-dir`, or `SLIFE2_DATA_DIR` — because
+    everything slife2 keeps belongs to one folder: the config that says what to
+    run, the runtime state of what is running, and the turns they produced.
+    Naming the config separately would mean two answers to "where is this
+    installation?", and the data directory would still have to be found another
+    way.
+    """
     if explicit is not None:
         return Path(explicit)
-    from_env = os.environ.get(CONFIG_ENV_VAR)
-    if from_env:
-        return Path(from_env)
-    candidate = Path.cwd() / DEFAULT_CONFIG_NAME
+    candidate = data_dir() / DEFAULT_CONFIG_NAME
     return candidate if candidate.is_file() else None
 
 
@@ -378,12 +385,13 @@ def load(explicit: str | Path | None = None) -> Config:
     A named path that does not exist *is* an error (the user asked for that
     file); an unnamed one that does not exist is not.
     """
-    explicit_given = explicit is not None or os.environ.get(CONFIG_ENV_VAR)
     path = find_config_path(explicit)
 
     if path is None or not path.is_file():
-        if explicit_given:
+        if explicit is not None:
             raise ConfigError(f"config file not found: {path}")
+        # No config is not an error: the defaults are a working single-provider
+        # setup, and a fresh data directory has nothing in it yet.
         return default_config()
 
     yaml = YAML(typ="safe")
@@ -416,10 +424,10 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
 
     servers = dict(base.servers)
     for name, spec in _mapping(raw.get("servers"), "servers").items():
-        if name != "agent" and name not in API_BACKENDS:
+        if name not in ("agent", "memory") and name not in API_BACKENDS:
             raise ConfigError(
-                f"servers.{name}: not `agent` or a known api "
-                f"(known: agent, {', '.join(API_BACKENDS)})"
+                f"servers.{name}: not a server this system runs "
+                f"(known: agent, memory, {', '.join(API_BACKENDS)})"
             )
         servers[str(name)] = _server(
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"

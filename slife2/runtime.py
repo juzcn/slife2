@@ -31,43 +31,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from slife2.paths import runtime_dir
+
 #: How long to wait for another launcher to finish starting a server.
 LOCK_TIMEOUT_SECONDS = 30.0
 LOCK_POLL_SECONDS = 0.1
 
 #: A record older than this whose process is gone is simply deleted.
 _LOG_KEEP_BYTES = 4 * 1024 * 1024
-
-
-def runtime_dir() -> Path:
-    """Per-user directory for records, locks and logs.
-
-    Deliberately not inside the repository.  A wheel install has no repository,
-    two checkouts on one machine would otherwise fight over the same state, and
-    a state file that lands in a git working tree is one somebody will
-    eventually commit.
-
-    One directory serves every instance on the machine, because the servers are
-    shared: two instances that name different config files still mean the same
-    servers when those configs name the same ports, and each has to be able to
-    see what the other started.
-    """
-    override = os.environ.get("SLIFE2_RUNTIME_DIR")
-    if override:
-        return Path(override)
-
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-    else:
-        # POSIX prefers XDG_RUNTIME_DIR, which is already private and per-user.
-        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
-        if xdg_runtime:
-            return Path(xdg_runtime) / "slife2"
-        base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
-
-    path = Path(base) / "slife2" / "runtime"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def normalize_url(url: str) -> str:

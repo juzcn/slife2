@@ -26,6 +26,7 @@ removes the dependency entirely, and takes three things with it:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -52,6 +53,10 @@ from slife2.tools import ToolRegistry, builtin_tools
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-agent"
+
+#: How long to wait on the memory server.  Short: remembering is not worth
+#: holding an answer for, and the write is best-effort anyway.
+MEMORY_TIMEOUT_SECONDS = 10.0
 
 INSTRUCTIONS = (
     "A conversational agent. Call `run_turn` with the conversation so far and "
@@ -101,6 +106,47 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
     """
     model_backends: dict[str, LLMBackend] = {}
     clients: dict[str, Client] = {}
+    memory_client: Client | None = None
+
+    async def memory() -> Client:
+        """The client for the memory server, opened on first use.
+
+        Not opened at startup: a server that is never asked to remember
+        anything should not require a memory component to exist.
+        """
+        nonlocal memory_client
+        if memory_client is None:
+            url = config.server("memory").url
+            memory_client = Client(url, timeout=MEMORY_TIMEOUT_SECONDS)
+            await memory_client.__aenter__()
+        return memory_client
+
+    async def remember_turn(
+        agent: str, prompt: str, model: str, result, new_messages: list[dict]
+    ) -> None:
+        """Persist a turn, and never let that decision cost the turn.
+
+        Memory is an enhancement, not part of correctness: a store that is down,
+        a disk that is full, a name that cannot be a filename — none of them is
+        a reason for a conversation that just succeeded to be reported as
+        failed.  So every failure is logged and swallowed, and the caller gets
+        its answer either way.
+        """
+        try:
+            client = await memory()
+            await client.call_tool(
+                "remember",
+                {
+                    "agent": agent,
+                    "prompt": prompt,
+                    "messages": new_messages,
+                    "model": model,
+                    "usage": result.usage.to_wire(),
+                    "steps": result.steps,
+                },
+            )
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("could not persist the turn for %s", agent, exc_info=True)
 
     def make_loop(active: LLMBackend) -> AgentLoop:
         return AgentLoop(
@@ -140,6 +186,9 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
                 await close_backend(client)
             clients.clear()
             model_backends.clear()
+            if memory_client is not None:
+                with contextlib.suppress(Exception):
+                    await memory_client.__aexit__(None, None, None)
 
     mcp: FastMCP = FastMCP(
         SERVER_NAME,
@@ -211,10 +260,13 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
         # Everything from here on is what the caller has to remember.
         offset = len(working)
         result = await loop.run_turn(working, prompt, ProgressObserver(ctx))
+        new_messages = [m.to_wire() for m in working[offset:]]
+
+        await remember_turn(agent, prompt, model, result, new_messages)
 
         return {
             "text": result.text,
-            "new_messages": [m.to_wire() for m in working[offset:]],
+            "new_messages": new_messages,
             "usage": result.usage.to_wire(),
             "steps": result.steps,
             "stop_reason": result.stop_reason,
@@ -231,8 +283,8 @@ def resolve_settings(config: Config) -> ServerSettings:
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
-    config_path = find_config_path(args.config)
-    config = load(args.config)
+    config_path = find_config_path()
+    config = load()
     settings = config.agent.server
 
     logger.info(

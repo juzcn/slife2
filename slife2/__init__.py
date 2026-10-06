@@ -18,6 +18,7 @@ through to the agent server for exactly that reason.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from slife2.config import (
@@ -27,6 +28,7 @@ from slife2.config import (
     find_config_path,
     load,
 )
+from slife2.paths import DATA_ENV_VAR
 
 __version__ = "0.1.0"
 
@@ -49,7 +51,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "that are already running. Commands: status, down."
         ),
     )
-    parser.add_argument("--config", default=None, help="path to slife2.yaml")
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "where slife2 keeps everything: slife2.yaml, the runtime state of "
+            "what is running, and the turns it produced"
+        ),
+    )
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
@@ -76,6 +85,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     args = parser.parse_args(rest)
     args.command = command
+    if args.data_dir:
+        # Set in the environment rather than passed down: the servers this
+        # instance starts must look in the same folder, and an inherited
+        # variable is harder to forget than an argument.
+        os.environ[DATA_ENV_VAR] = args.data_dir
     return args
 
 
@@ -177,8 +191,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     try:
-        config_path = find_config_path(args.config)
-        config: Config = load(args.config)
+        config_path = find_config_path()
+        config: Config = load()
         # The provider itself is not needed here: the TUI talks to the *agent*
         # server, which is the one that knows which model server to use.
         provider_name, _, model = config.resolve(args.model)

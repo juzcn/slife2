@@ -58,6 +58,14 @@ servers:
     host: 127.0.0.1
     port: 8002
     path: /mcp
+  # Keeps turns, one database per agent.  The databases themselves live in the
+  # platform's data directory (`%LOCALAPPDATA%\slife2\memory` on Windows), not
+  # here: they are data, and a data file inside a git working tree is one
+  # somebody eventually commits.
+  memory:
+    host: 127.0.0.1
+    port: 8010
+    path: /mcp
 
 providers:
   deepseek:

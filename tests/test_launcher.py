@@ -32,7 +32,7 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
 
 
 # --- which servers are needed ------------------------------------------------
@@ -51,12 +51,14 @@ def test_there_are_exactly_three_components() -> None:
     assert names == [
         "llm:openai-completions",
         "llm:anthropic-messages",
+        "memory",
         "agent",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
     assert modules == {
         "slife2.llm.openai_server",
         "slife2.llm.anthropic_server",
+        "slife2.memory_server",
         "slife2.server.server",
     }
 
@@ -70,7 +72,12 @@ def test_one_server_per_wire_protocol() -> None:
     """
     path = _config_with_both_protocols()
     names = [spec.name for spec in launcher.specs(load(path))]
-    assert names == ["llm:openai-completions", "llm:anthropic-messages", "agent"]
+    assert names == [
+        "llm:openai-completions",
+        "llm:anthropic-messages",
+        "memory",
+        "agent",
+    ]
 
 
 def _config_with_both_protocols():
@@ -107,7 +114,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         encoding="utf-8",
     )
     names = [spec.name for spec in launcher.specs(load(path))]
-    assert names == ["llm:openai-completions", "agent"]
+    assert names == ["llm:openai-completions", "memory", "agent"]
 
 
 def test_the_agent_server_takes_no_provider() -> None:
@@ -123,7 +130,8 @@ def test_model_servers_start_before_the_agent_server() -> None:
     """
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-1] == "agent"
-    assert all(name.startswith("llm:") for name in names[:-1])
+    # Everything else is a dependency of it, whatever kind it is.
+    assert set(names[:-1]) == {"llm:openai-completions", "memory"}
 
 
 def test_specs_carry_where_each_server_listens() -> None:
@@ -269,7 +277,7 @@ def test_the_spawn_command_uses_this_interpreter(
     argv = launcher._argv(SPEC, Path("D:/x/slife2.yaml"))
     assert argv[0] == sys.executable
     assert argv[1:3] == ["-m", "slife2.llm.openai_server"]
-    assert "--config" in argv
+    assert "--data-dir" in argv
 
 
 # --- the agent name is exclusive ---------------------------------------------

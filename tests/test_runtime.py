@@ -25,12 +25,12 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point every test at its own runtime directory.
+    """Point every test at its own data directory.
 
     Without this a test could read — or `down` — a developer's real servers.
     """
-    monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
-    return tmp_path / "runtime"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
+    return tmp_path / "data"
 
 
 def run_helper(code: str, *, env: dict[str, str] | None = None) -> subprocess.Popen:

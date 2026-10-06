@@ -11,13 +11,13 @@ import pytest
 
 from slife2.config import (
     API_BACKENDS,
-    CONFIG_ENV_VAR,
     ConfigError,
     default_config,
     find_config_path,
     load,
     resolve_secret,
 )
+from slife2.paths import DATA_ENV_VAR
 
 A_PROVIDER = """
 providers:
@@ -204,11 +204,8 @@ providers:
 # --- file discovery ----------------------------------------------------------
 
 
-def test_missing_unnamed_config_is_not_an_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+def test_missing_config_is_not_an_error(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     assert find_config_path() is None
     assert load() == default_config()
 
@@ -218,17 +215,25 @@ def test_missing_named_config_is_an_error(tmp_path) -> None:
         load(tmp_path / "absent.yaml")
 
 
-def test_env_var_names_a_config_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = write(tmp_path, A_PROVIDER)
-    monkeypatch.setenv(CONFIG_ENV_VAR, str(path))
+def test_env_var_names_the_data_directory(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One knob: point it at a folder and the config is looked for inside it."""
+    write(tmp_path, A_PROVIDER)
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    assert find_config_path() == tmp_path / "slife2.yaml"
     assert "local" in load().providers
+
+
+def test_a_data_dir_without_a_config_falls_back(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    assert find_config_path() is None
+    assert load() == default_config()
 
 
 def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
     env_path = write(tmp_path, A_PROVIDER)
     other = tmp_path / "other.yaml"
     other.write_text("default: ''\n", encoding="utf-8")
-    monkeypatch.setenv(CONFIG_ENV_VAR, str(env_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(env_path))
     # `other.yaml` has no providers, so it falls back to the defaults, which do
     # not include `local` — enough to tell the two apart.
     assert "local" not in load(other).providers

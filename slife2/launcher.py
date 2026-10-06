@@ -53,13 +53,15 @@ from slife2.runtime import (
     write_claim,
 )
 
-#: The agent server: a module, and the tool that proves it is the one we think.
+#: The components that are always present: a module, and the tool that proves
+#: we are talking to the one we think we are.
 #:
 #: In code rather than in the config.  Letting an operator name an arbitrary
 #: command would be a capability nobody asked for and one more thing to get
-#: wrong.  The model servers need no entry here — their module comes from their
-#: provider's `api`, which is already a closed set.
+#: wrong.  The model backends need no entry here — their module comes from the
+#: `api` they speak, which is already a closed set.
 AGENT_SERVER = ("slife2.server.server", "run_turn")
+MEMORY_SERVER = ("slife2.memory_server", "remember")
 
 #: The tool both model servers answer to, and how they are named.
 MODEL_TOOL = "stream_chat"
@@ -183,18 +185,21 @@ def specs(config: Config) -> list[ServerSpec]:
             )
         )
 
-    module, tool = AGENT_SERVER
-    address = config.agent.server
-    result.append(
-        ServerSpec(
-            name="agent",
-            module=module,
-            url=address.url,
-            host=address.host,
-            port=address.port,
-            expected_tool=tool,
+    for name, (module, tool) in (
+        ("memory", MEMORY_SERVER),
+        ("agent", AGENT_SERVER),
+    ):
+        address = config.server(name)
+        result.append(
+            ServerSpec(
+                name=name,
+                module=module,
+                url=address.url,
+                host=address.host,
+                port=address.port,
+                expected_tool=tool,
+            )
         )
-    )
     return result
 
 
@@ -247,8 +252,13 @@ def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
         "--port",
         str(spec.port),
     ]
-    if config_path is not None:
-        argv += ["--config", str(config_path)]
+    from slife2.paths import DATA_ENV_VAR
+
+    data_dir = os.environ.get(DATA_ENV_VAR)
+    if data_dir:
+        # The child inherits the environment anyway; passing it makes the
+        # argument list say where the process will look.
+        argv += ["--data-dir", data_dir]
     return argv
 
 

@@ -299,8 +299,8 @@ def build_server(
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
-    config_path = find_config_path(args.config)
-    config = load(args.config)
+    config_path = find_config_path()
+    config = load()
 
     providers = {
         name: provider
