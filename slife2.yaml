@@ -18,9 +18,8 @@
 #   openai-completions   OpenAI / DeepSeek / Ollama / MiniMax
 #   anthropic-messages   Claude / Bailian (Qwen)
 #
-# A provider gets its own server process, because a process can only hold one
-# endpoint and one key.  slife2 starts the ones the config names, on demand, and
-# shares them between instances.
+# slife2 starts the servers its config needs, on demand, and shares them between
+# instances.
 #
 # ── Models ──────────────────────────────────────────────────────────────────
 # Each model entry:
@@ -40,15 +39,31 @@
 # nothing and let the gateway decide.  Several gateways reject a temperature
 # they did not ask for.
 
+# ── The servers ─────────────────────────────────────────────────────────────
+# One address per *wire protocol*, not per provider: a process speaks one
+# format, so every OpenAI-compatible provider is served by the same process and
+# `stream_chat(provider=..., model=...)` says whose credentials to use.  A
+# protocol no provider uses is not started — it would be a process holding
+# nobody's key.
+servers:
+  agent:
+    host: 127.0.0.1
+    port: 8000
+    path: /mcp
+  openai-completions:
+    host: 127.0.0.1
+    port: 8001
+    path: /mcp
+  anthropic-messages:
+    host: 127.0.0.1
+    port: 8002
+    path: /mcp
+
 providers:
   deepseek:
     api: openai-completions
     base_url: https://api.deepseek.com
     api_key: ${DEEPSEEK_API_KEY}
-    server:
-      host: 127.0.0.1
-      port: 8001
-      path: /mcp
     models:
       - model: deepseek-flash
         name: DeepSeek Flash
@@ -65,10 +80,6 @@ providers:
     api: openai-completions
     base_url: https://api.scnet.cn/api/llm/v1
     api_key: ${SCNET_TOKEN_PLAN}
-    server:
-      host: 127.0.0.1
-      port: 8002
-      path: /mcp
     models:
       - model: DeepSeek-V4
         name: DeepSeek V4 Pro
@@ -96,10 +107,6 @@ providers:
     api: anthropic-messages
     base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
     api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
-    server:
-      host: 127.0.0.1
-      port: 8003
-      path: /mcp
     models:
       - model: qwen3.8-max
         name: Qwen3.8 Max
@@ -115,10 +122,6 @@ default: deepseek/deepseek-flash
 
 # ── The agent loop ──────────────────────────────────────────────────────────
 agent:
-  server:
-    host: 127.0.0.1
-    port: 8000
-    path: /mcp
   # Model calls allowed in one turn before it is cut off.  A model that keeps
   # calling tools would otherwise run indefinitely; the cap ends the turn
   # normally rather than raising.

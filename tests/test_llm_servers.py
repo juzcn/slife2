@@ -407,7 +407,7 @@ def scripted(*events) -> Streamer:
     """A streamer that replays fixed provider events, ignoring its input."""
 
     async def stream(
-        messages: list[Message], tools: list[ToolSpec], model: str
+        provider: str, messages: list[Message], tools: list[ToolSpec], model: str
     ) -> AsyncIterator[Chunk | Finish]:
         for event in events:
             yield event
@@ -428,7 +428,7 @@ async def call_stream_chat(server, **arguments):
 
     async with Client(server) as client:
         result = await client.call_tool(
-            "stream_chat", arguments, progress_handler=on_progress
+            "stream_chat", {"provider": "p", **arguments}, progress_handler=on_progress
         )
     return result, seen
 
@@ -509,6 +509,7 @@ async def test_stream_chat_works_without_a_progress_handler() -> None:
         result = await client.call_tool(
             "stream_chat",
             {
+                "provider": "p",
                 "messages": [{"role": "user", "content": "hi"}],
                 "tools": [],
                 "model": "m",
@@ -522,7 +523,7 @@ async def test_stream_chat_receives_the_neutral_message_shape() -> None:
     """The streamer must see parsed Message/ToolSpec objects, not raw dicts."""
     seen: list[tuple[list[Message], list[ToolSpec]]] = []
 
-    async def streamer(messages, tools, model):
+    async def streamer(provider, messages, tools, model):
         seen.append((messages, tools))
         yield Finish("stop")
 

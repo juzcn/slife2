@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from slife2.config import (
-    ConfigError,
     ModelSettings,
     ProviderSettings,
     find_config_path,
@@ -36,6 +35,9 @@ from slife2.messages import Message, ToolSpec, Usage
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-llm-openai"
+
+#: The wire protocol this process speaks — and the key its address lives under.
+API = "openai-completions"
 
 #: How much of the output budget a thinking model may spend reasoning, when
 #: `compat.thinking: enabled` asks for it.  Half, because the other half is what
@@ -207,40 +209,62 @@ def _usage(raw: Any) -> Usage | None:
     )
 
 
-def build_streamer(
-    provider: ProviderSettings, *, stream_usage: bool = True
+def _make_streamer(
+    providers: dict[str, ProviderSettings], *, stream_usage: bool = True
 ) -> Streamer:
-    """The adapter for one provider.
+    """The adapter for one process — every provider that speaks this wire.
 
     The SDK client is created on first use, not here: the API key is resolved at
     that moment, so a server that never receives a call never opens the OS
     keyring, and constructing a client outside a running event loop is not
     always safe.
     """
-    client: Any = None
+    clients: dict[str, Any] = {}
 
-    def _client() -> Any:
-        nonlocal client
-        if client is None:
-            key = provider.api_key
-            if not key or key.startswith("${"):
-                raise RuntimeError(
-                    f"{SERVER_NAME}: the API key for provider "
-                    f"{provider.base_url!r} did not resolve "
-                    f"(config value {provider.api_key_ref!r}). Export it, or "
-                    f"store it with `credstore set <NAME>`."
-                )
-            from openai import AsyncOpenAI
+    def _provider(name: str) -> ProviderSettings:
+        try:
+            return providers[name]
+        except KeyError:
+            known = ", ".join(sorted(providers)) or "(none)"
+            raise RuntimeError(
+                f"{SERVER_NAME}: no provider {name!r} in this config (known: {known})"
+            ) from None
 
-            client = AsyncOpenAI(base_url=provider.base_url, api_key=key)
+    def _client(name: str) -> Any:
+        """The SDK client for one provider, created on first use.
+
+        One client per provider, because each carries its own base_url and key.
+        Created lazily for the same reason the key is resolved lazily: a
+        provider nobody calls never has its keyring opened.
+        """
+        client = clients.get(name)
+        if client is not None:
+            return client
+
+        provider = _provider(name)
+        key = provider.api_key
+        if not key or key.startswith("${"):
+            raise RuntimeError(
+                f"{SERVER_NAME}: the API key for provider {name!r} "
+                f"({provider.base_url!r}) did not resolve "
+                f"(config value {provider.api_key_ref!r}). Export it, or "
+                f"store it with `credstore set <NAME>`."
+            )
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(base_url=provider.base_url, api_key=key)
+        clients[name] = client
         return client
 
     async def stream(
-        messages: list[Message], tools: list[ToolSpec], model: str
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        settings = provider.model(model)
+        settings = _provider(provider).model(model)
         request = build_request(messages, tools, settings, stream_usage=stream_usage)
-        response = await _client().chat.completions.create(**request)
+        response = await _client(provider).chat.completions.create(**request)
         async for event in response:
             for out in translate(event):
                 yield out
@@ -248,8 +272,15 @@ def build_streamer(
     return stream
 
 
+def build_streamer_for(
+    providers: dict[str, ProviderSettings], *, stream_usage: bool = True
+) -> Streamer:
+    """The adapter for every provider this process serves."""
+    return _make_streamer(providers, stream_usage=stream_usage)
+
+
 def build_server(
-    provider: ProviderSettings,
+    providers: dict[str, ProviderSettings],
     *,
     streamer: Streamer | None = None,
     stream_usage: bool = True,
@@ -260,7 +291,7 @@ def build_server(
         streamer=(
             streamer
             if streamer is not None
-            else build_streamer(provider, stream_usage=stream_usage)
+            else build_streamer_for(providers, stream_usage=stream_usage)
         ),
     )
 
@@ -270,49 +301,34 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     config_path = find_config_path(args.config)
     config = load(args.config)
-    try:
-        provider_name, provider = _select(config, args.provider)
-    except ConfigError as exc:
-        print(f"{SERVER_NAME}: {exc}")
+
+    providers = {
+        name: provider
+        for name, provider in config.providers.items()
+        if provider.api == API
+    }
+    if not providers:
+        print(f"{SERVER_NAME}: this config has no {API} provider")
         return 2
 
-    address = provider.server
+    address = config.server(API)
     logger.info(
-        "serving %s for provider %s on http://%s:%d%s",
+        "serving %s for %s on http://%s:%d%s (providers: %s)",
         SERVER_NAME,
-        provider_name,
+        API,
         args.host or address.host,
         args.port or address.port,
         address.path,
+        ", ".join(sorted(providers)),
     )
     serve(
-        build_server(provider),
+        build_server(providers),
         address,
         args,
-        name=f"{SERVER_NAME}:{provider_name}",
+        name=f"{SERVER_NAME}:{API}",
         config_path=config_path,
     )
     return 0
-
-
-def _select(config, name: str | None) -> tuple[str, ProviderSettings]:
-    """The provider this process serves.
-
-    A model server without one is a config error rather than something to guess
-    at: the whole point of the process boundary is that this one holds exactly
-    one provider's credentials.
-    """
-    if not name:
-        raise ConfigError(
-            "started without --provider; this server serves one provider and "
-            f"needs to know which (configured: {', '.join(sorted(config.providers))})"
-        )
-    provider = config.provider(name)
-    if provider.module != "slife2.llm.openai_server":
-        raise ConfigError(
-            f"provider {name!r} speaks {provider.api!r}, not openai-completions"
-        )
-    return name, provider
 
 
 if __name__ == "__main__":  # pragma: no cover

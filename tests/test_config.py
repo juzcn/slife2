@@ -25,7 +25,6 @@ providers:
     api: openai-completions
     base_url: https://example.test/v1
     api_key: ${SLIFE2_TEST_KEY:-none}
-    server: {port: 9001}
     models:
       - model: big
         context_window: 100000
@@ -58,11 +57,14 @@ def test_the_defaults_are_one_working_provider() -> None:
 
 
 def test_the_defaults_resolve() -> None:
-    name, provider, model = default_config().resolve()
+    config = default_config()
+    name, provider, model = config.resolve()
     assert name == "deepseek"
     assert provider.api in API_BACKENDS
     assert model.model == "deepseek-flash"
-    assert provider.server.url.startswith("http://")
+    # A provider has no address of its own: it is reached through the server for
+    # its protocol, which one process speaks for every provider that uses it.
+    assert config.url_for("deepseek/deepseek-flash").startswith("http://")
 
 
 def test_every_api_has_a_backend_module() -> None:
@@ -78,8 +80,9 @@ def test_a_provider_carries_its_credentials_and_its_models(tmp_path) -> None:
     provider = config.provider("local")
     assert provider.api == "openai-completions"
     assert provider.base_url == "https://example.test/v1"
-    assert provider.server.port == 9001
     assert list(provider.models) == ["big", "small"]
+    # ...and it is reached through the server for its protocol.
+    assert config.url_for("local/big") == config.server("openai-completions").url
 
 
 def test_a_model_keeps_only_what_was_configured(tmp_path) -> None:
@@ -112,7 +115,6 @@ def test_vision_is_opted_into_by_listing_image(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
-    server: {port: 9001}
     models:
       - model: sees
         input: [text, image]
@@ -157,7 +159,7 @@ def test_a_reference_is_provider_slash_model(tmp_path) -> None:
     config = load(write(tmp_path, A_PROVIDER))
     name, provider, model = config.resolve("local/big")
     assert (name, model.model) == ("local", "big")
-    assert provider.server.url == config.providers["local"].server.url
+    assert config.url_for("local/big") == config.server("openai-completions").url
 
 
 def test_a_bare_provider_name_means_its_first_model(tmp_path) -> None:
@@ -192,7 +194,6 @@ def test_the_default_falls_back_to_the_first_model(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
-    server: {port: 9001}
     models:
       - model: only
 """,

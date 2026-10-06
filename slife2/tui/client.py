@@ -61,12 +61,17 @@ class MCPAgentClient:
         url: str,
         *,
         agent: str = DEFAULT_AGENT,
+        model: str = "",
         timeout: float | None = TURN_TIMEOUT_SECONDS,
     ):
         self._url = url
-        #: Who this client says it is.  Opaque to the server today; see
-        #: `slife2.server.server.run_turn`.
+        #: Who this client says it is.  It reaches the server's system-prompt
+        #: template; see `slife2.server.server.run_turn`.
         self._agent = agent
+        #: Which model to ask for, as `provider/model`.  Sent per turn rather
+        #: than fixed at the server, because one agent server serves every
+        #: caller and two instances may want different models.
+        self._model = model
         self._timeout = timeout
         self._client: Client | None = None
         self._history: list[dict[str, object]] = []

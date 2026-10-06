@@ -81,7 +81,7 @@ def test_the_tui_connects_to_the_agent_server() -> None:
     """
     config = default_config()
     assert tui_url(config) == config.agent.server.url
-    assert tui_url(config) != config.provider("deepseek").server.url
+    assert tui_url(config) != config.url_for(config.default)
 
 
 def test_the_tui_url_can_be_overridden() -> None:

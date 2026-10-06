@@ -198,28 +198,26 @@ class ModelSettings:
 
 @dataclass(frozen=True)
 class ProviderSettings:
-    """A model server: one wire protocol, one endpoint, one set of credentials.
+    """One endpoint and one set of credentials, speaking one wire protocol.
+
+    No address of its own: a provider is reached through the server for its
+    `api`, because one process speaks one wire format for every provider that
+    uses it.  `stream_chat(provider=..., model=...)` says which.
 
     `api_key` is read lazily — the raw reference is kept and credstore is only
-    consulted on access — so a process that never serves this provider never
-    opens the keyring for it.
+    consulted on access — so a key is only resolved when a call actually needs
+    it.
     """
 
     api: str
     base_url: str
     api_key_ref: str
-    server: ServerSettings
     models: dict[str, ModelSettings] = field(default_factory=dict)
 
     @property
     def api_key(self) -> str:
         """The resolved key.  Touches credstore, so call it where it is needed."""
         return resolve_secret(self.api_key_ref)
-
-    @property
-    def module(self) -> str:
-        """The server module that speaks this provider's protocol."""
-        return API_BACKENDS[self.api]
 
     def model(self, model_id: str = "") -> ModelSettings:
         """Look up a model by its API name, defaulting to the first.
@@ -259,6 +257,8 @@ class AgentSettings:
 class Config:
     """Every section of one config file, already defaulted."""
 
+    #: name -> where it listens, keyed by `"agent"` and by each `api` in use.
+    servers: dict[str, ServerSettings] = field(default_factory=dict)
     providers: dict[str, ProviderSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
     #: `"provider/model"`, the model the agent starts with.
@@ -291,9 +291,36 @@ class Config:
         provider = self.provider(name)
         return name, provider, provider.model(model_id)
 
+    def server(self, name: str) -> ServerSettings:
+        """Where a named server listens.
+
+        Raises:
+            ConfigError: If the name is unknown — which means a caller asked for
+                a server this config does not bring up.
+        """
+        try:
+            return self.servers[name]
+        except KeyError:
+            known = ", ".join(sorted(self.servers)) or "(none)"
+            raise ConfigError(f"unknown server {name!r}; known: {known}") from None
+
     def url_for(self, reference: str = "") -> str:
-        """The endpoint serving a reference — what a client should connect to."""
-        return self.resolve(reference)[1].server.url
+        """The endpoint serving a model reference.
+
+        The *family's* server, not the provider's: a provider has no address of
+        its own, because one process speaks one wire format for all of them.
+        """
+        _, provider, _ = self.resolve(reference)
+        return self.server(provider.api).url
+
+    def apis_in_use(self) -> list[str]:
+        """The wire protocols some provider uses, in a stable order.
+
+        This is what the launcher starts: a family with no providers has nothing
+        to serve, and starting it would be a process holding nobody's key.
+        """
+        used = {p.api for p in self.providers.values()}
+        return [api for api in API_BACKENDS if api in used]
 
 
 def default_config() -> Config:
@@ -307,7 +334,6 @@ def default_config() -> Config:
         api="openai-completions",
         base_url="https://api.deepseek.com",
         api_key_ref="${DEEPSEEK_API_KEY}",
-        server=ServerSettings(port=8001),
         models={
             "deepseek-flash": ModelSettings(
                 model="deepseek-flash",
@@ -322,6 +348,13 @@ def default_config() -> Config:
         },
     )
     return Config(
+        servers={
+            "agent": ServerSettings(port=8000),
+            # One port per wire protocol, not per provider: a process speaks one
+            # format, and `stream_chat(provider=...)` picks whose credentials.
+            "openai-completions": ServerSettings(port=8001),
+            "anthropic-messages": ServerSettings(port=8002),
+        },
         providers={"deepseek": deepseek},
         agent=AgentSettings(),
         default="deepseek/deepseek-flash",
@@ -381,6 +414,17 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     """
     base = default_config()
 
+    servers = dict(base.servers)
+    for name, spec in _mapping(raw.get("servers"), "servers").items():
+        if name != "agent" and name not in API_BACKENDS:
+            raise ConfigError(
+                f"servers.{name}: not `agent` or a known api "
+                f"(known: agent, {', '.join(API_BACKENDS)})"
+            )
+        servers[str(name)] = _server(
+            spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
+        )
+
     providers_raw = _mapping(raw.get("providers"), "providers")
     providers = (
         {str(name): _provider(spec, str(name)) for name, spec in providers_raw.items()}
@@ -390,7 +434,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
 
     agent_raw = _mapping(raw.get("agent"), "agent")
     agent = AgentSettings(
-        server=_server(agent_raw.get("server"), base.agent.server, "agent.server"),
+        server=servers["agent"],
         max_steps=int(agent_raw.get("max_steps") or base.agent.max_steps),
         system_prompt=_template_path(
             agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
@@ -398,6 +442,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     )
 
     return Config(
+        servers=servers,
         providers=providers,
         agent=agent,
         default=str(raw.get("default") or _first_reference(providers)),
@@ -465,9 +510,6 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
         api=api,
         base_url=str(raw.get("base_url") or ""),
         api_key_ref=str(raw.get("api_key") or ""),
-        server=_server(
-            raw.get("server"), ServerSettings(port=8001), f"providers.{name}.server"
-        ),
         models=models,
     )
 

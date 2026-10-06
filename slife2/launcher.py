@@ -28,7 +28,7 @@ from pathlib import Path
 
 from fastmcp import Client
 
-from slife2.config import Config
+from slife2.config import API_BACKENDS, Config
 from slife2.runtime import (
     AgentClaim,
     ClientRecord,
@@ -61,9 +61,9 @@ from slife2.runtime import (
 #: provider's `api`, which is already a closed set.
 AGENT_SERVER = ("slife2.server.server", "run_turn")
 
-#: The tool both model servers answer to, and how a provider server is named.
+#: The tool both model servers answer to, and how they are named.
 MODEL_TOOL = "stream_chat"
-PROVIDER_PREFIX = "llm:"
+BACKEND_PREFIX = "llm:"
 
 #: How long a server may take to answer after being spawned.  Generous enough
 #: for a cold import of a provider SDK, short enough to be a deadline.
@@ -136,10 +136,6 @@ class ServerSpec:
     host: str
     port: int
     expected_tool: str
-    #: The config provider this server serves, or "" for the agent server.  A
-    #: model server is started with `--provider <name>` so it knows which
-    #: credentials and models are its own.
-    provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,28 +155,31 @@ class Outcome:
 def specs(config: Config) -> list[ServerSpec]:
     """The servers this config needs, in the order they must be started.
 
-    One model server **per provider**, because a process can only hold one
-    endpoint and one key — so the set is derived from the provider table rather
-    than from a separate address list.  Deleting a provider stops a process,
-    with no second switch to keep in step.
+    **One per wire protocol, not one per provider.**  A process speaks one
+    format, so every OpenAI-compatible provider is served by the same process
+    and `stream_chat(provider=..., model=...)` says whose credentials to use.
+    A provider with its own process would mean three processes for three
+    providers, which is what this replaced.
 
-    **Order matters.**  The agent server connects to its model server once, in
-    its FastMCP lifespan, so the model servers must be answering before it
-    starts.  Starting them together races, and the failure is confusing: the
-    agent server comes up healthy and every turn fails because its upstream was
-    not there.
+    Which families are needed is derived from the provider table: a protocol no
+    provider uses has nothing to serve, and starting it would be a process
+    holding nobody's key.
+
+    **Order matters.**  The agent server connects to a model server when a turn
+    needs it, but a model server answering first is what makes the first turn
+    work rather than fail and retry.
     """
     result: list[ServerSpec] = []
-    for name, provider in config.providers.items():
+    for api in config.apis_in_use():
+        address = config.server(api)
         result.append(
             ServerSpec(
-                name=f"{PROVIDER_PREFIX}{name}",
-                module=provider.module,
-                url=provider.server.url,
-                host=provider.server.host,
-                port=provider.server.port,
+                name=f"{BACKEND_PREFIX}{api}",
+                module=API_BACKENDS[api],
+                url=address.url,
+                host=address.host,
+                port=address.port,
                 expected_tool=MODEL_TOOL,
-                provider=name,
             )
         )
 
@@ -248,8 +247,6 @@ def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
         "--port",
         str(spec.port),
     ]
-    if spec.provider:
-        argv += ["--provider", spec.provider]
     if config_path is not None:
         argv += ["--config", str(config_path)]
     return argv

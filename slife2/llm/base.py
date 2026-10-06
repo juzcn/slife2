@@ -87,7 +87,11 @@ class Streamer(Protocol):
     """
 
     def __call__(
-        self, messages: list[Message], tools: list[ToolSpec], model: str
+        self,
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
     ) -> AsyncIterator[ProviderEvent]: ...
 
 

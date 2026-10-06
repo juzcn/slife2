@@ -94,6 +94,7 @@ class SlifeApp(App[None]):
         url: str,
         *,
         agent: str = DEFAULT_AGENT,
+        model: str = "",
         model_label: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
     ) -> None:
@@ -106,11 +107,12 @@ class SlifeApp(App[None]):
         self.title = f"slife2 - {agent}"
         self._url = url
         self._agent = agent
-        self._model_label = model_label
+        self._model = model
+        self._model_label = model_label or model
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
-            lambda: MCPAgentClient(url, agent=agent)
+            lambda: MCPAgentClient(url, agent=agent, model=model)
         )
         self._client: AgentClient | None = None
         self._connected = False

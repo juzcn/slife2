@@ -143,6 +143,7 @@ class _TurnBuilder:
 
 async def stream_chat_impl(
     streamer: Streamer,
+    provider: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     model: str,
@@ -153,6 +154,7 @@ async def stream_chat_impl(
     reported = 0
 
     async for event in streamer(
+        provider,
         [Message.from_wire(m) for m in messages],
         [ToolSpec.from_wire(t) for t in tools],
         model,
@@ -188,9 +190,10 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
 
     @mcp.tool
     async def stream_chat(
+        provider: str,
+        model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        model: str,
         ctx: Context,
     ) -> dict[str, Any]:
         """Stream one chat completion.
@@ -201,11 +204,14 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         progress stream still gets the whole answer.
 
         Args:
+            provider: Which configured provider to call.  One process serves
+                every provider that speaks its wire format, and this says whose
+                credentials and model list to use.
+            model: The model id, as that provider names it.
             messages: OpenAI-shaped chat messages.
             tools: OpenAI-shaped tool definitions; empty for no tools.
-            model: The provider's model id.
         """
-        return await stream_chat_impl(streamer, messages, tools, model, ctx)
+        return await stream_chat_impl(streamer, provider, messages, tools, model, ctx)
 
     return mcp
 
@@ -216,14 +222,6 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
     parser.add_argument("--config", default=None, help="path to slife2.yaml")
     parser.add_argument("--host", default=None, help="override the listen address")
     parser.add_argument("--port", default=None, type=int, help="override the port")
-    parser.add_argument(
-        "--provider",
-        default=None,
-        help=(
-            "which configured provider this model server serves. Required by "
-            "the model servers: each holds exactly one provider's credentials."
-        ),
-    )
     return parser.parse_args(argv)
 
 

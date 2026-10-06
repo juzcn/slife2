@@ -26,7 +26,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from slife2.config import (
-    ConfigError,
     ModelSettings,
     ProviderSettings,
     find_config_path,
@@ -44,6 +43,9 @@ from slife2.messages import Message, ToolSpec, Usage
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-llm-anthropic"
+
+#: The wire protocol this process speaks — and the key its address lives under.
+API = "anthropic-messages"
 
 #: Output cap when a model entry does not set one.  Anthropic requires the
 #: field, so "absent" cannot mean "omit" here the way it does for sampling.
@@ -267,32 +269,54 @@ def _int(source: Any, attribute: str) -> int:
     return int(getattr(source, attribute, 0) or 0)
 
 
-def build_streamer(provider: ProviderSettings) -> Streamer:
-    """The adapter for one provider.  The client is created on first use."""
-    client: Any = None
+def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
+    """The adapter for one process — every provider that speaks this wire.
 
-    def _client() -> Any:
-        nonlocal client
-        if client is None:
-            key = provider.api_key
-            if not key or key.startswith("${"):
-                raise RuntimeError(
-                    f"{SERVER_NAME}: the API key for provider "
-                    f"{provider.base_url!r} did not resolve "
-                    f"(config value {provider.api_key_ref!r}). Export it, or "
-                    f"store it with `credstore set <NAME>`."
-                )
-            from anthropic import AsyncAnthropic
+    The SDK client is created on first use, not here: the key is resolved at
+    that moment, so a provider nobody calls never opens the OS keyring, and
+    constructing a client outside a running event loop is not always safe.
+    """
+    clients: dict[str, Any] = {}
 
-            client = AsyncAnthropic(api_key=key, base_url=provider.base_url)
+    def _provider(name: str) -> ProviderSettings:
+        try:
+            return providers[name]
+        except KeyError:
+            known = ", ".join(sorted(providers)) or "(none)"
+            raise RuntimeError(
+                f"{SERVER_NAME}: no provider {name!r} in this config (known: {known})"
+            ) from None
+
+    def _client(name: str) -> Any:
+        """The SDK client for one provider, each with its own key."""
+        client = clients.get(name)
+        if client is not None:
+            return client
+
+        provider = _provider(name)
+        key = provider.api_key
+        if not key or key.startswith("${"):
+            raise RuntimeError(
+                f"{SERVER_NAME}: the API key for provider {name!r} "
+                f"({provider.base_url!r}) did not resolve "
+                f"(config value {provider.api_key_ref!r}). Export it, or "
+                f"store it with `credstore set <NAME>`."
+            )
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(api_key=key, base_url=provider.base_url)
+        clients[name] = client
         return client
 
     async def stream(
-        messages: list[Message], tools: list[ToolSpec], model: str
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        settings = provider.model(model)
+        settings = _provider(provider).model(model)
         request = build_request(messages, tools, settings)
-        response = await _client().messages.create(**request)
+        response = await _client(provider).messages.create(**request)
         async for event in response:
             for out in translate(event):
                 yield out
@@ -300,11 +324,13 @@ def build_streamer(provider: ProviderSettings) -> Streamer:
     return stream
 
 
-def build_server(provider: ProviderSettings, *, streamer: Streamer | None = None):
+def build_server(
+    providers: dict[str, ProviderSettings], *, streamer: Streamer | None = None
+):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_llm_server(
         name=SERVER_NAME,
-        streamer=streamer if streamer is not None else build_streamer(provider),
+        streamer=streamer if streamer is not None else _make_streamer(providers),
     )
 
 
@@ -313,44 +339,34 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     config_path = find_config_path(args.config)
     config = load(args.config)
-    try:
-        provider_name, provider = _select(config, args.provider)
-    except ConfigError as exc:
-        print(f"{SERVER_NAME}: {exc}")
+
+    providers = {
+        name: provider
+        for name, provider in config.providers.items()
+        if provider.api == API
+    }
+    if not providers:
+        print(f"{SERVER_NAME}: this config has no {API} provider")
         return 2
 
-    address = provider.server
+    address = config.server(API)
     logger.info(
-        "serving %s for provider %s on http://%s:%d%s",
+        "serving %s for %s on http://%s:%d%s (providers: %s)",
         SERVER_NAME,
-        provider_name,
+        API,
         args.host or address.host,
         args.port or address.port,
         address.path,
+        ", ".join(sorted(providers)),
     )
     serve(
-        build_server(provider),
+        build_server(providers),
         address,
         args,
-        name=f"{SERVER_NAME}:{provider_name}",
+        name=f"{SERVER_NAME}:{API}",
         config_path=config_path,
     )
     return 0
-
-
-def _select(config, name: str | None) -> tuple[str, ProviderSettings]:
-    """The provider this process serves — see the OpenAI server for why."""
-    if not name:
-        raise ConfigError(
-            "started without --provider; this server serves one provider and "
-            f"needs to know which (configured: {', '.join(sorted(config.providers))})"
-        )
-    provider = config.provider(name)
-    if provider.module != "slife2.llm.anthropic_server":
-        raise ConfigError(
-            f"provider {name!r} speaks {provider.api!r}, not anthropic-messages"
-        )
-    return name, provider
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -31,7 +31,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastmcp import Context, FastMCP
+from fastmcp import Client, Context, FastMCP
 
 from slife2.config import (
     DEFAULT_AGENT,
@@ -42,7 +42,7 @@ from slife2.config import (
 )
 from slife2.events import TurnEvent, encode
 from slife2.llm.base import LLMBackend
-from slife2.llm.client import close_backend, open_backend
+from slife2.llm.client import MCPBackend, close_backend, open_backend
 from slife2.llm.server_common import configure_logging, parse_serve_args, serve
 from slife2.loop import AgentLoop
 from slife2.messages import Message
@@ -91,12 +91,16 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
     """Build the agent MCP server.
 
     `backend` is injectable so the whole server can be exercised over the
-    in-memory transport with no LLM server and no network.  When it is not
-    given, the real one is built from the config and connected in the server's
-    lifespan — **once for the process, not once per turn**, because reconnecting
-    per turn would pay a handshake for every step of every turn.
+    in-memory transport with no LLM server and no network.
+
+    Otherwise a connection is opened **per model server, on first use, and kept
+    for the process**.  Not per turn — that would pay a handshake for every step
+    of every turn — and not once at startup either, because which model is
+    wanted is a property of the *request*: the caller names one, and this server
+    serves every caller.  A model nobody asks for is a connection nobody opens.
     """
-    loop_holder: dict[str, AgentLoop] = {}
+    model_backends: dict[str, LLMBackend] = {}
+    clients: dict[str, Client] = {}
 
     def make_loop(active: LLMBackend) -> AgentLoop:
         return AgentLoop(
@@ -105,28 +109,37 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
             max_steps=config.agent.max_steps,
         )
 
+    async def loop_for(reference: str) -> AgentLoop:
+        """The loop that talks to whatever `provider/model` names."""
+        if backend is not None:
+            return make_loop(backend)
+
+        name, provider, model = config.resolve(reference)
+        if name not in model_backends:
+            url = config.server(provider.api).url
+            if url not in clients:
+                # One client per *server*, not per provider: a server speaks one
+                # wire format for every provider that uses it.
+                client, _ = await open_backend(
+                    url, model.model, provider=name, name=f"{name}/{model.model}"
+                )
+                clients[url] = client
+            client = clients[url]
+            model_backends[name] = MCPBackend(
+                client, model.model, provider=name, name=f"{name}/{model.model}"
+            )
+            logger.info("model %s via %s", reference, config.server(provider.api).url)
+        return make_loop(model_backends[name])
+
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        if backend is not None:
-            loop_holder["loop"] = make_loop(backend)
-            yield {}
-            return
-
-        provider_name, provider, model = config.resolve()
-        logger.info(
-            "provider %s at %s, model %s",
-            provider_name,
-            provider.server.url,
-            model.model,
-        )
-        client, mcp_backend = await open_backend(
-            provider.server.url, model.model, name=f"{provider_name}/{model.model}"
-        )
         try:
-            loop_holder["loop"] = make_loop(mcp_backend)
             yield {}
         finally:
-            await close_backend(client)
+            for client in clients.values():
+                await close_backend(client)
+            clients.clear()
+            model_backends.clear()
 
     mcp: FastMCP = FastMCP(
         SERVER_NAME,
@@ -144,6 +157,7 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
         prompt: str,
         ctx: Context,
         agent: str = DEFAULT_AGENT,
+        model: str = "",
     ) -> dict[str, Any]:
         """Run one agent turn.
 
@@ -160,20 +174,21 @@ def build_server(config: Config, *, backend: LLMBackend | None = None) -> FastMC
             messages: The conversation so far, as previously returned.  Treat
                 these as opaque — pass back what you were given.
             prompt: What the user just said.
-            agent: Who is asking.  This server treats it as opaque — it is
-                recorded in the log and is the designated place for per-agent
-                behaviour if any ever appears, because isolation between agents
-                belongs inside an MCP server rather than in the process layout.
+            agent: Who is asking.  This server treats it as opaque beyond the
+                system prompt it renders — it is the designated place for
+                per-agent behaviour, because isolation between agents belongs
+                inside an MCP server rather than in the process layout.
+            model: Which model to use, as `provider/model`.  Left out, the
+                config's `default` is used.  Per request rather than per server
+                because one agent server serves every caller, and two instances
+                may well want different models.
 
         Returns:
             `text` (the final answer), `new_messages` (append these to the
             conversation you sent), `usage`, `steps` and `stop_reason`.
         """
-        loop = loop_holder.get("loop")
-        if loop is None:  # pragma: no cover - the lifespan always sets this
-            raise RuntimeError("the agent server is not initialised")
-
-        logger.debug("turn from agent %s", agent)
+        loop = await loop_for(model)
+        logger.debug("turn from agent %s on %s", agent, model or "the default")
         working = [Message.from_wire(m) for m in messages]
 
         # The system prompt comes from this server's config rather than the
@@ -220,16 +235,13 @@ def main(argv: list[str] | None = None) -> int:
     config = load(args.config)
     settings = config.agent.server
 
-    provider_name, provider, model = config.resolve()
     logger.info(
-        "serving %s on http://%s:%d%s (model: %s/%s at %s)",
+        "serving %s on http://%s:%d%s (default model: %s)",
         SERVER_NAME,
         args.host or settings.host,
         args.port or settings.port,
         settings.path,
-        provider_name,
-        model.model,
-        provider.server.url,
+        config.default,
     )
     serve(
         build_server(config),

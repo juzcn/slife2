@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 def scripted(*events) -> Streamer:
     async def stream(
-        messages: list[Message], tools: list[ToolSpec], model: str
+        provider: str, messages: list[Message], tools: list[ToolSpec], model: str
     ) -> AsyncIterator[Chunk | Finish]:
         for event in events:
             yield event
@@ -77,9 +77,10 @@ async def test_tool_call_fragments_are_reassembled_across_the_hop() -> None:
 async def test_the_model_and_messages_reach_the_server() -> None:
     seen: dict[str, object] = {}
 
-    async def streamer(messages, tools, model):
+    async def streamer(provider, messages, tools, model):
         seen["messages"] = messages
         seen["model"] = model
+        seen["provider"] = provider
         yield Finish("stop")
 
     server = build_llm_server(name="t", streamer=streamer)
@@ -102,7 +103,7 @@ async def test_a_provider_failure_surfaces_from_the_result() -> None:
     a hang that looks exactly like a slow model.
     """
 
-    async def streamer(messages, tools, model):
+    async def streamer(provider, messages, tools, model):
         raise RuntimeError("provider said no")
         yield  # pragma: no cover - makes this an async generator
 
@@ -119,7 +120,7 @@ async def test_a_provider_failure_surfaces_from_the_result() -> None:
 async def test_cancelling_the_drain_cancels_the_call() -> None:
     """A cancelled turn must not leave the tool call running."""
 
-    async def streamer(messages, tools, model):
+    async def streamer(provider, messages, tools, model):
         yield Chunk(text="first")
         await asyncio.sleep(10)
         yield Finish("stop")
@@ -150,7 +151,7 @@ async def test_the_agent_loop_runs_over_mcp() -> None:
     """
     calls = {"n": 0}
 
-    async def two_turn_streamer(messages, tools, model):
+    async def two_turn_streamer(provider, messages, tools, model):
         """Tool request on the first model call, the answer on the second."""
         calls["n"] += 1
         if calls["n"] == 1:

@@ -38,52 +38,81 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 # --- which servers are needed ------------------------------------------------
 
 
-def test_one_server_per_provider() -> None:
-    """A provider gets its own process, because a process holds one endpoint.
+def test_there_are_exactly_three_components() -> None:
+    """One agent loop, two model backends — each with one job.
 
-    The set is derived from the provider table rather than from a separate
-    address list, so deleting a provider stops a process with no second switch
-    to keep in step.
+    The granularity is the point: a backend speaks one wire protocol and does
+    nothing else, and a provider is a row in that backend's config rather than a
+    process of its own.  Three providers on two protocols is three processes,
+    not five.
     """
-    config = default_config()
+    config = load(_config_with_both_protocols())
     names = [spec.name for spec in launcher.specs(config)]
-    assert names == ["llm:deepseek", "agent"]
+    assert names == [
+        "llm:openai-completions",
+        "llm:anthropic-messages",
+        "agent",
+    ]
+    modules = {spec.module for spec in launcher.specs(config)}
+    assert modules == {
+        "slife2.llm.openai_server",
+        "slife2.llm.anthropic_server",
+        "slife2.server.server",
+    }
 
 
-def test_a_provider_server_knows_which_provider_it_serves() -> None:
-    """`--provider` is how it finds its own credentials and model list."""
-    spec = next(s for s in launcher.specs(default_config()) if s.provider)
-    assert spec.provider == "deepseek"
-    assert "--provider" in launcher._argv(spec, Path("slife2.yaml"))
+def test_one_server_per_wire_protocol() -> None:
+    """Not one per provider — that is what this replaced.
+
+    A process speaks one format, so every OpenAI-compatible provider shares it
+    and `stream_chat(provider=...)` says whose credentials to use.  Three
+    providers on two protocols is two processes, not three.
+    """
+    path = _config_with_both_protocols()
+    names = [spec.name for spec in launcher.specs(load(path))]
+    assert names == ["llm:openai-completions", "llm:anthropic-messages", "agent"]
 
 
-def test_the_agent_server_has_no_provider() -> None:
-    spec = next(s for s in launcher.specs(default_config()) if s.name == "agent")
-    assert spec.provider == ""
-    assert "--provider" not in launcher._argv(spec, Path("slife2.yaml"))
+def _config_with_both_protocols():
+    import tempfile
 
-
-def test_the_api_chooses_the_module(tmp_path) -> None:
-    """Two providers on different protocols need two different servers."""
-    path = tmp_path / "two.yaml"
+    path = Path(tempfile.mkdtemp()) / "two.yaml"
     path.write_text(
         """
 providers:
-  a:
-    api: openai-completions
-    server: {port: 9001}
-    models: [{model: m}]
-  b:
-    api: anthropic-messages
-    server: {port: 9002}
-    models: [{model: n}]
+  a: {api: openai-completions, models: [{model: m}]}
+  b: {api: openai-completions, models: [{model: n}]}
+  c: {api: anthropic-messages, models: [{model: o}]}
 default: a/m
 """,
         encoding="utf-8",
     )
-    modules = {s.name: s.module for s in launcher.specs(load(path))}
-    assert modules["llm:a"] == "slife2.llm.openai_server"
-    assert modules["llm:b"] == "slife2.llm.anthropic_server"
+    return path
+
+
+def test_the_api_chooses_the_module(tmp_path) -> None:
+    modules = {
+        spec.name: spec.module
+        for spec in launcher.specs(load(_config_with_both_protocols()))
+    }
+    assert modules["llm:openai-completions"] == "slife2.llm.openai_server"
+    assert modules["llm:anthropic-messages"] == "slife2.llm.anthropic_server"
+
+
+def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
+    """A server for a protocol nobody uses holds nobody's key."""
+    path = tmp_path / "one.yaml"
+    path.write_text(
+        "providers:\n  a: {api: openai-completions, models: [{model: m}]}\n",
+        encoding="utf-8",
+    )
+    names = [spec.name for spec in launcher.specs(load(path))]
+    assert names == ["llm:openai-completions", "agent"]
+
+
+def test_the_agent_server_takes_no_provider() -> None:
+    spec = next(s for s in launcher.specs(default_config()) if s.name == "agent")
+    assert "--provider" not in launcher._argv(spec, Path("slife2.yaml"))
 
 
 def test_model_servers_start_before_the_agent_server() -> None:
@@ -98,7 +127,9 @@ def test_model_servers_start_before_the_agent_server() -> None:
 
 
 def test_specs_carry_where_each_server_listens() -> None:
-    spec = next(s for s in launcher.specs(default_config()) if s.provider)
+    spec = next(
+        s for s in launcher.specs(default_config()) if s.name.startswith("llm:")
+    )
     assert (spec.host, spec.port, spec.expected_tool) == (
         "127.0.0.1",
         8001,
@@ -111,13 +142,12 @@ def test_specs_carry_where_each_server_listens() -> None:
 
 
 SPEC = ServerSpec(
-    name="llm:deepseek",
+    name="llm:openai-completions",
     module="slife2.llm.openai_server",
     url="http://127.0.0.1:8001/mcp",
     host="127.0.0.1",
     port=8001,
     expected_tool="stream_chat",
-    provider="deepseek",
 )
 
 

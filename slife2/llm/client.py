@@ -53,12 +53,17 @@ class MCPBackend:
         client: Client,
         model: str,
         *,
+        provider: str = "",
         name: str = "mcp",
         timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.name = name
         self._client = client
         self._model = model
+        #: Which configured provider to ask for.  One model server speaks one
+        #: wire format for every provider that uses it, so this is what picks
+        #: whose credentials and model list the call uses.
+        self._provider = provider
         self._timeout = timeout
 
     def stream(self, messages: list[Message], tools: list[ToolSpec]) -> Stream:
@@ -87,9 +92,10 @@ class MCPBackend:
             result = await self._client.call_tool(
                 "stream_chat",
                 {
+                    "provider": self._provider,
+                    "model": self._model,
                     "messages": [m.to_wire() for m in messages],
                     "tools": [t.to_wire() for t in tools],
-                    "model": self._model,
                 },
                 progress_handler=on_progress,
                 timeout=self._timeout,
@@ -138,6 +144,7 @@ async def open_backend(
     url: str,
     model: str,
     *,
+    provider: str = "",
     name: str = "mcp",
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[Client, MCPBackend]:
@@ -157,7 +164,9 @@ async def open_backend(
         # first turn.
         await client.__aexit__(None, None, None)
         raise
-    return client, MCPBackend(client, model, name=name, timeout=timeout)
+    return client, MCPBackend(
+        client, model, provider=provider, name=name, timeout=timeout
+    )
 
 
 async def _probe(client: Client, expected_tool: str, url: str) -> None:
