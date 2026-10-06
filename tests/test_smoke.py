@@ -12,7 +12,8 @@ from __future__ import annotations
 import pytest
 
 import slife2
-from slife2 import _parse_args, main
+from slife2 import _parse_args, main, tui_url
+from slife2.config import default_config
 
 pytestmark = pytest.mark.unit
 
@@ -69,6 +70,22 @@ def test_help_exits_cleanly(capsys) -> None:
     # guesses at.
     assert "status" in out
     assert "down" in out
+
+
+def test_the_tui_connects_to_the_agent_server() -> None:
+    """Not to a model server — the two are one word apart in the config.
+
+    `agent.server` and a provider's `server` are both "the server", and swapping
+    them fails at startup with "not a slife2 agent server": a model server
+    answers `stream_chat` and has never heard of `run_turn`.
+    """
+    config = default_config()
+    assert tui_url(config) == config.agent.server.url
+    assert tui_url(config) != config.provider("deepseek").server.url
+
+
+def test_the_tui_url_can_be_overridden() -> None:
+    assert tui_url(default_config(), "http://elsewhere/mcp") == "http://elsewhere/mcp"
 
 
 def test_agent_defaults_to_slife2() -> None:

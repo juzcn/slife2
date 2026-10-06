@@ -118,6 +118,21 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
+def tui_url(config: Config, override: str | None = None) -> str:
+    """Where the TUI connects: the agent server.
+
+    **Not a model server.**  There are two kinds of endpoint in this system and
+    they are one word apart in the config — `agent.server` and a provider's
+    `server` — which is exactly how they get swapped.  Connecting to a model
+    server fails with "not a slife2 agent server", because that server answers
+    `stream_chat` and has never heard of `run_turn`.
+
+    Named and separate so the choice can be asserted on rather than read out of
+    a long `main`.
+    """
+    return override or config.agent.server.url
+
+
 def _status(config: Config) -> int:
     from slife2.launcher import Status, statuses
 
@@ -164,8 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = find_config_path(args.config)
         config: Config = load(args.config)
-        provider_name, provider, model = config.resolve(args.model)
-        tui_url = args.url or provider.server.url
+        # The provider itself is not needed here: the TUI talks to the *agent*
+        # server, which is the one that knows which model server to use.
+        provider_name, _, model = config.resolve(args.model)
     except ConfigError as exc:
         # A config mistake is worth a one-line message rather than a traceback:
         # nothing has started yet, and the fix is in the file being named.
@@ -195,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             code = _ensure(config, config_path)
             if code == 0:
                 app = SlifeApp(
-                    tui_url,
+                    tui_url(config, args.url),
                     agent=args.agent,
                     model_label=f"{provider_name}/{model.model}",
                 )
