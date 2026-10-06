@@ -29,6 +29,7 @@ from pathlib import Path
 from fastmcp import Client
 
 from slife2.config import API_BACKENDS, Config
+from slife2.paths import data_dir
 from slife2.runtime import (
     AgentClaim,
     ClientRecord,
@@ -267,13 +268,14 @@ def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
         "--port",
         str(spec.port),
     ]
-    from slife2.paths import DATA_ENV_VAR
-
-    data_dir = os.environ.get(DATA_ENV_VAR)
-    if data_dir:
-        # The child inherits the environment anyway; passing it makes the
-        # argument list say where the process will look.
-        argv += ["--data-dir", data_dir]
+    # The *resolved* directory, not the environment variable.  A child is
+    # spawned with its working directory set away from the checkout, so one left
+    # to work it out for itself would decide it is an installation, look in
+    # `~/.slife2`, find no config there, and run on the built-in defaults — while
+    # this process, which read the config it was pointed at, believes otherwise.
+    # The symptom is a server that starts fine and immediately reports a config
+    # it does not have.
+    argv += ["--data-dir", str(data_dir())]
     return argv
 
 

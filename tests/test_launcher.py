@@ -182,6 +182,31 @@ async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
         launcher.probe("http://127.0.0.1:9/mcp", "x", timeout=0.2)
 
 
+def test_a_spawned_server_is_told_where_the_data_directory_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Always, not only when an environment variable happens to be set.
+
+    The child is spawned with its working directory moved off the checkout, so
+    one left to work it out for itself decides it is an installation, looks in
+    `~/.slife2`, finds no config, and runs on the built-in defaults — while the
+    parent, which read the config it was pointed at, believes otherwise.  The
+    symptom is a server that starts cleanly and immediately reports a config it
+    does not have:
+
+        slife2-llm-anthropic: this config has no anthropic-messages provider
+    """
+    monkeypatch.delenv("SLIFE2_DATA_DIR", raising=False)
+    spec = next(
+        s for s in launcher.specs(default_config()) if s.name.startswith("llm:")
+    )
+    argv = launcher._argv(spec, None)
+
+    assert "--data-dir" in argv
+    given = argv[argv.index("--data-dir") + 1]
+    assert given == str(launcher.data_dir())
+
+
 def test_a_registered_server_is_reused_and_nothing_is_spawned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
