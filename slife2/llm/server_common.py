@@ -18,15 +18,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
+from slife2 import __version__
 from slife2.config import ServerSettings
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
 from slife2.messages import Message, StreamChatResult, ToolCall, ToolSpec, Usage
+from slife2.runtime import ServerRecord, clear_record, write_record
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +227,24 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
     return parser.parse_args(argv)
 
 
-def serve(mcp: FastMCP, server: ServerSettings, args: argparse.Namespace) -> None:
-    """Run a server over streamable HTTP.
+def serve(
+    mcp: FastMCP,
+    server: ServerSettings,
+    args: argparse.Namespace,
+    *,
+    name: str,
+    config_path: Any = None,
+) -> None:
+    """Run a server over streamable HTTP, recording that it is here.
+
+    A server registers itself rather than being registered by whoever started
+    it, because *it* is the only party that knows which config it read — and
+    that is exactly what decides whether another instance may reuse it.  A
+    server started by hand is indistinguishable from one started by a launcher
+    once it does this, which is the point: `slife2` pointed at the same config
+    reuses it either way, and an instance pointed at a *different* config sees a
+    record that is not its own and refuses rather than talking to a server
+    holding somebody else's key.
 
     Two options are pinned explicitly even where they match the default, because
     flipping either is *silent* and a future refactor could do it without
@@ -239,14 +258,30 @@ def serve(mcp: FastMCP, server: ServerSettings, args: argparse.Namespace) -> Non
       agent's conversation memory lives in the caller, so nothing depends on a
       session surviving between requests.  See `slife2.server.server`.
     """
-    mcp.run(
-        transport="http",
+    url = ServerSettings(
         host=args.host or server.host,
         port=args.port or server.port,
         path=server.path,
-        json_response=False,
-        stateless_http=True,
+    ).url
+    record = ServerRecord.now(
+        name=name,
+        url=url,
+        pid=os.getpid(),
+        config=str(config_path) if config_path else "",
+        version=__version__,
     )
+    write_record(record)
+    try:
+        mcp.run(
+            transport="http",
+            host=args.host or server.host,
+            port=args.port or server.port,
+            path=server.path,
+            json_response=False,
+            stateless_http=True,
+        )
+    finally:
+        clear_record(url)
 
 
 def configure_logging() -> None:

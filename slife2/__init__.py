@@ -162,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     try:
+        config_path = find_config_path(args.config)
         config: Config = load(args.config)
         provider_name, provider, model = config.resolve(args.model)
         tui_url = args.url or provider.server.url
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         # stay shared with every other agent.
         with claim_agent(args.agent):
             claimed = True
-            code = _ensure(config, find_config_path(args.config))
+            code = _ensure(config, config_path)
             if code == 0:
                 app = SlifeApp(
                     tui_url,

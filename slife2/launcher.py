@@ -28,7 +28,6 @@ from pathlib import Path
 
 from fastmcp import Client
 
-from slife2 import __version__
 from slife2.config import Config
 from slife2.runtime import (
     AgentClaim,
@@ -52,7 +51,6 @@ from slife2.runtime import (
     terminate,
     unregister_client,
     write_claim,
-    write_record,
 )
 
 #: The agent server: a module, and the tool that proves it is the one we think.
@@ -298,7 +296,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     whoever held it has just started the server, so the answer changes.
     """
     if probe(spec.url, spec.expected_tool):
-        return Outcome(spec, _running_status(spec), read_record(spec.url))
+        return _reuse(spec, config_path=config_path)
 
     if tcp_listening(spec.host, spec.port):
         # Something is there and it is not us.  Spawning would fail to bind and
@@ -308,29 +306,41 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     try:
         with start_lock(spec.url):
             if probe(spec.url, spec.expected_tool):
-                return Outcome(spec, _running_status(spec), read_record(spec.url))
+                return _reuse(spec, config_path=config_path)
             if tcp_listening(spec.host, spec.port):
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
             proc = spawn(_argv(spec, config_path), url=spec.url)
             _wait_ready(spec, proc)
-            record = ServerRecord.now(
-                name=spec.name,
-                url=spec.url,
-                pid=proc.pid,
-                config=str(config_path) if config_path else "",
-                version=__version__,
-            )
-            write_record(record)
-            return Outcome(spec, Status.STARTED, record)
+            # The record is written by the server itself, not here: it is the
+            # only party that knows which config it read, and that is what
+            # decides whether another instance may reuse it.
+            return Outcome(spec, Status.STARTED, read_record(spec.url))
     except StartFailed as exc:
         return Outcome(spec, Status.FAILED, detail=f"{exc}\n{exc.log_tail}".strip())
     except TimeoutError as exc:
         return Outcome(spec, Status.FAILED, detail=str(exc))
 
 
-def _running_status(spec: ServerSpec) -> Status:
-    return Status.RUNNING if read_record(spec.url) else Status.UNMANAGED
+def _reuse(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
+    """Attach to a server that is already answering.
+
+    **The servers are shared, full stop.**  Which config started one does not
+    decide whether another may use it — two instances that happen to name the
+    same file are simply using the same configuration, and two that name
+    different files still share the servers, because sharing them is the point.
+
+    The record's `config` is still worth reading: a server on this port started
+    from a *different* config means two configurations are competing for one
+    endpoint, which is worth saying out loud rather than leaving as a mystery
+    when the model is not the one expected.
+    """
+    record = read_record(spec.url)
+    detail = ""
+    if record is not None and record.config and config_path is not None:
+        if Path(record.config) != Path(config_path):
+            detail = f"started from {record.config}"
+    return Outcome(spec, Status.RUNNING, record, detail)
 
 
 def _conflict_detail(spec: ServerSpec) -> str:
@@ -413,7 +423,7 @@ def statuses(config: Config) -> list[Outcome]:
     results = []
     for spec in specs(config):
         if probe(spec.url, spec.expected_tool):
-            results.append(Outcome(spec, _running_status(spec), read_record(spec.url)))
+            results.append(_reuse(spec))
         elif tcp_listening(spec.host, spec.port):
             results.append(
                 Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))

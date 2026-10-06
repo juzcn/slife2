@@ -17,7 +17,13 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from slife2.config import ConfigError, ModelSettings, ProviderSettings, load
+from slife2.config import (
+    ConfigError,
+    ModelSettings,
+    ProviderSettings,
+    find_config_path,
+    load,
+)
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
     build_llm_server,
@@ -235,6 +241,7 @@ def build_server(
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
+    config_path = find_config_path(args.config)
     config = load(args.config)
     try:
         provider_name, provider = _select(config, args.provider)
@@ -251,7 +258,13 @@ def main(argv: list[str] | None = None) -> int:
         args.port or address.port,
         address.path,
     )
-    serve(build_server(provider), address, args)
+    serve(
+        build_server(provider),
+        address,
+        args,
+        name=f"{SERVER_NAME}:{provider_name}",
+        config_path=config_path,
+    )
     return 0
 
 

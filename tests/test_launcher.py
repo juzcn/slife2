@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from slife2 import launcher
+from slife2 import launcher, runtime
 from slife2.config import (
     Config,
     default_config,
@@ -121,9 +121,19 @@ SPEC = ServerSpec(
 )
 
 
-def test_an_running_server_is_reused_and_nothing_is_spawned(
+def _register(spec: ServerSpec, *, config: str = "") -> None:
+    """Stand in for a server that has registered itself."""
+    runtime.write_record(
+        runtime.ServerRecord(
+            name=spec.name, url=spec.url, pid=os.getpid(), config=config
+        )
+    )
+
+
+def test_a_registered_server_is_reused_and_nothing_is_spawned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _register(SPEC)
     monkeypatch.setattr(launcher, "probe", lambda *a, **k: True)
 
     def explode(*a, **k):
@@ -131,8 +141,38 @@ def test_an_running_server_is_reused_and_nothing_is_spawned(
 
     monkeypatch.setattr(launcher, "spawn", explode)
     outcome = launcher.ensure(SPEC)
-    assert outcome.status in (Status.RUNNING, Status.UNMANAGED)
+    assert outcome.status is Status.RUNNING
     assert outcome.ok
+
+
+def test_a_server_started_by_another_config_is_still_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The servers are shared, full stop.**
+
+    Which config started one does not decide whether another may use it.  Two
+    instances naming the same file are simply using the same configuration;
+    two naming different files still mean the same servers when those configs
+    name the same ports, and sharing them is the point.
+
+    The record still says where it came from, so a port two configurations are
+    competing for is reported rather than left as a mystery when the model
+    turns out not to be the one expected.
+    """
+    _register(SPEC, config=str(Path("somewhere/else/slife2.yaml")))
+    monkeypatch.setattr(launcher, "probe", lambda *a, **k: True)
+
+    def explode(*a, **k):
+        raise AssertionError("should not spawn onto a port that answers")
+
+    monkeypatch.setattr(launcher, "spawn", explode)
+    outcome = launcher.ensure(SPEC, config_path=Path("this/one/slife2.yaml"))
+    assert outcome.status is Status.RUNNING
+    assert outcome.ok
+    # Reported, not refused: the detail names the other config, and comparing
+    # paths rather than strings keeps it honest on Windows, where the same path
+    # spells itself with backslashes.
+    assert "else" in outcome.detail and "slife2.yaml" in outcome.detail
 
 
 def test_a_held_port_that_is_not_ours_is_a_conflict(
@@ -181,10 +221,13 @@ def test_a_missing_server_is_spawned_and_recorded(
 
     outcome = launcher.ensure(SPEC, config_path=Path("slife2.yaml"))
     assert outcome.status is Status.STARTED
-    assert outcome.record is not None
-    assert outcome.record.pid == os.getpid()
-    # And a second call now reuses it rather than spawning again.
-    monkeypatch.setattr(launcher, "probe", lambda *a, **k: True)
+    # The record is written by the server, not by the launcher: only the server
+    # knows which config it read.  So there is none until it has started.
+    assert outcome.record is None
+
+    # And a second call reuses it rather than spawning again, once the server
+    # has registered.
+    _register(SPEC)
     again = launcher.ensure(SPEC, config_path=Path("slife2.yaml"))
     assert again.status is Status.RUNNING
 

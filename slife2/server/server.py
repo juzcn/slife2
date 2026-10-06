@@ -33,7 +33,13 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from slife2.config import DEFAULT_AGENT, Config, ServerSettings, load
+from slife2.config import (
+    DEFAULT_AGENT,
+    Config,
+    ServerSettings,
+    find_config_path,
+    load,
+)
 from slife2.events import TurnEvent, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import close_backend, open_backend
@@ -201,6 +207,7 @@ def resolve_settings(config: Config) -> ServerSettings:
 def main(argv: list[str] | None = None) -> int:
     args = parse_serve_args(argv, SERVER_NAME)
     configure_logging()
+    config_path = find_config_path(args.config)
     config = load(args.config)
     settings = config.agent.server
 
@@ -215,7 +222,13 @@ def main(argv: list[str] | None = None) -> int:
         model.model,
         provider.server.url,
     )
-    serve(build_server(config), settings, args)
+    serve(
+        build_server(config),
+        settings,
+        args,
+        name=SERVER_NAME,
+        config_path=config_path,
+    )
     return 0
 
 

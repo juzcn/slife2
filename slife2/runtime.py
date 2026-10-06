@@ -46,6 +46,11 @@ def runtime_dir() -> Path:
     two checkouts on one machine would otherwise fight over the same state, and
     a state file that lands in a git working tree is one somebody will
     eventually commit.
+
+    One directory serves every instance on the machine, because the servers are
+    shared: two instances that name different config files still mean the same
+    servers when those configs name the same ports, and each has to be able to
+    see what the other started.
     """
     override = os.environ.get("SLIFE2_RUNTIME_DIR")
     if override:
@@ -68,10 +73,8 @@ def runtime_dir() -> Path:
 def normalize_url(url: str) -> str:
     """Canonical form of an endpoint, so two spellings are one server.
 
-    Records are keyed by this, which makes the key a property of *where the
-    server is* rather than of which config file mentioned it.  Without it
-    ``http://localhost:8001/mcp`` and ``http://127.0.0.1:8001/mcp`` would be two
-    servers sharing one port.
+    Records are keyed by this.  Without it ``http://localhost:8001/mcp`` and
+    ``http://127.0.0.1:8001/mcp`` would be two servers sharing one port.
     """
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
