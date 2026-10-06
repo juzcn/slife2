@@ -40,7 +40,8 @@ from slife2.events import (
     TurnFinished,
 )
 from slife2.tui.client import AgentClient, MCPAgentClient
-from slife2.tui.widgets import PromptInput, StatusBar, Transcript
+from slife2.tui.theme import css_variables
+from slife2.tui.widgets import ChatView, HistoryInput, StatusBar
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +119,33 @@ class SlifeApp(App[None]):
         self._steps = 0
 
     def compose(self) -> ComposeResult:
-        yield Transcript()
-        yield PromptInput(id="prompt")
+        # The transcript signs its messages with the agent name, so a
+        # conversation reads `You> ...` / `jack> ...` on both sides.
+        yield ChatView(self._agent)
+        yield HistoryInput(
+            placeholder="Message slife2…",
+            id="user-input",
+            # `focus` rather than `indent`: Tab in a prompt should reach the
+            # rest of the app, not insert whitespace nobody can see.
+            tab_behavior="focus",
+        )
         yield StatusBar(id="status")
+
+    def get_css_variables(self) -> dict[str, str]:
+        """Publish the palette to the stylesheet.
+
+        This is what keeps the design in one place: `app.tcss` says
+        `$slife-amber`, the widgets say `PALETTE["amber"]`, and neither owns a
+        hex value.  slife v1 duplicates them, which is how a stylesheet and the
+        code that renders into it drift apart.
+        """
+        return {**super().get_css_variables(), **css_variables()}
 
     # --- lifecycle -----------------------------------------------------------
 
     async def on_mount(self) -> None:
         self._client = self._client_factory()
-        self.query_one(PromptInput).focus()
+        self.query_one(HistoryInput).focus()
         self._refresh_status()
         # Connecting can take a moment; a worker keeps the first paint prompt.
         self.run_worker(self._connect(), group="connect", exit_on_error=False)
@@ -158,10 +177,11 @@ class SlifeApp(App[None]):
     # --- running a turn ------------------------------------------------------
 
     @property
-    def _transcript(self) -> Transcript:
-        return self.query_one(Transcript)
+    def _transcript(self) -> ChatView:
+        return self.query_one(ChatView)
 
-    async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
+    async def on_history_input_submitted(self, message: HistoryInput.Submitted) -> None:
+        self.query_one(HistoryInput).remember(message.text)
         self._transcript.add_user(message.text)
         self._transcript.begin_assistant()
         self._steps = 0
@@ -213,13 +233,19 @@ class SlifeApp(App[None]):
         match event:
             case TextDelta(text=text):
                 self._transcript.append_text(text)
-            case ToolCallStarted(name=name):
-                self._transcript.add_tool_start(name)
-            case ToolCallFinished(ok=ok, result_preview=preview_text):
-                self._transcript.add_tool_end(ok, preview_text)
+            case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
+                self._transcript.add_tool_start(call_id, name, arguments)
+            case ToolCallFinished(
+                call_id=call_id,
+                ok=ok,
+                result_preview=preview_text,
+                result_chars=chars,
+            ):
+                self._transcript.add_tool_end(call_id, ok, preview_text, chars)
             case TurnFinished(usage=usage, steps=steps):
                 self._tokens += usage.total_tokens
                 self._steps = steps
+                self._transcript.set_usage(usage.total_tokens)
                 self._refresh_status()
 
     def on_turn_done_message(self, message: TurnDoneMessage) -> None:
@@ -266,6 +292,7 @@ class SlifeApp(App[None]):
             busy = True
         self.query_one(StatusBar).update_status(
             connection=self._connection_text,
+            connected=self._connected,
             agent=self._agent,
             model=self._model_label,
             busy=busy,

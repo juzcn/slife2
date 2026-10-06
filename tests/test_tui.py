@@ -18,7 +18,8 @@ from textual.worker import WorkerState
 from slife2.events import TextDelta, ToolCallFinished, ToolCallStarted, TurnFinished
 from slife2.messages import Usage
 from slife2.tui.app import SlifeApp
-from slife2.tui.widgets import PromptInput, StatusBar, Transcript
+from slife2.tui.theme import GLYPHS, PALETTE
+from slife2.tui.widgets import ChatView, HistoryInput, StatusBar, ToolCallWidget
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -30,7 +31,8 @@ def make_app(respond, *, connect_error: Exception | None = None) -> SlifeApp:
     return SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
-        model_label="test/model",
+        model_label="deepseek/deepseek-chat",
+        agent="jack",
     )
 
 
@@ -53,8 +55,30 @@ def answering(text: str, *, tokens: int = 0):
     return respond
 
 
+def tool_turn(*, ok: bool = True, result: str = "42"):
+    """A scripted client that runs one tool and then answers."""
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("checking"))
+        on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name="calc",
+                ok=ok,
+                result_preview="42" if ok else "unknown tool",
+                result_chars=len(result),
+                elapsed_ms=3,
+            )
+        )
+        on_event(TextDelta("it is 42"))
+        return "checkingit is 42"
+
+    return respond
+
+
 def shown(app: SlifeApp) -> str:
-    return app.query_one(Transcript).plain_text()
+    return app.query_one(ChatView).plain_text()
 
 
 def status(app: SlifeApp) -> str:
@@ -62,25 +86,53 @@ def status(app: SlifeApp) -> str:
 
 
 async def submit(pilot, text: str) -> None:
-    pilot.app.query_one(PromptInput).text = text
+    pilot.app.query_one(HistoryInput).text = text
     await pilot.press("enter")
     await pilot.pause()
 
 
-# --- the widgets -------------------------------------------------------------
+# --- the transcript ----------------------------------------------------------
 
 
 async def test_a_submitted_prompt_is_streamed_into_one_block() -> None:
-    """Deltas accumulate in the trailing block rather than one block per token."""
+    """Deltas accumulate in the trailing block rather than one per token."""
     app = make_app(answering("hello"))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        transcript = app.query_one(Transcript)
-        text = transcript.plain_text()
-        # One user bubble plus one assistant block: two widgets, not six.
-        assert "you> hi" in text
+        text = shown(app)
         assert "hello" in text
-        assert len(list(transcript.query("Static"))) == 2
+        # One user bubble plus one assistant block: two widgets, not six.
+        assert (
+            len(
+                list(app.query_one(ChatView).query(".user-message, .assistant-message"))
+            )
+            == 2
+        )
+
+
+async def test_the_user_message_carries_a_timestamp_and_prefix() -> None:
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hello")
+        assert "You> hello" in shown(app)
+
+
+async def test_both_sides_of_the_conversation_are_signed() -> None:
+    """`You> ...` and `jack> ...`, so neither side is the unmarked one."""
+    app = make_app(answering("hello"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        text = shown(app)
+
+    assert "You> hi" in text
+    assert "jack> hello" in text
+
+
+async def test_the_answer_carries_its_token_count() -> None:
+    app = make_app(answering("hello", tokens=830))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "830 tokens" in shown(app)
 
 
 async def test_final_answer_replaces_what_was_streamed() -> None:
@@ -99,109 +151,167 @@ async def test_final_answer_replaces_what_was_streamed() -> None:
     assert "garb" not in text
 
 
+async def test_model_output_is_not_parsed_as_markup() -> None:
+    """`[bold]` from a model is text, not an instruction to the renderer.
+
+    Rich's markup would raise on a stray `[`, and model output is full of them,
+    so the distinction is kept by construction: every string that came from a
+    model goes through `Text(...)`, which does not interpret tags.
+    """
+    hostile = "use [bold red]this[/] and [unclosed"
+    app = make_app(answering(hostile))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert hostile in shown(app)
+
+
 async def test_enter_submits_and_clears_the_box() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hello")
-        assert app.query_one(PromptInput).text == ""
-        assert "you> hello" in shown(app)
+        assert app.query_one(HistoryInput).text == ""
+        assert "You> hello" in shown(app)
 
 
 async def test_shift_enter_inserts_a_newline() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:
-        prompt = app.query_one(PromptInput)
+        prompt = app.query_one(HistoryInput)
         prompt.text = "line one"
         prompt.move_cursor(prompt.document.end)
         await pilot.press("shift+enter")
         await pilot.pause()
-        assert "\n" in app.query_one(PromptInput).text
+        assert "\n" in app.query_one(HistoryInput).text
 
 
 async def test_empty_input_is_not_submitted() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "   ")
-        assert "you>" not in shown(app)
+        assert "You>" not in shown(app)
 
 
-# --- tool activity -----------------------------------------------------------
+async def test_up_walks_back_through_previous_prompts() -> None:
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "first")
+        await submit(pilot, "second")
+        prompt = app.query_one(HistoryInput)
+        assert prompt.text == ""
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "second"
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "first"
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt.text == "second"
 
 
-async def test_tool_activity_renders_inline() -> None:
-    def respond(prompt: str, on_event):
-        on_event(ToolCallStarted(call_id="c1", name="calc"))
-        on_event(
-            ToolCallFinished(
-                call_id="c1",
-                name="calc",
-                ok=True,
-                result_preview="42",
-                result_chars=2,
-                elapsed_ms=1,
-            )
-        )
-        return "It is 42."
+# --- tool calls --------------------------------------------------------------
 
-    app = make_app(respond)
+
+async def test_a_tool_call_is_a_panel_showing_what_it_ran() -> None:
+    """The header says `calc: 6*7`, not just `calc`.
+
+    Which tool ran is the least interesting part; what it was asked is the part
+    worth a row.
+    """
+    app = make_app(tool_turn())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "6*7?")
-        text = shown(app)
+        panel = app.query_one(ToolCallWidget)
+        text = panel.plain_text()
 
-    assert "calc()" in text
-    assert "It is 42." in text
+    assert "Calc" in text
+    assert "6*7" in text
+    assert "done" in text
 
 
-async def test_text_after_a_tool_row_opens_a_new_block() -> None:
-    """A tool row ends the text block, not the turn — text resumes below it."""
-
-    def respond(prompt: str, on_event):
-        on_event(TextDelta("checking"))
-        on_event(ToolCallStarted(call_id="c1", name="calc"))
-        on_event(
-            ToolCallFinished(
-                call_id="c1",
-                name="calc",
-                ok=True,
-                result_preview="42",
-                result_chars=2,
-                elapsed_ms=1,
-            )
-        )
-        on_event(TextDelta("it is 42"))
-        return "checkingit is 42"
-
-    app = make_app(respond)
+async def test_a_tool_panel_starts_collapsed() -> None:
+    app = make_app(tool_turn())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "6*7?")
-        text = shown(app)
+        panel = app.query_one(ToolCallWidget)
+        assert panel.collapsed is True
+        assert "Arguments" not in panel.plain_text()
 
-    assert text.count("checking") == 2  # streamed, then the corrected block
-    assert "it is 42" in text
+
+async def test_toggling_a_tool_panel_expands_it() -> None:
+    app = make_app(tool_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        panel = app.query_one(ToolCallWidget)
+        panel.action_toggle_detail()
+        await pilot.pause()
+
+        text = panel.plain_text()
+        assert panel.collapsed is False
+        assert "Arguments" in text
+        assert "Result" in text
+        assert "e = 6*7" in text
+        assert "42" in text
 
 
-async def test_a_failed_tool_is_shown_as_failed() -> None:
-    def respond(prompt: str, on_event):
-        on_event(ToolCallStarted(call_id="c1", name="wether"))
-        on_event(
-            ToolCallFinished(
-                call_id="c1",
-                name="wether",
-                ok=False,
-                result_preview="unknown tool",
-                result_chars=12,
-                elapsed_ms=0,
-            )
-        )
-        return "No such tool."
-
-    app = make_app(respond)
+async def test_a_failed_tool_says_error() -> None:
+    app = make_app(tool_turn(ok=False))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "weather?")
-        text = shown(app)
+        panel = app.query_one(ToolCallWidget)
+        row = panel.plain_text()
+        panel.action_toggle_detail()
+        expanded = panel.plain_text()
 
-    assert "!!" in text
-    assert "unknown tool" in text
+    assert "error" in row
+    assert "Error" in expanded
+
+
+async def test_a_running_tool_says_running() -> None:
+    """Before the result lands the row has to say something is happening."""
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "1"}))
+        return ""
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        assert "running" in app.query_one(ToolCallWidget).plain_text()
+
+
+async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
+    """A tool panel ends the text block, not the turn — text resumes below it."""
+    app = make_app(tool_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        assert "it is 42" in shown(app)
+        blocks = app.query_one(ChatView).query(".assistant-message")
+        assert len(list(blocks)) == 2, "text after a tool panel is its own block"
+
+
+# --- the palette -------------------------------------------------------------
+
+
+async def test_the_stylesheet_reads_the_palette() -> None:
+    """Colours live in one place: the app publishes them, the CSS reads them."""
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE):
+        variables = app.get_css_variables()
+
+    assert variables["slife-bg"] == PALETTE["bg"]
+    assert variables["slife-amber"] == PALETTE["amber"]
+    # And the app did not lose Textual's own variables doing it.
+    assert "$primary" in str(variables) or "primary" in variables
+
+
+async def test_the_screen_is_painted_with_the_palette() -> None:
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        # Textual normalises a hex colour to a Color; compare the channels.
+        assert app.screen.styles.background.hex.lower() == PALETTE["bg"]
 
 
 # --- connection states -------------------------------------------------------
@@ -215,12 +325,11 @@ async def test_a_dead_server_does_not_kill_the_app() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         assert "disconnected" in status(app)
-        # ...and the prompt still works, reporting the problem.
         await submit(pilot, "hi")
         assert "not connected" in shown(app)
 
 
-async def test_a_failing_turn_is_reported_in_the_transcript() -> None:
+async def test_a_failing_turn_is_reported() -> None:
     def respond(prompt: str, on_event):
         raise RuntimeError("the model exploded")
 
@@ -228,23 +337,21 @@ async def test_a_failing_turn_is_reported_in_the_transcript() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         assert "the model exploded" in shown(app)
+        assert GLYPHS["failed"] in shown(app)
 
 
 # --- status and cancellation -------------------------------------------------
 
 
-async def test_status_bar_runs_up_the_token_count() -> None:
+async def test_status_bar_shows_the_agent_the_model_and_the_tokens() -> None:
     app = make_app(answering("hello", tokens=42))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        assert "42 tokens" in status(app)
+        bar = status(app)
 
-
-async def test_status_bar_shows_the_model() -> None:
-    app = make_app(answering("hello"))
-    async with app.run_test(size=SIZE) as pilot:
-        await pilot.pause()
-        assert "test/model" in status(app)
+    assert "jack" in bar
+    assert "deepseek/deepseek-chat" in bar
+    assert "42 tokens" in bar
 
 
 async def test_ctrl_c_cancels_a_running_turn() -> None:
@@ -257,8 +364,7 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
         return "never"
 
     app = make_app(answering("unused"))
-    client = app._client_factory()
-    client.run_turn = never_finishes  # type: ignore[method-assign]
+    app._client_factory().run_turn = never_finishes  # type: ignore[method-assign]
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
@@ -271,7 +377,6 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
 
         assert worker.state is WorkerState.CANCELLED
         assert "[cancelled]" in shown(app)
-        # And the app is still alive to be used.
         assert app.is_running
 
 

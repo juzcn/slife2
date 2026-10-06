@@ -123,7 +123,9 @@ class AgentLoop:
 
             # Phase B: run the batch and feed every result back.
             for call in result.tool_calls:
-                await self._emit(observer, ToolCallStarted(call.id, call.name))
+                await self._emit(
+                    observer, ToolCallStarted(call.id, call.name, call.arguments)
+                )
                 text, ok = await self._tools.execute(call)
                 await self._emit(
                     observer,

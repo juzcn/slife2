@@ -1,28 +1,111 @@
-/* The conversation takes the space; the input and status bar are fixed. */
+/* The transcript fills the screen; the prompt and the status row sit under it.
+   Design ported from slife v1 — a dark, low-chrome look with warm amber
+   accents.  Colours come from `theme.py` through the custom CSS variables the
+   app publishes, so no hex appears in this file or in the widgets. */
 
 Screen {
     layout: vertical;
+    background: $slife-bg;
+    color: $slife-text;
 }
 
-#transcript {
+/* ── The transcript ─────────────────────────────────────────────────────── */
+
+/* The scrollbar is hidden, on the grounds that a scrollbar in a chat window is
+   noise: the content is a conversation, and where you are in it is answered by
+   what you can read.  Scrolling still works, by wheel and by PageUp/PageDown. */
+ChatView {
     height: 1fr;
+    padding: 0;
+    overflow-y: auto;
+    scrollbar-size: 0 0;
+}
+
+/* ── Messages ───────────────────────────────────────────────────────────── */
+
+/* No bubbles and no borders: a message is a block of text marked by its
+   prefix.  The rhythm is that a user message has a blank row above it and an
+   assistant message has one below, so turns separate without a drawn rule. */
+
+.user-message {
+    margin: 1 0 0 0;
     padding: 0 1;
-    scrollbar-size-vertical: 1;
+    height: auto;
 }
 
-#prompt {
-    height: 5;
-    border: tall $accent;
-    margin: 0 1;
+.assistant-message {
+    margin: 0 0 1 0;
+    padding: 0 1;
+    height: auto;
 }
 
-#prompt:focus {
-    border: tall $accent-lighten-2;
+.system-message {
+    margin: 0;
+    padding: 0 1;
+    height: auto;
+    text-style: italic;
 }
 
-#status {
+/* ── Tool calls ─────────────────────────────────────────────────────────── */
+
+/* Collapsed this is one row; expanded it is a panel.  The 60% cap plus the
+   internal scroll means a large result stays readable in place instead of
+   pushing the conversation off the screen — and the line cap in the widget
+   bounds the pathological case before layout ever sees it. */
+.tool-call {
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: solid $slife-border;
+    background: $slife-panel;
+    width: 1fr;
+    height: auto;
+    max-height: 60%;
+    min-height: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-size: 1 2;
+    scrollbar-color: $slife-border-dim;
+    scrollbar-background: $slife-panel;
+}
+
+.tool-call:focus {
+    border: solid $slife-amber;
+}
+
+.tool-call > .tool-content {
+    width: 100%;
+}
+
+/* ── The prompt ─────────────────────────────────────────────────────────── */
+
+/* Three rows to start, twelve at most, growing upward with the draft.  The
+   rule above it is the only line on the screen, and it fades out on focus so
+   that typing has nothing competing with it. */
+#user-input {
+    height: auto;
+    min-height: 3;
+    max-height: 12;
+    padding: 0 1;
+    background: $slife-bg;
+    color: $slife-text;
+    border: none;
+    border-top: solid $slife-border;
+    scrollbar-size: 0 0;
+}
+
+#user-input:focus {
+    border-top: solid $slife-bg;
+}
+
+#user-input > .text-area--placeholder {
+    color: $slife-border-dim;
+}
+
+/* ── The status row ─────────────────────────────────────────────────────── */
+
+StatusBar {
     height: 1;
     padding: 0 1;
-    background: $panel;
-    color: $text-muted;
+    background: $slife-panel;
+    color: $slife-dim;
 }

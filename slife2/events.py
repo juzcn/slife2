@@ -22,7 +22,7 @@ is the trade, and it is worth it at three observers.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, assert_never
 
 from slife2.messages import Usage
@@ -58,6 +58,10 @@ class ToolCallStarted:
 
     call_id: str
     name: str
+    #: What it was asked with.  Carried so the transcript can say *what* was
+    #: read or computed rather than only which tool ran — "calc(e=6*7)" is a
+    #: sentence; "calc" is a word.
+    arguments: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -140,8 +144,16 @@ def encode(event: TurnEvent) -> str:
     match event:
         case TextDelta(text):
             payload = {"t": "text", "d": text}
-        case ToolCallStarted(call_id, name):
-            payload = {"t": "tool_start", "id": call_id, "name": name}
+        case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
+            payload = {
+                "t": "tool_start",
+                "id": call_id,
+                "name": name,
+                # Omitted when empty: most calls carry no arguments in the
+                # display sense, and a notification is not the place for an
+                # empty object on every single tool.
+                **({"args": arguments} if arguments else {}),
+            }
         case ToolCallFinished(
             call_id, name, ok, result_preview, result_chars, elapsed_ms
         ):
@@ -193,8 +205,11 @@ def decode(message: str) -> TurnEvent | None:
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "tool_start" if isinstance(payload.get("name"), str):
+            arguments = payload.get("args")
             return ToolCallStarted(
-                call_id=str(payload.get("id") or ""), name=payload["name"]
+                call_id=str(payload.get("id") or ""),
+                name=payload["name"],
+                arguments=arguments if isinstance(arguments, dict) else {},
             )
         case "tool_end" if isinstance(payload.get("name"), str):
             return ToolCallFinished(
