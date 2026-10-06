@@ -11,8 +11,8 @@ decisions look arbitrary until you know what happens if you undo them.
 
 ## 1. The shape
 
-Four processes, three of them MCP servers — brought up on demand by `slife2`
-and shared by every instance (see §4):
+Four processes, all of them MCP servers but the TUI — brought up on demand by
+`slife2` and shared by every instance (see §4):
 
 ```
 slife2                    TUI, MCP client              (no provider key, no SDK)
@@ -20,17 +20,24 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
   ▼
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
-  ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai     (openai SDK, holds a key)
-  └── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic  (anthropic SDK, holds a key)
+  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-memory        (one SQLite file per agent)
+  ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai     (openai SDK, holds keys)
+  └── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic  (anthropic SDK, holds keys)
 ```
+
+**One component, one job, and the granularity is deliberate.**  A model backend
+speaks one wire protocol; memory keeps turns; the agent loop runs turns.  A
+provider is a row in a backend's config rather than a process of its own, so
+three providers on two protocols is four processes and not six — the smallness
+is in what each process *does*, not in how many there are.
 
 Two properties fall out of this and are the reason for it:
 
-- **A provider API key exists only inside the LLM server process that needs it.**
-  The agent loop cannot leak one because it never has one.
+- **A provider API key exists only inside the model server process that needs
+  it.** The agent loop cannot leak one because it never has one.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
   switching providers is changing a URL. `grep -r "import openai\|import anthropic"
-  slife2/` matches exactly two files, both LLM servers.
+  slife2/` matches exactly two files, both model servers.
 
 The cost is one JSON-RPC hop per token on loopback. That is small and it is the
 price of the architecture; `ProgressObserver` is where a coalescing fix goes if
@@ -168,7 +175,48 @@ live instances may not share a name). It creates no port, no process, and no
 config section. Isolation, if it ever appears, belongs inside an MCP server —
 which is why the label reaches one.
 
-## 5. Compatibility notes
+## 5. Memory
+
+A component with one job: keep what was said. It does not summarise, does not
+decide what mattered, and puts nothing back into a conversation. Everything
+stored is the message list as it arrived, so a question the schema cannot answer
+today can be asked of the same rows later without a migration.
+
+**Agents are isolated by file.** `agent="jack"` reads and writes
+`jack.turn.db`, and no query can reach another agent's turns because there are
+no other agent's turns in the file. Isolation as a property of the filesystem
+beats isolation as a `WHERE` clause somebody can forget to write — and it is the
+one place `--agent` partitions anything, since the servers themselves stay
+shared.
+
+**A write failure never fails a turn.** Memory is an enhancement, not part of
+correctness: a store that is down, a disk that is full, a name that cannot be a
+filename — none is a reason for a conversation that succeeded to be reported as
+failed. Every failure is logged and swallowed.
+
+Two things about that turned out to need care:
+
+- **Absence has to be remembered, not re-tested.** The write being free
+  *logically* did not make the attempt free: building an MCP client against a
+  dead port spends a couple of seconds inside the transport's own retries, on
+  the first answer of every session. So the port is asked before the protocol —
+  a refused TCP connect returns at once — and the answer is kept for the life of
+  the process. Measured, 2.15s to 0.27s.
+- **A `ToolError` is not absence.** It means the memory server answered and
+  refused this one request — an agent name that cannot be a filename, say — and
+  that is one caller's problem rather than a reason to stop recording for
+  everyone.
+
+**`--agent` cannot become a path.** The name arrives from a command line and
+becomes a filename, so anything outside a conservative set is replaced and a
+name that reduces to nothing is refused: writing to a surprising path is a worse
+failure than saying no.
+
+Recall is deliberately absent. Retrieval is by time — `recent` — which is the
+honest thing for a component that stores without judging, and adding an index is
+a change to the file rather than a change to what was kept.
+
+## 6. Compatibility notes
 
 Two things about the 2026-07-28 revision that the code depends on, both verified
 by running against the real server rather than by reading:
@@ -185,7 +233,7 @@ by running against the real server rather than by reading:
   what happened here, and what a live call caught after the unit tests, built
   from synthetic OpenAI-shaped chunks, had all passed.
 
-## 6. The agent loop
+## 7. The agent loop
 
 `loop.py` is a pure function over a message list. It does not own the
 conversation, know what MCP is, know which provider answered, or know whether
@@ -215,7 +263,7 @@ Three load-bearing details:
   broken observer cannot end a turn — the loop swallows its exceptions, but
   deliberately lets `CancelledError` through.
 
-## 7. Deferred
+## 8. Deferred
 
 Named so they are decisions rather than oversights:
 
@@ -228,7 +276,8 @@ Named so they are decisions rather than oversights:
 - **Sender-side history trimming.** A long conversation grows without bound
   because the caller re-sends it every turn. The server could return a
   compacted history instead.
-- **Persistence.** Nothing survives a restart, on either side.
+- **Recall.** Memory stores turns and returns them by time; nothing yet
+  decides which past turns are *relevant* to the one in hand.
 - **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
   does not have to answer it. A tool that writes a file reopens the question v1
   answered with a model-driven `_approve` parameter.

@@ -27,7 +27,8 @@ That is the whole thing. `slife2` brings up the MCP servers its config needs,
 attaches to any that are already running, and starts the TUI.
 
 ```
-slife2 [--agent NAME] [--keep-servers]   ensure the servers, then run the TUI
+slife2 [--data-dir DIR] [--agent NAME] [--keep-servers]
+                                         ensure the servers, then run the TUI
 slife2 status                            what is running, and where
 slife2 down                              stop the servers this config names
 ```
@@ -38,18 +39,19 @@ per-agent. They are daemons, so closing one TUI does not interrupt another, and
 when the **last** instance exits it stops what is running. `--keep-servers`
 leaves them up instead.
 
-`--agent NAME` (default `slife2`) names the instance. It is a label: it titles
-the window, it is passed through to the agent server, and it is **exclusive** —
-two live instances may not share a name. It does not partition anything; the
-servers stay shared. Isolation, where it is ever needed, belongs inside an MCP
-server rather than in the process layout.
+`--agent NAME` (default `slife2`) names the instance. It titles the window, it
+signs the assistant's messages, and it renders the system prompt — and it is
+**exclusive**, so two live instances may not share a name. Where it *does*
+partition is memory: each agent's turns go in their own database. The servers
+themselves stay shared.
 
-Each server is also its own console script, so a process manager can run one
+Each component is also its own console script, so a process manager can run one
 without passing an argument:
 
 ```bash
 uv run slife2-agent            # the agent loop,             :8000
-uv run slife2-llm-openai       # an OpenAI-compatible model, :8001
+uv run slife2-memory           # turns, one db per agent,    :8010
+uv run slife2-llm-openai       # the OpenAI-compatible API, :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
 ```
 
@@ -57,14 +59,26 @@ In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
 conversation, **Ctrl+Q** quits.
 
-## Configuration
+## Where things live
 
-One `slife2.yaml`, read by all four processes, each taking its own section — so
-addresses are written once and cannot drift apart. It is checked in and
-documented in place, because **it holds no secrets**: every key in it is a
-`${VAR}` reference resolved at runtime. Discovery is `--config PATH` →
-`$SLIFE2_CONFIG` → `./slife2.yaml` → built-in defaults, so a checkout works
-without any of them.
+**One data directory holds everything** — the config that says what to run, the
+runtime state of what is running, and the turns they produced:
+
+```
+<data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
+  slife2.yaml                      the config; absent means the defaults
+  runtime/                         records, locks, logs — reconstructible
+  turns/                           <agent>.turn.db — not reconstructible
+```
+
+The default is the platform's data location (`%LOCALAPPDATA%\slife2` on Windows,
+`$XDG_DATA_HOME/slife2` elsewhere). The split that remains is the one that
+matters: deleting `runtime/` costs nothing, deleting `turns/` costs the memory.
+
+`slife2.yaml` is checked in and documented in place, because **it holds no
+secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
+directory with no config in it uses the built-in defaults, so a fresh install
+runs without one.
 
 Secrets are never written in the file. `${VAR}` resolves through shell env →
 [credstore](https://pypi.org/project/credstore/) → literal default, and a
@@ -76,13 +90,17 @@ fails at the API call where the message can name it, rather than at startup.
 
 ```
 slife2/
+├─ paths.py           # the one data directory, and what goes under it
 ├─ launcher.py        # which servers are needed, and attaching to the running ones
 ├─ runtime.py         # daemon records, logs, and the kernel-backed locks
 ├─ config.py          # slife2.yaml, and the ${VAR} / keyring: resolution chain
+├─ prompt.py          # the Jinja2 system prompt, rendered per turn
 ├─ messages.py        # the neutral message model — what crosses `stream_chat`
 ├─ events.py          # the turn event vocabulary, and its progress encoding
 ├─ tools.py           # the tool registry, plus `now` and `calc`
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
+├─ memory.py          # TurnStore: one SQLite file per agent
+├─ memory_server.py   # slife2-memory: `remember` and `recent`
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py         # Chunk <-> progress payload (no I/O)
@@ -91,6 +109,7 @@ slife2/
 │  ├─ openai_server.py    # slife2-llm-openai     <- imports openai
 │  └─ anthropic_server.py # slife2-llm-anthropic  <- imports anthropic
 ├─ server/server.py   # slife2-agent: FastMCP, one stateless `run_turn` tool
+├─ templates/system.j2# the system prompt the distribution ships
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation
