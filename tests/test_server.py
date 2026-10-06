@@ -23,7 +23,7 @@ from fastmcp import Client, FastMCP
 
 from slife2.config import default_config
 from slife2.events import TurnEvent, decode
-from slife2.llm.base import Chunk
+from slife2.llm.base import Chunk, Stream
 from slife2.messages import StreamChatResult, ToolCall
 from slife2.server.server import ProgressObserver, build_server
 
@@ -115,6 +115,49 @@ async def test_the_server_remembers_nothing_between_calls() -> None:
     # The second call saw only its own prompt, not the first exchange.
     for messages, _ in backend.calls:
         assert [m.role for m in messages if m.role != "system"] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_one_server_serves_two_instances_without_mixing_them() -> None:
+    """Two instances, one agent server on one port, no cross-talk.
+
+    This is why the agent server can be a single process: it keeps no state, so
+    a second instance is not a second server.  Each caller sends its whole
+    history and gets an answer computed from that history alone.
+
+    Asserted concurrently on purpose — sequentially it would pass even if the
+    server kept something, because the second call would simply overwrite it.
+    """
+
+    class EchoBackend:
+        """Answers with the prompt it was given, so mixing is detectable."""
+
+        name = "echo"
+
+        def stream(self, messages, tools):
+            prompt = messages[-1].content or ""
+
+            async def chunks():
+                yield Chunk(text=f"reply to {prompt}")
+
+            async def result():
+                return StreamChatResult(text=f"reply to {prompt}")
+
+            return Stream(chunks=chunks(), result=result())
+
+    server = build_server(config(), backend=EchoBackend())
+
+    async with Client(server) as first, Client(server) as second:
+        one, two = await asyncio.gather(
+            first.call_tool("run_turn", {"messages": [], "prompt": "alpha"}),
+            second.call_tool("run_turn", {"messages": [], "prompt": "beta"}),
+        )
+
+    assert one.data["text"] == "reply to alpha"
+    assert two.data["text"] == "reply to beta"
+    # ...and neither answer contains the other's prompt.
+    assert "beta" not in one.data["text"]
+    assert "alpha" not in two.data["text"]
 
 
 @pytest.mark.asyncio
