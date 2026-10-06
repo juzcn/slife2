@@ -128,11 +128,93 @@ def test_pid_alive_does_not_kill_the_process_it_checks() -> None:
         child.wait()
 
 
+#: Platforms with a start-token source.  The CI matrix covers all three; the
+#: guard is here so an exotic platform fails honestly rather than pretending
+#: `down` is safe there.
+_HAS_START_TOKEN = (
+    sys.platform == "win32"
+    or sys.platform.startswith("linux")
+    or sys.platform == "darwin"
+)
+
+
+@pytest.mark.skipif(not _HAS_START_TOKEN, reason="no start-token source here")
 def test_start_token_distinguishes_process_instances() -> None:
     """The defence against pid reuse: same number, different instance."""
     mine = runtime.process_start_token(os.getpid())
     assert mine is not None, "this platform should expose a start token"
     assert runtime.process_start_token(999_999) is None
+
+
+@pytest.mark.skipif(not _HAS_START_TOKEN, reason="no start-token source here")
+def test_the_start_token_is_stable_for_one_process() -> None:
+    """It identifies an instance, so it must not drift while it runs."""
+    assert runtime.process_start_token(os.getpid()) == runtime.process_start_token(
+        os.getpid()
+    )
+
+
+class FakePs:
+    """Stands in for `subprocess.run(["ps", ...])`."""
+
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        return self
+
+
+def test_the_ps_token_comes_from_lstart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The macOS path, exercised where it cannot run.
+
+    macOS has no /proc, so its token comes from `ps -o lstart=`.  Calling the
+    source directly is the only way this is covered on the Linux and Windows CI
+    jobs — otherwise a typo here would surface on one third of the matrix.
+    """
+    fake = FakePs("Mon Oct  6 11:20:03 2026\n")
+    monkeypatch.setattr(runtime.subprocess, "run", fake)
+
+    token = runtime._start_token_ps(4321)
+    assert token, "a stamp should produce a token"
+    assert fake.calls[0][0] == "ps"
+    assert "lstart=" in fake.calls[0]
+    assert fake.calls[0][-1] == "4321"
+
+    # Stable for the same stamp...
+    assert runtime._start_token_ps(4321) == token
+    # ...and different for a process that started a second later, which is the
+    # whole point: a recycled pid gets a different value.
+    monkeypatch.setattr(runtime.subprocess, "run", FakePs("Mon Oct  6 11:20:04 2026\n"))
+    assert runtime._start_token_ps(4321) != token
+
+
+def test_the_ps_token_is_absent_when_ps_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No output means no answer, not an empty-string token that would match."""
+    monkeypatch.setattr(runtime.subprocess, "run", FakePs(""))
+    assert runtime._start_token_ps(4321) is None
+
+
+def test_the_ps_token_survives_ps_being_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine without `ps` degrades to "cannot prove", which is safe."""
+
+    def explode(*args, **kwargs):
+        raise FileNotFoundError("no ps here")
+
+    monkeypatch.setattr(runtime.subprocess, "run", explode)
+    assert runtime._start_token_ps(4321) is None
+
+
+def test_every_platform_has_a_token_source() -> None:
+    """A platform with no source silently disables `down`, so name them."""
+    assert set(runtime._START_TOKEN_SOURCES) == {"win32", "linux"}
+    # Everything else falls through to `ps`, which macOS and the BSDs have.
+    assert runtime._start_token_ps is not None
 
 
 def test_same_process_rejects_a_record_with_no_token() -> None:

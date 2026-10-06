@@ -412,6 +412,80 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def _start_token_windows(pid: int) -> str | None:
+    """The kernel's creation time for a process, as a FILETIME pair."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(wintypes.DWORD()),
+            ctypes.byref(wintypes.DWORD()),
+        )
+        return f"{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
+    except OSError:
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _start_token_linux(pid: int) -> str | None:
+    """Field 22 of `/proc/<pid>/stat`, the process start time in clock ticks."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        # Field 2 is the command name and may contain spaces or brackets, so
+        # the split happens after the last ')' rather than on whitespace.
+        after_name = stat.rsplit(")", 1)[1].split()
+        return after_name[19]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _start_token_ps(pid: int) -> str | None:
+    """`ps -o lstart=`, for macOS and the BSDs, which have no /proc.
+
+    Second-resolution, and worth being precise about what that costs: a false
+    match needs a recycled pid belonging to a process that started in the
+    *same second* as the daemon we recorded.  The impostor necessarily started
+    after our daemon exited, so that requires our daemon to have lived under a
+    second — and these are servers, not one-shots.
+
+    The alternative is reading `kinfo_proc` through ctypes, whose layout is
+    exactly the thing that changes between macOS releases.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    stamp = result.stdout.strip()
+    return _digest(stamp) if stamp else None
+
+
+#: One token source per platform.  Split out rather than inlined into a single
+#: branchy function so each is callable directly, which is the only way the
+#: macOS path can be tested on the other two thirds of the CI matrix.
+_START_TOKEN_SOURCES = {
+    "win32": _start_token_windows,
+    "linux": _start_token_linux,
+}
+
+
 def process_start_token(pid: int) -> str | None:
     """An identifier for *this instance* of a pid, or None if unavailable.
 
@@ -426,44 +500,10 @@ def process_start_token(pid: int) -> str | None:
     """
     if pid <= 0:
         return None
-
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return None
-        try:
-            created = wintypes.FILETIME()
-            exited = wintypes.FILETIME()
-            kernel32.GetProcessTimes(
-                handle,
-                ctypes.byref(created),
-                ctypes.byref(exited),
-                ctypes.byref(wintypes.DWORD()),
-                ctypes.byref(wintypes.DWORD()),
-            )
-            return f"{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
-        except OSError:
-            return None
-        finally:
-            kernel32.CloseHandle(handle)
-
-    if sys.platform.startswith("linux"):
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            # Field 22 is starttime, but field 2 is the command name and may
-            # contain spaces or brackets, so the split happens after the last
-            # ')' rather than on whitespace.
-            after_name = stat.rsplit(")", 1)[1].split()
-            return after_name[19]
-        except (OSError, IndexError, ValueError):
-            return None
-
-    return None
+    source = _START_TOKEN_SOURCES.get(sys.platform)
+    if source is not None:
+        return source(pid)
+    return _start_token_ps(pid)  # macOS, the BSDs, anything else
 
 
 def same_process(record: ServerRecord) -> bool:
