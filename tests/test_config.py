@@ -18,6 +18,22 @@ from slife2.config import (
 )
 
 
+def test_the_checked_in_config_equals_the_built_in_defaults() -> None:
+    """`slife2.yaml` claims every value in it is the built-in default.
+
+    That claim is what lets the file be deleted without changing behaviour, and
+    it is only true while two places agree — the defaults in `config.py` and the
+    values in the YAML.  Changing a model name is a one-line edit in each, which
+    is exactly the kind of pair that drifts.
+    """
+    from pathlib import Path
+
+    checked_in = Path(__file__).resolve().parents[1] / "slife2.yaml"
+    if not checked_in.is_file():  # a wheel install has no repository
+        pytest.skip("no checked-in slife2.yaml here")
+    assert load(checked_in) == default_config()
+
+
 def test_defaults_point_each_process_at_its_own_port() -> None:
     """The servers must not collide on a port out of the box."""
     cfg = default_config()

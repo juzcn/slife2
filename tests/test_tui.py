@@ -31,7 +31,7 @@ def make_app(respond, *, connect_error: Exception | None = None) -> SlifeApp:
     return SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
-        model_label="deepseek/deepseek-chat",
+        model_label="deepseek/deepseek-flash",
         agent="jack",
     )
 
@@ -363,7 +363,7 @@ async def test_status_bar_shows_the_agent_the_model_and_the_tokens() -> None:
         bar = status(app)
 
     assert "jack" in bar
-    assert "deepseek/deepseek-chat" in bar
+    assert "deepseek/deepseek-flash" in bar
     assert "42 tokens" in bar
 
 

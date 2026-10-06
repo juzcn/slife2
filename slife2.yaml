@@ -45,7 +45,7 @@ servers:
 providers:
   deepseek:
     server: llm-openai
-    model: deepseek-chat
+    model: deepseek-flash
   claude:
     server: llm-anthropic
     model: claude-sonnet-5-5

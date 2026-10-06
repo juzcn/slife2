@@ -250,7 +250,7 @@ def default_config() -> Config:
     }
     providers = {
         "deepseek": ProviderSettings(
-            model="deepseek-chat", url=servers["llm-openai"].url, server="llm-openai"
+            model="deepseek-flash", url=servers["llm-openai"].url, server="llm-openai"
         ),
         "claude": ProviderSettings(
             model="claude-sonnet-5-5",
