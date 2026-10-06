@@ -333,7 +333,18 @@ def build_server(
         result = await loop.run_turn(working, user, ProgressObserver(ctx))
         new_messages = [m.to_wire() for m in working[offset:]]
 
-        await remember_turn(agent, prompt, model, result, new_messages)
+        # What gets *stored* starts one message later than what gets returned.
+        # `working[offset]` is the user's message — the loop appends it first —
+        # and its content is where an attached image lives, as a base64 data
+        # URL.  Keeping it would put a multi-megabyte payload in the database
+        # and re-read it on every `recent`, to remember something already
+        # recorded in full: `prompt` is a column, and the picture is not
+        # something a later turn can be shown anyway.
+        #
+        # The caller still gets it.  The conversation it carries has to contain
+        # what the user said, or the model would lose the other half of every
+        # exchange.
+        await remember_turn(agent, prompt, model, result, new_messages[1:])
 
         return {
             "text": result.text,

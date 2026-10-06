@@ -14,6 +14,7 @@ that progress notifications survive HTTP.  That one is `integration`.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from dataclasses import replace
 
@@ -192,6 +193,13 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     assert jack.is_file(), "the turn was not recorded"
     rows = sqlite3.connect(jack).execute("SELECT agent, prompt FROM turns").fetchall()
     assert rows == [("jack", "what is 2+2?")]
+
+    # The stored messages are the *answer* side of the turn.  The user's own
+    # message is not among them — its text is the `prompt` column, and its
+    # content is where an attached image would be.
+    stored = sqlite3.connect(jack).execute("SELECT messages FROM turns").fetchone()[0]
+    roles = [m["role"] for m in json.loads(stored)]
+    assert "user" not in roles, roles
 
     # ...and no other agent's database was created along the way.
     assert [p.name for p in turns_dir().glob("*.db")] == ["jack.turn.db"]
