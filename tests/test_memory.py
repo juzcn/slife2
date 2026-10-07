@@ -34,13 +34,16 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
     *column* to a table that already has rows is the thing this module has no
     mechanism for.  So `summary` and `tags` exist now, empty, rather than
     arriving with the feature that fills them.
+
+    One divergence from v1: there is no `user_message`.  v1 keeps the user's
+    half beside the assistant's; here the turn is one list and the user's
+    message is its first element, so a column for it would be a second copy.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     with sqlite3.connect(store.path) as connection:
         columns = [row[1] for row in connection.execute("PRAGMA table_info(turn)")]
 
     assert columns == [
-        "user_message",
         "messages",
         "summary",
         "tags",
@@ -57,10 +60,12 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
 def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     """Every value that went in comes out, unmangled."""
     store = TurnStore(tmp_path / "jack.turn.db")
-    messages = [{"role": "assistant", "content": "It is 42."}]
+    messages = [
+        {"role": "user", "content": "what is 2+2?"},
+        {"role": "assistant", "content": "It is 42."},
+    ]
 
     turn_id = store.save_turn(
-        user_message="what is 2+2?",
         messages=messages,
         channel="human",
         who_helped="jack",
@@ -75,7 +80,6 @@ def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     assert store.count() == 1
     (record,) = store.recent()
     assert record.turn_id == turn_id
-    assert record.user_message == "what is 2+2?"
     assert record.messages == messages
     assert record.channel == "human"
     assert record.who_helped == "jack"
@@ -96,10 +100,17 @@ def test_recent_is_newest_first(tmp_path) -> None:
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     for text in ("first", "second", "third"):
-        store.save_turn(user_message=text, messages=[])
+        store.save_turn(messages=[{"role": "user", "content": text}])
 
-    assert [r.user_message for r in store.recent()] == ["third", "second", "first"]
-    assert [r.user_message for r in store.recent(limit=2)] == ["third", "second"]
+    assert [r.messages[0]["content"] for r in store.recent()] == [
+        "third",
+        "second",
+        "first",
+    ]
+    assert [r.messages[0]["content"] for r in store.recent(limit=2)] == [
+        "third",
+        "second",
+    ]
 
 
 def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
@@ -110,14 +121,14 @@ def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     """
     path = tmp_path / "jack.turn.db"
     store = TurnStore(path)
-    store.save_turn(user_message="first", messages=[{"role": "assistant", "c": 1}])
-    store.save_turn(user_message="second", messages=[])
+    store.save_turn(messages=[{"role": "assistant", "c": 1}])
+    store.save_turn(messages=[{"role": "assistant", "c": 2}])
 
     with sqlite3.connect(path) as connection:
         connection.execute("UPDATE turn SET messages = 'not json' WHERE rowid = 1")
 
     records = store.recent()
-    assert [r.user_message for r in records] == ["second", "first"]
+    assert [r.messages for r in records] == [[{"role": "assistant", "c": 2}], []]
     assert records[1].messages == []
 
 
@@ -160,14 +171,18 @@ def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None
     emoji_as_escaped = json.loads('"\\ud83d\\ude00"')
 
     turn_id = store.save_turn(
-        user_message="an emoji: " + emoji_as_escaped,
-        messages=[{"role": "assistant", "content": "half a character: \ud800"}],
+        messages=[
+            {"role": "user", "content": "an emoji: " + emoji_as_escaped},
+            {"role": "assistant", "content": "half a character: \ud800"},
+        ],
     )
 
     assert turn_id == 1
     (record,) = store.recent()
-    assert record.user_message == "an emoji: \U0001f600"
-    assert record.messages == [{"role": "assistant", "content": "half a character: �"}]
+    assert record.messages == [
+        {"role": "user", "content": "an emoji: \U0001f600"},
+        {"role": "assistant", "content": "half a character: �"},
+    ]
 
 
 def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
@@ -179,7 +194,7 @@ def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     jack, jill = store_for("jack"), store_for("jill")
 
-    jack.save_turn(user_message="mine", messages=[])
+    jack.save_turn(messages=[{"role": "user", "content": "mine"}])
 
     assert jack.path != jill.path
     assert jack.count() == 1

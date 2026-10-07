@@ -221,13 +221,12 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     row = (
         sqlite3.connect(jack)
         .execute(
-            "SELECT user_message, messages, summary, tags, created_at, completed_at,"
+            "SELECT messages, summary, tags, created_at, completed_at,"
             " channel, who_helped, what_model, token_count, context_tokens FROM turn"
         )
         .fetchone()
     )
     (
-        user_message,
         stored,
         summary,
         tags,
@@ -240,7 +239,6 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
         context_tokens,
     ) = row
 
-    assert user_message == "what is 2+2?"
     assert who_helped == "jack"
     assert channel == "human"
     assert created_at and completed_at
@@ -254,11 +252,16 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     # not the config's default, which is a model that never ran.
     assert what_model == "fake"
 
-    # The stored messages are the *answer* side of the turn.  The user's own
-    # message is not among them — its text is `user_message`, and its content is
-    # where an attached image would be.
-    roles = [m["role"] for m in json.loads(stored)]
-    assert roles == ["assistant", "tool", "assistant"], roles
+    # The stored messages are the whole turn, opening with what the user said —
+    # there is no column for it, so this entry is the only place it is kept.
+    turns_messages = json.loads(stored)
+    assert [m["role"] for m in turns_messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert turns_messages[0]["content"] == "what is 2+2?"
 
     # ...and no other agent's database was created along the way.
     assert [p.name for p in turns_dir().glob("*.db")] == ["jack.turn.db"]

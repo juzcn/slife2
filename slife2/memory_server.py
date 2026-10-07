@@ -64,7 +64,6 @@ def build_server(config: Config) -> FastMCP:
     @mcp.tool
     async def remember(
         agent: str,
-        user_message: str,
         messages: list[dict[str, Any]],
         token_count: int = 0,
         context_tokens: int = 0,
@@ -84,12 +83,11 @@ def build_server(config: Config) -> FastMCP:
         Args:
             agent: Whose memory.  It names the database file, so agents are
                 isolated from each other by construction.
-            user_message: What the user said, as its own field.  Not the first
-                element of `messages` — see the note on the two halves below.
-            messages: The assistant/tool half of the turn, as the agent loop
-                returned it.  A `role: user` entry here would duplicate
-                `user_message`, and would be where an attached image's base64
-                payload ended up.
+            messages: The whole turn, as the agent loop returned it: the user's
+                message first, then every assistant message, tool call and
+                result.  Store it as it is.  What the user said is in there as
+                the first entry, and an attached image's base64 payload rides
+                along on it.
             token_count: What the turn cost, summed over every model call in it.
             context_tokens: The last model call's prompt plus completion — how
                 large the conversation had become, which is what the next
@@ -109,7 +107,6 @@ def build_server(config: Config) -> FastMCP:
         store = store_for(agent)
         turn_id = await _on_thread(
             store.save_turn,
-            user_message=user_message,
             messages=messages,
             token_count=token_count,
             context_tokens=context_tokens,

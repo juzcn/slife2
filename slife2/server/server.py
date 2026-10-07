@@ -173,7 +173,6 @@ def build_server(
 
     async def remember_turn(
         agent: str,
-        user_message: str,
         messages: list[dict],
         result,
         *,
@@ -213,7 +212,6 @@ def build_server(
                 "remember",
                 {
                     "agent": agent,
-                    "user_message": user_message,
                     "messages": messages,
                     "token_count": result.usage.total_tokens,
                     "context_tokens": result.last_usage.total_tokens,
@@ -376,21 +374,18 @@ def build_server(
         result = await loop.run_turn(working, user, ProgressObserver(ctx))
         new_messages = [m.to_wire() for m in working[offset:]]
 
-        # What gets *stored* starts one message later than what gets returned.
-        # `working[offset]` is the user's message — the loop appends it first —
-        # and its content is where an attached image lives, as a base64 data
-        # URL.  Keeping it would put a multi-megabyte payload in the database
-        # and re-read it on every `recent`, to remember something already
-        # recorded in full: `prompt` is a column, and the picture is not
-        # something a later turn can be shown anyway.
+        # The turn goes to disk exactly as it comes back: `new_messages` is what
+        # the caller gets and what the store is handed, so there is no second
+        # shape to keep in step.  The user's message is `new_messages[0]` — the
+        # loop appends it first — and with it there the record reads back on its
+        # own, as a conversation rather than as an answer whose question is
+        # missing.
         #
-        # The caller still gets it.  The conversation it carries has to contain
-        # what the user said, or the model would lose the other half of every
-        # exchange.
+        # The cost is deliberate: a turn carrying an image stores the base64
+        # payload in the database, and every `recent` re-reads it.
         await remember_turn(
             agent,
-            prompt,
-            new_messages[1:],
+            new_messages,
             result,
             model=answered_by,
             channel=channel,

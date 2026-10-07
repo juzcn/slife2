@@ -1,20 +1,23 @@
 """Persisted turns, one SQLite file per agent.
 
-The schema is slife v1's.  This module originally had a `turns` table of its own
-invention — `(id, agent, created_at, prompt, messages, model, usage, steps)` —
-and it was the wrong shape in ways that only show up later: one column for two
-different token counts, one column for two different moments, and no place for
-the reasoning at all.  v1's design has answers to those, arrived at by use.
+The schema is slife v1's, minus one column.  This module originally had a `turns`
+table of its own invention — `(id, agent, created_at, prompt, messages, model,
+usage, steps)` — and it was the wrong shape in ways that only show up later: one
+column for two different token counts, one column for two different moments, and
+no place for the reasoning at all.  v1's design has answers to those, arrived at
+by use.  The exception is `user_message`, which v1 keeps beside the assistant's
+half and which is not a column here at all — see below.
 
 **One row is one turn**: what the user said, and everything the agent did about
 it.  Turns are independent — no session grouping, no lifecycle.  Nothing here
 deletes one.
 
-**The user's message has its own column**, and is *not* inside `messages`.  That
-split is load-bearing: `messages` is the assistant/tool half as OpenAI-shaped
-JSON, `user_message` is the text somebody typed.  An attached image lives on the
-user message as a base64 data URL, so keeping it out of `messages` is also what
-keeps the payload out of the database.
+**A turn is one list of messages**, the user's own first, in the shape the model
+saw it — OpenAI-shaped JSON in a single column.  There is no separate column for
+what the user said: it is `messages[0]`, and the turn therefore reads back on its
+own, as a conversation rather than as an answer whose question is missing.  An
+attached image is a base64 data URL on that first entry and is stored with the
+rest, so the payload is in the database and every `recent` reads it.
 
 **Agents are isolated by file.**  `<agent>.turn.db` — there is no agent column
 and no query that can reach another agent's turns, because there is no other
@@ -103,7 +106,9 @@ class TurnRecord:
     #: The SQLite rowid.  There is no `id` column: rowid is already monotonic
     #: with creation, and a second one would be a second thing to keep in step.
     turn_id: int
-    user_message: str
+    #: The whole turn, the user's message first.  Nothing here singles that
+    #: message out: it is `messages[0]`, and a reader that wants what was asked
+    #: reads it there, where the model read it too.
     messages: list[dict[str, Any]] = field(default_factory=list)
     #: A retrieval hook the model may write later.  Nothing writes it yet.
     summary: str = ""
@@ -128,7 +133,6 @@ class TurnRecord:
     def to_wire(self) -> dict[str, Any]:
         return {
             "turn_id": self.turn_id,
-            "user_message": self.user_message,
             "messages": self.messages,
             "summary": self.summary,
             "tags": self.tags,
@@ -144,12 +148,10 @@ class TurnRecord:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turn (
-    -- What the user said.  Its own column, not inside `messages`: it is the
-    -- thing searched and embedded separately, and it is where an attachment
-    -- lives, which is why the payload stays out of the message JSON.
-    user_message   TEXT    NOT NULL DEFAULT '',
-
-    -- The assistant/tool half of the turn, as OpenAI-shaped message JSON.
+    -- The whole turn as OpenAI-shaped message JSON, the user's message first.
+    -- An attachment rides on that first entry as a base64 data URL, so the
+    -- payload lives here with everything else rather than in a column of its
+    -- own.
     messages       TEXT    NOT NULL DEFAULT '[]',
 
     -- Retrieval hooks for later.  Nothing writes them yet; they are here
@@ -278,7 +280,6 @@ class TurnStore:
     def save_turn(
         self,
         *,
-        user_message: str,
         messages: list[dict[str, Any]],
         channel: str = "",
         who_helped: str = "",
@@ -294,7 +295,7 @@ class TurnStore:
         the boundary between the live conversation and the permanent record, and
         the rule about what is worth keeping belongs on this side of it.
 
-        The text is passed through `_storable` first, for the reason given
+        The document is passed through `_storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of
         what was in it.  `ensure_ascii=False` is kept — the alternative escapes
         every non-Latin character, and a Chinese conversation should not pay six
@@ -303,11 +304,10 @@ class TurnStore:
         """
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO turn (user_message, messages, created_at, completed_at,"
+                "INSERT INTO turn (messages, created_at, completed_at,"
                 " channel, who_helped, what_model, token_count, context_tokens)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    _storable(user_message),
                     _storable(
                         json.dumps(compact_tool_results(messages), ensure_ascii=False)
                     ),
@@ -379,7 +379,6 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
     """
     return TurnRecord(
         turn_id=int(row["turn_id"]),
-        user_message=str(row["user_message"]),
         messages=_loads(row["messages"], []),
         summary=str(row["summary"] or ""),
         tags=str(row["tags"] or ""),

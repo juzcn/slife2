@@ -25,14 +25,16 @@ pytestmark = pytest.mark.unit
 async def test_a_turn_goes_in_and_comes_back(tmp_path, monkeypatch) -> None:
     """The write and the read are one contract, so they are tested as one."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    messages = [{"role": "assistant", "content": "It is 42."}]
+    messages = [
+        {"role": "user", "content": "what is 2+2?"},
+        {"role": "assistant", "content": "It is 42."},
+    ]
 
     async with Client(build_server(default_config())) as client:
         stored = await client.call_tool(
             "remember",
             {
                 "agent": "jack",
-                "user_message": "what is 2+2?",
                 "messages": messages,
                 "token_count": 245,
                 "context_tokens": 135,
@@ -45,7 +47,6 @@ async def test_a_turn_goes_in_and_comes_back(tmp_path, monkeypatch) -> None:
     assert stored.data["turn_id"] == 1
     (record,) = read.data
     assert record["turn_id"] == 1
-    assert record["user_message"] == "what is 2+2?"
     assert record["messages"] == messages
     assert record["who_helped"] == "jack"
     assert record["what_model"] == "deepseek/deepseek-flash"
@@ -70,5 +71,5 @@ async def test_an_agent_name_that_cannot_be_a_file_is_refused(
         with pytest.raises(ToolError):
             await client.call_tool(
                 "remember",
-                {"agent": "..", "user_message": "hello", "messages": []},
+                {"agent": "..", "messages": []},
             )
