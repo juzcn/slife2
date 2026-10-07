@@ -2,9 +2,12 @@
 
 A component with one job: keep what was said.  It does not summarise, does not
 decide what mattered, and does not put anything back into a conversation — the
-caller does that, if it ever does.  Everything stored is the message list as it
-arrived, so a question this component cannot answer today can be asked of the
-same rows later without a migration.
+caller does that, if it ever does.  A turn is stored as it happened — with one
+deliberate exception, an oversized tool result, which is kept as an announced
+head-and-tail digest rather than in full (see `slife2.memory`) — so a question
+this component cannot answer today can be asked of the same rows later without a
+migration: search, embedding and summarising are each a table the schema has a
+place for and nothing here builds yet.
 
 **Agents are isolated by file.**  `agent="jack"` reads and writes
 `jack.turn.db`; there is no query that can reach another agent's turns, because
@@ -65,42 +68,63 @@ def build_server(config: Config) -> FastMCP:
     @mcp.tool
     async def remember(
         agent: str,
-        prompt: str,
+        user_message: str,
         messages: list[dict[str, Any]],
-        model: str = "",
-        usage: dict[str, Any] | None = None,
-        steps: int = 0,
+        token_count: int = 0,
+        context_tokens: int = 0,
+        who_helped: str = "",
+        what_model: str = "",
+        channel: str = "",
+        created_at: str | None = None,
+        completed_at: str | None = None,
     ) -> dict[str, Any]:
         """Persist one turn.
 
-        A turn is one exchange: the user's prompt and everything the loop did
+        A turn is one exchange: what the user said, and everything the agent did
         about it — assistant messages, tool calls and their results — in the
-        order they happened.  Store them as they are; this is a record, not an
+        order they happened.  Store it as it is; this is a record, not an
         interpretation.
 
         Args:
             agent: Whose memory.  It names the database file, so agents are
                 isolated from each other by construction.
-            prompt: What the user said.
-            messages: The turn's messages, as returned by the agent loop.
-            model: Which model answered, as `provider/model`.
-            usage: Token counts, if known.
-            steps: How many model calls the turn took.
+            user_message: What the user said, as its own field.  Not the first
+                element of `messages` — see the note on the two halves below.
+            messages: The assistant/tool half of the turn, as the agent loop
+                returned it.  A `role: user` entry here would duplicate
+                `user_message`, and would be where an attached image's base64
+                payload ended up.
+            token_count: What the turn cost, summed over every model call in it.
+            context_tokens: The last model call's prompt plus completion — how
+                large the conversation had become, which is what the next
+                request resends.  A different question from `token_count`: one
+                is a bill, the other is what the context window has to hold.
+            who_helped: The agent that answered.
+            what_model: Which model answered, as `provider/model`.
+            channel: Where the turn came in from — `human`, or a peer's id.
+                Empty when the caller has nothing to say about it.
+            created_at: When the user pressed enter.  Defaults to now, which is
+                the same moment to within a hop for a caller on loopback.
+            completed_at: When the assistant finished.  Defaults to now.
 
         Returns:
-            `id` of the stored turn and the file it went into.
+            `turn_id` of the stored turn, and the file it went into.
         """
         store = store_for(agent)
         turn_id = await _on_thread(
-            store.remember,
-            prompt=prompt,
+            store.save_turn,
+            user_message=user_message,
             messages=messages,
-            model=model,
-            usage=usage,
-            steps=steps,
+            token_count=token_count,
+            context_tokens=context_tokens,
+            who_helped=who_helped,
+            what_model=what_model,
+            channel=channel,
+            created_at=created_at,
+            completed_at=completed_at,
         )
         logger.info("stored turn %s for %s", turn_id, agent)
-        return {"id": turn_id, "database": str(store.path)}
+        return {"turn_id": turn_id, "database": str(store.path)}
 
     @mcp.tool
     async def recent(agent: str, limit: int = 10) -> list[dict[str, Any]]:

@@ -104,7 +104,14 @@ class TurnFinished:
     """
 
     text: str
+    #: The turn's total across every model call — what it cost.
     usage: Usage
+    #: The last call's own usage: how large the conversation had become, which
+    #: is what a "how full is the context" display is asking about.  Carried
+    #: separately because `usage` cannot answer it — on a turn that took three
+    #: steps, `usage` is the sum of three calls and reads as a context nearly
+    #: three times its real size.
+    last_usage: Usage
     steps: int
     stop_reason: str
 
@@ -182,13 +189,16 @@ def encode(event: TurnEvent) -> str:
                 "n": result_chars,
                 "ms": elapsed_ms,
             }
-        case TurnFinished(text, usage, steps, stop_reason):
+        case TurnFinished(text, usage, last_usage, steps, stop_reason):
             payload = {
                 "t": "done",
                 "d": text,
                 "steps": steps,
                 "stop": stop_reason,
                 "usage": usage.to_wire(),
+                # One per turn, not one per token, so the extra key costs
+                # nothing that the short-key convention above is protecting.
+                "last": last_usage.to_wire(),
             }
         case _:
             # `assert_never` rather than a bare raise: it is the idiom the type
@@ -242,6 +252,10 @@ def decode(message: str) -> TurnEvent | None:
             return TurnFinished(
                 text=str(payload.get("d") or ""),
                 usage=Usage.from_wire(payload.get("usage")),
+                # An absent key reads as zero, which is the honest answer to
+                # "how full is the context" when nobody said — and is what a
+                # server from before this key existed sends.
+                last_usage=Usage.from_wire(payload.get("last")),
                 steps=int(payload.get("steps") or 0),
                 stop_reason=str(payload.get("stop") or ""),
             )

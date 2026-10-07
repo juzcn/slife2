@@ -48,8 +48,15 @@ def make_app(respond, *, connect_error: Exception | None = None) -> SlifeApp:
     )
 
 
-def answering(text: str, *, tokens: int = 0):
-    """A scripted client that streams `text` one character at a time."""
+def answering(text: str, *, tokens: int = 0, context: int | None = None):
+    """A scripted client that streams `text` one character at a time.
+
+    `tokens` is what the turn cost and `context` is the size it left the
+    conversation at.  They are the same number unless a test says otherwise,
+    which is the truth for a turn that took one model call — and a test that
+    cares about the difference is the only way to tell a display that reads the
+    right one from a display that reads the other.
+    """
 
     def respond(prompt: str, on_event):
         for char in text:
@@ -58,6 +65,9 @@ def answering(text: str, *, tokens: int = 0):
             TurnFinished(
                 text=text,
                 usage=Usage(completion_tokens=tokens),
+                last_usage=Usage(
+                    completion_tokens=tokens if context is None else context
+                ),
                 steps=1,
                 stop_reason="stop",
             )
@@ -155,7 +165,13 @@ def reasoning_turn():
         on_event(ThinkingDelta("let me think about this"))
         on_event(TextDelta("the answer"))
         on_event(
-            TurnFinished(text="the answer", usage=Usage(), steps=1, stop_reason="stop")
+            TurnFinished(
+                text="the answer",
+                usage=Usage(),
+                last_usage=Usage(),
+                steps=1,
+                stop_reason="stop",
+            )
         )
         return "the answer"
 
@@ -499,6 +515,29 @@ async def test_the_context_is_the_latest_turn_not_a_running_total() -> None:
         await submit(pilot, "two")
         # 30 twice would be 60%, which is what accumulating would show.
         assert "(30.0%)" in status(app)
+
+
+async def test_the_context_is_the_last_call_not_the_turn_s_bill() -> None:
+    """What a turn *cost* and how big it *is* are two numbers, and only one of
+    them belongs in the status bar.
+
+    A turn that called a tool twice made three model calls: the bill is the sum
+    of all three, while the conversation is the size of the last one.  Showing
+    the bill reads as a context near three times fuller than it is — and it is
+    the tempting mistake, because `usage` is the number that is right there.
+    """
+    client = FakeAgentClient(answering("hello", tokens=245, context=135))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="m",
+        context_window=1000,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "135 (13.5%)" in status(app)
+        # ...while the line under the answer still reports what the turn cost.
+        assert "245 tokens" in shown(app)
 
 
 async def test_an_at_path_is_read_and_sent_with_the_prompt(tmp_path) -> None:

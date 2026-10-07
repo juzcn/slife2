@@ -27,10 +27,10 @@ import sys
 import time
 from collections.abc import Generator
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from slife2.clock import now
 from slife2.paths import runtime_dir
 
 #: How long to wait for another launcher to finish starting a server.
@@ -148,7 +148,7 @@ class ServerRecord:
             start_token=process_start_token(pid) or "",
             config=config,
             version=version,
-            started_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            started_at=now(),
         )
 
 
@@ -239,7 +239,7 @@ class AgentClaim:
             name=name,
             pid=pid,
             start_token=process_start_token(pid) or "",
-            started_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            started_at=now(),
         )
 
 

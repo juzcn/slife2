@@ -25,7 +25,7 @@ from fastmcp import Client, FastMCP
 from slife2.config import default_config
 from slife2.events import TurnEvent, decode
 from slife2.llm.base import Chunk, Stream
-from slife2.messages import StreamChatResult, ToolCall
+from slife2.messages import StreamChatResult, ToolCall, Usage
 from slife2.server.server import ProgressObserver, build_server
 
 pytestmark = pytest.mark.unit
@@ -169,6 +169,11 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     calls is a component that does nothing; and written to *that agent's* file,
     because isolation between agents is the reason the file is per-agent in the
     first place.
+
+    Every column is checked, not just the two obvious ones.  A column that is
+    silently empty because nobody wired it up looks exactly like a column that
+    is empty because there was nothing to put in it, and only an assertion can
+    tell those apart.
     """
     import sqlite3
 
@@ -176,30 +181,84 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     from slife2.paths import DATA_ENV_VAR, turns_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    cfg = config()
 
-    async with Client(build_memory(config())) as memory_client:
-        server = build_server(
-            config(),
-            backend=answering("hello"),
-            memory_client=memory_client,
-        )
+    # Two model calls, of different sizes, so the two token columns can be told
+    # apart: one is the turn's total, the other is only the last call's.
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "6*7"}),),
+                usage=Usage(prompt_tokens=100, completion_tokens=10),
+                stop_reason="tool_calls",
+            ),
+        ),
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="It is 42.",
+                usage=Usage(prompt_tokens=130, completion_tokens=5),
+                stop_reason="stop",
+            ),
+        ),
+    )
+
+    async with Client(build_memory(cfg)) as memory_client:
+        server = build_server(cfg, backend=backend, memory_client=memory_client)
         async with Client(server) as client:
             await client.call_tool(
                 "run_turn",
-                {"messages": [], "prompt": "what is 2+2?", "agent": "jack"},
+                {
+                    "messages": [],
+                    "prompt": "what is 2+2?",
+                    "agent": "jack",
+                    "channel": "human",
+                },
             )
 
     jack = turns_dir() / "jack.turn.db"
     assert jack.is_file(), "the turn was not recorded"
-    rows = sqlite3.connect(jack).execute("SELECT agent, prompt FROM turns").fetchall()
-    assert rows == [("jack", "what is 2+2?")]
+    row = (
+        sqlite3.connect(jack)
+        .execute(
+            "SELECT user_message, messages, summary, tags, created_at, completed_at,"
+            " channel, who_helped, what_model, token_count, context_tokens FROM turn"
+        )
+        .fetchone()
+    )
+    (
+        user_message,
+        stored,
+        summary,
+        tags,
+        created_at,
+        completed_at,
+        channel,
+        who_helped,
+        what_model,
+        token_count,
+        context_tokens,
+    ) = row
+
+    assert user_message == "what is 2+2?"
+    assert who_helped == "jack"
+    assert channel == "human"
+    assert created_at and completed_at
+    assert created_at <= completed_at
+    # The bill for the turn against the size it had grown to by the end.
+    assert (token_count, context_tokens) == (245, 135)
+    # Retrieval hooks: nothing writes them yet, and the schema is where the
+    # later feature finds them rather than an ALTER TABLE.
+    assert (summary, tags) == ("", "")
+    # What actually answered, which with an injected backend is the backend —
+    # not the config's default, which is a model that never ran.
+    assert what_model == "fake"
 
     # The stored messages are the *answer* side of the turn.  The user's own
-    # message is not among them — its text is the `prompt` column, and its
-    # content is where an attached image would be.
-    stored = sqlite3.connect(jack).execute("SELECT messages FROM turns").fetchone()[0]
+    # message is not among them — its text is `user_message`, and its content is
+    # where an attached image would be.
     roles = [m["role"] for m in json.loads(stored)]
-    assert "user" not in roles, roles
+    assert roles == ["assistant", "tool", "assistant"], roles
 
     # ...and no other agent's database was created along the way.
     assert [p.name for p in turns_dir().glob("*.db")] == ["jack.turn.db"]

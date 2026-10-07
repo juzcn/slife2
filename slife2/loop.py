@@ -44,6 +44,16 @@ class TurnResult:
     usage: Usage
     steps: int
     stop_reason: str
+    #: The **last** model call's own usage: the conversation as that call saw
+    #: it, which is the size the next request re-sends.  Not derivable from
+    #: `usage`, which is a sum over calls and so cannot say how big any one of
+    #: them was.  Last, and with no default, so a four-argument construction
+    #: fails loudly rather than binding something else.
+    #:
+    #: A turn cut off at the step limit is the one place this is not quite the
+    #: next request's size: the final batch of tool results was appended after
+    #: that call, so those tokens are not in it.
+    last_usage: Usage
 
     @property
     def hit_step_limit(self) -> bool:
@@ -89,6 +99,7 @@ class AgentLoop:
         specs = self._tools.specs
         total_usage = Usage()
         last_text = ""
+        last_usage = Usage()
 
         for step in range(1, self._max_steps + 1):
             stream = self._backend.stream(messages, specs)
@@ -102,6 +113,7 @@ class AgentLoop:
             result = await stream.result
             total_usage = total_usage + result.usage
             last_text = result.text
+            last_usage = result.usage
             messages.append(
                 Message(
                     role="assistant",
@@ -116,6 +128,7 @@ class AgentLoop:
                     TurnFinished(
                         text=result.text,
                         usage=total_usage,
+                        last_usage=last_usage,
                         steps=step,
                         stop_reason=result.stop_reason or "stop",
                     ),
@@ -123,6 +136,7 @@ class AgentLoop:
                 return TurnResult(
                     text=result.text,
                     usage=total_usage,
+                    last_usage=last_usage,
                     steps=step,
                     stop_reason=result.stop_reason or "stop",
                 )
@@ -154,6 +168,7 @@ class AgentLoop:
             TurnFinished(
                 text=last_text,
                 usage=total_usage,
+                last_usage=last_usage,
                 steps=self._max_steps,
                 stop_reason="max_steps",
             ),
@@ -161,6 +176,7 @@ class AgentLoop:
         return TurnResult(
             text=last_text,
             usage=total_usage,
+            last_usage=last_usage,
             steps=self._max_steps,
             stop_reason="max_steps",
         )

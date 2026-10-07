@@ -35,6 +35,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.clock import now
 from slife2.config import (
     DEFAULT_AGENT,
     Config,
@@ -171,7 +172,15 @@ def build_server(
         return memory_conn
 
     async def remember_turn(
-        agent: str, prompt: str, model: str, result, new_messages: list[dict]
+        agent: str,
+        user_message: str,
+        messages: list[dict],
+        result,
+        *,
+        model: str,
+        channel: str,
+        created_at: str,
+        completed_at: str,
     ) -> None:
         """Persist a turn, and never let that decision cost the turn.
 
@@ -186,6 +195,13 @@ def build_server(
         be a filename, say — and that is one caller's problem rather than
         everyone's.  Anything else is the transport, and the transport going
         away is what `memory` remembers.
+
+        Two token counts go over, and they are not interchangeable.  `usage` is
+        the turn's total across however many model calls it took — the bill.
+        `last_usage` is the final call's own, which is how much conversation
+        existed when the turn ended: the number the *next* request would resend,
+        and so the one that says how close the context window is to full.  A sum
+        cannot answer that, which is why the loop reports both.
         """
         nonlocal memory_off
         client = await memory()
@@ -197,11 +213,18 @@ def build_server(
                 "remember",
                 {
                     "agent": agent,
-                    "prompt": prompt,
-                    "messages": new_messages,
-                    "model": model,
-                    "usage": result.usage.to_wire(),
-                    "steps": result.steps,
+                    "user_message": user_message,
+                    "messages": messages,
+                    "token_count": result.usage.total_tokens,
+                    "context_tokens": result.last_usage.total_tokens,
+                    "who_helped": agent,
+                    # What `loop_for` resolved to, not the reference as typed:
+                    # a caller may name a bare provider or nothing at all, and
+                    # neither says which model wrote the answer.
+                    "what_model": model,
+                    "channel": channel,
+                    "created_at": created_at,
+                    "completed_at": completed_at,
                 },
             )
         except ToolError as exc:
@@ -220,10 +243,18 @@ def build_server(
             max_steps=config.agent.max_steps,
         )
 
-    async def loop_for(reference: str) -> AgentLoop:
-        """The loop that talks to whatever `provider/model` names."""
+    async def loop_for(reference: str) -> tuple[AgentLoop, str]:
+        """The loop for `provider/model`, and the model that turned out to be.
+
+        The second half is for the record, and it is the *resolved* model rather
+        than the reference as typed: a caller may name a bare provider, or
+        nothing at all and mean the config's default, and neither answers the
+        question a stored turn is later asked — which model wrote this.  An
+        injected backend answers with its own label, because in that case the
+        thing that ran genuinely is not anything the config names.
+        """
         if backend is not None:
-            return make_loop(backend)
+            return make_loop(backend), backend.name
 
         name, provider, model = config.resolve(reference)
         if name not in model_backends:
@@ -240,7 +271,7 @@ def build_server(
                 client, model.model, provider=name, name=f"{name}/{model.model}"
             )
             logger.info("model %s via %s", reference, config.server(provider.api).url)
-        return make_loop(model_backends[name])
+        return make_loop(model_backends[name]), f"{name}/{model.model}"
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -273,6 +304,7 @@ def build_server(
         agent: str = DEFAULT_AGENT,
         model: str = "",
         images: list[str] | None = None,
+        channel: str = "",
     ) -> dict[str, Any]:
         """Run one agent turn.
 
@@ -301,12 +333,22 @@ def build_server(
                 unless the model's config lists `image` under `input` — silently
                 dropping an attachment somebody made is worse than saying the
                 model cannot read it.
+            channel: Where this turn came in from — `human`, or a peer's id.
+                Recorded with the turn and used for nothing else; the caller is
+                the only party that knows, which is why it is a parameter rather
+                than something this server infers.
 
         Returns:
             `text` (the final answer), `new_messages` (append these to the
             conversation you sent), `usage`, `steps` and `stop_reason`.
         """
-        loop = await loop_for(model)
+        # First statement, not last: this is when the turn was asked for.  The
+        # gap to `completed_at` is how long somebody waited, so everything that
+        # takes time — including `loop_for`, which opens a connection on a cold
+        # cache — has to fall inside it.
+        started_at = now()
+
+        loop, answered_by = await loop_for(model)
         logger.debug("turn from agent %s on %s", agent, model or "the default")
         working = [Message.from_wire(m) for m in messages]
         user = _with_images(prompt, images or [], config, model)
@@ -344,7 +386,16 @@ def build_server(
         # The caller still gets it.  The conversation it carries has to contain
         # what the user said, or the model would lose the other half of every
         # exchange.
-        await remember_turn(agent, prompt, model, result, new_messages[1:])
+        await remember_turn(
+            agent,
+            prompt,
+            new_messages[1:],
+            result,
+            model=answered_by,
+            channel=channel,
+            created_at=started_at,
+            completed_at=now(),
+        )
 
         return {
             "text": result.text,

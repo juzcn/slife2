@@ -139,10 +139,27 @@ class MCPAgentClient:
             if event is not None:
                 on_event(event)
 
+        payload: dict[str, object] = {
+            "messages": self._history,
+            "prompt": prompt,
+            "agent": self._agent,
+            # Every turn this client sends came from somebody typing, which is
+            # the whole of what the channel records.  A second kind of caller
+            # gets a second client rather than a flag on this one.
+            "channel": "human",
+        }
+        # Omitted rather than sent empty: an empty string and an absent key mean
+        # the same thing to the server — "you choose" — and a payload that says
+        # nothing once is clearer than one that says it twice.
+        if self._model:
+            payload["model"] = self._model
+        if images:
+            payload["images"] = images
+
         try:
             result = await self._client.call_tool(
                 "run_turn",
-                {"messages": self._history, "prompt": prompt, "agent": self._agent},
+                payload,
                 progress_handler=on_progress,
                 # Passing a progress handler is what makes the SDK attach a
                 # progress token, and `report_progress` on the server is a

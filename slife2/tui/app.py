@@ -266,11 +266,15 @@ class SlifeApp(App[None]):
                 result_chars=chars,
             ):
                 self._transcript.add_tool_end(call_id, ok, preview_text, chars)
-            case TurnFinished(usage=usage, steps=steps):
-                # Replaced, not accumulated: this is how big the conversation
-                # is now, which is the only thing a context percentage can be a
-                # percentage of.
-                self._context_tokens = usage.total_tokens
+            case TurnFinished(usage=usage, last_usage=last_usage, steps=steps):
+                # Two numbers, two questions.  `last_usage` is how large the
+                # conversation had become by the end — the only thing a context
+                # percentage can be a percentage of.  `usage` is the turn's bill
+                # across every model call it took, which is what the line under
+                # the answer reports.  Taking the bill for the size reads as a
+                # context two or three times fuller than it is on any turn that
+                # called a tool, and it was what this did.
+                self._context_tokens = last_usage.total_tokens
                 self._steps = steps
                 self._transcript.set_usage(usage.total_tokens)
                 self._refresh_status()

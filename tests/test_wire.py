@@ -53,7 +53,16 @@ EVENTS = [
         result_chars=4,
         elapsed_ms=0,
     ),
-    TurnFinished(text="done", usage=Usage(10, 20), steps=2, stop_reason="stop"),
+    # A turn's bill and the size it left the conversation at are different
+    # numbers, so the fixture makes them different and the round trip has to
+    # keep them apart.
+    TurnFinished(
+        text="done",
+        usage=Usage(10, 20),
+        last_usage=Usage(7, 3),
+        steps=2,
+        stop_reason="stop",
+    ),
 ]
 
 
