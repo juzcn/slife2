@@ -70,7 +70,7 @@ from slife2.runtime import (
 #: wrong.  The model backends need no entry here — their module *and* their
 #: advertised name both come from the `api` they speak, which is already a
 #: closed set.
-AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "run_turn")
+AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 MEMORY_SERVER = ("slife2.memory_server", MEMORY_SERVER_NAME, "remember")
 
 #: The tool every model server answers to, and how they are named.  One tool

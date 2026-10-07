@@ -151,7 +151,7 @@ def tui_url(config: Config, override: str | None = None) -> str:
     they are one word apart in the config — `agent.server` and a provider's
     `server` — which is exactly how they get swapped.  Connecting to a model
     server fails with "not a slife2 agent server", because that server answers
-    `stream_chat` and has never heard of `run_turn`.
+    `stream_chat` and has never heard of `send_message`.
 
     Named and separate so the choice can be asserted on rather than read out of
     a long `main`.

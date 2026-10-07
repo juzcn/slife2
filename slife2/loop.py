@@ -86,8 +86,10 @@ class AgentLoop:
         """Run one turn, appending to `messages` as it goes.
 
         `messages` is mutated in place: the loop appends the user message, every
-        assistant message, and every tool result.  The caller owns the list and
-        therefore owns the conversation's lifetime and bounds.
+        assistant message, and every tool result.  Whoever owns the list owns the
+        conversation's lifetime and bounds — which is the agent server now, and
+        was the TUI before it.  Either way the loop is not the owner: it is
+        handed a list and asked to advance it.
 
         `user` is what the user said — text, or content parts when something came
         with it.  It is appended here rather than by the caller because the loop

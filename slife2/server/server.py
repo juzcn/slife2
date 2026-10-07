@@ -1,34 +1,54 @@
-"""slife2-agent — the agent loop, as a stateless MCP server.
+"""slife2-agent — the agent loop, as an MCP server that owns its conversations.
 
 The middle of the chain.  It is a server to the TUI and a client to an LLM
 server, and it holds nothing else: no provider SDK is importable here, no API key
 is readable here, and the only thing it knows about the model behind it is a URL
 and a model name from the config.
 
-**This server keeps no state.**  It has no conversation store, no session map,
-and no lock.  A turn is a function: history in, history out.  The caller sends
-what was said and gets back what to remember.
+**This server keeps the conversations**, and it addresses each one by
+`(agent, subagent)` — the same pair every other server in this system keys its
+own state by.  `subagent=""` is the agent's own conversation; anything else is a
+worker it is running.  A caller submits a user message under that key and gets
+that turn's answer back; the surface is two tools, `send_message` and `reset`.
 
-That is a deliberate reading of how MCP works now — `Context.session_id` is not
-a usable identity (measured: it is a fresh uuid per request on both the
-in-memory and the HTTP transport, because the client never sends
-`mcp-session-id`), and building conversation memory on transport sessions means
-the memory is only as stable as a header.  Making the caller own the history
-removes the dependency entirely, and takes three things with it:
+**A key is created when it is first used, and it never expires.**  That is the
+difference from the handle this server used to mint: an id could go stale — a
+daemon restart, an idle window — and every caller then had to carry a "your loop
+is gone" path.  A name cannot go stale.  The idle sweep still runs, but it only
+reclaims memory; nothing a caller can observe depends on it.
 
-* a store that could grow without bound,
-* a per-conversation lock, because two turns can no longer race over one list,
-* the repair-on-cancellation logic, which existed only to stop an interrupted
-  turn leaving a corrupt shared history.  There is no shared history to corrupt:
-  a cancelled turn simply returns nothing, and the caller's history is whatever
-  it already had.
+**The key travels with the call.**  Everything this server asks of a peer is
+asked on behalf of the same `(agent, subagent)` — the memory write and the model
+call both carry it — so a hop is never anonymous.  What the model servers do
+*not* do with it is keep the conversation: see DESIGN.md §3 for why the history
+has to live here, on the side of the hop that does not speak a wire protocol.
+
+Two consequences of owning the history are paid for here rather than avoided,
+because they are the price of the state:
+
+* **A per-key lock**, so two turns cannot race over one list.  `send_message`
+  takes it; a second caller waits, and that wait *is* the inbox.  Distinct keys
+  hold distinct locks, so two agents' conversations run at the same time.
+* **Repair on cancellation.**  A cancelled turn can leave the list holding an
+  assistant message whose tool calls are only partly answered, which is a 400
+  from every provider.  `run_turn_into` truncates back to the user's own message,
+  inside the lock.
+
+What statelessness bought and is now given up deliberately: a conversation store
+that can grow without bound.  See DESIGN.md §8 — trimming is the next thing, not
+a thing this cut pretends to have solved.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import AsyncGenerator
+import time
+from collections import deque
+from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
@@ -37,19 +57,20 @@ from fastmcp.exceptions import ToolError
 from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
-    DEFAULT_AGENT,
     MEMORY_SERVER_NAME,
     Config,
     find_config_path,
     load,
 )
-from slife2.events import TurnEvent, encode
+from slife2.events import TurnEvent, TurnObserver, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
-from slife2.loop import AgentLoop
+from slife2.loop import AgentLoop, TurnResult
 from slife2.mcp_server import (
+    ClientId,
     close_server,
     configure_logging,
+    describe,
     house_server,
     open_server,
     parse_serve_args,
@@ -69,12 +90,24 @@ SERVER_NAME = "slife2-agent"
 #: see `slife2.mcp_server.open_server`.
 MEMORY_TIMEOUT_SECONDS = 10.0
 
+#: How long a conversation survives with nothing asked of it.  This is
+#: housekeeping, not a lifetime a caller can observe: the sweep only reclaims
+#: memory, and the next message under the same key starts the state again.
+LOOP_IDLE_SECONDS = 30 * 60.0
+
+#: How many messages one loop may have waiting.  The client's per-call timeout
+#: starts when the call is made, not when its turn starts, so an unbounded queue
+#: is an unbounded wait — and a wait longer than the timeout closes the stream
+#: and cancels the turn, which is the very way a message gets lost.  A bound is
+#: what keeps "queued" from meaning "eventually dropped".
+MAX_QUEUED = 32
+
 INSTRUCTIONS = (
-    "A conversational agent. Call `run_turn` with the conversation so far and "
-    "a new prompt; assistant output arrives as progress notifications on the "
-    "same request, and the result carries the final answer plus the messages "
-    "to append to the conversation. This server keeps no state: the caller "
-    "owns the history."
+    "A conversational agent. Call `send_message` with an agent name and what was "
+    "said; assistant output arrives as progress notifications on that call, and "
+    "the result carries the final answer. The conversation is kept here and is "
+    "addressed by `(agent, subagent)` — send only what is new, and use `reset` to "
+    "start one over."
 )
 
 
@@ -103,6 +136,66 @@ class ProgressObserver:
         await self._ctx.report_progress(self._count, None, encode(event))
 
 
+@dataclass
+class Pending:
+    """A message submitted to a loop whose turn has not started yet.
+
+    It is held here, and *not* appended to the loop's messages, until its turn
+    begins.  `AgentLoop.run_turn` re-reads the message list at every step, so a
+    message appended early would be seen by the model mid-turn — steering that
+    nobody asked for, arriving silently.
+    """
+
+    prompt: str
+    images: list[str]
+    channel: str
+
+
+@dataclass
+class Outcome:
+    """What one turn did, filled in even when the turn was cancelled.
+
+    `messages` is a copy taken after any repair, so it is the slice this turn is
+    answerable for: the whole exchange, or the user's message alone when the
+    turn was cut off.
+    """
+
+    messages: list[Message] = field(default_factory=list)
+    result: TurnResult | None = None
+    started_at: str = ""
+    completed_at: str = ""
+
+
+@dataclass
+class Loop:
+    """One conversation, and everything that makes it a thing.
+
+    `subagent` is part of the identity rather than a label on it: two keys differ
+    exactly when their pairs differ, and the pair is what the lock, the inbox and
+    the memory write are each scoped to.
+    """
+
+    agent: str
+    subagent: str
+    model: str
+    messages: list[Message]
+    lock: asyncio.Lock
+    last_used: float
+    inbox: deque[Pending] = field(default_factory=deque)
+
+    @property
+    def records(self) -> bool:
+        """Whether this conversation's turns are written to memory.
+
+        A worker's are not.  A subagent is a means to an end inside one turn of
+        its parent's conversation, and recording its round trips would file them
+        under a conversation they were never part of — which is the one thing the
+        record must not do, since the whole point of it is to be readable as a
+        conversation.
+        """
+        return not self.subagent
+
+
 def build_server(
     config: Config,
     *,
@@ -118,16 +211,37 @@ def build_server(
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
     of every turn — and not once at startup either, because which model is
-    wanted is a property of the *request*: the caller names one, and this server
-    serves every caller.  A model nobody asks for is a connection nobody opens.
+    wanted is a property of the *loop*: a caller names one when it opens one, and
+    this server serves every caller.  A model nobody asks for is a connection
+    nobody opens.
     """
-    model_backends: dict[str, LLMBackend] = {}
+    #: Cached per model *name*, because the connection behind one is expensive
+    #: and a conversation's model never changes.  `MCPBackend` rather than the
+    #: protocol, because only this one can carry a key — an injected backend is
+    #: a test's, and has no model server to name a conversation to.
+    model_backends: dict[str, MCPBackend] = {}
     clients: dict[str, Client] = {}
     #: The memory client once we have one — injected, or opened on first use.
     memory_conn: Client | None = memory_client
     #: Whether *we* opened it, and so whether we should close it.  An injected
     #: client belongs to whoever made it.
     memory_owned = memory_client is None
+
+    #: Every conversation, by key.  One entry per `(agent, subagent)` that has
+    #: been used, which is what makes isolation a property of the key rather than
+    #: a rule somebody has to remember to apply.
+    loops: dict[ClientId, Loop] = {}
+
+    #: Serialises the two lazy caches below.  Without it, two turns that start
+    #: together both miss and both open a connection, and the loser is
+    #: overwritten in `clients` — which makes it unreachable to the lifespan's
+    #: cleanup and leaks it along with its task group.  Two loops on one default
+    #: model is the ordinary case now, so this is not a hypothetical race.
+    opening = asyncio.Lock()
+
+    #: Writes detached from a cancelled turn.  Kept so they are not collected
+    #: mid-flight, and drained on the way out.
+    background: set[asyncio.Task[None]] = set()
 
     async def memory() -> Client:
         """The client for the memory server, opened on first use.
@@ -139,24 +253,30 @@ def build_server(
         A memory server that is not there **raises**, like every other peer in
         this system.  `slife2.mcp_server.open_server` is where that rule lives
         and why; what matters here is that this component is not the exception
-        to it.  It used to be — a server found missing was remembered as missing
-        and every turn afterwards ran on without a record — which made the same
-        situation fatal at startup and silent a minute later.
+        to it.
         """
         nonlocal memory_conn
-        if memory_conn is None:
-            memory_conn = await open_server(
-                config.server("memory").url,
-                name=MEMORY_SERVER_NAME,
-                fallback_tool="remember",
-                timeout=MEMORY_TIMEOUT_SECONDS,
-            )
-        return memory_conn
+        # Fast path outside the lock: once a loop has been opened there is no
+        # await between the check and the use, and the event loop is
+        # single-threaded, so reading it unlocked is sound.
+        if memory_conn is not None:
+            return memory_conn
+        async with opening:
+            if memory_conn is None:
+                memory_conn = await open_server(
+                    config.server("memory").url,
+                    name=MEMORY_SERVER_NAME,
+                    fallback_tool="remember",
+                    timeout=MEMORY_TIMEOUT_SECONDS,
+                )
+            assert memory_conn is not None  # open_server returns one or raises
+            return memory_conn
 
     async def remember_turn(
         agent: str,
+        subagent: str,
         messages: list[dict],
-        result,
+        result: TurnResult | None,
         *,
         model: str,
         channel: str,
@@ -165,25 +285,26 @@ def build_server(
     ) -> None:
         """Persist a turn.
 
+        **This is called for every turn of a loop that has memory**, cancelled
+        ones included, and `result` is None exactly when the turn did not
+        finish.  The rule is deliberately not "remember to record the cancel
+        path": a write that is conditional on how a turn ended is a write
+        somebody can forget to make, and the failure it produces is a
+        conversation in the transcript that the database has never heard of.
+
         A store that is *gone* fails the turn, and that is the system's rule
         rather than this function's — `slife2.mcp_server.open_server` is where a
         missing peer is decided to be a broken system rather than a degraded
-        one, and nothing here softens it.  It is the answer the CLI already
-        gives at startup, where a component that will not come up stops `slife2`
-        before it draws anything: a component that goes missing later is that
-        situation arriving late, not a new one to paper over.
-
-        A `ToolError` is left alone, and it is a different thing.  It means the
-        memory server answered and refused *this* request — an agent name that
-        cannot be a filename, say — which is one caller's problem rather than a
-        sign that anything is down.
+        one.  A `ToolError` is left alone, and it is a different thing: it means
+        the memory server answered and refused *this* request — an agent name
+        that cannot be a filename, say — which is one caller's problem rather
+        than a sign that anything is down.
 
         Two token counts go over, and they are not interchangeable.  `usage` is
         the turn's total across however many model calls it took — the bill.
         `last_usage` is the final call's own, which is how much conversation
-        existed when the turn ended: the number the *next* request would resend,
-        and so the one that says how close the context window is to full.  A sum
-        cannot answer that, which is why the loop reports both.
+        existed when the turn ended: the number the *next* request would resend.
+        A cancelled turn has neither, and reports zero rather than a guess.
         """
         client = await memory()
 
@@ -192,12 +313,13 @@ def build_server(
                 "remember",
                 {
                     "agent": agent,
+                    "subagent": subagent,
                     "messages": messages,
-                    "token_count": result.usage.total_tokens,
-                    "context_tokens": result.last_usage.total_tokens,
+                    "token_count": result.usage.total_tokens if result else 0,
+                    "context_tokens": result.last_usage.total_tokens if result else 0,
                     "who_helped": agent,
-                    # What `loop_for` resolved to, not the reference as typed:
-                    # a caller may name a bare provider or nothing at all, and
+                    # What the loop was opened on, not the reference as typed: a
+                    # caller may name a bare provider or nothing at all, and
                     # neither says which model wrote the answer.
                     "what_model": model,
                     "channel": channel,
@@ -219,48 +341,211 @@ def build_server(
             max_steps=config.agent.max_steps,
         )
 
-    async def loop_for(reference: str) -> tuple[AgentLoop, str]:
-        """The loop for `provider/model`, and the model that turned out to be.
+    async def loop_for(reference: str, client_id: ClientId) -> AgentLoop:
+        """The agent loop for a conversation's model, bound to that conversation.
 
-        The second half is for the record, and it is the *resolved* model rather
-        than the reference as typed: a caller may name a bare provider, or
-        nothing at all and mean the config's default, and neither answers the
-        question a stored turn is later asked — which model wrote this.  An
-        injected backend answers with its own label, because in that case the
-        thing that ran genuinely is not anything the config names.
+        A conversation's model is fixed when it starts, so this is asked the same
+        question every turn — which is why the connection is cached per model
+        server, and why the cache is taken under a lock.
+
+        What is *not* cached is the key.  `with_key` hands back a view of the
+        shared backend carrying this conversation's `(agent, subagent)`, so the
+        key reaches the model server on every call without splitting the cache
+        per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return make_loop(backend), backend.name
+            return make_loop(backend)
 
         name, provider, model = config.resolve(reference)
-        if name not in model_backends:
-            url = config.server(provider.api).url
-            if url not in clients:
-                # One client per *server*, not per provider: a server speaks one
-                # wire format for every provider that uses it.
-                client, _ = await open_backend(
-                    url,
+        async with opening:
+            if name not in model_backends:
+                url = config.server(provider.api).url
+                if url not in clients:
+                    # One client per *server*, not per provider: a server speaks
+                    # one wire format for every provider that uses it.
+                    client, _ = await open_backend(
+                        url,
+                        model.model,
+                        provider=name,
+                        name=f"{name}/{model.model}",
+                        # Checked against the name the protocol's server
+                        # advertises, so a URL pointed at the wrong backend is
+                        # caught here rather than at the first turn.
+                        server_name=API_SERVER_NAMES[provider.api],
+                    )
+                    clients[url] = client
+                model_backends[name] = MCPBackend(
+                    clients[url],
                     model.model,
                     provider=name,
                     name=f"{name}/{model.model}",
-                    # Checked against the name the protocol's server advertises,
-                    # so a URL pointed at the wrong backend is caught here rather
-                    # than at the first turn.
-                    server_name=API_SERVER_NAMES[provider.api],
                 )
-                clients[url] = client
-            client = clients[url]
-            model_backends[name] = MCPBackend(
-                client, model.model, provider=name, name=f"{name}/{model.model}"
+                logger.info(
+                    "model %s via %s", reference, config.server(provider.api).url
+                )
+        return make_loop(model_backends[name].with_key(*client_id))
+
+    # --- the registry --------------------------------------------------------
+
+    def resolved_model(reference: str) -> str:
+        """The model a conversation started on, as `provider/model`.
+
+        Read once, when the conversation starts, and kept: a conversation's model
+        is a property of the conversation, so a later message naming a different
+        one is not obeyed — it is what `reset` is for.
+        """
+        name, _, settings = config.resolve(reference)
+        return f"{name}/{settings.model}"
+
+    def opening_messages(agent: str) -> list[Message]:
+        """What a conversation starts with: its system prompt, and nothing else.
+
+        Rendered when the conversation starts rather than once at startup,
+        because the agent name is a property of the *key* — the server is shared,
+        so two agents are two names asking one process.
+        """
+        system = render_system_prompt(config.agent.system_prompt, agent_name=agent)
+        return [Message(role="system", content=system)] if system else []
+
+    def reap() -> None:
+        """Drop conversations nothing has asked anything of for a while.
+
+        Memory only.  Nothing a caller can observe depends on this — a key is
+        recreated on the next message that uses it — which is the whole reason
+        the sweep is allowed to be this casual.
+
+        A conversation with a turn in flight is never idle, whatever its
+        timestamp says: its own turn refreshes `last_used` when it finishes.
+        """
+        cutoff = time.monotonic() - LOOP_IDLE_SECONDS
+        for client, loop in list(loops.items()):
+            if loop.lock.locked():
+                continue
+            if loop.last_used < cutoff:
+                logger.info("reaping idle conversation %s", describe(client))
+                loops.pop(client, None)
+
+    def conversation(agent: str, subagent: str, model: str) -> Loop:
+        """The conversation for this key, started if it is not running.
+
+        Created on demand rather than opened by a separate call, because a key
+        that cannot go stale is worth more than the round trip it costs: there is
+        no handle to carry, no lifetime to observe, and no "not found" for a
+        caller to handle.  The idle sweep may have dropped the state; the caller
+        cannot tell, and does not have to.
+        """
+        client = (agent, subagent)
+        loop = loops.get(client)
+        if loop is None:
+            loop = Loop(
+                agent=agent,
+                subagent=subagent,
+                model=resolved_model(model),
+                messages=opening_messages(agent),
+                lock=asyncio.Lock(),
+                last_used=time.monotonic(),
             )
-            logger.info("model %s via %s", reference, config.server(provider.api).url)
-        return make_loop(model_backends[name]), f"{name}/{model.model}"
+            loops[client] = loop
+            logger.debug(
+                "started %s on %s", describe(client), model or "the default model"
+            )
+        loop.last_used = time.monotonic()
+        return loop
+
+    def detach(coro: Coroutine[Any, Any, None]) -> None:
+        """Run a write that must outlive the cancellation that prompted it.
+
+        Measured against the real Streamable HTTP transport: from a cancelled
+        handler a plain `await` is cancelled again at its next checkpoint, so a
+        record written that way is simply lost.  A task created here is outside
+        the cancelled scope and does land.  We cannot wait for it, so its
+        failures are logged rather than dropped on the floor.
+        """
+        task = asyncio.ensure_future(coro)
+        background.add(task)
+
+        def done(finished: asyncio.Task[None]) -> None:
+            background.discard(finished)
+            if not finished.cancelled() and (exc := finished.exception()):
+                logger.warning("recording a cancelled turn failed: %s", exc)
+
+        task.add_done_callback(done)
+
+    def recorded_model(loop: Loop) -> str:
+        """What to write in the `what_model` column.
+
+        The loop's own model, except when a backend was injected — in which case
+        the thing that ran genuinely is not anything the config names, and
+        writing the config's model would be recording a model that never
+        answered.  This is the one place that distinction has to be made, so it
+        is one function rather than a condition repeated at each call site.
+        """
+        return backend.name if backend is not None else loop.model
+
+    async def record(loop: Loop, item: Pending, outcome: Outcome) -> None:
+        """Write this turn to memory if this loop has any.
+
+        Called *after* the lock is released: it is a network call, and a queued
+        turn waiting on the memory server is a wait with no reason behind it.
+        """
+        if not loop.records or not outcome.messages:
+            # No memory, or a caller cancelled while queued — in which case its
+            # turn never started and there is nothing that happened to record.
+            return
+        await remember_turn(
+            loop.agent,
+            loop.subagent,
+            [message.to_wire() for message in outcome.messages],
+            outcome.result,
+            model=recorded_model(loop),
+            channel=item.channel,
+            created_at=outcome.started_at or outcome.completed_at,
+            completed_at=outcome.completed_at,
+        )
+
+    async def run_turn_into(
+        loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
+    ) -> None:
+        """One turn, and the repair a cancellation needs.
+
+        `outcome` is filled in a `finally`, *after* the repair, so it always
+        holds what this turn is answerable for: the whole exchange, or the
+        user's message alone when the turn was cut off.
+        """
+        snapshot = len(loop.messages)
+        outcome.started_at = now()
+        user = _with_images(item.prompt, item.images, config, loop.model)
+        agent_loop = await loop_for(loop.model, (loop.agent, loop.subagent))
+        try:
+            outcome.result = await agent_loop.run_turn(loop.messages, user, observer)
+        except asyncio.CancelledError:
+            # The repair, and it has to happen *here* — inside the lock, before
+            # it is released.  Releasing first and truncating after would let
+            # the next queued turn start on a list that is not yet well formed,
+            # and one of the states a cancellation can land in is invalid on the
+            # wire rather than merely untidy: an assistant message whose tool
+            # calls are only partly answered is a 400 from every provider.
+            #
+            # `+ 1` is load-bearing.  The loop appends the user's message
+            # itself, so truncating to the snapshot would delete the message
+            # this whole arrangement exists to not lose.
+            del loop.messages[snapshot + 1 :]
+            raise
+        finally:
+            outcome.messages = list(loop.messages[snapshot:])
+            outcome.completed_at = now()
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
         try:
             yield {}
         finally:
+            # A detached write exists because a turn was cancelled; letting the
+            # process exit on top of it would lose the record it was written
+            # for.  Bounded, because a store that has stopped answering must not
+            # hold up the shutdown.
+            if background:
+                await asyncio.wait(list(background), timeout=5.0)
             for client in clients.values():
                 await close_server(client)
             clients.clear()
@@ -268,121 +553,158 @@ def build_server(
             if memory_owned and memory_conn is not None:
                 await close_server(memory_conn)
 
+            # `loops` is deliberately **not** cleared here.  It is state the
+            # process owns, and this hook is not the process's lifetime: over
+            # the in-memory transport FastMCP runs the lifespan once per client
+            # session, so clearing here would empty the registry every time a
+            # caller disconnected — which is precisely what a loop is supposed
+            # to survive.  The dictionary goes away with the process, which is
+            # the only lifetime it has.
+
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
 
     @mcp.tool
-    async def run_turn(
-        messages: list[dict[str, Any]],
+    async def send_message(
+        agent: str,
         prompt: str,
         ctx: Context,
-        agent: str = DEFAULT_AGENT,
+        subagent: str = "",
         model: str = "",
         images: list[str] | None = None,
         channel: str = "",
     ) -> dict[str, Any]:
-        """Run one agent turn.
+        """Say something to a conversation and get that turn's answer.
+
+        The conversation is addressed by `(agent, subagent)` and **starts on the
+        first message sent to a key** — there is nothing to open and no id to
+        carry.  Sending to a key that has been idle for a long time simply starts
+        it again; that is not an error and a caller cannot tell it happened.
 
         Assistant output streams back as `notifications/progress` on this
         request, one notification per chunk.  The returned `text` is the final
         answer and is authoritative — a client that ignores the progress stream
         still gets the whole thing.
 
-        The conversation lives with the caller.  Send back whatever the previous
-        result's `new_messages` contained, in order; the server remembers
-        nothing between calls.
+        **A message sent to a busy conversation waits rather than displacing
+        anything.**  Turns on one key run one at a time, in the order they were
+        submitted, and a queued message becomes a turn of its own when its place
+        comes up.  Nothing is dropped and nothing is cancelled — up to a bound,
+        because a client's call timeout does not know it is waiting.  Different
+        keys do not wait for each other at all.
 
         Args:
-            messages: The conversation so far, as previously returned.  Treat
-                these as opaque — pass back what you were given.
+            agent: Whose conversation.  It renders the system prompt and is the
+                name its turns are recorded under.
             prompt: What the user just said.
-            agent: Who is asking.  This server treats it as opaque beyond the
-                system prompt it renders — it is the designated place for
-                per-agent behaviour, because isolation between agents belongs
-                inside an MCP server rather than in the process layout.
-            model: Which model to use, as `provider/model`.  Left out, the
-                config's `default` is used.  Per request rather than per server
-                because one agent server serves every caller, and two instances
-                may well want different models.
-            images: Images to send with the prompt, each a `data:` URL.  Refused
-                unless the model's config lists `image` under `input` — silently
+            subagent: Which of that agent's conversations.  Empty — the default —
+                is the agent's own, the one a person is watching.  Anything else
+                is a worker the agent is running: a separate conversation, with
+                its own history and its own inbox, whose turns are **not** written
+                to memory.  A subagent is a means to an end inside one turn of its
+                parent's conversation, and filing its round trips in the record
+                would file them under a conversation they were never part of.
+            model: Which model this conversation runs on, as `provider/model`.
+                Left out, the config's `default` is used.  Read when the
+                conversation starts and kept — a later message naming a different
+                model is ignored, because the model, the system prompt and the
+                recorded name are all properties of the conversation.  Change it
+                by resetting the conversation.
+            images: Images to send with it, each a `data:` URL.  Refused unless
+                the model's config lists `image` under `input` — silently
                 dropping an attachment somebody made is worse than saying the
                 model cannot read it.
-            channel: Where this turn came in from — `human`, or a peer's id.
-                Recorded with the turn and used for nothing else; the caller is
-                the only party that knows, which is why it is a parameter rather
-                than something this server infers.
+            channel: Where this turn came in from — `human`, or the key of
+                whoever sent it.  Recorded with the turn and used for nothing
+                else; the caller is the only party that knows, which is why it is
+                a parameter rather than something this server infers.
 
         Returns:
-            `text` (the final answer), `new_messages` (append these to the
-            conversation you sent), `usage`, `steps` and `stop_reason`.
+            `text` (the final answer), `usage`, `steps`, `stop_reason`, and the
+            `model` that answered — which a bare provider or an empty reference
+            does not otherwise reveal.
         """
-        # First statement, not last: this is when the turn was asked for.  The
-        # gap to `completed_at` is how long somebody waited, so everything that
-        # takes time — including `loop_for`, which opens a connection on a cold
-        # cache — has to fall inside it.
-        started_at = now()
-
-        # Asked before anything is spent on the turn.  A memory server that is
-        # not there is a broken system rather than a degraded one, and the
-        # moment to find that out is *before* a model call has been paid for —
-        # not at the write, when the answer exists and has nowhere to go.
+        # Asked before anything is spent.  A memory server that is not there is a
+        # broken system rather than a degraded one, and the moment to find that
+        # out is *before* the first model call has been paid for — not at the
+        # write, when the answer exists and has nowhere to go.
         await memory()
+        reap()
+        loop = conversation(agent, subagent, model)
 
-        loop, answered_by = await loop_for(model)
-        logger.debug("turn from agent %s on %s", agent, model or "the default")
-        working = [Message.from_wire(m) for m in messages]
-        user = _with_images(prompt, images or [], config, model)
+        if len(loop.inbox) >= MAX_QUEUED:
+            raise ToolError(
+                f"{describe((agent, subagent))} already has {len(loop.inbox)} "
+                f"messages waiting, which is the limit.  Wait for them, or reset "
+                f"the conversation."
+            )
 
-        # The system prompt comes from this server's config rather than the
-        # caller's history, so it is applied afresh each turn and can be changed
-        # by editing the config.  Skipped when the caller already supplied one,
-        # so this cannot produce two.
-        #
-        # Rendered here rather than at startup because the agent name arrives
-        # *with the request*: this server is shared, so two instances are two
-        # names asking one process, and a prompt rendered once would give the
-        # first caller's name to everybody.
-        if not (working and working[0].role == "system"):
-            # Imported as a function rather than as the module: the tool's
-            # own parameter is called `prompt`, and `prompt.render(...)` would
-            # be asking a string to render itself.
-            system = render_system_prompt(config.agent.system_prompt, agent_name=agent)
-            if system:
-                working.insert(0, Message(role="system", content=system))
+        item = Pending(prompt=prompt, images=list(images or []), channel=channel)
+        loop.inbox.append(item)
+        outcome = Outcome()
+        try:
+            try:
+                async with loop.lock:
+                    # Ours, and its turn is starting now.  A message waiting in
+                    # the inbox is *not* in `messages`: `AgentLoop.run_turn`
+                    # re-reads the list every step, so an early append would be
+                    # seen by the running turn as steering nobody asked for.
+                    with contextlib.suppress(ValueError):
+                        loop.inbox.remove(item)
+                    await run_turn_into(loop, item, ProgressObserver(ctx), outcome)
+            except asyncio.CancelledError:
+                if outcome.messages:
+                    # Our turn had started, so it happened, and a turn that
+                    # happened is recorded — see `remember_turn`.  Detached,
+                    # because a plain await here is cancelled again.
+                    detach(record(loop, item, outcome))
+                raise
+            else:
+                await record(loop, item, outcome)
+        finally:
+            # Cancelled while queued: the turn never started, so there is
+            # nothing to record, but the inbox entry must not be left behind.
+            loop.last_used = time.monotonic()
+            with contextlib.suppress(ValueError):
+                loop.inbox.remove(item)
 
-        # Everything from here on is what the caller has to remember.
-        offset = len(working)
-        result = await loop.run_turn(working, user, ProgressObserver(ctx))
-        new_messages = [m.to_wire() for m in working[offset:]]
-
-        # The turn goes to disk exactly as it comes back: `new_messages` is what
-        # the caller gets and what the store is handed, so there is no second
-        # shape to keep in step.  The user's message is `new_messages[0]` — the
-        # loop appends it first — and with it there the record reads back on its
-        # own, as a conversation rather than as an answer whose question is
-        # missing.
-        #
-        # The cost is deliberate: a turn carrying an image stores the base64
-        # payload in the database, and every `recent` re-reads it.
-        await remember_turn(
-            agent,
-            new_messages,
-            result,
-            model=answered_by,
-            channel=channel,
-            created_at=started_at,
-            completed_at=now(),
-        )
-
+        result = outcome.result
         return {
-            "text": result.text,
-            "new_messages": new_messages,
-            "usage": result.usage.to_wire(),
-            "steps": result.steps,
-            "stop_reason": result.stop_reason,
+            "text": result.text if result else "",
+            "usage": result.usage.to_wire() if result else None,
+            "steps": result.steps if result else 0,
+            "stop_reason": result.stop_reason if result else "cancelled",
+            "model": loop.model,
         }
+
+    @mcp.tool
+    async def reset(agent: str, subagent: str = "") -> dict[str, Any]:
+        """Forget a conversation, and its history with it.
+
+        Idempotent, and deliberately not an error when there was nothing there:
+        the caller's intent — that this conversation should not continue — is
+        satisfied either way, and a caller that had nothing to forget is in
+        exactly the state it asked for.
+
+        Only the *conversation* is forgotten.  The turns it produced are in
+        memory, which is storage rather than state, and clearing that is a
+        different request with a different blast radius.
+
+        Args:
+            agent: Whose conversation.
+            subagent: Which of that agent's conversations; empty for its own.
+
+        Returns:
+            `reset`: whether there was a conversation there to forget.
+        """
+        forgotten = loops.pop((agent, subagent), None) is not None
+        logger.debug(
+            "reset: %s %s",
+            describe((agent, subagent)),
+            "forgotten" if forgotten else "was not running",
+        )
+        return {"reset": forgotten}
 
     return mcp
 

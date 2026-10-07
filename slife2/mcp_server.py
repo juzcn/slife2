@@ -14,6 +14,34 @@ piece of protocol knowledge, and splitting them is how the halves drift.
 Nothing here is LLM-specific.  That is the point of the module: the memory
 server and the agent server used to reach into `slife2.llm` for this, which put
 the serving scaffold of a non-LLM component inside the LLM package.
+
+## The contract: a server keys its state by client id
+
+**Every server here keys whatever state it has by a client id, and no client
+carries state on a server's behalf.**  The id is `(agent, subagent)` — which
+agent is talking, and which of that agent's conversations, empty for the one a
+person is watching and a name for a worker it is running — and it travels with
+every call, at every hop, including the ones that key nothing on it.
+
+Three things follow, and each is a property the whole system has rather than a
+rule each server remembers:
+
+* **State is created when a key is first used, and a key never goes stale.**
+  There is nothing to open, no handle to carry and no lifetime for a caller to
+  observe, so there is no "not found" for one to handle either.  An idle sweep
+  may drop the state underneath; the next call simply starts it again, and the
+  caller cannot tell.
+* **Isolation is the key.**  Two agents cannot reach each other's state because
+  their ids differ, not because a query remembered a `WHERE`.
+* **A hop is never anonymous.**  Even a server with no state to key receives the
+  id, so any log line or future accounting can say whose call it served.
+
+This is the shape SEP-2567 asks for once sessions are gone — state addressed by
+an explicit argument rather than by the connection — with one deliberate
+difference: the id is a **name the caller already has**, not an opaque handle
+the server minted.  An opaque handle has to be stored, and a stored handle is
+one more thing that can be lost, expired, or wrong after a restart.  See
+DESIGN.md §3 for the argument and for what this costs.
 """
 
 from __future__ import annotations
@@ -35,6 +63,22 @@ from slife2.paths import add_data_dir_argument, apply_data_dir
 from slife2.runtime import ServerRecord, clear_record, tcp_listening, write_record
 
 logger = logging.getLogger(__name__)
+
+#: The client id every server keys its state by: which agent is talking, and
+#: which of that agent's conversations.  See the module docstring for the
+#: contract; this is only its shape.
+ClientId = tuple[str, str]
+
+
+def describe(client: ClientId) -> str:
+    """A client id as one readable token, for a log line.
+
+    `jack` rather than `jack/` for an agent's own conversation, because that is
+    what a person calls it — and the worker form keeps the slash, so the two are
+    never confusable in a log.
+    """
+    agent, subagent = client
+    return f"{agent}/{subagent}" if subagent else agent
 
 
 def house_server(
@@ -216,9 +260,10 @@ def serve(
       returned as one JSON document.  Progress notifications cannot be
       interleaved into a buffered body, so every stream in this system would
       stop streaming while still returning correct results.
-    * ``stateless_http=True`` — every server here is stateless by design.  The
-      agent's conversation memory lives in the caller, so nothing depends on a
-      session surviving between requests.  See `slife2.server.server`.
+    * ``stateless_http=True`` — no request here depends on a session surviving
+      between two of them.  The agent server does keep its loops, but it names
+      them with an ordinary tool argument rather than a transport session, so it
+      is stateless in the sense this flag means.  See `slife2.server.server`.
     """
     url = ServerSettings(
         host=args.host or server.host,

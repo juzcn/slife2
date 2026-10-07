@@ -636,6 +636,7 @@ class StatusBar(Static):
         agent: str = "",
         model: str = "",
         busy: bool = False,
+        queued: int = 0,
         context_tokens: int = 0,
         context_window: int = 0,
         steps: int = 0,
@@ -649,6 +650,12 @@ class StatusBar(Static):
             parts.append(f"[{PALETTE['red']}]{connection}[/]")
         elif busy:
             parts.append(f"[{PALETTE['amber']}]working{GLYPHS['ellipsis']}[/]")
+        # Messages the user has sent that have not had their turn yet.  Shown
+        # because they are deliberately *not* in the transcript until they run:
+        # a queued message appearing above the answer still being written would
+        # misreport the order the turns actually happened in.
+        if queued:
+            parts.append(f"[{PALETTE['dim']}]{queued} queued[/]")
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
 

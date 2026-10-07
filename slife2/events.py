@@ -97,10 +97,10 @@ class ToolCallFinished:
 class TurnFinished:
     """The turn ended.  `text` is the final answer, and is authoritative.
 
-    This duplicates the return value of `run_turn` on purpose: the return value
-    is what a *client* renders, while this event is what the progress stream
-    reports.  When they disagree — a dropped notification, a coalescing layer, a
-    late delivery — the return value wins.
+    This duplicates the return value of `send_message` on purpose: the return
+    value is what a *client* renders, while this event is what the progress
+    stream reports.  When they disagree — a dropped notification, a coalescing
+    layer, a late delivery — the return value wins.
     """
 
     text: str

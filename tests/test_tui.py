@@ -13,7 +13,6 @@ import asyncio
 
 import pytest
 from fakes import FakeAgentClient
-from textual.worker import WorkerState
 
 from slife2.events import (
     TextDelta,
@@ -112,6 +111,21 @@ async def submit(pilot, text: str) -> None:
     pilot.app.query_one(HistoryInput).text = text
     await pilot.press("enter")
     await pilot.pause()
+
+
+async def settle(pilot, app: SlifeApp, *, tries: int = 200) -> None:
+    """Let every queued turn finish, however many there are.
+
+    A single `pause()` is not enough once the app owns a queue: each turn ends
+    by handing control back to the drain, which starts the next one, and the
+    whole chain has to be pumped.  Polling the flag rather than sleeping a fixed
+    time keeps this from being a race that passes on a fast machine.
+    """
+    for _ in range(tries):
+        await pilot.pause()
+        if not app._draining:
+            return
+    raise AssertionError("the queue never drained")
 
 
 # --- the transcript ----------------------------------------------------------
@@ -579,16 +593,16 @@ async def test_a_missing_attachment_is_reported_and_the_prompt_still_goes() -> N
 async def test_the_status_bar_stops_saying_working_when_the_turn_ends() -> None:
     """The bar has to be told about the transition, not asked during it.
 
-    `_run_turn` ends with a `finally` that refreshes the status, and that line
-    runs while the worker is still `RUNNING` — it is the last statement of the
-    worker's own body.  So it reports "working" for the turn that has just
-    finished, and nothing afterwards corrects it: the bar says working until the
-    next turn, and then until the one after that.
+    The drain's `finally` refreshes the status, and that line runs while the
+    worker is still `RUNNING` — it is the last statement of the worker's own
+    body.  So it reports "working" for the turn that has just finished, and
+    nothing afterwards corrects it: the bar says working until the next turn,
+    and then until the one after that.
     """
     app = make_app(answering("hello"))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        worker = app._turn_worker
+        worker = app._worker
         assert worker is not None
         await worker.wait()
         await pilot.pause()
@@ -614,13 +628,11 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         await asyncio.wait_for(started.wait(), timeout=2)
-        worker = app._turn_worker
-        assert worker is not None and worker.state is WorkerState.RUNNING
+        assert app._turn is not None and not app._turn.done()
 
         await pilot.press("ctrl+c")
         await pilot.pause()
 
-        assert worker.state is WorkerState.CANCELLED
         assert "[cancelled]" in shown(app)
         assert app.is_running
 
@@ -629,7 +641,86 @@ async def test_ctrl_c_quits_when_no_turn_is_running() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
-        assert app._turn_worker is None
+        assert app._turn is None
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running
+
+
+async def test_a_second_prompt_waits_and_both_are_answered() -> None:
+    """The behaviour this whole change exists for, seen from the window.
+
+    What it replaced: a second Enter ran `exclusive=True`, which cancelled the
+    turn already running and threw it away — its text stayed on screen, and
+    neither it nor the user's message ever reached the conversation.  Now the
+    second prompt queues, and the order the turns happened in is the order they
+    are drawn in.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_then_fast(prompt, on_event, *, images=None):
+        if prompt == "alpha":
+            started.set()
+            await release.wait()
+        answer = f"answer to {prompt}"
+        on_event(TextDelta(answer))
+        return answer
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = slow_then_fast  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "alpha")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await submit(pilot, "beta")
+        await pilot.pause()
+
+        # Waiting, and said so rather than shown in the wrong place: a queued
+        # message drawn above the answer still being written would report the
+        # turns out of order.
+        assert "1 queued" in status(app)
+        assert "You> beta" not in shown(app)
+
+        release.set()
+        await settle(pilot, app)
+
+        text = shown(app)
+        assert (
+            text.index("You> alpha")
+            < text.index("answer to alpha")
+            < text.index("You> beta")
+            < text.index("answer to beta")
+        )
+        assert "queued" not in status(app)
+
+
+async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
+    """Ctrl+C stops one turn.  The messages behind it are still wanted."""
+    started = asyncio.Event()
+
+    async def first_hangs(prompt, on_event, *, images=None):
+        if prompt == "alpha":
+            started.set()
+            await asyncio.sleep(30)
+        answer = f"answer to {prompt}"
+        on_event(TextDelta(answer))
+        return answer
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = first_hangs  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "alpha")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await submit(pilot, "beta")
+        await pilot.pause()
+
+        await pilot.press("ctrl+c")
+        await settle(pilot, app)
+
+        # The turn the user gave up on stopped; the one they are still waiting
+        # for ran.
+        assert "[cancelled]" in shown(app)
+        assert "answer to beta" in shown(app)
+        assert "answer to alpha" not in shown(app)

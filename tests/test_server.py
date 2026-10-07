@@ -1,4 +1,4 @@
-"""The agent MCP server.
+"""The agent MCP server, which owns its loops.
 
 Almost everything here runs over FastMCP's **in-memory transport**, which binds
 no port and needs no LLM — `build_server(..., backend=...)` takes a scripted
@@ -9,6 +9,10 @@ stop meaning "fast".
 
 One test does bind a real socket, because the in-memory transport cannot prove
 that progress notifications survive HTTP.  That one is `integration`.
+
+The property under test throughout is that a loop **is** the conversation: a
+message sent to it is answered in the context of everything said to it before,
+and two loops on one server never see each other.
 """
 
 from __future__ import annotations
@@ -16,15 +20,18 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import sqlite3
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
 import pytest_asyncio
-from fakes import FakeBackend, ScriptedTurn
+from fakes import FakeBackend, ScriptedTurn, text_turn
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2.config import default_config
+from slife2.config import DEFAULT_AGENT, default_config
 from slife2.events import TurnEvent, decode
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import StreamChatResult, ToolCall, Usage
@@ -64,14 +71,14 @@ def answering(text: str) -> FakeBackend:
 async def memory():
     """A memory server that actually answers, over the in-memory transport.
 
-    Every turn writes one, and a turn **cannot run without it**: a memory server
-    that is not there is a broken system rather than a degraded one, so
-    `run_turn` fails before it spends anything on a model call.  See
+    Sending **cannot happen without it**: a memory server that is not there is a
+    broken system rather than a degraded one, so `send_message` fails before
+    anything is spent on a model call.  See
     `slife2.mcp_server.open_server`.
 
     The real server rather than a stub, so what these tests exercise is the
     component the agent server actually talks to — the one test that is *about*
-    the failure passes its own client instead.
+    the failure passes its own config instead.
     """
     from slife2.memory_server import build_server as build_memory
 
@@ -79,51 +86,106 @@ async def memory():
         yield client
 
 
-async def call(server: FastMCP, **arguments):
+async def send(
+    server: FastMCP,
+    prompt: str,
+    *,
+    agent: str = DEFAULT_AGENT,
+    subagent: str = "",
+    **arguments,
+):
+    """Say one thing to a conversation, naming it the way every server does.
+
+    A fresh client each time, deliberately: the conversation lives in the
+    *server*, so a test that reconnects is exercising the same thing a TUI does
+    when it comes back — and one that reconnects by accident is not silently
+    passing.
+    """
     async with Client(server) as client:
-        return await client.call_tool("run_turn", arguments)
+        return await client.call_tool(
+            "send_message",
+            {"agent": agent, "subagent": subagent, "prompt": prompt, **arguments},
+        )
+
+
+async def reset(server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = ""):
+    """Forget a conversation."""
+    async with Client(server) as client:
+        return await client.call_tool("reset", {"agent": agent, "subagent": subagent})
+
+
+def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
+    """What the model was sent on one of its calls, as role-tagged text.
+
+    The system prompt is dropped: it is the same on every call and its content
+    is the subject of its own tests, so including it here would only make every
+    assertion about the conversation longer without making it stronger.
+    """
+    return [
+        f"{m.role}:{m.content}" for m in backend.calls[call][0] if m.role != "system"
+    ]
 
 
 # --- the surface -------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_exactly_one_tool(memory) -> None:
-    """`reset` is gone: with no server-side history there is nothing to reset."""
+async def test_the_server_exposes_two_tools(memory) -> None:
+    """There is no `open_loop` because there is nothing to open.
+
+    An id a server mints is an id a caller has to keep, and keeping it is where
+    every lifetime problem starts.  A conversation is started by the first
+    message that names it, so sending *is* opening — and what is left is one verb
+    and one way to start over.
+    """
     async with Client(
         build_server(config(), memory_client=memory, backend=FakeBackend())
     ) as client:
         tools = await client.list_tools()
-    assert [t.name for t in tools] == ["run_turn"]
+    assert [t.name for t in tools] == ["send_message", "reset"]
 
 
 @pytest.mark.asyncio
-async def test_run_turn_returns_the_final_text(memory) -> None:
+async def test_a_turn_returns_the_final_text(memory) -> None:
     server = build_server(config(), memory_client=memory, backend=tool_then_answer())
-    result = await call(server, messages=[], prompt="what is 6*7?")
+    result = await send(server, "what is 6*7?")
     assert result.data["text"] == "It is 42."
 
 
 @pytest.mark.asyncio
-async def test_run_turn_reports_what_the_caller_must_remember(memory) -> None:
-    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
-    result = await call(server, messages=[], prompt="what is 6*7?")
+async def test_a_turn_reports_its_shape(memory) -> None:
+    """What a caller needs to render and to bill — and no history.
 
-    roles = [m["role"] for m in result.data["new_messages"]]
-    assert roles == ["user", "assistant", "tool", "assistant"]
+    `new_messages` is deliberately absent: it was the caller's half of owning
+    the conversation, and the loop owns it now.
+    """
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
+    result = await send(server, "what is 6*7?")
+
     assert result.data["steps"] == 2
     assert result.data["stop_reason"] == "stop"
-
-
-# --- statelessness -----------------------------------------------------------
+    assert "usage" in result.data
+    assert "new_messages" not in result.data
 
 
 @pytest.mark.asyncio
-async def test_the_server_remembers_nothing_between_calls(memory) -> None:
-    """Two identical calls from an empty history behave identically.
+async def test_a_turn_says_what_answered(memory) -> None:
+    """A bare provider or an empty reference does not reveal the model."""
+    server = build_server(config(), memory_client=memory, backend=answering("ok"))
+    result = await send(server, "hi", agent="jack")
+    assert result.data["model"] == default_config().default
 
-    This is the property that makes the design stateless: if the server kept
-    anything, the second call would see the first.
+
+# --- a loop is the conversation ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_loop_remembers_what_was_said_to_it(memory) -> None:
+    """The inversion of the property this server used to be built on.
+
+    Two messages on one loop, and the second model call sees the first exchange.
+    Under the old stateless design the second call would have seen only its own
+    prompt, because the caller had to send the history back.
     """
     backend = FakeBackend(
         ScriptedTurn(result=StreamChatResult(text="first")),
@@ -131,26 +193,26 @@ async def test_the_server_remembers_nothing_between_calls(memory) -> None:
     )
     server = build_server(config(), memory_client=memory, backend=backend)
 
-    first = await call(server, messages=[], prompt="hi")
-    second = await call(server, messages=[], prompt="hi")
+    await send(server, "one")
+    await send(server, "two")
 
-    assert first.data["text"] == "first"
-    assert second.data["text"] == "second"
-    # The second call saw only its own prompt, not the first exchange.
-    for messages, _ in backend.calls:
-        assert [m.role for m in messages if m.role != "system"] == ["user"]
+    assert prompts_seen(backend, 0) == ["user:one"]
+    assert prompts_seen(backend, 1) == [
+        "user:one",
+        "assistant:first",
+        "user:two",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_one_server_serves_two_instances_without_mixing_them(memory) -> None:
-    """Two instances, one agent server on one port, no cross-talk.
-
-    This is why the agent server can be a single process: it keeps no state, so
-    a second instance is not a second server.  Each caller sends its whole
-    history and gets an answer computed from that history alone.
+async def test_one_server_serves_two_loops_without_mixing_them(memory) -> None:
+    """Two loops, two agents, one agent server, no cross-talk.
 
     Asserted concurrently on purpose — sequentially it would pass even if the
-    server kept something, because the second call would simply overwrite it.
+    loops were the same one, because the second turn would simply run after the
+    first.  This is the property that lets one agent server serve every
+    instance, and it is the same claim the stateless version made: what changed
+    is where the history lives, not whether two agents can share a process.
     """
 
     class EchoBackend:
@@ -170,11 +232,10 @@ async def test_one_server_serves_two_instances_without_mixing_them(memory) -> No
             return Stream(chunks=chunks(), result=result())
 
     server = build_server(config(), memory_client=memory, backend=EchoBackend())
-
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
-            first.call_tool("run_turn", {"messages": [], "prompt": "alpha"}),
-            second.call_tool("run_turn", {"messages": [], "prompt": "beta"}),
+            first.call_tool("send_message", {"agent": "jack", "prompt": "alpha"}),
+            second.call_tool("send_message", {"agent": "jill", "prompt": "beta"}),
         )
 
     assert one.data["text"] == "reply to alpha"
@@ -185,8 +246,240 @@ async def test_one_server_serves_two_instances_without_mixing_them(memory) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_subagent_is_a_conversation_of_its_own(memory) -> None:
+    """The second half of the id separates conversations, not just agents.
+
+    Two clients that differ only in `subagent` must not see each other.  That is
+    what lets a worker be a worker, and it falls out of the key rather than out
+    of a rule somebody has to remember to apply.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="main")),
+        ScriptedTurn(result=StreamChatResult(text="worker")),
+        ScriptedTurn(result=StreamChatResult(text="main again")),
+    )
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    await send(server, "one", agent="jack")
+    await send(server, "two", agent="jack", subagent="helper")
+
+    # The worker was not told what the agent's own conversation said...
+    assert prompts_seen(backend, 1) == ["user:two"]
+    # ...nor the other way round, on the agent's next turn.
+    await send(server, "three", agent="jack")
+    assert prompts_seen(backend, 2) == [
+        "user:one",
+        "assistant:main",
+        "user:three",
+    ]
+
+
+# --- an unknown loop ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reset_starts_the_conversation_over(memory) -> None:
+    """The one lifecycle verb left, and it is the caller's to ask for.
+
+    Idempotent, because a caller that had nothing to forget is already in the
+    state it asked for.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    await send(server, "one")
+    assert (await reset(server)).data["reset"]
+    # Nothing to forget the second time, and not an error.
+    assert not (await reset(server)).data["reset"]
+
+    await send(server, "two")
+    # The new conversation opened with its system prompt and nothing else.
+    assert prompts_seen(backend, 1) == ["user:two"]
+
+
+@pytest.mark.asyncio
+async def test_an_idle_conversation_simply_starts_again(memory, monkeypatch) -> None:
+    """The idle sweep reclaims memory, and that is the whole of what it does.
+
+    It used to be what made an id go stale, which meant every caller needed a
+    path for "your conversation is gone".  A key cannot go stale, so the sweep is
+    invisible: the next message starts a conversation under the same name, and
+    nothing has to be told that it happened.
+    """
+    monkeypatch.setattr("slife2.server.server.LOOP_IDLE_SECONDS", 0.0)
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    await send(server, "one")
+    await send(server, "two")
+
+    # Swept in between, so the second call began a conversation rather than
+    # continuing one — and nothing raised either way.
+    assert prompts_seen(backend, 1) == ["user:two"]
+
+
+# --- the inbox ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(memory) -> None:
+    """The core claim of the whole design, and the reason loops exist at all.
+
+    A second message arrives while the first turn is still streaming.  Under the
+    TUI's old policy it would have *cancelled* the first turn and thrown it
+    away; here it queues, runs in its turn, and both answers come back.
+
+    The second assertion is the one that catches a real mistake: the queued
+    message must not be visible to the turn that is already running.  The loop
+    re-reads its message list at every step, so a message appended on arrival
+    would be read by the model mid-turn — steering nobody asked for, arriving
+    silently.
+    """
+    backend = FakeBackend(
+        text_turn("slow answer", delay=0.15),
+        text_turn("second answer"),
+    )
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    first = asyncio.create_task(send(server, "one"))
+    # The first turn has begun only once the backend has been asked for a
+    # stream; anything earlier and the second message might win the race for
+    # the lock and this would assert nothing.
+    for _ in range(200):
+        if backend.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert backend.calls, "the first turn never reached the model"
+
+    second = asyncio.create_task(send(server, "two"))
+    await asyncio.sleep(0.05)
+    assert not second.done(), "the second message did not wait for the first"
+
+    one, two = await asyncio.gather(first, second)
+    assert one.data["text"] == "slow answer"
+    assert two.data["text"] == "second answer"
+
+    # The running turn never saw the queued message.
+    assert all("two" not in prompt for prompt in prompts_seen(backend, 0))
+    # ...and the second turn saw the first exchange plus its own message.
+    assert prompts_seen(backend, 1) == [
+        "user:one",
+        "assistant:slow answer",
+        "user:two",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_message_leaves_the_lock_free(memory) -> None:
+    """A caller that goes away while queued is not a lock held forever."""
+    backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    first = asyncio.create_task(send(server, "one"))
+    for _ in range(200):
+        if backend.calls:
+            break
+        await asyncio.sleep(0.01)
+
+    queued = asyncio.create_task(send(server, "doomed"))
+    await asyncio.sleep(0.02)
+    queued.cancel()
+    with pytest.raises((asyncio.CancelledError, Exception)):
+        await queued
+
+    # The one that was already running is untouched, and the loop still works.
+    result = await first
+    assert result.data["text"] == "slow"
+    assert (await send(server, "after")).data["text"] == "next"
+
+
+# --- cancellation ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
+    memory,
+) -> None:
+    """The sharpest edge in the system, and it is back because the state is.
+
+    Two things have to hold at once.  The user's message survives — losing it is
+    the failure this whole arrangement exists to prevent — and nothing the
+    interrupted turn produced survives with it, because a cancellation can land
+    between an assistant message that asked for three tool calls and the second
+    of their results, and *that* list is a 400 from every provider.
+
+    Asserted through the next turn rather than by reaching inside: what the
+    model is sent is the only thing that actually matters.
+    """
+    backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    interrupted = asyncio.create_task(send(server, "one"))
+    for _ in range(200):
+        if backend.calls:
+            break
+        await asyncio.sleep(0.01)
+    interrupted.cancel()
+    with pytest.raises((asyncio.CancelledError, Exception)):
+        await interrupted
+
+    await send(server, "two")
+    assert prompts_seen(backend, 1) == ["user:one", "user:two"]
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_is_still_recorded(
+    memory, tmp_path, monkeypatch
+) -> None:
+    """Recording is unconditional, so the cancel path is not a special case.
+
+    A turn that happened gets a row, and a cancelled one is the shape of a
+    question with no answer — which is what it was.  The alternative is a
+    message the user can see, the model will see, and the database has never
+    heard of.
+    """
+    from slife2.memory_server import build_server as build_memory
+    from slife2.paths import DATA_ENV_VAR, turns_dir
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    backend = FakeBackend(text_turn("never finished", delay=0.4))
+    async with Client(build_memory(config())) as memory_client:
+        server = build_server(config(), backend=backend, memory_client=memory_client)
+        interrupted = asyncio.create_task(send(server, "one"))
+        for _ in range(200):
+            if backend.calls:
+                break
+            await asyncio.sleep(0.01)
+        interrupted.cancel()
+        with pytest.raises((asyncio.CancelledError, Exception)):
+            await interrupted
+        # The write is detached from the cancelled request, so give it a moment
+        # to land rather than racing it.
+        await asyncio.sleep(0.5)
+
+    rows = (
+        sqlite3.connect(turns_dir() / f"{DEFAULT_AGENT}.turn.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the cancelled turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user"]
+    assert stored[0]["content"] == "one"
+
+
+# --- memory ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
 async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
-    """The turn lands in the caller's own database, and nowhere else.
+    """The turn lands in that agent's own database, and nowhere else.
 
     Both halves matter.  Written at all, because a memory component that nothing
     calls is a component that does nothing; and written to *that agent's* file,
@@ -198,8 +491,6 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
     is empty because there was nothing to put in it, and only an assertion can
     tell those apart.
     """
-    import sqlite3
-
     from slife2.memory_server import build_server as build_memory
     from slife2.paths import DATA_ENV_VAR, turns_dir
 
@@ -228,16 +519,7 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
 
     async with Client(build_memory(cfg)) as memory_client:
         server = build_server(cfg, backend=backend, memory_client=memory_client)
-        async with Client(server) as client:
-            await client.call_tool(
-                "run_turn",
-                {
-                    "messages": [],
-                    "prompt": "what is 2+2?",
-                    "agent": "jack",
-                    "channel": "human",
-                },
-            )
+        await send(server, "what is 2+2?", agent="jack", channel="human")
 
     jack = turns_dir() / "jack.turn.db"
     assert jack.is_file(), "the turn was not recorded"
@@ -277,6 +559,8 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
 
     # The stored messages are the whole turn, opening with what the user said —
     # there is no column for it, so this entry is the only place it is kept.
+    # The system prompt is *not* here: it belongs to the loop, not the turn, and
+    # a copy per row is how it would accumulate.
     turns_messages = json.loads(stored)
     assert [m["role"] for m in turns_messages] == [
         "user",
@@ -291,18 +575,17 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_fails_when_the_memory_server_is_gone() -> None:
+async def test_opening_a_loop_fails_when_the_memory_server_is_gone() -> None:
     """A missing memory server is a broken system, not a degraded one.
 
-    The store here is a URL nothing is listening on, which is what a `slife2
-    down` looks like from the agent server's side.  The turn is *refused* rather
-    than answered-and-not-recorded, which is what the CLI already does at
-    startup — `slife2` will not draw anything if a component will not come up,
-    so a component that goes missing later takes the same answer.  See
-    `slife2.mcp_server.open_server`.
+    Asked before anything is spent rather than at the write: the point of the
+    guard is to find out *before* a model call has been paid for, not once the
+    answer exists and has nowhere to go.
 
-    Port 9 rather than the configured 8010, which would make this pass or fail
-    on whether the developer happens to have slife2 running.
+    The store here is a URL nothing is listening on, which is what a `slife2
+    down` looks like from the agent server's side.  Port 9 rather than the
+    configured 8010, which would make this pass or fail on whether the developer
+    happens to have slife2 running.
     """
     base = default_config()
     cfg = replace(
@@ -312,7 +595,10 @@ async def test_a_turn_fails_when_the_memory_server_is_gone() -> None:
     server = build_server(cfg, backend=answering("the answer"))
 
     with pytest.raises(ToolError, match="nothing is listening on 127.0.0.1:9"):
-        await call(server, messages=[], prompt="hi", agent="jack")
+        await send(server, "hi", agent="jack")
+
+
+# --- images ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -337,12 +623,7 @@ async def test_images_reach_the_model_as_content_parts(memory) -> None:
         },
     )
     server = build_server(vision, memory_client=memory, backend=backend)
-    await call(
-        server,
-        messages=[],
-        prompt="what is this?",
-        images=["data:image/png;base64,AAAA"],
-    )
+    await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
     sent = backend.calls[0][0][-1]
     assert isinstance(sent.content, list)
@@ -373,88 +654,16 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(memory) -> No
         },
     )
     with pytest.raises(Exception, match="cannot read images"):
-        await call(
+        await send(
             build_server(text_only, memory_client=memory, backend=answering("ok")),
-            messages=[],
-            prompt="look",
+            "look",
             images=["data:image/png;base64,AAAA"],
         )
-
-
-@pytest.mark.asyncio
-async def test_history_sent_by_the_caller_is_used(memory) -> None:
-    """The caller owns memory; sending it back is what continues a conversation."""
-    backend = answering("second answer")
-    server = build_server(config(), memory_client=memory, backend=backend)
-
-    history = [
-        {"role": "user", "content": "one"},
-        {"role": "assistant", "content": "first answer"},
-    ]
-    await call(server, messages=history, prompt="two")
-
-    seen = backend.calls[0][0]
-    assert [m.role for m in seen] == ["system", "user", "assistant", "user"]
-    assert seen[2].content == "first answer"
-
-
-@pytest.mark.asyncio
-async def test_a_full_round_trip_carries_the_conversation(memory) -> None:
-    """Feed each result's `new_messages` back in, as a client would."""
-    backend = FakeBackend(
-        ScriptedTurn(result=StreamChatResult(text="first answer")),
-        ScriptedTurn(result=StreamChatResult(text="second answer")),
-    )
-    server = build_server(config(), memory_client=memory, backend=backend)
-
-    history: list[dict] = []
-    first = await call(server, messages=history, prompt="one")
-    history.extend(first.data["new_messages"])
-    await call(server, messages=history, prompt="two")
-
-    seen = backend.calls[1][0]
-    assert [m.role for m in seen] == ["system", "user", "assistant", "user"]
-    assert seen[2].content == "first answer"
-
-
-@pytest.mark.asyncio
-async def test_an_interrupted_turn_leaves_the_caller_history_intact(memory) -> None:
-    """Cancellation needs no repair, because nothing shared was written.
-
-    The plan called this the sharpest correctness edge in the system; making the
-    caller own the history removes it rather than solving it.
-    """
-    backend = FakeBackend(
-        ScriptedTurn(
-            result=StreamChatResult(text="never"),
-            chunks=[Chunk(text="partial")],
-            delay=5.0,
-        ),
-        ScriptedTurn(result=StreamChatResult(text="fine")),
-    )
-    server = build_server(config(), memory_client=memory, backend=backend)
-    history: list[dict] = [{"role": "user", "content": "earlier"}]
-
-    async with Client(server) as client:
-        task = asyncio.create_task(
-            client.call_tool("run_turn", {"messages": history, "prompt": "slow"})
-        )
-        await asyncio.sleep(0.2)
-        task.cancel()
-        with pytest.raises((asyncio.CancelledError, Exception)):
-            await task
-
-    # The caller's list is untouched — it never handed over ownership.
-    assert history == [{"role": "user", "content": "earlier"}]
-    # And the server is not poisoned: a fresh call still works.
-    result = await call(server, messages=[], prompt="again")
-    assert result.data["text"] == "fine"
 
 
 # --- the system prompt -------------------------------------------------------
 
 
-@pytest.mark.asyncio
 def template(tmp_path, body: str):
     """A system prompt template on disk, as the config expects."""
     path = tmp_path / "system.j2"
@@ -470,7 +679,7 @@ async def test_the_system_prompt_is_a_template(tmp_path, memory) -> None:
         memory_client=memory,
         backend=backend,
     )
-    await call(server, messages=[], prompt="hi")
+    await send(server, "hi")
 
     seen = backend.calls[0][0]
     assert seen[0].role == "system"
@@ -478,15 +687,16 @@ async def test_the_system_prompt_is_a_template(tmp_path, memory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_template_is_rendered_per_turn_with_the_agent_name(
+async def test_the_template_is_rendered_with_the_loops_own_agent_name(
     tmp_path, memory
 ) -> None:
-    """One template, personalised by whoever is asking.
+    """One template, personalised by whoever the loop belongs to.
 
-    Rendered per turn rather than once, because the agent name arrives *with the
-    request* — the server is shared, so two instances are two names asking one
-    process.  Rendering at startup would hand the first caller's name to
-    everybody, which is the failure this asserts against.
+    Rendered when the loop is opened rather than once at startup, because the
+    agent name is a property of the *loop* — the server is shared, so two
+    instances are two names asking one process.  Rendering at startup would hand
+    the first caller's name to everybody, which is the failure this asserts
+    against.
     """
     backend = FakeBackend(
         ScriptedTurn(result=StreamChatResult(text="ok")),
@@ -498,13 +708,11 @@ async def test_the_template_is_rendered_per_turn_with_the_agent_name(
         backend=backend,
     )
 
-    await call(server, messages=[], prompt="hello", agent="jack")
-    await call(server, messages=[], prompt="hello", agent="jill")
+    await send(server, "hello", agent="jack")
+    await send(server, "hello", agent="jill")
 
-    first = backend.calls[0][0][0]
-    second = backend.calls[1][0][0]
-    assert first.content == "You are jack."
-    assert second.content == "You are jill."
+    assert backend.calls[0][0][0].content == "You are jack."
+    assert backend.calls[1][0][0].content == "You are jill."
 
 
 @pytest.mark.asyncio
@@ -516,38 +724,6 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
     path.write_text("agent:\n  system_prompt: not-here.j2\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="not-here.j2"):
         load(path)
-
-
-@pytest.mark.asyncio
-async def test_the_system_prompt_is_not_handed_back_to_the_caller(
-    tmp_path, memory
-) -> None:
-    """Otherwise it would accumulate one copy per turn in the caller's history."""
-    server = build_server(
-        config(system_prompt=template(tmp_path, "be terse")),
-        memory_client=memory,
-        backend=answering("ok"),
-    )
-    result = await call(server, messages=[], prompt="hi")
-    assert all(m["role"] != "system" for m in result.data["new_messages"])
-
-
-@pytest.mark.asyncio
-async def test_a_caller_supplied_system_message_is_not_doubled(
-    tmp_path, memory
-) -> None:
-    backend = answering("ok")
-    server = build_server(
-        config(system_prompt=template(tmp_path, "from config")),
-        memory_client=memory,
-        backend=backend,
-    )
-    await call(
-        server, messages=[{"role": "system", "content": "from caller"}], prompt="hi"
-    )
-
-    seen = backend.calls[0][0]
-    assert [m.content for m in seen if m.role == "system"] == ["from caller"]
 
 
 # --- limits ------------------------------------------------------------------
@@ -567,13 +743,24 @@ async def test_max_steps_comes_from_the_config(memory) -> None:
         ]
     )
     server = build_server(config(max_steps=2), memory_client=memory, backend=backend)
-    result = await call(server, messages=[], prompt="loop forever")
+    result = await send(server, "loop forever")
 
     assert len(backend.calls) == 2
     assert result.data["stop_reason"] == "max_steps"
 
 
 # --- the streaming contract --------------------------------------------------
+
+
+async def send_with_progress(
+    server: FastMCP, prompt: str, handler, *, agent: str = DEFAULT_AGENT
+):
+    async with Client(server) as client:
+        return await client.call_tool(
+            "send_message",
+            {"agent": agent, "prompt": prompt},
+            progress_handler=handler,
+        )
 
 
 @pytest.mark.asyncio
@@ -586,12 +773,7 @@ async def test_events_arrive_as_progress_notifications(memory) -> None:
         assert event is not None, f"not one of our payloads: {message!r}"
         seen.append(event)
 
-    async with Client(server) as client:
-        await client.call_tool(
-            "run_turn",
-            {"messages": [], "prompt": "what is 6*7?"},
-            progress_handler=on_progress,
-        )
+    await send_with_progress(server, "what is 6*7?", on_progress)
 
     kinds = [type(e).__name__ for e in seen]
     assert kinds[0] == "TextDelta"
@@ -613,10 +795,7 @@ async def test_progress_values_are_a_monotonic_counter(memory) -> None:
         values.append(progress)
         assert total is None, "inventing a total would render a fake percentage"
 
-    async with Client(server) as client:
-        await client.call_tool(
-            "run_turn", {"messages": [], "prompt": "x"}, progress_handler=on_progress
-        )
+    await send_with_progress(server, "x", on_progress)
 
     assert values == sorted(values)
     assert len(set(values)) == len(values)
@@ -626,7 +805,7 @@ async def test_progress_values_are_a_monotonic_counter(memory) -> None:
 async def test_a_turn_works_without_a_progress_handler(memory) -> None:
     """A non-streaming client gets the same answer and the server does no extra work."""
     server = build_server(config(), memory_client=memory, backend=tool_then_answer())
-    result = await call(server, messages=[], prompt="x")
+    result = await send(server, "x")
     assert result.data["text"] == "It is 42."
 
 
@@ -652,17 +831,15 @@ async def test_report_progress_is_a_no_op_without_a_token() -> None:
 # --- everything above, over a real socket ------------------------------------
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_progress_streams_over_real_http(memory) -> None:
-    """The one test that binds a port.
+@asynccontextmanager
+async def over_http(server: FastMCP) -> AsyncGenerator[str]:
+    """Serve a built server on a real port, and yield its URL.
 
-    The in-memory transport cannot prove that progress notifications survive
-    HTTP framing, and `json_response=True` would break them silently while still
-    returning correct results — so this asserts they arrive *during* the call
-    with more than one of them, not as a single buffered dump at the end.
+    A real socket rather than the in-memory transport, because both of the
+    properties asserted below are properties of the wire: that progress
+    notifications survive HTTP framing, and that closing a response stream
+    cancels the turn behind it.  Neither can be shown in-process.
     """
-    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     app = server.http_app(path="/mcp", json_response=False, stateless_http=True)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -674,33 +851,96 @@ async def test_progress_streams_over_real_http(memory) -> None:
 
     uv = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
     serve_task = asyncio.create_task(uv.serve(sockets=[sock]))
-
     try:
         for _ in range(100):
             if uv.started:
                 break
             await asyncio.sleep(0.05)
         assert uv.started, "the server did not start"
-
-        arrivals: list[tuple[float, str]] = []
-
-        async def on_progress(progress, total, message):
-            event = decode(message or "")
-            if event is not None:
-                arrivals.append((progress, type(event).__name__))
-
-        async with Client(f"http://127.0.0.1:{port}/mcp") as client:
-            result = await client.call_tool(
-                "run_turn",
-                {"messages": [], "prompt": "what is 6*7?"},
-                progress_handler=on_progress,
-            )
-
-        assert result.data["text"] == "It is 42."
-        assert len(arrivals) > 1
-        assert arrivals[-1][1] == "TurnFinished"
-        assert "ToolCallStarted" in [name for _, name in arrivals]
+        yield f"http://127.0.0.1:{port}/mcp"
     finally:
         uv.should_exit = True
         await asyncio.wait_for(serve_task, timeout=5)
         sock.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_progress_streams_over_real_http(memory) -> None:
+    """The one test that binds a port for the streaming contract.
+
+    The in-memory transport cannot prove that progress notifications survive
+    HTTP framing, and `json_response=True` would break them silently while still
+    returning correct results — so this asserts they arrive *during* the call
+    with more than one of them, not as a single buffered dump at the end.
+    """
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
+    arrivals: list[tuple[float, str]] = []
+
+    async def on_progress(progress, total, message):
+        event = decode(message or "")
+        if event is not None:
+            arrivals.append((progress, type(event).__name__))
+
+    async with over_http(server) as url, Client(url) as client:
+        result = await client.call_tool(
+            "send_message",
+            {"agent": "jack", "prompt": "what is 6*7?"},
+            progress_handler=on_progress,
+        )
+
+    assert result.data["text"] == "It is 42."
+    assert len(arrivals) > 1
+    assert arrivals[-1][1] == "TurnFinished"
+    assert "ToolCallStarted" in [name for _, name in arrivals]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_is_repaired_over_real_http(memory) -> None:
+    """The load-bearing assumption, measured rather than read.
+
+    Everything the loop does on the way out depends on one property of the
+    transport: closing a response stream cancels the handler behind it, *at the
+    await point it has reached*.  At this revision that is the only cancellation
+    signal there is — a conforming client never puts `notifications/cancelled`
+    on the wire, and the server acknowledges one that arrives without acting on
+    it, because honouring it by client-chosen request id would let one caller
+    cancel another's work.
+
+    So the assertion is end-to-end and behavioural: a turn is cut off
+    mid-stream, and the *next* turn's model call shows the user's message
+    survived and nothing the interrupted turn produced did.  The alternative —
+    an assistant message whose tool calls are only partly answered — is a 400
+    from every provider, and nothing inside the process can show that.
+    """
+    backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
+    server = build_server(config(), memory_client=memory, backend=backend)
+
+    async with over_http(server) as url:
+        async with Client(url) as client:
+            interrupted = asyncio.create_task(
+                client.call_tool(
+                    "send_message", {"agent": DEFAULT_AGENT, "prompt": "one"}
+                )
+            )
+            for _ in range(200):
+                if backend.calls:
+                    break
+                await asyncio.sleep(0.01)
+            assert backend.calls, "the turn never reached the model"
+
+            interrupted.cancel()
+            with pytest.raises((asyncio.CancelledError, Exception)):
+                await interrupted
+
+        # A fresh connection, which also shows the server was not poisoned by
+        # the cancellation, and one more message — which is how the repair is
+        # observed: what the loop holds is what the model is next sent.
+        async with Client(url) as client:
+            result = await client.call_tool(
+                "send_message", {"agent": DEFAULT_AGENT, "prompt": "two"}
+            )
+
+    assert result.data["text"] == "fine"
+    assert prompts_seen(backend, 1) == ["user:one", "user:two"]

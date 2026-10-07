@@ -94,9 +94,25 @@ def safe_agent_name(name: str) -> str:
     return cleaned[:64]
 
 
-def database_path(agent: str) -> Path:
-    """The database for one agent."""
-    return turns_dir() / f"{safe_agent_name(agent)}.turn.db"
+#: What separates the two halves of a client id in a filename.  It has to be a
+#: character `safe_agent_name` cannot leave behind, or `("a.b", "c")` and
+#: `("a", "b.c")` would name the same file — and `@` is not in that set.
+_CLIENT_SEPARATOR = "@"
+
+
+def database_path(agent: str, subagent: str = "") -> Path:
+    """The database for one client id.
+
+    **One file per id, not a column.**  Isolation as a property of the filesystem
+    beats isolation as a `WHERE` clause somebody can forget to write — the same
+    argument DESIGN.md §5 makes for agents, applied one level down.  An agent's
+    own conversation keeps the bare name it always had, so the common case does
+    not pay for the one that is not.
+    """
+    safe = safe_agent_name(agent)
+    if subagent:
+        safe = f"{safe}{_CLIENT_SEPARATOR}{safe_agent_name(subagent)}"
+    return turns_dir() / f"{safe}.turn.db"
 
 
 @dataclass(frozen=True)
@@ -402,6 +418,6 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
-def store_for(agent: str) -> TurnStore:
-    """The store for one agent, creating its file if needed."""
-    return TurnStore(database_path(agent))
+def store_for(agent: str, subagent: str = "") -> TurnStore:
+    """The store for one client id, creating its file if needed."""
+    return TurnStore(database_path(agent, subagent))

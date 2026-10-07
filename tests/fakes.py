@@ -145,7 +145,7 @@ class FakeAgentClient:
     async def close(self) -> None:
         self.connected = False
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         self.resets += 1
 
     async def run_turn(

@@ -177,3 +177,41 @@ async def test_the_agent_loop_runs_over_mcp() -> None:
     assert [m.role for m in messages] == ["user", "assistant", "tool", "assistant"]
     assert messages[2].content == "42"
     assert calls["n"] == 2
+
+
+async def test_two_concurrent_calls_on_one_client_do_not_mix() -> None:
+    """Two loops share one `Client`, and their streams interleave.
+
+    The agent server opens one client per model *server* and keeps it for the
+    process, so the moment a server has two loops — the ordinary case, and
+    exactly what a subagent fan-out is — two `stream_chat` calls are in flight on
+    one session at once.  Nothing in this project had ever exercised that: the
+    agent server's own tests inject a backend, so `loop_for`'s cache path never
+    ran with anything concurrent.
+
+    Each request carries its own progress callback, so the chunks should be
+    multiplexed rather than mixed.  The streamer yields one character at a time
+    with a sleep between them, which is what makes the two interleave on the wire
+    instead of running one after the other and passing for the wrong reason.
+    """
+
+    async def echoing(provider, messages, tools, model):
+        prompt = messages[-1].content or ""
+        for char in prompt:
+            await asyncio.sleep(0.01)
+            yield Chunk(text=char)
+        yield Finish("stop")
+
+    server = build_llm_server(name="agent", streamer=echoing)
+    async with Client(server) as client:
+        backend = MCPBackend(client, "m")
+        first, second = await asyncio.gather(
+            collect(backend, [Message(role="user", content="alpha")]),
+            collect(backend, [Message(role="user", content="beta")]),
+        )
+
+    assert first[1].text == "alpha"
+    assert second[1].text == "beta"
+    # ...and the chunks themselves never crossed over, not just the results.
+    assert "".join(c.text or "" for c in first[0]) == "alpha"
+    assert "".join(c.text or "" for c in second[0]) == "beta"

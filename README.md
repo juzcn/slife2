@@ -65,6 +65,12 @@ In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
 conversation, **Ctrl+Q** quits.
 
+Send a second message while one is still being answered and it **queues**: the
+turn already running finishes, yours runs next, and the status bar says how many
+are waiting. Ctrl+C stops the turn in flight and leaves the queue alone — the
+message you gave up on and the one you are still waiting for are not the same
+message.
+
 Name an image with `@` and it goes with the prompt:
 
 ```
@@ -127,8 +133,9 @@ slife2/
 ├─ tools.py           # the tool registry, plus `now` and `calc`
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ memory.py          # TurnStore: one SQLite file per agent
-├─ mcp_server.py      # what it takes to *be* one of our MCP servers, and how a
-│                     #   client proves which one it reached (`identifies`)
+├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
+│                     #   the client id every one of them keys its state by —
+│                     #   and how a client proves which one it reached
 ├─ memory_server.py   # slife2-memory: `remember` and `recent`
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
@@ -138,7 +145,8 @@ slife2/
 │  ├─ openai_server.py    # slife2-llm-openai             <- imports openai
 │  ├─ openai_responses_server.py # slife2-llm-openai-responses <- imports openai
 │  └─ anthropic_server.py # slife2-llm-anthropic          <- imports anthropic
-├─ server/server.py   # slife2-agent: FastMCP, one stateless `run_turn` tool
+├─ server/server.py   # slife2-agent: FastMCP, the conversations and their two
+│                     #   tools, keyed by (agent, subagent)
 ├─ templates/system.j2# the system prompt the distribution ships
 └─ tui/
    ├─ app.py          # the Textual App

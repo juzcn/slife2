@@ -5,10 +5,12 @@ that depend on *who is asking* can be written as such.  slife v1 does the same,
 and for the same reason: a prompt is text with holes in it, and a template is
 the thing that says where the holes are.
 
-**It is rendered per turn, not once at startup.**  The agent name arrives with
-the request — `run_turn(messages, prompt, agent=...)` — because the server is
-stateless and shared, so two instances on one server are two names asking the
-same process.  Rendering once would make the first caller's name everybody's.
+**It is rendered when a conversation starts, not once at startup.**  The agent
+name is a property of the conversation — `send_message(agent, ...)` names it —
+because the server is shared, so two instances on one server are two names asking
+the same process.  Rendering once would make the first caller's name everybody's.
+Rendering it per *turn* would be the same mistake one size smaller: a
+conversation's agent cannot change, so there would be nothing to re-render for.
 
 Jinja2 caches compiled templates, so rendering per turn costs a dict lookup and
 a format operation, not a parse.

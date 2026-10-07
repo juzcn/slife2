@@ -57,6 +57,7 @@ class MCPBackend:
         provider: str = "",
         name: str = "mcp",
         timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+        key: tuple[str, str] = ("", ""),
     ) -> None:
         self.name = name
         self._client = client
@@ -66,6 +67,29 @@ class MCPBackend:
         #: whose credentials and model list the call uses.
         self._provider = provider
         self._timeout = timeout
+        #: Whose conversation this call is being made for — the same
+        #: `(agent, subagent)` every other server in this system keys its own
+        #: state by.  It is not state here and nothing is keyed on it: it travels
+        #: with the call so a model server can say *whose* call it served, in its
+        #: log and in anything that later wants to account for one agent's usage.
+        self._key = key
+
+    def with_key(self, agent: str, subagent: str) -> MCPBackend:
+        """A view of this backend that speaks for one conversation.
+
+        The connection is shared — one per model server, however many
+        conversations are using it — so this is a shallow copy carrying a
+        different key rather than a second backend.  That is what lets the agent
+        server cache by model while still naming a conversation on every call.
+        """
+        return MCPBackend(
+            self._client,
+            self._model,
+            provider=self._provider,
+            name=self.name,
+            timeout=self._timeout,
+            key=(agent, subagent),
+        )
 
     def stream(self, messages: list[Message], tools: list[ToolSpec]) -> Stream:
         queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -95,6 +119,8 @@ class MCPBackend:
                 {
                     "provider": self._provider,
                     "model": self._model,
+                    "agent": self._key[0],
+                    "subagent": self._key[1],
                     "messages": [m.to_wire() for m in messages],
                     "tools": [t.to_wire() for t in tools],
                 },

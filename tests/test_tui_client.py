@@ -7,9 +7,9 @@ turned into a `data:` URL, handed to this class, and dropped.  Both were
 invisible from either end, because the client honoured its own signature and the
 server honoured its own schema.
 
-So this is a test of the *payload*: which keys go out and what is in them.  The
-transport underneath is stubbed, because the wire is not the part that was
-wrong.
+So this is a test of the *payload*: which tool is called, which keys go out, and
+what is in them.  The transport underneath is stubbed, because the wire is not
+the part that was wrong.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from slife2 import mcp_server as mcp_server_module
 from slife2.tui.client import MCPAgentClient
@@ -30,15 +31,15 @@ class FakeTransport:
     """The MCP client `MCPAgentClient` would have built, with the wire stubbed."""
 
     def __init__(
-        self, tools: tuple[str, ...] = ("run_turn",), *, name: str | None = None
+        self, tools: tuple[str, ...] = ("send_message",), *, name: str | None = None
     ) -> None:
         self.tools = tools
         #: What the handshake reported this server calls itself.  `None` is a
         #: server that reported no name — the case `identifies` falls back to
         #: `tools` for — so the default exercises that path.
         self.server_info = SimpleNamespace(name=name) if name else None
-        #: Every argument dict handed to `call_tool`, in order.
-        self.sent: list[dict[str, Any]] = []
+        #: Every (tool, arguments) pair handed to `call_tool`, in order.
+        self.sent: list[tuple[str, dict[str, Any]]] = []
 
     async def __aenter__(self) -> FakeTransport:
         return self
@@ -52,15 +53,13 @@ class FakeTransport:
     async def call_tool(
         self, name: str, arguments: dict[str, Any], **kwargs: Any
     ) -> SimpleNamespace:
-        # Copied, because `arguments["messages"]` *is* the client's history list
-        # and the client extends it in place as soon as this returns.  A real
-        # transport serialises the payload and has no such problem; a fake that
-        # keeps the reference would show every past turn carrying the present
-        # conversation.
-        self.sent.append(copy.deepcopy(arguments))
-        return SimpleNamespace(
-            data={"text": "ok", "new_messages": [{"role": "assistant"}]}
-        )
+        # Copied, because a real transport serialises the payload and a fake
+        # that kept the reference would let a later mutation show up in a
+        # recorded call.
+        self.sent.append((name, copy.deepcopy(arguments)))
+        if name == "reset":
+            return SimpleNamespace(data={"reset": True})
+        return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
 
 
 def install(monkeypatch, transport: FakeTransport) -> None:
@@ -74,8 +73,19 @@ def install(monkeypatch, transport: FakeTransport) -> None:
     monkeypatch.setattr(mcp_server_module, "Client", lambda *a, **k: transport)
 
 
+def sent(transport: FakeTransport, tool: str) -> list[dict[str, Any]]:
+    return [arguments for name, arguments in transport.sent if name == tool]
+
+
 @pytest.mark.asyncio
-async def test_a_turn_carries_everything_the_caller_gave_it(monkeypatch) -> None:
+async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
+    """The client id *is* the conversation, so it goes out with every message.
+
+    There is no second call to make first: the server starts a conversation
+    under a key it has not seen, so naming the key is the whole of addressing
+    one.  That is what removed the handle — and with it the "your conversation
+    is gone" path every caller used to need.
+    """
     transport = FakeTransport()
     install(monkeypatch, transport)
     client = MCPAgentClient(
@@ -85,15 +95,16 @@ async def test_a_turn_carries_everything_the_caller_gave_it(monkeypatch) -> None
     await client.connect()
     await client.run_turn("hi", lambda event: None, images=["data:image/png;base64,AA"])
 
-    (sent,) = transport.sent
-    assert sent == {
-        "messages": [],
-        "prompt": "hi",
+    (arguments,) = sent(transport, "send_message")
+    assert arguments == {
         "agent": "jack",
+        "subagent": "",
+        "prompt": "hi",
         "channel": "human",
         "model": "deepseek/deepseek-flash",
         "images": ["data:image/png;base64,AA"],
     }
+    assert client.client_id == ("jack", "")
 
 
 @pytest.mark.asyncio
@@ -107,31 +118,75 @@ async def test_a_payload_says_nothing_it_does_not_have_to(monkeypatch) -> None:
     await client.connect()
     await client.run_turn("hi", lambda event: None)
 
-    (sent,) = transport.sent
-    assert "model" not in sent
-    assert "images" not in sent
+    (arguments,) = sent(transport, "send_message")
+    assert "model" not in arguments
+    assert "images" not in arguments
     # The channel is not optional: this client exists to serve somebody typing,
     # and that is a fact about the caller rather than something it may lack.
-    assert sent["channel"] == "human"
+    assert arguments["channel"] == "human"
 
 
 @pytest.mark.asyncio
-async def test_the_conversation_grows_by_what_the_server_returned(monkeypatch) -> None:
+async def test_a_subagent_name_is_carried_as_part_of_the_id(monkeypatch) -> None:
+    """The second half of the id is what makes a worker a separate conversation.
+
+    A TUI is never a worker, so it does not pass one — but the id it sends has
+    the same shape either way, which is what lets every server key on one thing.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack", subagent="helper")
+
+    await client.connect()
+    await client.run_turn("hi", lambda event: None)
+
+    assert client.client_id == ("jack", "helper")
+    assert sent(transport, "send_message")[0]["subagent"] == "helper"
+
+
+@pytest.mark.asyncio
+async def test_resetting_names_the_same_id(monkeypatch) -> None:
+    """Forgetting a conversation is a command about a key, not a handle.
+
+    Nothing about this client changes: the next message under the same id simply
+    begins a conversation the way the first one did.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+    await client.run_turn("hi", lambda event: None)
+
+    await client.reset()
+    await client.run_turn("after reset", lambda event: None)
+
+    assert sent(transport, "reset") == [{"agent": "jack", "subagent": ""}]
+    assert client.client_id == ("jack", "")
+    assert len(sent(transport, "send_message")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_keeps_the_connection(monkeypatch) -> None:
+    """A `ToolError` is the server answering, not the transport dying.
+
+    Dropping the connection here would turn a bad API key into a reconnect storm
+    on every retry.
+    """
     transport = FakeTransport()
     install(monkeypatch, transport)
     client = MCPAgentClient("http://test/mcp", agent="jack")
     await client.connect()
 
-    assert await client.run_turn("hi", lambda event: None) == "ok"
-    await client.run_turn("again", lambda event: None)
+    async def explode(name, arguments, **kwargs):
+        if name == "send_message":
+            raise ToolError("the API key did not resolve")
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
 
-    # The second turn carries what the first one produced: the server keeps no
-    # state, so this list is the entire conversation.
-    assert transport.sent[1]["messages"] == [{"role": "assistant"}]
+    monkeypatch.setattr(transport, "call_tool", explode)
 
-    client.reset()
-    await client.run_turn("after reset", lambda event: None)
-    assert transport.sent[2]["messages"] == []
+    with pytest.raises(ToolError, match="API key"):
+        await client.run_turn("hi", lambda event: None)
+    assert client.client_id == ("jack", "")
 
 
 @pytest.mark.asyncio
@@ -177,4 +232,4 @@ async def test_a_named_server_is_accepted_without_listing_tools(monkeypatch) -> 
 
     await client.connect()
     await client.run_turn("hi", lambda event: None)
-    assert transport.sent[0]["prompt"] == "hi"
+    assert sent(transport, "send_message")[0]["prompt"] == "hi"

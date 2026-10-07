@@ -211,6 +211,8 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         ctx: Context,
+        agent: str = "",
+        subagent: str = "",
     ) -> dict[str, Any]:
         """Stream one chat completion.
 
@@ -224,9 +226,26 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 every provider that speaks its wire format, and this says whose
                 credentials and model list to use.
             model: The model id, as that provider names it.
-            messages: OpenAI-shaped chat messages.
+            messages: OpenAI-shaped chat messages — **the whole conversation, sent
+                afresh every call.**  This server keeps nothing between calls, and
+                that is deliberate rather than unfinished: it speaks one wire
+                protocol, so a conversation living here would be lost the moment
+                it moved to a provider that speaks another.  The history belongs
+                one hop up, where the server is protocol-agnostic.
             tools: OpenAI-shaped tool definitions; empty for no tools.
+            agent: Whose conversation this call is serving.  Nothing is keyed on
+                it — this server has no state for it to key — but it travels with
+                every call so a log line, and anything that later wants to account
+                for one agent's usage, can say *whose* call was served rather than
+                leaving every hop anonymous.
+            subagent: Which of that agent's conversations, empty for its own.
         """
+        logger.debug(
+            "stream_chat %s/%s for %s",
+            provider,
+            model,
+            f"{agent}/{subagent}" if subagent else agent or "(unstated)",
+        )
         return await stream_chat_impl(streamer, provider, messages, tools, model, ctx)
 
     return mcp

@@ -1,19 +1,21 @@
-"""slife2-memory — turns, persisted, one database per agent.
+"""slife2-memory — turns, persisted, one database per client id.
 
 A component with one job: keep what was said.  It does not summarise, does not
-decide what mattered, and does not put anything back into a conversation — the
-caller does that, if it ever does.  A turn is stored as it happened — with one
+decide what mattered, does not put anything back into a conversation, and does
+not decide *whether* a turn is worth keeping — the caller does that, and the
+agent server is the caller that knows a worker's turns are not.  A turn is stored as it happened — with one
 deliberate exception, an oversized tool result, which is kept as an announced
 head-and-tail digest rather than in full (see `slife2.memory`) — so a question
 this component cannot answer today can be asked of the same rows later without a
 migration: search, embedding and summarising are each a table the schema has a
 place for and nothing here builds yet.
 
-**Agents are isolated by file.**  `agent="jack"` reads and writes
-`jack.turn.db`; there is no query that can reach another agent's turns, because
-there is no other agent's turns in the file.  One process serves every agent —
-the same arrangement as the model backends, where one process speaks one wire
-format for every provider — and the `agent` argument picks the file.
+**Client ids are isolated by file.**  `("jack", "")` reads and writes
+`jack.turn.db`, and `("jack", "worker")` writes `jack@worker.turn.db`; there is no
+query that can reach another id's turns, because there is no other id's turns in
+the file.  One process serves every id — the same arrangement as the model
+backends, where one process speaks one wire format for every provider — and the
+`(agent, subagent)` pair picks the file.
 
 It is shared infrastructure like the rest: started on demand, reused if already
 running, never per-agent.
@@ -28,7 +30,13 @@ from typing import Any
 from fastmcp import FastMCP
 
 from slife2.config import Config, find_config_path, load
-from slife2.mcp_server import configure_logging, house_server, parse_serve_args, serve
+from slife2.mcp_server import (
+    configure_logging,
+    describe,
+    house_server,
+    parse_serve_args,
+    serve,
+)
 from slife2.memory import store_for
 from slife2.paths import turns_dir
 
@@ -40,9 +48,10 @@ SERVER_NAME = "slife2-memory"
 CONFIG_KEY = "memory"
 
 INSTRUCTIONS = (
-    "Persisted turns, one database per agent. Call `remember` after a turn and "
-    "`recent` to read back what was said. The store keeps no opinion about what "
-    "matters: it writes what it is given and returns it in order."
+    "Persisted turns, one database per client id. Call `remember` after a turn "
+    "and `recent` to read back what was said, naming the same `(agent, subagent)` "
+    "the turn was taken under. The store keeps no opinion about what matters: it "
+    "writes what it is given and returns it in order."
 )
 
 
@@ -65,6 +74,7 @@ def build_server(config: Config) -> FastMCP:
     async def remember(
         agent: str,
         messages: list[dict[str, Any]],
+        subagent: str = "",
         token_count: int = 0,
         context_tokens: int = 0,
         who_helped: str = "",
@@ -81,13 +91,14 @@ def build_server(config: Config) -> FastMCP:
         interpretation.
 
         Args:
-            agent: Whose memory.  It names the database file, so agents are
-                isolated from each other by construction.
+            agent: Whose memory.  With `subagent` it names the database file, so
+                client ids are isolated from each other by construction.
             messages: The whole turn, as the agent loop returned it: the user's
                 message first, then every assistant message, tool call and
                 result.  Store it as it is.  What the user said is in there as
                 the first entry, and an attached image's base64 payload rides
                 along on it.
+            subagent: Which of that agent's conversations; empty for its own.
             token_count: What the turn cost, summed over every model call in it.
             context_tokens: The last model call's prompt plus completion — how
                 large the conversation had become, which is what the next
@@ -95,7 +106,7 @@ def build_server(config: Config) -> FastMCP:
                 is a bill, the other is what the context window has to hold.
             who_helped: The agent that answered.
             what_model: Which model answered, as `provider/model`.
-            channel: Where the turn came in from — `human`, or a peer's id.
+            channel: Where the turn came in from — `human`, or a client id.
                 Empty when the caller has nothing to say about it.
             created_at: When the user pressed enter.  Defaults to now, which is
                 the same moment to within a hop for a caller on loopback.
@@ -104,7 +115,7 @@ def build_server(config: Config) -> FastMCP:
         Returns:
             `turn_id` of the stored turn, and the file it went into.
         """
-        store = store_for(agent)
+        store = store_for(agent, subagent)
         turn_id = await _on_thread(
             store.save_turn,
             messages=messages,
@@ -116,11 +127,13 @@ def build_server(config: Config) -> FastMCP:
             created_at=created_at,
             completed_at=completed_at,
         )
-        logger.info("stored turn %s for %s", turn_id, agent)
+        logger.info("stored turn %s for %s", turn_id, describe((agent, subagent)))
         return {"turn_id": turn_id, "database": str(store.path)}
 
     @mcp.tool
-    async def recent(agent: str, limit: int = 10) -> list[dict[str, Any]]:
+    async def recent(
+        agent: str, limit: int = 10, subagent: str = ""
+    ) -> list[dict[str, Any]]:
         """The most recent turns, newest first.
 
         Retrieval is by time, which is the honest thing for a component that
@@ -131,8 +144,9 @@ def build_server(config: Config) -> FastMCP:
         Args:
             agent: Whose memory.
             limit: How many turns at most.
+            subagent: Which of that agent's conversations; empty for its own.
         """
-        store = store_for(agent)
+        store = store_for(agent, subagent)
         records = await _on_thread(store.recent, limit)
         return [record.to_wire() for record in records]
 

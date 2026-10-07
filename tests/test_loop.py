@@ -224,9 +224,11 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
     """A turn cut off mid-stream must not leave a dangling user message pair.
 
     The loop appends the assistant message only after the stream completes, so
-    an interrupted turn leaves the list ending in `user` — which the *server*
-    repairs, because only it knows a partial answer was shown.  What the loop
-    guarantees is that nothing half-written is in the list.
+    an interrupted turn leaves the list ending in `user`.  What the loop
+    guarantees is that nothing half-written is in the list; what happens to that
+    trailing user message is the owner's decision, and the owner is the agent
+    server — which keeps it, and records it, because losing it is the failure
+    the whole loop design exists to prevent.  See DESIGN.md §3.
     """
     backend = FakeBackend(text_turn("slow", chunks=["s", "l", "o", "w"], delay=0.05))
     messages: list[Message] = []

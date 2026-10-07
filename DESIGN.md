@@ -60,7 +60,7 @@ MCP `tools/call` is a request/response. A TUI needs tokens as they arrive. Both
 hops solve this the same way rather than inventing a special case each:
 
 ```
-caller:  tools/call run_turn(...)
+caller:  tools/call send_message(agent, subagent, ...)
 server:    ← notifications/progress   {text: "你"}
            ← notifications/progress   {text: "好"}
            ← notifications/progress   {tool_start: ...}
@@ -77,10 +77,15 @@ already replaced.
 Why progress and not `Context.log()`, which would carry structured `extra` and
 skip the JSON encoding:
 
-1. **Request scoping.** Progress carries `related_request_id`, so an event is
-   attributable to the call that caused it. `notifications/message` has no
-   request correlation at all — with two turns in flight the stream is
+1. **Request scoping.** Progress is delivered to the handler of the call that
+   caused it, so an event belongs to a known request. `notifications/message`
+   has no request correlation at all — with two turns in flight the stream is
    uninterpretable.
+   (An earlier version of this file credited `related_request_id` for that. It
+   is on the wire and it does carry the correlation, but it never reaches the
+   handler: the callback signature is `(progress, total, message)`. The
+   attribution is the per-call handler, and the difference matters the day
+   somebody tries to use the field.)
 2. **Opt-in delivery.** `report_progress` is a silent no-op when the client
    supplied no progress token. A script calling the same tool gets a correct
    answer and the server does no extra work. Logging is always on.
@@ -98,9 +103,9 @@ The payload is a plain string, so events cross as compact JSON with a `type`
 tag, `ensure_ascii=True`. Both halves live next to each other
 (`events.py`, `llm/wire.py`) so one round-trip test covers each contract.
 
-## 3. Statelessness
+## 3. The loop, and why the server owns it
 
-**Every server is stateless; the caller owns the conversation.**
+**Every server is stateless; the loop is where the conversation lives.**
 
 This was the largest change during implementation, and it was forced by
 measurement rather than preference. The original design keyed conversation
@@ -118,33 +123,112 @@ handshake from Streamable HTTP (SEP-2567, SEP-2575). MCP has no protocol-level
 sessions, and building memory on one means the memory is only as stable as a
 header that no longer exists.
 
-So the server became a function:
+That measurement is what rules out the obvious answer. A server cannot key state
+on the connection, because the protocol has no connection identity left to key
+on. So the state has to be **named by the caller** — which is a decision per
+call, not per server.
+
+**This server used to be a function, and now it is not.** The first cut was
+`run_turn(messages, prompt)`: the caller sent the whole conversation and got
+back what to remember. That was the right shape while its premise held — "here
+there is one client, and the state is the conversation it is already
+displaying". The premise stopped holding. A loop has to be addressable in its
+own right, for two reasons that are really one: so that a message arriving while
+it is busy can **wait** for it rather than displace what is running, and so that
+a caller which is not displaying the conversation can still continue one. (A
+subagent is that caller — see §8.)
+
+So a conversation is an object, and the surface is two tools:
 
 ```
-run_turn(messages, prompt) → {text, new_messages, usage, steps, stop_reason}
+send_message(agent, subagent, prompt) → {text, usage, steps, stop_reason, model}
+reset(agent, subagent)
 ```
 
-The caller sends what was said and gets back what to remember. Three things
-disappeared rather than being solved:
+**`new_messages` is gone**, and its absence is the point: the caller has nothing
+left to remember. It keeps an identity and no state at all — and the identity is
+not something the server gave it.
 
-- a conversation store that could grow without bound,
-- a per-conversation lock, because two turns can no longer race over one list,
-- **cancellation repair**, which existed only to stop an interrupted turn leaving
-  a corrupt shared history. There is no shared history to corrupt: a cancelled
-  turn returns nothing and the caller's history is whatever it already had. The
-  plan called this the sharpest correctness edge in the system; statelessness
-  deletes it.
+**This is where the design departs from SEP-2567, deliberately.** That SEP is the
+one that removed sessions, and its guidance for what replaces them is *"servers
+that need cross-call state use explicit, server-minted handles passed as ordinary
+tool arguments"*. The first cut of this file followed that literally, and the
+handle was a mistake — not because it was opaque or because it was minted, but
+because **anything a caller has to keep is a thing that can be lost, expired, or
+wrong after a restart, and every caller then needs a path for that.** A loop id
+could go stale two ways, so the TUI carried a "your conversation is gone" branch
+and DESIGN carried a paragraph about how ordinary that was.
 
-`stateless_http=True` follows from the same decision. So does the absence of a
-`reset` tool — the client clears its own list, and the MCP surface is exactly
-one tool.
+A name cannot go stale. So the id is `(agent, subagent)` — something the caller
+already knows, because it is *who the caller is*. The server starts a
+conversation the first time it sees a key, so sending is opening; an idle sweep
+may drop the state underneath and the next message simply begins again. There is
+no create, no handle, no expiry, and no error class. What the SEP's four
+requirements were buying — opaqueness, entropy, bounded lifetime, a readable
+expiry error — are all answers to problems a keyed-by-name design does not have.
 
-**Rejected:** server-minted opaque handles (the pattern the 2026-07-28 migration
-guidance recommends for cross-call state, e.g. `create_basket() → basket_id`).
-It is the right answer when state must outlive a client or be shared between
-them. Here there is one client, the state is the conversation it is already
-displaying, and a handle would add a store, a lifetime policy, and an
-expiry-error path to buy nothing.
+The price is the one the SEP warns about: a name is guessable, so possession is
+not authorization. Here there is no authorization to subvert — every server
+listens on loopback, the only thing on the other end is a CLI the user started,
+and the same was already true of `agent` before this change.
+
+Four things come back with the state, and each is paid for here rather than
+avoided:
+
+- **A per-conversation lock**, because two turns can now race over one list.
+- **An inbox**, which is that lock seen from the other side: a `send_message` for
+  a busy loop *waits*, in arrival order, and becomes a turn of its own. Nothing
+  is dropped and nothing is cancelled. The message is held in the loop's inbox
+  and **not** in its messages until its turn begins — the loop re-reads the
+  message list at every step, so a message appended on arrival would be read by
+  the model mid-turn, which is steering nobody asked for.
+- **Cancellation repair**, which the plan called the sharpest correctness edge in
+  the system and which statelessness had deleted. A cancelled turn can leave an
+  assistant message whose tool calls are only partly answered, and *that* list is
+  a 400 from every provider — so the repair truncates back to the user's own
+  message. The `+ 1` is load-bearing: the loop appends the user's message itself,
+  so truncating to the snapshot would delete the very message this arrangement
+  exists to not lose.
+- **A conversation store that can grow without bound**, which is now the
+  server's problem rather than the caller's. See §8.
+
+**Every turn of a loop that has memory is recorded, cancelled ones included.**
+The rule is deliberately not "remember to record the cancel path": a write that
+is conditional on how a turn ended is a write somebody can forget to make, and
+the failure it produces is a conversation in the transcript that the database has
+never heard of. A cancelled turn's row is a user message with no answer, which is
+exactly what it was. (Nothing writes it today, but `Loop.records` is what a
+subagent's loop will set false: a worker's round trips must not land in its
+parent agent's record.)
+
+One measurement decides *how* that write is made. From a cancelled handler a
+plain `await` is cancelled again at its next checkpoint — measured against the
+real transport, not assumed — so a record written that way is simply lost. A task
+created outside the cancelled scope does land, so the cancel path detaches the
+write and logs its failure instead of dropping it. What that gives up is
+ordering: if a queued turn follows immediately, it may write first. That is a
+cosmetic inversion in `recent`, and it is the cheaper half of the trade — the
+alternative is every queued turn waiting on the memory server.
+
+**The id travels with the call, at every hop.** It is not only the agent server
+that receives it: the memory write and the model call are both made under the
+same `(agent, subagent)`, so no hop in this system is anonymous. What the model
+servers do *not* do with it is keep a conversation — see §6, and the note there
+about why the history cannot live on the far side of a protocol-specific hop.
+
+**`--agent` exclusivity is now the only thing keeping one agent to one
+conversation.** The first cut enforced it in the server, because a caller
+arriving under a name had to be given *its* loop rather than the previous one's.
+A key is created on demand, so there is no previous one to hand over: two live
+clients under one name would now genuinely share a conversation. `slife2.launcher`
+still refuses to start the second one (§4), and that is where the rule lives —
+one place, and the place that already had to know.
+
+`stateless_http=True` stays, and it is not in tension with any of this: at
+2026-07-28 the flag is consulted only on the handshake-era path, so what it
+pins is that no request depends on a session surviving between two of them.
+Nothing here does — the state is named by an ordinary argument, which is the
+whole point.
 
 ## 4. Shared servers, and the launcher
 
@@ -244,6 +328,14 @@ Two things about the daemons themselves still need care:
   its name, or the record's `version` (written by every server, read by nobody)
   could start being compared.
 
+  This is no longer hypothetical. Renaming the agent server's tool from
+  `run_turn` to `send_message` is the first live instance: a daemon left over from
+  the previous build still advertises `slife2-agent`, so the identity check
+  passes, and then every turn fails with "unknown tool" while the log calls it
+  one caller's bad data. `slife2 down` is required after that upgrade, and the
+  probe's expected tool name (`slife2.launcher.AGENT_SERVER`) has to move in the
+  same commit as the tool or the symptom looks like a bug in the new code.
+
   Note what the identity check changed here, because it moved this edge rather
   than removing it. It compares the *server's* name, so a build that renames a
   server is now refused by a daemon from the old one — which is louder than the
@@ -324,6 +416,13 @@ verified by running against the installed library rather than by reading:
 conversation, know what MCP is, know which provider answered, or know whether
 anyone is watching.
 
+The server owns the conversation and the loop still does not, and that is not a
+contradiction worth smoothing over: **the state is the server's, the algorithm
+is the loop's.** `AgentLoop.run_turn` is handed a list it mutates in place, which
+is exactly what it did when the caller owned that list. The inbox is a lock in
+the server rather than a queue inside the loop, so nothing about the step
+machinery below changed when the state moved in.
+
 ```
 append the user message
 for step in 1..max_steps:
@@ -358,11 +457,38 @@ Named so they are decisions rather than oversights:
   are dropped until there is a display decision.
 - **Delta coalescing.** One notification per token. The seam is
   `ProgressObserver`.
-- **Sender-side history trimming.** A long conversation grows without bound
-  because the caller re-sends it every turn. The server could return a
-  compacted history instead.
+- **History trimming, and now it is the server's problem.** A long conversation
+  grows without bound. It used to grow in the caller's list, which made it
+  something a caller could feel and bound; it now grows in the loop, and the
+  caller re-sends nothing, so nothing feels it. This is the first thing to do
+  next, not a note that can sit.
+- **Bounds.** A loop caps its inbox (`MAX_QUEUED`), because a client's call
+  timeout starts when the call is made and an unbounded queue is therefore an
+  unbounded wait — and a wait longer than the timeout closes the stream and
+  cancels the turn, which is the very way a message gets lost. Nothing yet caps
+  how many loops exist, and nothing bounds a loop's history.
 - **Recall.** Memory stores turns and returns them by time; nothing yet
   decides which past turns are *relevant* to the one in hand.
 - **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
   does not have to answer it. A tool that writes a file reopens the question v1
-  answered with a model-driven `_approve` parameter.
+  answered with a model-driven `_approve` parameter — and a tool that spawns a
+  subagent is the first such tool this design has an obvious use for.
+- **Subagents.** The shape is decided and the seams are in: one agent has one
+  loop with memory, plus N worker loops that have none. `Loop.records` and
+  `Loop.children` exist for it, workers hang off their parent so a worker id is
+  not addressable from outside, and a worker's answer arrives as a tool result
+  because tools already return text. What is not decided: how a spawn tool
+  collects results, whether a worker can be multi-turn, how deep nesting may go,
+  and whether cancelling a parent cancels its children (it depends on
+  `children`, which is why that link had to be in from the start).
+- **Server-initiated push.** Not available at this revision through FastMCP:
+  `subscriptions/listen` is the only push channel, it carries four
+  change-notification types, and FastMCP 4.0.11 registers no handler for it at
+  all. So an answer can only ride the request that asked for it — which is why a
+  queued caller waits on its own call rather than being told later.
+- **A client id on the turn record.** Nothing reads it yet, and adding a column
+  to `turn` means deleting every existing `*.turn.db` (there is no migration
+  layer, §5). The failure mode of getting it wrong is worse than the gap: the
+  new INSERT would raise `OperationalError`, the memory server would report it
+  as one caller's bad data, and every turn after the upgrade would run perfectly
+  and never be recorded. Add it with the reader that needs it.

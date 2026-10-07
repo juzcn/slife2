@@ -1,23 +1,26 @@
 """The Textual application.
 
-Three things here are worth knowing before changing them:
+Four things here are worth knowing before changing them:
 
 1. **The MCP client is created in `on_mount`, never in `__init__`.**  Its anyio
    task group has to live in the app's event loop, and `__init__` runs before
    there is one.
-2. **Every widget mutation happens in a message handler.**  The progress
-   callback, the turn's result, and its failure are all posted as messages
-   rather than applied where they happen.  That is not just tidiness: the
-   result must be applied *after* the deltas that preceded it, and posting it
-   puts it in the same queue, in order.  Applying it directly from the worker
-   would let it overtake deltas that had been posted but not yet handled — the
-   final answer would land first and the fragments would appear beneath it.
-   Routing through messages also means widget updates happen inside Textual's
-   handling context, which keeps `refresh()` batching deterministic and stops
-   pilot-driven tests racing, and it keeps `client.py` free of UI concerns.
-3. **`ctrl+c` cancels a running turn, and quits when there is none.**  Leaving
-   it as quit-only would mean a user cannot stop a runaway turn, which is the
-   most common thing anyone wants to do.
+2. **Submissions queue, and only one turn is in flight at a time.**  The loop on
+   the server would accept them concurrently and run them in order, but the
+   *transcript* could not: a turn's last delta and its result travel on one
+   response while the next turn's first delta travels on another, and nothing
+   orders those two arrivals.  Sending one at a time makes the transcript's
+   order a property of the code rather than of a race — and it also means the
+   client's timeout measures a turn rather than a wait, which is what a timeout
+   should measure.  What the server's own inbox is for is the *other* caller:
+   any peer that sends to a busy loop is queued there and never loses its turn.
+3. **Every event is stamped with the turn it belongs to.**  Textual delivers
+   events as queued messages, so a delta from the turn that just finished can be
+   handled after the *next* turn's block is already open — and land in it.  The
+   ticket is what makes that a dropped fragment instead of a wrong transcript.
+4. **`ctrl+c` cancels the running turn, never the queue.**  The message the user
+   is still waiting on must not go with the one they gave up on.  With no turn
+   running it quits, because a user cannot stop a runaway turn otherwise.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from collections.abc import Callable
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.message import Message as TextualMessage
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker
 
 from slife2.config import DEFAULT_AGENT
 from slife2.events import (
@@ -51,28 +54,9 @@ logger = logging.getLogger(__name__)
 class TurnEventMessage(TextualMessage):
     """A turn event, carried from the client callback into Textual's handling."""
 
-    def __init__(self, event: TurnEvent) -> None:
+    def __init__(self, ticket: int, event: TurnEvent) -> None:
+        self.ticket = ticket
         self.event = event
-        super().__init__()
-
-
-class TurnDoneMessage(TextualMessage):
-    """The turn's authoritative answer.
-
-    Posted rather than applied, so it cannot overtake the deltas that came
-    before it — see the module docstring.
-    """
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-        super().__init__()
-
-
-class TurnFailedMessage(TextualMessage):
-    """The turn raised.  Posted for the same ordering reason."""
-
-    def __init__(self, error: str) -> None:
-        self.error = error
         super().__init__()
 
 
@@ -123,7 +107,24 @@ class SlifeApp(App[None]):
         self._client: AgentClient | None = None
         self._connected = False
         self._connection_text = "connecting"
-        self._turn_worker: Worker[None] | None = None
+        #: Prompts sent but not started, oldest first.  The user's message is
+        #: added to the transcript when its turn starts rather than on submit,
+        #: so that the transcript stays a faithful record of the turns that
+        #: actually happened, in the order they happened.
+        self._queue: list[str] = []
+        self._worker: Worker[None] | None = None
+        self._draining = False
+        #: The running turn, as its own task so that cancelling one leaves the
+        #: queue alone.  Cancelling the worker would take the queue with it.
+        #: It resolves to the turn's answer, which the queue applies before the
+        #: next turn opens a block.
+        self._turn: asyncio.Task[str] | None = None
+        #: Whether the cancellation in flight was ours.  Without it there is no
+        #: way to tell "the user stopped this turn" from "the app is closing",
+        #: and they want opposite handling.
+        self._interrupting = False
+        #: Which turn's events the transcript is currently accepting.
+        self._ticket = 0
         self._context_tokens = 0
         self._steps = 0
 
@@ -186,7 +187,7 @@ class SlifeApp(App[None]):
         self._refresh_status()
         return self._connected
 
-    # --- running a turn ------------------------------------------------------
+    # --- the queue of turns --------------------------------------------------
 
     @property
     def _transcript(self) -> ChatView:
@@ -194,63 +195,98 @@ class SlifeApp(App[None]):
 
     async def on_history_input_submitted(self, message: HistoryInput.Submitted) -> None:
         self.query_one(HistoryInput).remember(message.text)
-        self._transcript.add_user(message.text)
-        self._transcript.begin_assistant()
-        self._steps = 0
-        self._refresh_status(busy=True)
-        # exclusive=True: a second submit cancels the first, which is what a
-        # user pressing Enter again means.
-        self._turn_worker = self.run_worker(
-            self._run_turn(message.text),
-            group="turn",
-            exclusive=True,
-            exit_on_error=False,
+        self._queue.append(message.text)
+        self._start_draining()
+        self._refresh_status()
+
+    def _start_draining(self) -> None:
+        """Be the one worker that runs queued turns, if there is not one already.
+
+        The flag rather than the worker's state: `run_worker` returns before the
+        worker has started, so a second submission in the same tick would see a
+        worker that is set and not yet running, and start a second one.
+        """
+        if self._draining:
+            return
+        self._draining = True
+        self._worker = self.run_worker(self._drain(), group="turn", exit_on_error=False)
+
+    async def _drain(self) -> None:
+        """Run queued turns, one at a time, until the queue is empty."""
+        try:
+            while self._queue:
+                # Taken off the queue *before* it runs, so the count in the
+                # status bar is what is still waiting rather than including the
+                # turn the user is already watching.
+                prompt = self._queue.pop(0)
+                self._ticket += 1
+                ticket = self._ticket
+                self._transcript.add_user(prompt)
+                self._transcript.begin_assistant()
+                self._steps = 0
+                self._refresh_status()
+
+                self._turn = asyncio.create_task(self._send(prompt, ticket))
+                try:
+                    final = await self._turn
+                except asyncio.CancelledError:
+                    if not self._interrupting:
+                        raise
+                    self._transcript.add_note("[cancelled]")
+                except Exception as exc:
+                    logger.exception("turn failed")
+                    self._transcript.add_error(str(exc))
+                else:
+                    self._transcript.finish_assistant(final)
+                finally:
+                    self._interrupting = False
+                    self._turn = None
+                    self._refresh_status()
+        finally:
+            self._draining = False
+
+    async def _send(self, prompt: str, ticket: int) -> str:
+        """Run one turn and return its authoritative answer.
+
+        The answer is returned rather than posted so the queue can apply it
+        before the next turn opens a block.  Ordering against the deltas is the
+        ticket's job, not the message queue's.
+        """
+        assert self._client is not None
+        # The `@path` markers stay in the prompt: the transcript should show
+        # what was sent, and taking them out would leave a sentence with a
+        # hole where the attachment was named.
+        images, complaints = attachments.extract(prompt)
+        for complaint in complaints:
+            # Complaints do not stop the prompt.  Losing what somebody typed
+            # because one attachment was wrong is a worse outcome than
+            # sending it without.
+            self._transcript.add_note(complaint)
+
+        if not self._connected:
+            # Lazy retry: the server may have started since we launched.
+            await self._connect()
+        if not self._connected:
+            raise ConnectionError(
+                f"not connected to the agent server ({self._connection_text})"
+            )
+
+        return await self._client.run_turn(
+            prompt, lambda event: self._on_event(ticket, event), images=images
         )
 
-    async def _run_turn(self, prompt: str) -> None:
-        assert self._client is not None
-        try:
-            # The `@path` markers stay in the prompt: the transcript should show
-            # what was sent, and taking them out would leave a sentence with a
-            # hole where the attachment was named.
-            images, complaints = attachments.extract(prompt)
-            for complaint in complaints:
-                # Complaints do not stop the prompt.  Losing what somebody typed
-                # because one attachment was wrong is a worse outcome than
-                # sending it without.
-                self._transcript.add_note(complaint)
-
-            if not self._connected:
-                # Lazy retry: the server may have started since we launched.
-                await self._connect()
-            if not self._connected:
-                self.post_message(
-                    TurnFailedMessage(
-                        f"not connected to the agent server ({self._connection_text})"
-                    )
-                )
-                return
-
-            final = await self._client.run_turn(prompt, self._on_event, images=images)
-            self.post_message(TurnDoneMessage(final))
-        except asyncio.CancelledError:
-            # `action_interrupt` has already noted it in the transcript; all
-            # this needs to do is not turn a deliberate cancellation into an
-            # error message.
-            raise
-        except Exception as exc:
-            logger.exception("turn failed")
-            self.post_message(TurnFailedMessage(str(exc)))
-        finally:
-            self._refresh_status()
-
-    def _on_event(self, event: TurnEvent) -> None:
+    def _on_event(self, ticket: int, event: TurnEvent) -> None:
         """Called by the client for every progress event.  Does not touch widgets."""
-        self.post_message(TurnEventMessage(event))
+        self.post_message(TurnEventMessage(ticket, event))
 
     # --- message handlers (the only places widgets are mutated) --------------
 
     def on_turn_event_message(self, message: TurnEventMessage) -> None:
+        # Late fragments of a turn that is over.  Dropping them is what keeps
+        # one turn's tail out of the next turn's block — see the module
+        # docstring.
+        if message.ticket != self._ticket:
+            return
         event = message.event
         match event:
             case TextDelta(text=text):
@@ -279,37 +315,29 @@ class SlifeApp(App[None]):
                 self._transcript.set_usage(usage.total_tokens)
                 self._refresh_status()
 
-    def on_turn_done_message(self, message: TurnDoneMessage) -> None:
-        self._transcript.finish_assistant(message.text)
-
-    def on_turn_failed_message(self, message: TurnFailedMessage) -> None:
-        self._transcript.add_error(message.error)
-
     # --- keyboard ------------------------------------------------------------
 
     def action_interrupt(self) -> None:
-        """Stop a running turn, or quit when there is nothing to stop."""
-        worker = self._turn_worker
-        if worker is not None and worker.state is WorkerState.RUNNING:
-            worker.cancel()
-            self._transcript.add_note("[cancelled]")
-            self._refresh_status()
+        """Stop the running turn, or quit when there is nothing to stop."""
+        if self._turn is not None and not self._turn.done():
+            self._interrupting = True
+            self._turn.cancel()
         else:
             self.exit()
 
-    def action_new_conversation(self) -> None:
-        """Start over: forget the history and empty the window.
+    async def action_new_conversation(self) -> None:
+        """Start over: a new loop, an empty queue, an empty window.
 
-        Cheap, because the server keeps no conversation to clear — see
-        `slife2.tui.client.MCPAgentClient`.
+        The queue is dropped rather than carried over — those messages were
+        meant for the conversation being abandoned — and the loop is replaced,
+        which is also what forgets the history: the server ends a name's old
+        loop when it opens a new one for that name.
         """
-        if (
-            self._turn_worker is not None
-            and self._turn_worker.state is WorkerState.RUNNING
-        ):
-            self._turn_worker.cancel()
+        if self._turn is not None and not self._turn.done():
+            self._turn.cancel()
+        self._queue.clear()
         if self._client is not None:
-            self._client.reset()
+            await self._client.reset()
         self._transcript.clear_all()
         self._context_tokens = 0
         self._steps = 0
@@ -317,16 +345,23 @@ class SlifeApp(App[None]):
 
     # --- status --------------------------------------------------------------
 
-    def _refresh_status(self, *, busy: bool = False) -> None:
-        worker = self._turn_worker
-        if worker is not None and worker.state is WorkerState.RUNNING:
-            busy = True
+    def _refresh_status(self) -> None:
+        """Derive the bar from what is left to do, not from a worker's state.
+
+        Asking the worker whether it is running is wrong at exactly the moment
+        the last refresh happens: it is the final statement of the worker's own
+        body, so it sees `RUNNING` for a turn that has already finished, and
+        nothing afterwards corrects it — the bar says working until the next
+        turn, and then until the one after that.  A queue and a task are the two
+        things that actually describe the situation.
+        """
         self.query_one(StatusBar).update_status(
             connection=self._connection_text,
             connected=self._connected,
             agent=self._agent,
             model=self._model_label,
-            busy=busy,
+            busy=self._turn is not None or bool(self._queue),
+            queued=len(self._queue),
             context_tokens=self._context_tokens,
             context_window=self._context_window,
             steps=self._steps,
