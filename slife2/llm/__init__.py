@@ -11,9 +11,16 @@ Layers, in dependency order::
     base.py           Chunk, ToolCallDelta, Stream, LLMBackend  (no I/O)
     wire.py           Chunk <-> progress payload                (no I/O)
     client.py         MCPBackend: LLMBackend over MCP           (client side)
-    server_common.py  shared scaffolding for the two servers
+    server_common.py  what the two model servers share: one `stream_chat`
+                      tool, the progress encoding, and tool-call assembly
     openai_server.py  slife2-llm-openai     <- imports openai
     anthropic_server.py  slife2-llm-anthropic  <- imports anthropic
+
+Serving a server at all — the flags, the HTTP transport, the record that says a
+daemon is here — is deliberately *not* in this package.  It is not an LLM
+concern, and the memory server and the agent server need it too, so it lives in
+:mod:`slife2.mcp_server`.  Neither of those two should have to import
+`slife2.llm` to be a server.
 
 Nothing is re-exported here on purpose: importing `slife2.llm` should not pull
 in either SDK, and a wildcard export would eventually do exactly that.

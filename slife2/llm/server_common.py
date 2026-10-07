@@ -1,8 +1,13 @@
-"""Scaffolding the two LLM MCP servers share.
+"""What the two LLM MCP servers share.
 
 Both servers do the same job — expose one `stream_chat` tool, push provider
 output down the progress channel, return the assembled message — and differ only
 in which SDK they call.  This module holds everything except that difference.
+
+Serving a server at all — the flags, the HTTP transport, the record that says a
+daemon is here — is *not* here, because it is not an LLM concern: it lives in
+`slife2.mcp_server`, alongside the other things every server in this system
+agrees about.
 
 It is also where **tool-call fragments are reassembled**, and that placement is
 deliberate.  Every provider streams tool arguments as JSON text split at
@@ -15,24 +20,40 @@ receives complete `ToolCall` objects and needs no accumulator of its own.
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from slife2 import __version__
-from slife2.config import ServerSettings
+from slife2.config import ProviderSettings, find_config_path, load
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
+from slife2.mcp_server import (
+    configure_logging,
+    house_server,
+    parse_serve_args,
+    serve,
+)
 from slife2.messages import Message, StreamChatResult, ToolCall, ToolSpec, Usage
-from slife2.paths import DATA_ENV_VAR
-from slife2.runtime import ServerRecord, clear_record, write_record
 
 logger = logging.getLogger(__name__)
+
+#: What a model backend tells a caller that reads its instructions.
+#:
+#: The two things a caller cannot work out from the tool signature are what
+#: `provider` selects and that the result — not the notifications — is
+#: authoritative.  Nothing here restates a tool description; that is the spec's
+#: guidance for this field, and it is also just true.
+INSTRUCTIONS = (
+    "A model backend. Call `stream_chat` with a configured provider and a model "
+    "id; provider output arrives as progress notifications on the same request, "
+    "and the result carries the complete assistant message. The result is "
+    "authoritative — a caller that ignores the progress stream still gets the "
+    "whole answer. This server keeps no state between calls."
+)
 
 
 @dataclass
@@ -179,15 +200,7 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
     server through the in-memory transport with a scripted provider — no API
     key, no network, no mocking library.
     """
-    mcp: FastMCP = FastMCP(
-        name,
-        # Provider errors (a rejected key, a model that does not exist) are the
-        # single most likely thing a user has to debug here, and FastMCP's
-        # default is to replace them with a generic message.  These servers
-        # listen on loopback and serve their own operator, so the detail is
-        # worth more than the tidiness.
-        mask_error_details=False,
-    )
+    mcp = house_server(name, instructions=INSTRUCTIONS)
 
     @mcp.tool
     async def stream_chat(
@@ -217,94 +230,51 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
     return mcp
 
 
-def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:
-    """The flags every server here accepts."""
-    parser = argparse.ArgumentParser(prog=description, description=description)
-    parser.add_argument(
-        "--data-dir",
-        default=None,
-        help=(
-            "where slife2 keeps everything: slife2.yaml, the runtime state of "
-            "what is running, and the turns it produced"
-        ),
-    )
-    parser.add_argument("--host", default=None, help="override the listen address")
-    parser.add_argument("--port", default=None, type=int, help="override the port")
-    args = parser.parse_args(argv)
-    if args.data_dir:
-        # Set in the environment rather than passed down: the servers this one
-        # starts must look in the same folder, and an inherited variable is
-        # harder to forget than an argument.
-        os.environ[DATA_ENV_VAR] = args.data_dir
-    return args
-
-
-def serve(
-    mcp: FastMCP,
-    server: ServerSettings,
-    args: argparse.Namespace,
+def serve_backend(
+    argv: list[str] | None,
     *,
-    name: str,
-    config_path: Any = None,
-) -> None:
-    """Run a server over streamable HTTP, recording that it is here.
+    api: str,
+    server_name: str,
+    build: Callable[[dict[str, ProviderSettings]], FastMCP],
+    logger: logging.Logger,
+) -> int:
+    """The `main` both model servers share.
 
-    A server registers itself rather than being registered by whoever started
-    it, because *it* is the only party that knows which config it read — and
-    that is exactly what decides whether another instance may reuse it.  A
-    server started by hand is indistinguishable from one started by a launcher
-    once it does this, which is the point: `slife2` pointed at the same config
-    reuses it either way, and an instance pointed at a *different* config sees a
-    record that is not its own and refuses rather than talking to a server
-    holding somebody else's key.
+    One process per wire protocol, so the only thing that genuinely differs
+    between the two is which protocol they serve and which SDK builds the
+    streamer.  Everything else here was byte-identical in both, which is the
+    kind of duplication that drifts one branch at a time.
 
-    Two options are pinned explicitly even where they match the default, because
-    flipping either is *silent* and a future refactor could do it without
-    noticing:
+    A config with no provider for this protocol stops here, with a one-line
+    message and exit code 2, rather than starting a server that can answer
+    nothing.
 
-    * ``json_response=False`` — with it True the response body is buffered and
-      returned as one JSON document.  Progress notifications cannot be
-      interleaved into a buffered body, so every stream in this system would
-      stop streaming while still returning correct results.
-    * ``stateless_http=True`` — every server here is stateless by design.  The
-      agent's conversation memory lives in the caller, so nothing depends on a
-      session surviving between requests.  See `slife2.server.server`.
+    `logger` is the caller's, so a line still lands under the name of the server
+    that wrote it rather than under this module's.
     """
-    url = ServerSettings(
-        host=args.host or server.host,
-        port=args.port or server.port,
-        path=server.path,
-    ).url
-    record = ServerRecord.now(
-        name=name,
-        url=url,
-        pid=os.getpid(),
-        config=str(config_path) if config_path else "",
-        version=__version__,
+    args = parse_serve_args(argv, server_name)
+    configure_logging()
+    config_path = find_config_path()
+    config = load()
+
+    providers = {
+        name: provider
+        for name, provider in config.providers.items()
+        if provider.api == api
+    }
+    if not providers:
+        print(f"{server_name}: this config has no {api} provider")
+        return 2
+
+    address = config.server(api)
+    logger.info(
+        "serving %s for %s on http://%s:%d%s (providers: %s)",
+        server_name,
+        api,
+        args.host or address.host,
+        args.port or address.port,
+        address.path,
+        ", ".join(sorted(providers)),
     )
-    write_record(record)
-    try:
-        mcp.run(
-            transport="http",
-            host=args.host or server.host,
-            port=args.port or server.port,
-            path=server.path,
-            json_response=False,
-            stateless_http=True,
-        )
-    finally:
-        clear_record(url)
-
-
-def configure_logging() -> None:
-    """Log to stderr, never stdout.
-
-    stdout is not free here: on a stdio transport it *is* the protocol channel,
-    and even over HTTP the house rule is that model output must never be
-    printed to a console whose codepage may not be UTF-8 — a `UnicodeEncodeError`
-    mid-turn is a worse failure than a log line nobody reads.
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    serve(build(providers), address, args, name=server_name, config_path=config_path)
+    return 0

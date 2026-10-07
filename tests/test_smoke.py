@@ -90,14 +90,29 @@ def test_agent_defaults_to_slife2() -> None:
     assert _parse_args(["--agent", "jack"]).agent == "jack"
 
 
-def test_a_leading_subcommand_is_taken_as_one() -> None:
+def test_a_subcommand_is_recognised_wherever_it_is_written() -> None:
     """`slife2 status` is a command; `slife2 --agent jack` is the TUI.
 
-    The subcommand is only recognised in the first position, which is what lets
-    the common invocation stay a plain flag call.
+    The command is an ordinary positional, so the flags and the command can be
+    written in either order.  It used to be taken only from the first position,
+    which made `slife2 --data-dir D status` a usage error — and `--data-dir`
+    matters most on `status` and `down`, which are what you run when the data
+    directory is not the default one.
     """
     assert _parse_args(["status"]).command == "status"
     assert _parse_args(["down"]).command == "down"
     assert _parse_args([]).command == "run"
     assert _parse_args(["--agent", "jack"]).command == "run"
     assert _parse_args(["status", "--data-dir", "x"]).command == "status"
+    assert _parse_args(["--data-dir", "x", "status"]).command == "status"
+    assert _parse_args(["--data-dir", "x"]).command == "run"
+
+
+def test_an_unknown_command_is_a_usage_error() -> None:
+    """Rather than a word silently treated as a flag, or as the TUI.
+
+    Argparse owns the choice, so it names the commands that do exist — which is
+    the whole reason the subcommand is not picked out by hand any more.
+    """
+    with pytest.raises(SystemExit):
+        _parse_args(["frobnicate"])

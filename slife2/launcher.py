@@ -28,7 +28,14 @@ from pathlib import Path
 
 from fastmcp import Client
 
-from slife2.config import API_BACKENDS, Config
+from slife2.config import (
+    AGENT_SERVER_NAME,
+    API_BACKENDS,
+    API_SERVER_NAMES,
+    MEMORY_SERVER_NAME,
+    Config,
+)
+from slife2.mcp_server import identifies
 from slife2.paths import data_dir
 from slife2.runtime import (
     AgentClaim,
@@ -54,15 +61,17 @@ from slife2.runtime import (
     write_claim,
 )
 
-#: The components that are always present: a module, and the tool that proves
-#: we are talking to the one we think we are.
+#: The components that are always present: a module, the MCP name that module's
+#: server advertises, and the tool that identifies it for a server that reports
+#: no name at all.  See `slife2.mcp_server.identifies` for why both are needed.
 #:
 #: In code rather than in the config.  Letting an operator name an arbitrary
 #: command would be a capability nobody asked for and one more thing to get
-#: wrong.  The model backends need no entry here — their module comes from the
-#: `api` they speak, which is already a closed set.
-AGENT_SERVER = ("slife2.server.server", "run_turn")
-MEMORY_SERVER = ("slife2.memory_server", "remember")
+#: wrong.  The model backends need no entry here — their module *and* their
+#: advertised name both come from the `api` they speak, which is already a
+#: closed set.
+AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "run_turn")
+MEMORY_SERVER = ("slife2.memory_server", MEMORY_SERVER_NAME, "remember")
 
 #: The tool both model servers answer to, and how they are named.
 MODEL_TOOL = "stream_chat"
@@ -138,6 +147,10 @@ class ServerSpec:
     url: str
     host: str
     port: int
+    #: The MCP name the server advertises, which is what proves it is ours.
+    expected_name: str
+    #: The tool that identifies it when it advertises no name — see
+    #: `slife2.mcp_server.identifies`.
     expected_tool: str
 
 
@@ -182,11 +195,12 @@ def specs(config: Config) -> list[ServerSpec]:
                 url=address.url,
                 host=address.host,
                 port=address.port,
+                expected_name=API_SERVER_NAMES[api],
                 expected_tool=MODEL_TOOL,
             )
         )
 
-    for name, (module, tool) in (
+    for name, (module, server_name, tool) in (
         ("memory", MEMORY_SERVER),
         ("agent", AGENT_SERVER),
     ):
@@ -198,30 +212,35 @@ def specs(config: Config) -> list[ServerSpec]:
                 url=address.url,
                 host=address.host,
                 port=address.port,
+                expected_name=server_name,
                 expected_tool=tool,
             )
         )
     return result
 
 
-async def _probe_async(url: str, expected_tool: str, timeout: float) -> bool:
-    client: Client = Client(url, timeout=timeout)
+async def _probe_async(spec: ServerSpec, timeout: float) -> bool:
+    client: Client = Client(spec.url, timeout=timeout)
     await client.__aenter__()
     try:
-        names = {tool.name for tool in await client.list_tools()}
-        return expected_tool in names
+        return await identifies(
+            client, spec.expected_name, fallback_tool=spec.expected_tool
+        )
     finally:
         await client.__aexit__(None, None, None)
 
 
-def probe(
-    url: str, expected_tool: str, *, timeout: float = PROBE_TIMEOUT_SECONDS
-) -> bool:
-    """Whether the server at `url` is up *and* is the one we expect.
+def probe(spec: ServerSpec, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
+    """Whether the server at `spec.url` is up *and* is the one we expect.
 
-    The tool check is what makes this better than a connection test: it catches
-    the port being held by a different MCP server, which a connect would wave
-    through and which would then fail in the middle of a turn.
+    Identity comes from the handshake, which is what makes this better than a
+    connection test: it catches the port being held by a different MCP server,
+    which a connect would wave through and which would then fail in the middle
+    of a turn.  See `slife2.mcp_server.identifies`.
+
+    Takes the whole spec rather than a URL and a name so the two cannot be
+    paired up wrongly at a call site — there are five of them, and a mismatched
+    pair would report a perfectly good server as absent.
 
     Blocks, and so cannot be called from inside a running event loop.  It never
     is in production — the launcher runs before the TUI starts its loop — and
@@ -242,7 +261,7 @@ def probe(
         )
 
     try:
-        return asyncio.run(_probe_async(url, expected_tool, timeout))
+        return asyncio.run(_probe_async(spec, timeout))
     except Exception:
         return False
 
@@ -297,7 +316,7 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
                 f"{spec.name} exited with code {proc.returncode} before it was ready",
                 tail_log(spec.url),
             )
-        if probe(spec.url, spec.expected_tool):
+        if probe(spec):
             return
         if time.monotonic() >= deadline:
             # We own a process that has never served anything, so cleaning it up
@@ -319,7 +338,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     contends — and the probe inside the lock is what makes the wait meaningful:
     whoever held it has just started the server, so the answer changes.
     """
-    if probe(spec.url, spec.expected_tool):
+    if probe(spec):
         return _reuse(spec, config_path=config_path)
 
     if tcp_listening(spec.host, spec.port):
@@ -329,7 +348,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
 
     try:
         with start_lock(spec.url):
-            if probe(spec.url, spec.expected_tool):
+            if probe(spec):
                 return _reuse(spec, config_path=config_path)
             if tcp_listening(spec.host, spec.port):
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
@@ -446,7 +465,7 @@ def statuses(config: Config) -> list[Outcome]:
     """What each server this config needs is doing right now."""
     results = []
     for spec in specs(config):
-        if probe(spec.url, spec.expected_tool):
+        if probe(spec):
             results.append(_reuse(spec))
         elif tcp_listening(spec.host, spec.port):
             results.append(
@@ -471,11 +490,7 @@ def stop(config: Config) -> list[Outcome]:
     for spec in specs(config):
         record = read_record(spec.url)
         if record is None:
-            status = (
-                Status.UNMANAGED
-                if probe(spec.url, spec.expected_tool)
-                else Status.NOT_RUNNING
-            )
+            status = Status.UNMANAGED if probe(spec) else Status.NOT_RUNNING
             results.append(
                 Outcome(spec, status, detail="no record; not started by slife2")
             )

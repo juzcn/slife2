@@ -1,9 +1,11 @@
-"""slife2-llm-openai — one provider's chat completions, behind MCP.
+"""slife2-llm-openai — every OpenAI-compatible provider, behind MCP.
 
-One process per provider, because a process can only hold one base_url and one
-key.  It is started as `slife2-llm-openai --provider deepseek` and reads that
-provider's credentials and models from the config; it holds no state between
-calls and knows nothing about the others.
+**One process per wire protocol, not per provider.**  This process serves every
+provider in the config whose `api` is `openai-completions`, and
+`stream_chat(provider=...)` says whose credentials and model list a given call
+uses.  A process per provider would be more processes buying nothing: they all
+speak one format, and this way a provider nobody calls never has its key
+resolved at all.  It holds no state between calls.
 
 "OpenAI-compatible" is doing real work in that sentence.  The same code serves
 OpenAI, DeepSeek, Ollama, vLLM, scnet, and most gateways, because they all speak
@@ -17,19 +19,9 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from slife2.config import (
-    ModelSettings,
-    ProviderSettings,
-    find_config_path,
-    load,
-)
+from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
-from slife2.llm.server_common import (
-    build_llm_server,
-    configure_logging,
-    parse_serve_args,
-    serve,
-)
+from slife2.llm.server_common import build_llm_server, serve_backend
 from slife2.messages import Message, ToolSpec, Usage
 
 logger = logging.getLogger(__name__)
@@ -297,38 +289,10 @@ def build_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-
-    providers = {
-        name: provider
-        for name, provider in config.providers.items()
-        if provider.api == API
-    }
-    if not providers:
-        print(f"{SERVER_NAME}: this config has no {API} provider")
-        return 2
-
-    address = config.server(API)
-    logger.info(
-        "serving %s for %s on http://%s:%d%s (providers: %s)",
-        SERVER_NAME,
-        API,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
-        ", ".join(sorted(providers)),
+    """Entry point for the `slife2-llm-openai` console script."""
+    return serve_backend(
+        argv, api=API, server_name=SERVER_NAME, build=build_server, logger=logger
     )
-    serve(
-        build_server(providers),
-        address,
-        args,
-        name=f"{SERVER_NAME}:{API}",
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

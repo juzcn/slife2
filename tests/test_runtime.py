@@ -23,14 +23,8 @@ pytestmark = pytest.mark.unit
 REPO = str(Path(__file__).resolve().parents[1])
 
 
-@pytest.fixture(autouse=True)
-def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point every test at its own data directory.
-
-    Without this a test could read — or `down` — a developer's real servers.
-    """
-    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
-    return tmp_path / "data"
+# The data directory is isolated for every test in `conftest.py`, not here —
+# see the note there for why it is not this module's business alone.
 
 
 def run_helper(code: str, *, env: dict[str, str] | None = None) -> subprocess.Popen:

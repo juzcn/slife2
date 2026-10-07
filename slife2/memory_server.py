@@ -28,7 +28,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from slife2.config import Config, find_config_path, load
-from slife2.llm.server_common import configure_logging, parse_serve_args, serve
+from slife2.mcp_server import configure_logging, house_server, parse_serve_args, serve
 from slife2.memory import store_for
 from slife2.paths import turns_dir
 
@@ -59,11 +59,7 @@ def build_server(config: Config) -> FastMCP:
         """
         return await asyncio.to_thread(function, *args, **kwargs)
 
-    mcp: FastMCP = FastMCP(
-        SERVER_NAME,
-        instructions=INSTRUCTIONS,
-        mask_error_details=False,
-    )
+    mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
 
     @mcp.tool
     async def remember(

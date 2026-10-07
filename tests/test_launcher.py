@@ -29,10 +29,8 @@ pytestmark = pytest.mark.unit
 
 REPO = str(Path(__file__).resolve().parents[1])
 
-
-@pytest.fixture(autouse=True)
-def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
+# The data directory is isolated for every test in `conftest.py`, not here —
+# see the note there for why it is not this module's business alone.
 
 
 # --- which servers are needed ------------------------------------------------
@@ -138,9 +136,10 @@ def test_specs_carry_where_each_server_listens() -> None:
     spec = next(
         s for s in launcher.specs(default_config()) if s.name.startswith("llm:")
     )
-    assert (spec.host, spec.port, spec.expected_tool) == (
+    assert (spec.host, spec.port, spec.expected_name, spec.expected_tool) == (
         "127.0.0.1",
         8001,
+        "slife2-llm-openai",
         "stream_chat",
     )
     assert spec.url == "http://127.0.0.1:8001/mcp"
@@ -155,6 +154,7 @@ SPEC = ServerSpec(
     url="http://127.0.0.1:8001/mcp",
     host="127.0.0.1",
     port=8001,
+    expected_name="slife2-llm-openai",
     expected_tool="stream_chat",
 )
 
@@ -179,7 +179,7 @@ async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
     the only sign.
     """
     with pytest.raises(RuntimeError, match="cannot run inside an event loop"):
-        launcher.probe("http://127.0.0.1:9/mcp", "x", timeout=0.2)
+        launcher.probe(SPEC, timeout=0.2)
 
 
 def test_a_spawned_server_is_told_where_the_data_directory_is(
@@ -278,7 +278,7 @@ def test_a_missing_server_is_spawned_and_recorded(
 ) -> None:
     state = {"spawned": False}
 
-    def fake_probe(url, tool, **kwargs):
+    def fake_probe(spec, **kwargs):
         return state["spawned"]  # not ready until after the spawn
 
     class FakeProc:

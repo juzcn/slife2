@@ -10,15 +10,18 @@ per-agent port, process, or config section.  Isolation, where it is needed,
 belongs inside an MCP server, not in the process layout; the label is passed
 through to the agent server for exactly that reason.
 
-    slife2 [--agent NAME]     ensure the servers, then run the TUI
-    slife2 status             what is running, and where
-    slife2 down               stop the servers this config names
+    slife2 [OPTIONS]          ensure the servers, then run the TUI
+    slife2 status [OPTIONS]   what is running, and where
+    slife2 down [OPTIONS]     stop the servers this config names
+
+`--help` lists the options, and the flags may be written before or after the
+command.  `--data-dir` is the one worth knowing about on its own: it decides
+which config, which runtime state and which databases everything else reads.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from slife2.config import (
@@ -28,37 +31,51 @@ from slife2.config import (
     find_config_path,
     load,
 )
-from slife2.paths import DATA_ENV_VAR
+from slife2.paths import add_data_dir_argument, apply_data_dir
 
 __version__ = "0.1.0"
 
-#: argv[0] values that select a subcommand instead of the TUI.  Checked before
-#: argparse sees them, so `slife2 --agent jack` — the thing people actually
-#: type — stays a plain flag invocation.
-_COMMANDS = ("status", "down")
+#: The subcommands, and what happens when none is named.
+_RUN = "run"
+_COMMANDS = (_RUN, "status", "down")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse the command line.
+
+    The subcommand is an ordinary optional positional, so argparse matches it
+    wherever it appears: `slife2 status --data-dir D` and
+    `slife2 --data-dir D status` are the same invocation.  It used to be pulled
+    off the front before argparse saw the rest, which made the second spelling a
+    usage error — and the flag is worth having on `status` and `down`, which are
+    exactly the commands someone reaches for when the data directory is not the
+    default one.
+
+    Letting argparse own it also means an unknown command is a usage error
+    naming the ones that exist, rather than a word silently treated as a flag.
+    """
     rest = list(sys.argv[1:] if argv is None else argv)
-    command = "run"
-    if rest and rest[0] in _COMMANDS:
-        command = rest.pop(0)
 
     parser = argparse.ArgumentParser(
         prog="slife2",
+        # Deliberately does not enumerate the commands: the positional below
+        # already lists them from `_COMMANDS`, and a second copy here is one
+        # more place for the list to be wrong.
         description=(
             "Terminal AI agent. Starts the MCP servers it needs and shares any "
-            "that are already running. Commands: status, down."
+            "that are already running."
         ),
     )
     parser.add_argument(
-        "--data-dir",
-        default=None,
-        help=(
-            "where slife2 keeps everything: slife2.yaml, the runtime state of "
-            "what is running, and the turns it produced"
-        ),
+        "command",
+        nargs="?",
+        default=_RUN,
+        choices=_COMMANDS,
+        help="what to do (default: run the TUI)",
     )
+    # Shared with the servers' own parsers: the flag means the same thing in
+    # both, and `slife2.paths` is where the directory it names is defined.
+    add_data_dir_argument(parser)
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
@@ -84,12 +101,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(rest)
-    args.command = command
-    if args.data_dir:
-        # Set in the environment rather than passed down: the servers this
-        # instance starts must look in the same folder, and an inherited
-        # variable is harder to forget than an argument.
-        os.environ[DATA_ENV_VAR] = args.data_dir
+    apply_data_dir(args)
     return args
 
 
@@ -224,10 +236,14 @@ def main(argv: list[str] | None = None) -> int:
             claimed = True
             code = _ensure(config, config_path)
             if code == 0:
+                # Resolved, because `--model` may be a bare provider name and
+                # the wire wants `provider/model`.  Passed to the TUI at all is
+                # the point: without it the flag reached the window title and
+                # nothing else, and every turn ran on the config's default.
                 app = SlifeApp(
                     tui_url(config, args.url),
                     agent=args.agent,
-                    model_label=f"{provider_name}/{model.model}",
+                    model=f"{provider_name}/{model.model}",
                 )
                 app.run()
     except AgentInUse as exc:

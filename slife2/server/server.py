@@ -37,17 +37,17 @@ from fastmcp.exceptions import ToolError
 
 from slife2.clock import now
 from slife2.config import (
+    API_SERVER_NAMES,
     DEFAULT_AGENT,
     Config,
-    ServerSettings,
     find_config_path,
     load,
 )
 from slife2.events import TurnEvent, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, close_backend, open_backend
-from slife2.llm.server_common import configure_logging, parse_serve_args, serve
 from slife2.loop import AgentLoop
+from slife2.mcp_server import configure_logging, house_server, parse_serve_args, serve
 from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
 from slife2.runtime import tcp_listening
@@ -263,7 +263,14 @@ def build_server(
                 # One client per *server*, not per provider: a server speaks one
                 # wire format for every provider that uses it.
                 client, _ = await open_backend(
-                    url, model.model, provider=name, name=f"{name}/{model.model}"
+                    url,
+                    model.model,
+                    provider=name,
+                    name=f"{name}/{model.model}",
+                    # Checked against the name the protocol's server advertises,
+                    # so a URL pointed at the wrong backend is caught here rather
+                    # than at the first turn.
+                    server_name=API_SERVER_NAMES[provider.api],
                 )
                 clients[url] = client
             client = clients[url]
@@ -286,14 +293,8 @@ def build_server(
                 with contextlib.suppress(Exception):
                     await memory_conn.__aexit__(None, None, None)
 
-    mcp: FastMCP = FastMCP(
-        SERVER_NAME,
-        instructions=INSTRUCTIONS,
-        lifespan=lifespan,
-        # Provider failures should reach the caller intact: "model not found" is
-        # actionable and FastMCP's default is to replace it with a generic
-        # message.  This listens on loopback and serves its own operator.
-        mask_error_details=False,
+    mcp: FastMCP = house_server(
+        SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
 
     @mcp.tool
@@ -432,11 +433,6 @@ def _with_images(
     parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     parts += [{"type": "image_url", "image_url": {"url": url}} for url in images]
     return parts
-
-
-def resolve_settings(config: Config) -> ServerSettings:
-    """Where this server listens, per the config."""
-    return config.agent.server
 
 
 def main(argv: list[str] | None = None) -> int:

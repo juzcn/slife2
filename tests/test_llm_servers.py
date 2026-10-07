@@ -798,3 +798,64 @@ def test_a_user_message_with_an_image_survives_conversion() -> None:
     )
     assert messages[0]["content"][0] == {"type": "text", "text": "look"}
     assert messages[0]["content"][1]["source"]["media_type"] == "image/jpeg"
+
+
+# --- the `main` both servers share -------------------------------------------
+
+#: One OpenAI-compatible provider and nothing else, so the *other* protocol has
+#: no provider to serve.
+ONLY_OPENAI = """
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+default: local/big
+"""
+
+
+def _point_at(tmp_path, monkeypatch) -> None:
+    (tmp_path / "slife2.yaml").write_text(ONLY_OPENAI, encoding="utf-8")
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path))
+
+
+def test_a_protocol_no_provider_uses_stops_with_an_answer(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Rather than starting a server that can answer nothing.
+
+    `serve_backend` is the branch both model servers used to spell out
+    separately and identically, and this is the branchy half of it — untested
+    while it was duplicated, which is the other reason to have one copy.
+    """
+    _point_at(tmp_path, monkeypatch)
+    from slife2.llm import anthropic_server
+
+    assert anthropic_server.main([]) == 2
+    assert "no anthropic-messages provider" in capsys.readouterr().out
+
+
+def test_the_matching_protocol_serves_every_provider_of_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The other half of the same branch: a protocol that *is* in the config
+    goes on to serve, carrying only that protocol's providers.
+
+    `serve` is replaced rather than run, because the real one blocks on a
+    socket — what is being asserted is what reaches it.
+    """
+    from slife2.llm import openai_server, server_common
+
+    _point_at(tmp_path, monkeypatch)
+    served: list[Any] = []
+    monkeypatch.setattr(server_common, "serve", lambda *a, **k: served.append(a))
+
+    assert openai_server.main([]) == 0
+    (mcp, address, _args) = served[0]
+    # The address is the one the *protocol* listens on, not the provider's — a
+    # provider has no address of its own.
+    assert address.url == "http://127.0.0.1:8001/mcp"
+    # And it is this server, by the name a client checks it by.
+    assert mcp.name == openai_server.SERVER_NAME

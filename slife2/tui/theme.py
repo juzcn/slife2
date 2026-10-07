@@ -44,11 +44,6 @@ PALETTE: dict[str, str] = {
 }
 
 
-def css(name: str) -> str:
-    """The value of a palette entry, for building markup in Python."""
-    return PALETTE[name]
-
-
 def css_variables() -> dict[str, str]:
     """The palette as Textual CSS variables, for the stylesheet."""
     return {f"slife-{name}": value for name, value in PALETTE.items()}
@@ -66,8 +61,6 @@ GLYPHS: dict[str, str] = {
     "running": "◌",  # dotted circle
     "done": "●",  # filled circle
     "error": "●",
-    "warning": "⚠",
-    "ok": "✓",
     "failed": "✗",
     "up": "↑",
     "separator": "│",

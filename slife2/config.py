@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +80,21 @@ API_BACKENDS: dict[str, str] = {
     "anthropic-messages": "slife2.llm.anthropic_server",
 }
 
+#: The MCP name the server for each wire protocol advertises — what
+#: `Client.server_info` reports, and so what a caller compares against to prove
+#: it reached the server it meant rather than some other MCP server on the port.
+#:
+#: Beside `API_BACKENDS` because the same thing decides both: a module is only
+#: reachable through the protocol it speaks.  It cannot be derived from the
+#: module name without importing the module, and importing `openai_server` is
+#: exactly what the agent server must never do, so it is spelled out here — and
+#: `tests/test_config.py` asserts every entry still matches its module's own
+#: `SERVER_NAME`, which is the only way this can drift.
+API_SERVER_NAMES: dict[str, str] = {
+    "openai-completions": "slife2-llm-openai",
+    "anthropic-messages": "slife2-llm-anthropic",
+}
+
 #: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
 #: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
 #: lookup.
@@ -89,7 +104,23 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 DEFAULT_CONFIG_NAME = "slife2.yaml"
 
 #: The agent label used when `--agent` is not given.
+#:
+#: Not to be confused with `AGENT_SERVER_NAME` below.  This one is an *identity*
+#: — it titles the window and is passed to the agent server — while that one is
+#: the MCP name of the *process* that serves every agent.  They are one hyphen
+#: apart, which is exactly why both say so here.
 DEFAULT_AGENT = "slife2"
+
+#: The MCP names the two always-present servers advertise, as `Client.server_info`
+#: reports them.  A client proves it reached the server it meant by comparing
+#: against these; see `slife2.mcp_server.identifies`.
+#:
+#: Spelled out rather than read off the modules, because reading them means
+#: importing them: the TUI and the agent loop must not pull in a server, and the
+#: agent loop in particular must never reach `openai_server`.  `tests/test_config.py`
+#: asserts each still matches its module's own `SERVER_NAME`.
+AGENT_SERVER_NAME = "slife2-agent"
+MEMORY_SERVER_NAME = "slife2-memory"
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -173,9 +204,10 @@ class ModelSettings:
     name: str = ""
     #: The model thinks natively, so reasoning is worth asking for.
     reasoning: bool = False
-    #: Modalities accepted.  Carried so a caller can refuse to attach an image
-    #: to a model that cannot read one; slife2 attaches nothing yet, so today
-    #: this is the config that says so.
+    #: Modalities accepted.  This is the config that says whether a model can
+    #: read an image, and the agent server refuses an attachment against a model
+    #: whose `input` does not list `image` — silently dropping one is worse than
+    #: saying the model cannot read it.  See `slife2.server.server._with_images`.
     input: tuple[str, ...] = ("text",)
     #: Token budget, used for the context percentage in the status bar.
     context_window: int = 0
@@ -563,8 +595,11 @@ def _optional_float(value: Any) -> float | None:
 
 
 __all__ = [
+    "AGENT_SERVER_NAME",
     "API_BACKENDS",
+    "API_SERVER_NAMES",
     "DEFAULT_AGENT",
+    "MEMORY_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",
     "Config",
@@ -576,5 +611,4 @@ __all__ = [
     "find_config_path",
     "load",
     "resolve_secret",
-    "replace",
 ]

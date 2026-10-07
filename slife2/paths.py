@@ -26,11 +26,43 @@ a developer's real state, and what `--data-dir` sets.
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
+
+
+def add_data_dir_argument(parser: argparse.ArgumentParser) -> None:
+    """Add `--data-dir`, the one flag every entry point accepts.
+
+    Here rather than written into each parser because there are two of them —
+    the CLI's and the servers' — and a flag whose help text and meaning are
+    copied into both is a flag that drifts.  It is also the flag that decides
+    which config, which runtime state and which databases everything else reads,
+    so it belongs beside :func:`data_dir` rather than in either caller.
+    """
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "where slife2 keeps everything: slife2.yaml, the runtime state of "
+            "what is running, and the turns it produced"
+        ),
+    )
+
+
+def apply_data_dir(args: argparse.Namespace) -> None:
+    """Honour `--data-dir` by putting it in the environment.
+
+    Set in the environment rather than passed down: the servers a process starts
+    must look in the same folder, and an inherited variable is harder to forget
+    than an argument.  Both entry points therefore call this immediately after
+    parsing, before anything reaches :func:`data_dir`.
+    """
+    if args.data_dir:
+        os.environ[DATA_ENV_VAR] = args.data_dir
 
 
 #: What a checkout of this project has at its root.  Its presence, naming this
@@ -69,8 +101,10 @@ def data_dir() -> Path:
     `SLIFE2_DATA_DIR` overrides both, and `--data-dir` sets that.
     """
     override = os.environ.get(DATA_ENV_VAR)
-    path = Path(override) if override else (
-        Path.cwd() if in_checkout() else Path.home() / ".slife2"
+    path = (
+        Path(override)
+        if override
+        else (Path.cwd() if in_checkout() else Path.home() / ".slife2")
     )
     path.mkdir(parents=True, exist_ok=True)
     return path

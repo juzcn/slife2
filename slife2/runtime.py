@@ -37,7 +37,9 @@ from slife2.paths import runtime_dir
 LOCK_TIMEOUT_SECONDS = 30.0
 LOCK_POLL_SECONDS = 0.1
 
-#: A record older than this whose process is gone is simply deleted.
+#: How large a daemon's log may grow before the next start truncates it.  Logs
+#: here are diagnostics nobody is expected to read in full, so the ceiling is a
+#: "do not fill the disk" bound rather than a retention policy.
 _LOG_KEEP_BYTES = 4 * 1024 * 1024
 
 
@@ -190,32 +192,6 @@ def write_record(record: ServerRecord) -> None:
 def clear_record(url: str) -> None:
     with contextlib.suppress(OSError):
         record_path(url).unlink(missing_ok=True)
-
-
-def all_records() -> list[ServerRecord]:
-    """Every record in the runtime directory, for `status --all`."""
-    records = []
-    for path in sorted(_sub("servers").glob("*.json")):
-        record = read_record_for_file(path)
-        if record is not None:
-            records.append(record)
-    return records
-
-
-def read_record_for_file(path: Path) -> ServerRecord | None:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return ServerRecord(
-            name=str(raw["name"]),
-            url=str(raw["url"]),
-            pid=int(raw["pid"]),
-            start_token=str(raw.get("start_token") or ""),
-            config=str(raw.get("config") or ""),
-            version=str(raw.get("version") or ""),
-            started_at=str(raw.get("started_at") or ""),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
 
 
 @dataclass(frozen=True)

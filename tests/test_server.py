@@ -282,7 +282,7 @@ async def test_a_turn_succeeds_with_no_memory_server(tmp_path, monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_images_reach_the_model_as_content_parts() -> None:
     """A prompt with an image is a list of parts, not a string."""
-    from slife2.config import ModelSettings, ProviderSettings, replace
+    from slife2.config import ModelSettings, ProviderSettings
 
     backend = answering("I see it")
     vision = replace(
@@ -323,7 +323,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them() -> None:
     the *default* model is a vision model, so this has to be built explicitly —
     which is the point: the check reads the config rather than assuming.
     """
-    from slife2.config import ModelSettings, ProviderSettings, replace
+    from slife2.config import ModelSettings, ProviderSettings
 
     text_only = replace(
         default_config(),

@@ -72,6 +72,29 @@ def test_every_api_has_a_backend_module() -> None:
         assert module.startswith("slife2.llm."), api
 
 
+def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
+    """The names here are what a client checks to prove it reached the right
+    server, and they are spelled out rather than imported — the TUI must not
+    pull in a server, and the agent loop must never import `openai_server`.
+
+    Spelling them out is only safe if something notices when one drifts, and
+    that is this: each claimed name against the `SERVER_NAME` the server itself
+    passes to `FastMCP(...)`, which is what actually ends up on the wire.
+    """
+    import importlib
+
+    from slife2.config import AGENT_SERVER_NAME, API_SERVER_NAMES, MEMORY_SERVER_NAME
+
+    assert importlib.import_module("slife2.server.server").SERVER_NAME == (
+        AGENT_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.memory_server").SERVER_NAME == (
+        MEMORY_SERVER_NAME
+    )
+    for api, module in API_BACKENDS.items():
+        assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]
+
+
 # --- providers and models ----------------------------------------------------
 
 

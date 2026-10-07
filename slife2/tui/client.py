@@ -15,8 +15,9 @@ from typing import Protocol
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from slife2.config import DEFAULT_AGENT
+from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT
 from slife2.events import TurnEvent, decode
+from slife2.mcp_server import identifies
 
 logger = logging.getLogger(__name__)
 
@@ -90,21 +91,24 @@ class MCPAgentClient:
         The URL is in the error because "connection refused" without an address
         is the least useful thing a terminal can say, and so is a bare timeout.
 
-        The probe is `tools/list` rather than `ping`: the 2026-07-28 revision of
-        MCP made the protocol stateless and removed the protocol-level ping, so
-        a conforming server answers `ping` with "Method not found".  Listing
-        tools is the documented liveness check, and it also catches the case
-        where the URL points at some *other* MCP server.
+        The probe is not `ping`: the 2026-07-28 revision of MCP made the protocol
+        stateless and removed the protocol-level ping, so a conforming server
+        answers it with "Method not found", and no replacement liveness probe is
+        specified.  The check here is our own, and it earns its place by catching
+        the case where the URL points at some *other* MCP server — which a bare
+        connection test waves through.  See `slife2.mcp_server.identifies`.
         """
         if self._client is not None:
             return
         client: Client = Client(self._url, timeout=self._timeout)
         try:
             await client.__aenter__()
-            names = {tool.name for tool in await client.list_tools()}
-            if "run_turn" not in names:
+            if not await identifies(
+                client, AGENT_SERVER_NAME, fallback_tool="run_turn"
+            ):
+                names = sorted(tool.name for tool in await client.list_tools())
                 raise ConnectionError(
-                    f"not a slife2 agent server (tools: {sorted(names) or 'none'})"
+                    f"not a slife2 agent server (tools: {names or 'none'})"
                 )
         except Exception as exc:
             with contextlib.suppress(Exception):

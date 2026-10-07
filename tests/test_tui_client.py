@@ -29,8 +29,14 @@ pytestmark = pytest.mark.unit
 class FakeTransport:
     """The MCP client `MCPAgentClient` would have built, with the wire stubbed."""
 
-    def __init__(self, tools: tuple[str, ...] = ("run_turn",)) -> None:
+    def __init__(
+        self, tools: tuple[str, ...] = ("run_turn",), *, name: str | None = None
+    ) -> None:
         self.tools = tools
+        #: What the handshake reported this server calls itself.  `None` is a
+        #: server that reported no name — the case `identifies` falls back to
+        #: `tools` for — so the default exercises that path.
+        self.server_info = SimpleNamespace(name=name) if name else None
         #: Every argument dict handed to `call_tool`, in order.
         self.sent: list[dict[str, Any]] = []
 
@@ -125,9 +131,44 @@ async def test_the_conversation_grows_by_what_the_server_returned(monkeypatch) -
 @pytest.mark.asyncio
 async def test_a_server_that_is_not_ours_is_refused(monkeypatch) -> None:
     """The URL may point at some other MCP server, and saying so beats a turn
-    that fails later with a message about an unknown tool."""
+    that fails later with a message about an unknown tool.
+
+    This transport reports no name, so the check falls back to the tool list —
+    which is the weaker check, and the one that has to keep working.
+    """
     install(monkeypatch, FakeTransport(tools=("stream_chat",)))
     client = MCPAgentClient("http://test/mcp")
 
     with pytest.raises(ConnectionError, match="not a slife2 agent server"):
         await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_says_it_is_something_else_is_refused(monkeypatch) -> None:
+    """The name the handshake reports decides on its own.
+
+    It is not a hint to combine with the tool list: a server that calls itself
+    something else is not ours even if it happens to expose a tool by that name,
+    which is exactly what a *stale* build of one of our own servers looks like.
+    """
+    install(monkeypatch, FakeTransport(name="someone-elses-server"))
+    client = MCPAgentClient("http://test/mcp")
+
+    with pytest.raises(ConnectionError, match="not a slife2 agent server"):
+        await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_a_named_server_is_accepted_without_listing_tools(monkeypatch) -> None:
+    """The common case: the handshake already answered, so nothing more is asked.
+
+    `tools` is deliberately wrong here — if the name matches, the tool list is
+    never consulted, and asserting that is how the round trip stays saved.
+    """
+    transport = FakeTransport(tools=("nothing_like_it",), name="slife2-agent")
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp")
+
+    await client.connect()
+    await client.run_turn("hi", lambda event: None)
+    assert transport.sent[0]["prompt"] == "hi"
