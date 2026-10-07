@@ -27,11 +27,16 @@ That is the whole thing. `slife2` brings up the MCP servers its config needs,
 attaches to any that are already running, and starts the TUI.
 
 ```
-slife2 [--data-dir DIR] [--agent NAME] [--keep-servers]
-                                         ensure the servers, then run the TUI
+slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
+       [--keep-servers]                  ensure the servers, then run the TUI
 slife2 status                            what is running, and where
 slife2 down                              stop the servers this config names
 ```
+
+`--model` picks the model this instance starts on, as `provider/model` (or a
+bare provider, meaning its first model); without it the config's `default` is
+used. `--url` overrides the agent server's endpoint, for the case where it is
+already running somewhere this config does not name.
 
 **The servers are shared.** A second `slife2` — under any `--agent` — finds them
 already running and reuses them; nothing is started twice and nothing is
@@ -113,13 +118,16 @@ slife2/
 ├─ paths.py           # the one data directory, and what goes under it
 ├─ launcher.py        # which servers are needed, and attaching to the running ones
 ├─ runtime.py         # daemon records, logs, and the kernel-backed locks
-├─ config.py          # slife2.yaml, and the ${VAR} / keyring: resolution chain
+├─ clock.py           # the one timestamp format every writer uses
+├─ config.py          # slife2.yaml, the ${VAR} / keyring: chain, and the server table
 ├─ prompt.py          # the Jinja2 system prompt, rendered per turn
 ├─ messages.py        # the neutral message model — what crosses `stream_chat`
 ├─ events.py          # the turn event vocabulary, and its progress encoding
 ├─ tools.py           # the tool registry, plus `now` and `calc`
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ memory.py          # TurnStore: one SQLite file per agent
+├─ mcp_server.py      # what it takes to *be* one of our MCP servers, and how a
+│                     #   client proves which one it reached (`identifies`)
 ├─ memory_server.py   # slife2-memory: `remember` and `recent`
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
@@ -134,12 +142,21 @@ slife2/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation
    ├─ widgets.py      # Transcript, PromptInput, StatusBar
+   ├─ attachments.py  # reading `@path` images out of a prompt
+   ├─ theme.py        # the palette and glyphs, defined once
    └─ app.tcss
 ```
 
 The dependency direction is one-way and is what makes each layer testable alone:
 `tui/` → MCP → `server/` → `loop.py` → {`llm/base.py`, `tools.py`, `events.py`,
 `messages.py`} → `config.py`. The loop imports neither `server/` nor `tui/`.
+
+`mcp_server.py` is a leaf every server sits on: it holds what being one of our
+servers means — the flags, the HTTP transport, the record that says a daemon is
+here, and the two conventions (`house_server`) that would otherwise be copied
+into each of the four. It is not LLM-specific, which is why it is not under
+`llm/`: the memory server and the agent server are not LLM components, and the
+scaffold they serve on should not come out of the LLM package.
 
 ## Tests
 
