@@ -293,12 +293,23 @@ which is why the label reaches one.
 
 A component with one job: keep what was said. It does not summarise, does not
 decide what mattered, and puts nothing back into a conversation. The schema is
-v1's `turn` table, taken whole — one row per turn, the user's message in a column
-of its own so it can be searched and embedded apart from the answer, and columns
-for the two token counts, the two timestamps and the identity that v1 arrived at
-by using it. Everything is stored as it happened, with one deliberate exception
-(an oversized tool result becomes an announced head-and-tail digest), so a
-question the schema cannot answer today can be asked of the same rows later
+v1's `turn` table, minus one column — one row per turn, columns for the two
+token counts, the two timestamps and the identity that v1 arrived at by using
+it. The missing column is `user_message`: v1 keeps the user's half beside the
+assistant's so it can be searched and embedded apart from the answer, and here
+it is `messages[0]` instead, because a turn is one list of messages and a column
+holding the first element of it would be a second copy to keep in step.
+Everything is stored as it happened, with two deliberate
+exceptions, both announced rather than silent: an oversized tool result becomes
+a head-and-tail digest, and an attached image becomes a note saying it was
+there. Nothing is lost by the second that the row was the only copy of — the
+file is still named in the prompt, because v1's `@` marker stays in the text
+where the user put it, so attaching it again is what sends it again. What the
+rule buys is that a turn is text a model can read back: a ten-megabyte
+screenshot in the row would be megabytes carried into every later read of that
+turn, to say what one line already says.
+
+So a question the schema cannot answer today can be asked of the same rows later
 without a migration — and the columns the later features need already exist,
 because adding a column to a table with rows in it is the one change this schema
 has no mechanism for.

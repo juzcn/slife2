@@ -16,9 +16,10 @@ deletes one.
 saw it — OpenAI-shaped JSON in a single column.  There is no separate column for
 what the user said: it is `messages[0]`, and the turn therefore reads back on its
 own, as a conversation rather than as an answer whose question is missing.  An
-attached image is a base64 data URL on that first entry and is stored with the
-rest, so the payload is in the database and any read of the turn brings it back
-with everything else.
+attached image is a base64 data URL on that first entry, and it is the one thing
+that does *not* reach the database: turning a turn into text is what a model
+reads back, so the bytes become a note saying they were there, and the file they
+came from is still named in the prompt (`strip_images`).
 
 **Agents are isolated by file.**  `<agent>.turn.db` — there is no agent column
 and no query that can reach another agent's turns, because there is no other
@@ -202,9 +203,10 @@ class TurnRecord:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turn (
     -- The whole turn as OpenAI-shaped message JSON, the user's message first.
-    -- An attachment rides on that first entry as a base64 data URL, so the
-    -- payload lives here with everything else rather than in a column of its
-    -- own.
+    -- An attachment arrives on that first entry as a base64 data URL and leaves
+    -- as a note in the same place: the bytes are the one thing a turn does not
+    -- keep (see `strip_images`).  There is no column for what was attached and
+    -- there is not meant to be — the file is named in the text.
     messages       TEXT    NOT NULL DEFAULT '[]',
 
     -- Retrieval hooks for later.  Nothing writes them yet; they are here
@@ -272,6 +274,56 @@ def compact_tool_results(
 #: The announcement.  ASCII, and distinctive enough that the idempotence check
 #: cannot be fooled by a tool that happened to return the same words.
 _COMPACTION_MARKER = "... [compacted at save:"
+
+
+def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace an attached image with a note saying it was there.
+
+    **The bytes are not kept, and the name is not needed.**  An attachment
+    arrives as a base64 data URL — up to ten megabytes of it (`slife2.tui.
+    attachments`) — and a turn is text that a model reads back; putting the
+    picture in the database would mean every later read of that turn carries
+    megabytes to say what one line could.  The file it came from needs no field
+    of its own, because `@screenshot.png` is still in the prompt: the marker is
+    left in the text where the user put it (that is the whole of v1's
+    convention), so what is stored says which file it was, and attaching it
+    again is a new turn and a new model call.
+
+    Announced, never silent, for the reason the tool-result digest is: a
+    placeholder that reads as the real thing is a lie a model reasons from.
+
+    Returns new dicts; the caller's list is untouched, because the live
+    conversation is still using the image — the model that just read it may be
+    reasoning about it in this very turn.
+    """
+    stripped: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            stripped.append(message)
+            continue
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                parts.append({"type": "text", "text": _image_note(part)})
+            else:
+                parts.append(part)
+        stripped.append({**message, "content": parts})
+    return stripped
+
+
+def _image_note(part: dict[str, Any]) -> str:
+    """What one attached image leaves behind."""
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else None
+    media_type, _, payload = str(url or "").partition(";base64,")
+    media_type = media_type.removeprefix("data:") or "image"
+    # Three quarters: base64 carries four characters per three bytes.
+    size = f", ~{len(payload) * 3 // 4 // 1024} KB" if payload else ""
+    return (
+        f"[image not stored: {media_type}{size} — the prompt names the file, "
+        f"and attaching it again sends it]"
+    )
 
 
 # --- reading a turn back ------------------------------------------------------
@@ -434,9 +486,12 @@ class TurnStore:
     ) -> int:
         """Append one turn, returning its rowid.
 
-        The tool results are compacted here rather than by the caller: this is
-        the boundary between the live conversation and the permanent record, and
-        the rule about what is worth keeping belongs on this side of it.
+        What a turn keeps is decided here rather than by the caller: this is the
+        boundary between the live conversation and the permanent record, and the
+        rules about what is worth keeping belong on this side of it.  Two of
+        them, and both announce themselves — an oversized tool result becomes a
+        head-and-tail digest, and an attached image becomes a note saying it was
+        there (`strip_images`).
 
         The document is passed through `_storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of
@@ -452,7 +507,10 @@ class TurnStore:
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _storable(
-                        json.dumps(compact_tool_results(messages), ensure_ascii=False)
+                        json.dumps(
+                            compact_tool_results(strip_images(messages)),
+                            ensure_ascii=False,
+                        )
                     ),
                     created_at or now(),
                     completed_at or now(),

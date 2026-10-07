@@ -100,8 +100,9 @@ def build_server(config: Config) -> FastMCP:
             messages: The whole turn, as the agent loop returned it: the user's
                 message first, then every assistant message, tool call and
                 result.  Store it as it is.  What the user said is in there as
-                the first entry, and an attached image's base64 payload rides
-                along on it.
+                the first entry, and so is an attached image — which is the one
+                thing this does not keep: the bytes become a note saying they
+                were there, and the file is still named in the prompt.
             subagent: Which of that agent's conversations; empty for its own.
             token_count: What the turn cost, summed over every model call in it.
             context_tokens: The last model call's prompt plus completion — how

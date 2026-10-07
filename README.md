@@ -94,6 +94,11 @@ local files, and only when the model's config lists `image` under `input` — a
 model that cannot read images says so rather than quietly ignoring what you
 attached.
 
+The picture itself goes to the model and no further: what memory keeps is the
+marker, plus a note where the image was saying it was there and how big it was.
+Attaching it again is what sends it again — the file is named in the prompt, so
+a turn read back a month later still says which picture it was about.
+
 ## Tools
 
 The model's tool list — the ones slife2 ships and the ones other people run —

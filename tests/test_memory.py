@@ -20,6 +20,7 @@ from slife2.memory import (
     TOOL_RESULT_CHARS,
     TurnStore,
     compact_tool_results,
+    message_text,
     safe_agent_name,
     store_for,
 )
@@ -411,17 +412,26 @@ def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
     assert listing["assistant_message"] == "y" * 10 + "…"
 
 
-def test_an_image_in_the_message_is_named_in_the_listing(tmp_path) -> None:
-    """A model reading a one-line summary can act on `[image_url]`; it cannot
-    act on the base64 that is actually stored, and it cannot act on silence."""
+def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
+    """The bytes stop at the model; the record keeps a note saying they were
+    there.
+
+    Ten megabytes of screenshot on the first message would be megabytes carried
+    into every later read of the turn — and `turn_read` is a tool a model calls
+    by itself.  What is *not* lost is which file it was: `@screenshot.png` is
+    still in the text, because that is where the user put it.
+    """
     store = TurnStore(tmp_path / "jack.turn.db")
     store.save_turn(
         messages=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "what is this?"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {"type": "text", "text": "what is this? @cat.png"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64," + "A" * 4000},
+                    },
                 ],
             },
             {"role": "assistant", "content": "A cat."},
@@ -430,11 +440,42 @@ def test_an_image_in_the_message_is_named_in_the_listing(tmp_path) -> None:
     )
 
     (record,), _ = store.turns(limit=1)
-    listing = record.to_listing()
+    text = message_text(record.messages[0]["content"])
 
-    assert "what is this?" in listing["user_message"]
-    assert "[image_url]" in listing["user_message"]
-    assert "base64" not in listing["user_message"]
+    assert "@cat.png" in text, "the file is still named, so it can be sent again"
+    assert "image/png" in text and "not stored" in text
+    assert "~2 KB" in text, "how big it was, so a reader knows what it is missing"
+    assert "A" * 100 not in text
+
+    # And nothing anywhere in the row holds the payload.
+    with sqlite3.connect(store.path) as connection:
+        raw = connection.execute("SELECT messages FROM turn").fetchone()[0]
+    assert "A" * 100 not in raw
+
+
+def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> None:
+    """What the live conversation holds is not what the database holds.
+
+    `save_turn` is called while the model that just read the picture may still
+    be reasoning about it, so the caller's list is not the thing to rewrite.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this? @cat.png"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                },
+            ],
+        }
+    ]
+
+    store.save_turn(messages=messages, created_at=now())
+
+    assert messages[0]["content"][1]["type"] == "image_url"
 
 
 def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
