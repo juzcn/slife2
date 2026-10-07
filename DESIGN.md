@@ -11,8 +11,8 @@ decisions look arbitrary until you know what happens if you undo them.
 
 ## 1. The shape
 
-Four processes, all of them MCP servers but the TUI — brought up on demand by
-`slife2` and shared by every instance (see §4):
+Every component is an MCP server but the TUI — all of them brought up on demand
+by `slife2` and shared by every instance (see §4):
 
 ```
 slife2                    TUI, MCP client              (no provider key, no SDK)
@@ -20,16 +20,26 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
   ▼
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
-  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-memory        (one SQLite file per agent)
-  ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai     (openai SDK, holds keys)
-  └── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic  (anthropic SDK, holds keys)
+  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-memory                 (one SQLite file per agent)
+  ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai             (openai SDK, holds keys)
+  ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
+  └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
 ```
 
 **One component, one job, and the granularity is deliberate.**  A model backend
 speaks one wire protocol; memory keeps turns; the agent loop runs turns.  A
 provider is a row in a backend's config rather than a process of its own, so
-three providers on two protocols is four processes and not six — the smallness
-is in what each process *does*, not in how many there are.
+three providers that happen to speak two protocols are two model processes and
+not three — the smallness is in what each process *does*, not in how many there
+are.  The count in the diagram is what one config uses, not a fixed number:
+a protocol no provider speaks is not started at all.
+
+The two OpenAI entries are the point worth checking, because they look like
+duplication and are not.  **Responses is a different wire format, not a flag on
+chat-completions** — different input items, differently-shaped tools, different
+streaming events — so it is a protocol, and a protocol is a process.  Merging
+them behind one `api` would put two adapters in one file and make the choice a
+branch inside the server rather than a fact about the config.
 
 Two properties fall out of this and are the reason for it:
 
@@ -37,7 +47,8 @@ Two properties fall out of this and are the reason for it:
   it.** The agent loop cannot leak one because it never has one.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
   switching providers is changing a URL. `grep -r "import openai\|import anthropic"
-  slife2/` matches exactly two files, both model servers.
+  slife2/` matches only files under `llm/` that are model servers — one per wire
+  protocol, so three of them now, and nothing else in the tree.
 
 The cost is one JSON-RPC hop per token on loopback. That is small and it is the
 price of the architecture; `ProgressObserver` is where a coalescing fix goes if
@@ -170,7 +181,7 @@ is worth knowing which way it points.
 
 On top of that sits one piece of bookkeeping: each client registers itself, and
 the **last one out** stops the servers. Without it, the daemon rule would mean an
-ordinary exit leaves four processes running until the next reboot. The count is
+ordinary exit leaves the servers running until the next reboot. The count is
 by pid liveness rather than a counter, so a client that was killed — and so
 never deregistered — cannot keep them alive forever.
 

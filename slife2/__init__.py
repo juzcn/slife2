@@ -255,8 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         #
         # This is the other half of "the servers are daemons".  They must
         # outlive *a* client, or sharing would be meaningless, but not the last
-        # one: otherwise an ordinary exit leaves four processes running until
-        # the next reboot.  `others_running` counts by pid liveness, so a client
+        # one: otherwise an ordinary exit leaves the servers running until the
+        # next reboot.  `others_running` counts by pid liveness, so a client
         # that was killed — and so never deregistered — cannot keep them alive.
         if claimed and not args.keep_servers and not others_running():
             print("  last instance out; stopping the shared servers")

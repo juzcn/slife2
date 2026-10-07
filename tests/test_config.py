@@ -149,6 +149,56 @@ providers:
     assert provider.model("blind").accepts_images is False
 
 
+def test_the_responses_store_flag_is_tri_state(tmp_path) -> None:
+    """Absent must stay distinguishable from `false`.
+
+    They are different requests: leaving `compat.store` out sends nothing and
+    keeps whatever default the endpoint has — which for this API is to retain
+    the response — while `store: false` asks for the opposite.  A `bool(...)` in
+    the parser would collapse the two, and the bug would look like a config that
+    quietly stopped working.
+    """
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-responses
+    models:
+      - model: refused
+        compat: {store: false}
+      - model: asked
+        compat: {store: true}
+      - model: silent
+""",
+    )
+    provider = load(path).provider("p")
+    assert provider.model("refused").store is False
+    assert provider.model("asked").store is True
+    assert provider.model("silent").store is None
+
+
+def test_a_store_flag_on_another_protocol_is_carried_but_unused(tmp_path) -> None:
+    """The field is on the neutral model, so any provider may set it.
+
+    Nothing rejects it — the backends that do not read it simply ignore it,
+    which is what `compat` is for.  What must *not* happen is a crash on a
+    config that mentions it under the wrong `api`.
+    """
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-completions
+    models:
+      - model: m
+        compat: {store: false}
+""",
+    )
+    assert load(path).provider("p").model("m").store is False
+
+
 def test_an_unknown_api_is_refused(tmp_path) -> None:
     path = write(
         tmp_path,

@@ -56,8 +56,9 @@ without passing an argument:
 ```bash
 uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-memory           # turns, one db per agent,    :8010
-uv run slife2-llm-openai       # the OpenAI-compatible API, :8001
+uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
+uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
 ```
 
 In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
@@ -133,9 +134,10 @@ slife2/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py         # Chunk <-> progress payload (no I/O)
 │  ├─ client.py       # MCPBackend: the agent loop's only backend
-│  ├─ server_common.py# what the two model servers share, incl. tool-call assembly
-│  ├─ openai_server.py    # slife2-llm-openai     <- imports openai
-│  └─ anthropic_server.py # slife2-llm-anthropic  <- imports anthropic
+│  ├─ server_common.py# what the model servers share, incl. tool-call assembly
+│  ├─ openai_server.py    # slife2-llm-openai             <- imports openai
+│  ├─ openai_responses_server.py # slife2-llm-openai-responses <- imports openai
+│  └─ anthropic_server.py # slife2-llm-anthropic          <- imports anthropic
 ├─ server/server.py   # slife2-agent: FastMCP, one stateless `run_turn` tool
 ├─ templates/system.j2# the system prompt the distribution ships
 └─ tui/
@@ -154,7 +156,7 @@ The dependency direction is one-way and is what makes each layer testable alone:
 `mcp_server.py` is a leaf every server sits on: it holds what being one of our
 servers means — the flags, the HTTP transport, the record that says a daemon is
 here, and the two conventions (`house_server`) that would otherwise be copied
-into each of the four. It is not LLM-specific, which is why it is not under
+into each server. It is not LLM-specific, which is why it is not under
 `llm/`: the memory server and the agent server are not LLM components, and the
 scaffold they serve on should not come out of the LLM package.
 

@@ -81,9 +81,10 @@ ProviderEvent = Chunk | Finish
 class Streamer(Protocol):
     """A provider adapter: neutral messages in, provider events out.
 
-    Implemented once per SDK in `openai_server` and `anthropic_server`.  It is a
-    plain callable returning an async iterator, so a test can substitute a
-    scripted one without any of the SDK being involved.
+    Implemented once per wire protocol — in `openai_server`,
+    `openai_responses_server` and `anthropic_server`.  It is a plain callable
+    returning an async iterator, so a test can substitute a scripted one
+    without any of the SDK being involved.
     """
 
     def __call__(

@@ -1,4 +1,4 @@
-"""The two LLM MCP servers.
+"""The LLM MCP servers — one per wire protocol.
 
 Three layers are tested here, and the middle one is the point of the file:
 
@@ -8,8 +8,9 @@ Three layers are tested here, and the middle one is the point of the file:
 2. `stream_chat` end to end over FastMCP's in-memory transport, with a scripted
    streamer in place of the provider.  This is where tool-call fragment
    reassembly and progress delivery are proved.
-3. Message conversion for Anthropic, whose format disagrees with the neutral
-   model in ways that produce 400s if handled naively.
+3. Message conversion for the two backends whose format disagrees with the
+   neutral model in ways that produce 400s if handled naively — Anthropic, and
+   the Responses API.
 
 Every test here is `unit`: the in-memory transport binds no port and the
 scripted streamer makes no network call.
@@ -30,6 +31,16 @@ from anthropic.types import (
 )
 from fastmcp import Client
 from openai.types.chat import ChatCompletionChunk
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseTextDeltaEvent,
+)
 
 from slife2.config import ModelSettings
 from slife2.llm.anthropic_server import (
@@ -43,6 +54,16 @@ from slife2.llm.anthropic_server import (
 )
 from slife2.llm.anthropic_server import translate as anthropic_translate
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
+from slife2.llm.openai_responses_server import (
+    build_request as responses_build_request,
+)
+from slife2.llm.openai_responses_server import (
+    to_responses_input,
+    to_responses_tools,
+)
+from slife2.llm.openai_responses_server import (
+    translate as responses_translate,
+)
 from slife2.llm.openai_server import (
     build_request as openai_build_request,
 )
@@ -348,6 +369,373 @@ def test_tools_use_input_schema() -> None:
     )
     assert tools == [
         {"name": "calc", "description": "maths", "input_schema": {"type": "object"}}
+    ]
+
+
+# --- Responses adapter -------------------------------------------------------
+#
+# The Responses API streams events, not deltas on a choice — so every test here
+# names the event type it is driving, and `translate` dispatches on it.  The
+# objects are real SDK ones for the same reason as above: what we adapt to is
+# what the SDK actually produces.
+
+
+def _resp(**over: Any) -> dict[str, Any]:
+    """A Response body, carrying the fields the model marks required."""
+    base: dict[str, Any] = {
+        "id": "resp_1",
+        "created_at": 0.0,
+        "model": "m",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+    base.update(over)
+    return base
+
+
+def _completed(**over: Any) -> ResponseCompletedEvent:
+    return ResponseCompletedEvent.model_validate(
+        {
+            "type": "response.completed",
+            "sequence_number": 9,
+            "response": _resp(**over),
+        }
+    )
+
+
+def _text_delta(text: str) -> ResponseTextDeltaEvent:
+    return ResponseTextDeltaEvent.model_validate(
+        {
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": text,
+            "item_id": "i",
+            "logprobs": [],
+            "output_index": 0,
+            "sequence_number": 1,
+        }
+    )
+
+
+def test_responses_text_delta() -> None:
+    assert responses_translate(_text_delta("hi")) == [Chunk(text="hi")]
+
+
+def test_responses_reasoning_summary_is_its_own_kind() -> None:
+    """A reasoning summary must arrive as `thinking`, never as the answer.
+
+    This API returns only a *summary* of the model's reasoning, which is still
+    the model talking to itself — folded into the reply it would read as part of
+    the answer, and no test elsewhere would notice.
+    """
+    event = ResponseReasoningSummaryTextDeltaEvent.model_validate(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "hmm",
+            "item_id": "i",
+            "output_index": 0,
+            "summary_index": 0,
+            "sequence_number": 2,
+        }
+    )
+    assert responses_translate(event) == [Chunk(thinking="hmm")]
+
+
+def test_responses_function_call_item_announces_call_id_and_name() -> None:
+    """`call_id` is this API's name for the id a tool result refers back to."""
+    event = ResponseOutputItemAddedEvent.model_validate(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "sequence_number": 3,
+            "item": {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "calc",
+                "arguments": "",
+            },
+        }
+    )
+    (chunk,) = responses_translate(event)
+    assert chunk.tool_call_deltas == (ToolCallDelta(index=0, id="c1", name="calc"),)
+
+
+def test_responses_arguments_delta_is_keyed_by_output_index() -> None:
+    """Not by `item_id` — the index is what the accumulator keys on.
+
+    Each function call is its own output item, so the index is stable and unique
+    across the whole response: the job Anthropic's content-block index does.
+    """
+    event = ResponseFunctionCallArgumentsDeltaEvent.model_validate(
+        {
+            "type": "response.function_call_arguments.delta",
+            "delta": '{"e"',
+            "item_id": "i",
+            "output_index": 2,
+            "sequence_number": 4,
+        }
+    )
+    (chunk,) = responses_translate(event)
+    assert chunk.tool_call_deltas == (ToolCallDelta(index=2, arguments_delta='{"e"'),)
+
+
+def test_responses_completion_carries_usage_and_a_stop_reason() -> None:
+    """Usage arrives only on the terminal event, unlike chat-completions."""
+    usage_chunk, finish = responses_translate(
+        _completed(
+            usage={
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "total_tokens": 7,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        )
+    )
+    assert usage_chunk.usage is not None
+    assert (usage_chunk.usage.prompt_tokens, usage_chunk.usage.completion_tokens) == (
+        3,
+        4,
+    )
+    assert finish == Finish(stop_reason="stop")
+
+
+def test_responses_completion_with_a_function_call_says_tool_calls() -> None:
+    """This API reports a status, not a finish reason.
+
+    The distinction the rest of the system speaks in has to be recovered from
+    the output, so that a caller comparing stop reasons across backends is not
+    told a different story by this one.
+    """
+    (finish,) = responses_translate(
+        _completed(
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "calc",
+                    "arguments": "{}",
+                }
+            ]
+        )
+    )
+    assert finish == Finish(stop_reason="tool_calls")
+
+
+def test_responses_an_incomplete_response_keeps_its_reason() -> None:
+    """Cut off at the output cap is an ordinary outcome, not an error.
+
+    The reason travels through as the stop reason, so the caller can tell a
+    truncated answer from a finished one.
+    """
+    event = ResponseIncompleteEvent.model_validate(
+        {
+            "type": "response.incomplete",
+            "sequence_number": 9,
+            "response": _resp(
+                status="incomplete",
+                incomplete_details={"reason": "max_output_tokens"},
+            ),
+        }
+    )
+    assert responses_translate(event) == [Finish(stop_reason="max_output_tokens")]
+
+
+def test_responses_a_failed_response_raises_with_the_providers_words() -> None:
+    """Not an empty result — that is indistinguishable from a working answer.
+
+    A blank reply would be recorded in memory as a turn that succeeded, and the
+    only symptom would be nothing at all.  Raising is what the rest of the
+    system is built for: the backend re-raises and the TUI prints the message.
+    """
+    event = ResponseFailedEvent.model_validate(
+        {
+            "type": "response.failed",
+            "sequence_number": 9,
+            "response": _resp(
+                status="failed",
+                error={"code": "server_error", "message": "upstream exploded"},
+            ),
+        }
+    )
+    with pytest.raises(RuntimeError, match="upstream exploded"):
+        responses_translate(event)
+
+
+def test_responses_an_error_event_raises() -> None:
+    event = ResponseErrorEvent.model_validate(
+        {
+            "type": "error",
+            "code": "invalid_request",
+            "message": "no such model",
+            "param": None,
+            "sequence_number": 1,
+        }
+    )
+    with pytest.raises(RuntimeError, match="no such model"):
+        responses_translate(event)
+
+
+def test_responses_a_completed_response_carrying_an_error_raises() -> None:
+    """A response can complete *and* hold an error it recovered from.
+
+    Answering with the text that arrived while ignoring it is how a partial
+    answer gets recorded as a whole one.
+    """
+    with pytest.raises(RuntimeError, match="slow down"):
+        responses_translate(
+            _completed(error={"code": "rate_limit_exceeded", "message": "slow down"})
+        )
+
+
+def test_responses_an_unknown_event_is_not_an_error() -> None:
+    """The event list grows; a new `response.*` event is not a failed turn."""
+    event = ResponseCompletedEvent.model_validate(
+        {"type": "response.completed", "sequence_number": 1, "response": _resp()}
+    )
+    event.type = "response.something.new"  # type: ignore[misc]
+    assert responses_translate(event) == []
+
+
+# --- Responses message conversion --------------------------------------------
+#
+# Four disagreements with the neutral model, and each one is a 400 if it is not
+# handled: the system prompt is a parameter, tools are flat, calls and results
+# are top-level items, and content parts are renamed.
+
+
+def test_responses_system_messages_become_instructions() -> None:
+    instructions, items = to_responses_input(
+        [Message(role="system", content="be nice"), Message(role="user", content="hi")]
+    )
+    assert instructions == "be nice"
+    assert items == [{"role": "user", "content": "hi"}]
+
+
+def test_responses_several_system_turns_are_joined() -> None:
+    instructions, _ = to_responses_input(
+        [
+            Message(role="system", content="one"),
+            Message(role="user", content="hi"),
+            Message(role="system", content="two"),
+        ]
+    )
+    assert instructions == "one\n\ntwo"
+
+
+def test_responses_a_plain_message_stays_a_plain_string() -> None:
+    """Wrapping every string in a one-element list buys nothing and costs
+    readability in every request anyone ever inspects."""
+    _, items = to_responses_input([Message(role="user", content="hi")])
+    assert items == [{"role": "user", "content": "hi"}]
+
+
+def test_responses_content_parts_are_renamed_and_reshaped() -> None:
+    """An image nests a bare data URL here, not an `image_url` object."""
+    _, items = to_responses_input(
+        [
+            Message(
+                role="user",
+                content=[
+                    {"type": "text", "text": "what is this?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            )
+        ]
+    )
+    assert items[0]["content"] == [
+        {"type": "input_text", "text": "what is this?"},
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,AAAA",
+            "detail": "auto",
+        },
+    ]
+
+
+def test_responses_a_remote_image_is_not_fetched() -> None:
+    """Fetching an address a prompt named is a request nobody made.
+
+    Dropping is safe because the agent server has already refused to send one.
+    """
+    _, items = to_responses_input(
+        [
+            Message(
+                role="user",
+                content=[
+                    {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}},
+                    {"type": "text", "text": "hi"},
+                ],
+            )
+        ]
+    )
+    assert items[0]["content"] == [{"type": "input_text", "text": "hi"}]
+
+
+def test_responses_tool_results_are_their_own_items() -> None:
+    """The part with no analogue in either other backend.
+
+    A tool result is not a message with a role here — it is a `function_call_output`
+    item addressed by the id the call announced.
+    """
+    _, items = to_responses_input(
+        [Message(role="tool", content="4", tool_call_id="c1")]
+    )
+    assert items == [{"type": "function_call_output", "call_id": "c1", "output": "4"}]
+
+
+def test_responses_an_assistant_turn_is_its_text_then_its_calls() -> None:
+    """The order the API itself emits, so a history round-trips unchanged."""
+    _, items = to_responses_input(
+        [
+            Message(
+                role="assistant",
+                content="let me check",
+                tool_calls=[ToolCall(id="c1", name="calc", arguments={"e": "1"})],
+            )
+        ]
+    )
+    assert items == [
+        {"role": "assistant", "content": "let me check"},
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "calc",
+            "arguments": '{"e": "1"}',
+        },
+    ]
+
+
+def test_responses_an_assistant_turn_with_only_calls_has_no_message_item() -> None:
+    _, items = to_responses_input(
+        [Message(role="assistant", tool_calls=[ToolCall(id="c1", name="calc")])]
+    )
+    assert [item["type"] for item in items] == ["function_call"]
+
+
+def test_responses_an_empty_turn_is_dropped() -> None:
+    _, items = to_responses_input([Message(role="assistant")])
+    assert items == []
+
+
+def test_responses_tools_are_flat() -> None:
+    """No `function` wrapper — the whole difference from chat-completions."""
+    tools = to_responses_tools(
+        [ToolSpec(name="calc", description="maths", parameters={"type": "object"})]
+    )
+    assert tools == [
+        {
+            "type": "function",
+            "name": "calc",
+            "description": "maths",
+            "parameters": {"type": "object"},
+        }
     ]
 
 
@@ -682,6 +1070,63 @@ def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     assert request["thinking"]["budget_tokens"] < 2000
 
 
+def test_responses_sends_only_what_was_configured() -> None:
+    bare = ModelSettings(model="m")
+    request = responses_build_request([Message(role="user", content="hi")], [], bare)
+    assert "temperature" not in request
+    assert "top_p" not in request
+    assert "max_output_tokens" not in request
+    assert "reasoning" not in request
+    assert "store" not in request
+
+    tuned = ModelSettings(model="m", temperature=0.3, top_p=0.9, max_tokens=100)
+    request = responses_build_request([Message(role="user", content="hi")], [], tuned)
+    assert request["temperature"] == 0.3
+    assert request["top_p"] == 0.9
+    # This API calls the output cap something else, and does not require it —
+    # unlike Anthropic, where an absent one has to become a real number.
+    assert request["max_output_tokens"] == 100
+
+
+def test_responses_thinking_is_opt_in() -> None:
+    """`reasoning: true` asks for a summary; the model reasons natively
+    otherwise, and a model the config does not claim reasons is not sent a
+    parameter it has no use for."""
+    plain = ModelSettings(model="m")
+    assert "reasoning" not in responses_build_request([], [], plain)
+
+    reasoning = ModelSettings(model="m", reasoning=True)
+    assert responses_build_request([], [], reasoning)["reasoning"] == {
+        "summary": "auto"
+    }
+
+    # ...but a gateway that rejects the field can still say so, as on the other
+    # two backends — the gateways that need the escape hatch are the same ones.
+    for setting in ("omit", "disabled"):
+        refused = ModelSettings(model="m", reasoning=True, thinking=setting)
+        assert "reasoning" not in responses_build_request([], [], refused), setting
+
+
+def test_responses_store_is_absent_unless_the_config_asks() -> None:
+    """Three states, and the middle one is the default.
+
+    Absent means *send nothing*, which leaves each endpoint's own default in
+    place — the API's default being to keep the response.  That is deliberate:
+    Responses-compatible endpoints differ in whether they implement the field at
+    all, so a server that picked a value for every call would break against the
+    ones that do not accept it.
+    """
+    assert "store" not in responses_build_request([], [], ModelSettings(model="m"))
+    assert (
+        responses_build_request([], [], ModelSettings(model="m", store=False))["store"]
+        is False
+    )
+    assert (
+        responses_build_request([], [], ModelSettings(model="m", store=True))["store"]
+        is True
+    )
+
+
 def test_reasoning_is_read_whatever_the_gateway_calls_it() -> None:
     """There is no standard field name, and a missed one is invisible.
 
@@ -800,10 +1245,10 @@ def test_a_user_message_with_an_image_survives_conversion() -> None:
     assert messages[0]["content"][1]["source"]["media_type"] == "image/jpeg"
 
 
-# --- the `main` both servers share -------------------------------------------
+# --- the `main` every model server shares ------------------------------------
 
-#: One OpenAI-compatible provider and nothing else, so the *other* protocol has
-#: no provider to serve.
+#: One OpenAI-compatible provider and nothing else, so every *other* protocol
+#: has no provider to serve.
 ONLY_OPENAI = """
 providers:
   local:
@@ -859,3 +1304,47 @@ def test_the_matching_protocol_serves_every_provider_of_it(
     assert address.url == "http://127.0.0.1:8001/mcp"
     # And it is this server, by the name a client checks it by.
     assert mcp.name == openai_server.SERVER_NAME
+
+
+ONLY_RESPONSES = """
+providers:
+  oai:
+    api: openai-responses
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+default: oai/big
+"""
+
+
+def test_responses_stops_with_an_answer_when_its_config_has_none(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The third backend takes the same branch as the other two, because it
+    takes the same `main` — which is the point of there being one."""
+    _point_at(tmp_path, monkeypatch)
+    from slife2.llm import openai_responses_server
+
+    assert openai_responses_server.main([]) == 2
+    assert "no openai-responses provider" in capsys.readouterr().out
+
+
+def test_responses_is_served_on_its_own_port(tmp_path, monkeypatch) -> None:
+    """A third protocol gets a third address, keyed by the `api` it speaks.
+
+    Sharing a port with the chat-completions server is the mistake this
+    catches: both are "openai", and both would be reachable at :8001 if the
+    registry keyed them by anything but the protocol.
+    """
+    from slife2.llm import openai_responses_server, server_common
+
+    (tmp_path / "slife2.yaml").write_text(ONLY_RESPONSES, encoding="utf-8")
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path))
+    served: list[Any] = []
+    monkeypatch.setattr(server_common, "serve", lambda *a, **k: served.append(a))
+
+    assert openai_responses_server.main([]) == 0
+    (mcp, address, _args) = served[0]
+    assert address.url == "http://127.0.0.1:8003/mcp"
+    assert mcp.name == openai_responses_server.SERVER_NAME

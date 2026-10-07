@@ -36,19 +36,22 @@ REPO = str(Path(__file__).resolve().parents[1])
 # --- which servers are needed ------------------------------------------------
 
 
-def test_there_are_exactly_three_components() -> None:
-    """One agent loop, two model backends — each with one job.
+def test_there_is_one_component_per_job() -> None:
+    """One agent loop, one memory store, one process per wire protocol.
 
     The granularity is the point: a backend speaks one wire protocol and does
     nothing else, and a provider is a row in that backend's config rather than a
-    process of its own.  Three providers on two protocols is three processes,
-    not five.
+    process of its own.  Four providers on three protocols is three model
+    processes, not four.  Note which way the list is ordered, too — it is
+    `API_BACKENDS` order, because the servers start in the order they are
+    needed and the model ones come before the agent that talks to them.
     """
-    config = load(_config_with_both_protocols())
+    config = load(_config_with_every_protocol())
     names = [spec.name for spec in launcher.specs(config)]
     assert names == [
         "llm:openai-completions",
         "llm:anthropic-messages",
+        "llm:openai-responses",
         "memory",
         "agent",
     ]
@@ -56,6 +59,7 @@ def test_there_are_exactly_three_components() -> None:
     assert modules == {
         "slife2.llm.openai_server",
         "slife2.llm.anthropic_server",
+        "slife2.llm.openai_responses_server",
         "slife2.memory_server",
         "slife2.server.server",
     }
@@ -65,29 +69,31 @@ def test_one_server_per_wire_protocol() -> None:
     """Not one per provider — that is what this replaced.
 
     A process speaks one format, so every OpenAI-compatible provider shares it
-    and `stream_chat(provider=...)` says whose credentials to use.  Three
-    providers on two protocols is two processes, not three.
+    and `stream_chat(provider=...)` says whose credentials to use.  Two
+    providers on one protocol is one process.
     """
-    path = _config_with_both_protocols()
+    path = _config_with_every_protocol()
     names = [spec.name for spec in launcher.specs(load(path))]
     assert names == [
         "llm:openai-completions",
         "llm:anthropic-messages",
+        "llm:openai-responses",
         "memory",
         "agent",
     ]
 
 
-def _config_with_both_protocols():
+def _config_with_every_protocol():
     import tempfile
 
-    path = Path(tempfile.mkdtemp()) / "two.yaml"
+    path = Path(tempfile.mkdtemp()) / "all.yaml"
     path.write_text(
         """
 providers:
   a: {api: openai-completions, models: [{model: m}]}
   b: {api: openai-completions, models: [{model: n}]}
   c: {api: anthropic-messages, models: [{model: o}]}
+  d: {api: openai-responses, models: [{model: p}]}
 default: a/m
 """,
         encoding="utf-8",
@@ -98,10 +104,11 @@ default: a/m
 def test_the_api_chooses_the_module(tmp_path) -> None:
     modules = {
         spec.name: spec.module
-        for spec in launcher.specs(load(_config_with_both_protocols()))
+        for spec in launcher.specs(load(_config_with_every_protocol()))
     }
     assert modules["llm:openai-completions"] == "slife2.llm.openai_server"
     assert modules["llm:anthropic-messages"] == "slife2.llm.anthropic_server"
+    assert modules["llm:openai-responses"] == "slife2.llm.openai_responses_server"
 
 
 def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:

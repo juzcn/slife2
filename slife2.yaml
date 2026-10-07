@@ -17,6 +17,9 @@
 #
 #   openai-completions   OpenAI / DeepSeek / Ollama / MiniMax
 #   anthropic-messages   Claude / Bailian (Qwen)
+#   openai-responses     OpenAI's newer Responses API — a different protocol
+#                        from the chat-completions one above, not a flag on it,
+#                        so it is served by a process of its own
 #
 # slife2 starts the servers its config needs, on demand, and shares them between
 # instances.
@@ -34,6 +37,12 @@
 #   compat.thinking       omit  — send no thinking field (for gateways that
 #                                 reject the standard shape yet reason natively)
 #                         disabled / enabled are also accepted
+#   compat.store          openai-responses only: whether the provider may keep
+#                         the response on its side.  Leave it out and slife2
+#                         sends nothing, which leaves that provider's own
+#                         default in place — the right answer when you do not
+#                         know how much of the API a gateway implements.
+#                         false / true send the field explicitly.
 #
 # An omitted sampling field is *not* the same as a default value: it means send
 # nothing and let the gateway decide.  Several gateways reject a temperature
@@ -57,6 +66,10 @@ servers:
   anthropic-messages:
     host: 127.0.0.1
     port: 8002
+    path: /mcp
+  openai-responses:
+    host: 127.0.0.1
+    port: 8003
     path: /mcp
   # Keeps turns, one database per agent.  The databases themselves live in the
   # platform's data directory (`%LOCALAPPDATA%\slife2\memory` on Windows), not
@@ -124,6 +137,26 @@ providers:
           - image
         context_window: 983616
         max_tokens: 131072
+
+  # Nothing here speaks the Responses API yet, so the block above is what
+  # actually runs.  A provider for it looks like this — note that it is a
+  # separate provider entry, not a change to `deepseek`, because the protocol
+  # decides which process serves it:
+  #
+  # openai:
+  #   api: openai-responses
+  #   base_url: https://api.openai.com/v1
+  #   api_key: ${OPENAI_API_KEY}
+  #   models:
+  #     - model: gpt-5.1
+  #       name: GPT-5.1
+  #       reasoning: true
+  #       input: [text, image]
+  #       context_window: 400000
+  #       max_tokens: 128000
+  #       compat:
+  #         # Only if this endpoint rejects the field; see the note above.
+  #         store: false
 
 # Which model the agent starts with, as "provider/model".
 default: deepseek/deepseek-flash

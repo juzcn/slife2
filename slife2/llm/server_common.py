@@ -1,8 +1,10 @@
-"""What the two LLM MCP servers share.
+"""What the LLM MCP servers share.
 
-Both servers do the same job — expose one `stream_chat` tool, push provider
-output down the progress channel, return the assembled message — and differ only
-in which SDK they call.  This module holds everything except that difference.
+Every one of them does the same job — expose one `stream_chat` tool, push
+provider output down the progress channel, return the assembled message — and
+they differ only in which wire format they speak.  This module holds everything
+except that difference, so adding a backend means writing an adapter and a
+`main`, not a server.
 
 Serving a server at all — the flags, the HTTP transport, the record that says a
 daemon is here — is *not* here, because it is not an LLM concern: it lives in
@@ -238,12 +240,13 @@ def serve_backend(
     build: Callable[[dict[str, ProviderSettings]], FastMCP],
     logger: logging.Logger,
 ) -> int:
-    """The `main` both model servers share.
+    """The `main` every model server shares.
 
     One process per wire protocol, so the only thing that genuinely differs
-    between the two is which protocol they serve and which SDK builds the
-    streamer.  Everything else here was byte-identical in both, which is the
-    kind of duplication that drifts one branch at a time.
+    between any two of them is which protocol they serve and which SDK builds
+    the streamer.  Everything else here was byte-identical in the first two,
+    which is the kind of duplication that drifts one branch at a time — and a
+    third copy would have made it three.
 
     A config with no provider for this protocol stops here, with a one-line
     message and exit code 2, rather than starting a server that can answer

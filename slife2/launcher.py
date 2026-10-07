@@ -73,7 +73,9 @@ from slife2.runtime import (
 AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "run_turn")
 MEMORY_SERVER = ("slife2.memory_server", MEMORY_SERVER_NAME, "remember")
 
-#: The tool both model servers answer to, and how they are named.
+#: The tool every model server answers to, and how they are named.  One tool
+#: and one prefix for all of them, because a backend is a backend whatever
+#: protocol it speaks — adding one changes a dict in the config, not this file.
 MODEL_TOOL = "stream_chat"
 BACKEND_PREFIX = "llm:"
 

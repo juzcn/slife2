@@ -8,7 +8,6 @@ configuration has to answer:
         api: openai-completions          # the wire protocol
         base_url: https://api.deepseek.com
         api_key: ${DEEPSEEK_API_KEY}
-        server: {host: 127.0.0.1, port: 8001, path: /mcp}
         models:
           - model: deepseek-flash        # the API name, and the local id
             name: DeepSeek Flash         # what to call it on screen
@@ -21,11 +20,13 @@ configuration has to answer:
 
 Three things are worth stating outright.
 
-**A provider holds its own credentials, and therefore its own process.**  A
-server process can only hold one `base_url` and one key, so two
-OpenAI-compatible providers cannot share one — the launcher starts one server
-per provider, and a key exists only in the process that needs it.  This is why
-`server:` sits inside the provider rather than in a separate address table.
+**A provider holds its own credentials; a wire protocol holds the process.**  A
+server process can only hold one `base_url` and one key, so providers cannot
+share one — but they do not need to have one each either, because a single
+process can serve every provider that speaks the same wire format and
+`stream_chat(provider=...)` says whose credentials a call uses.  So the address
+is keyed by `api` in the `servers:` section, not by provider, and a key exists
+only in the process that needs it.
 
 **A model is named `provider/model`.**  That is the reference used in `default`
 and on the command line, and it is unambiguous in a file where several providers
@@ -78,6 +79,12 @@ class ConfigError(Exception):
 API_BACKENDS: dict[str, str] = {
     "openai-completions": "slife2.llm.openai_server",
     "anthropic-messages": "slife2.llm.anthropic_server",
+    # A protocol, not a flag on the one above: the Responses API takes a
+    # different input shape, names its tools differently and streams different
+    # events, so it is a process of its own like every other entry here.
+    # Appended last on purpose — `apis_in_use` preserves this order and the
+    # launcher starts them in it.
+    "openai-responses": "slife2.llm.openai_responses_server",
 }
 
 #: The MCP name the server for each wire protocol advertises — what
@@ -93,6 +100,7 @@ API_BACKENDS: dict[str, str] = {
 API_SERVER_NAMES: dict[str, str] = {
     "openai-completions": "slife2-llm-openai",
     "anthropic-messages": "slife2-llm-anthropic",
+    "openai-responses": "slife2-llm-openai-responses",
 }
 
 #: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
@@ -217,6 +225,17 @@ class ModelSettings:
     #: `compat.thinking` — `enabled`, `disabled`, or `omit` for gateways that
     #: reject the standard shape while reasoning anyway.
     thinking: str = ""
+    #: `compat.store` — whether the Responses API may keep the response
+    #: server-side.  **Tri-state, and the third state is the default.**
+    #:
+    #: `None` means *send nothing*, leaving each endpoint's own default in
+    #: place; `True` and `False` are requests.  The distinction is not academic
+    #: here: the API's default is to store, and Responses-compatible endpoints
+    #: differ in whether they implement the field at all, so a server that
+    #: picked a value for every call would break against the ones that do not
+    #: accept it.  Only the Responses backend reads this; the other two ignore
+    #: it.  See `slife2.llm.openai_responses_server.store_parameter`.
+    store: bool | None = None
 
     @property
     def label(self) -> str:
@@ -388,6 +407,7 @@ def default_config() -> Config:
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
             "anthropic-messages": ServerSettings(port=8002),
+            "openai-responses": ServerSettings(port=8003),
         },
         providers={"deepseek": deepseek},
         agent=AgentSettings(),
@@ -573,6 +593,11 @@ def _model(raw: Any, provider: str) -> ModelSettings:
     else:
         inputs = (str(modalities),)
 
+    # `None` here is a value, not an absence: `compat.store` says "send
+    # nothing" and must stay distinguishable from `compat.store: false`, which
+    # says "send false".  A plain `bool(...)` would collapse the two into False.
+    store_raw = compat.get("store")
+
     return ModelSettings(
         model=model,
         name=str(raw.get("name") or ""),
@@ -583,6 +608,7 @@ def _model(raw: Any, provider: str) -> ModelSettings:
         temperature=_optional_float(raw.get("temperature")),
         top_p=_optional_float(raw.get("top_p")),
         thinking=str(compat.get("thinking") or ""),
+        store=None if store_raw is None else bool(store_raw),
     )
 
 

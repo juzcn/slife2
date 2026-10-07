@@ -9,8 +9,8 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    # The MCP server framework and its client, used by all three servers and
-    # both hops.  `Context.report_progress` is what turns a tool call into a
+    # The MCP server framework and its client, used by every server and both
+    # hops.  `Context.report_progress` is what turns a tool call into a
     # progress stream on the server side, and `Client(FastMCP)` is the in-memory
     # transport every server test runs on.  Brings `mcp` transitively; nothing
     # here imports `mcp` directly, so it is not listed.
@@ -24,9 +24,10 @@ dependencies = [
     # is where provider API keys live.  Published out of the slife repo, so this
     # is v1's credstore rather than a reimplementation.
     "credstore>=0.10.5",
-    # Provider SDKs.  Imported *only* by the two LLM server processes: the TUI,
-    # the agent loop and every shared module stay free of them, which is the
-    # whole point of putting the backends behind MCP.
+    # Provider SDKs.  Imported *only* by the LLM server processes — one per wire
+    # protocol, so `openai` is now imported by two of them and `anthropic` by
+    # one: the TUI, the agent loop and every shared module stay free of both,
+    # which is the whole point of putting the backends behind MCP.
     "openai>=2.46.0",
     "anthropic>=1.2.0",
     "jinja2>=3.1.0",
@@ -51,6 +52,7 @@ slife2-agent = "slife2.server.server:main"
 slife2-memory = "slife2.memory_server:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"
 slife2-llm-anthropic = "slife2.llm.anthropic_server:main"
+slife2-llm-openai-responses = "slife2.llm.openai_responses_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["slife2"]
