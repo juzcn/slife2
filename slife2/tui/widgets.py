@@ -639,6 +639,8 @@ class StatusBar(Static):
         queued: int = 0,
         context_tokens: int = 0,
         context_window: int = 0,
+        thinking: bool = False,
+        vision: bool = False,
         steps: int = 0,
         connected: bool = True,
     ) -> None:
@@ -659,20 +661,40 @@ class StatusBar(Static):
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
 
+        # What the model *is*, as opposed to what it is doing — which is why
+        # these are dim words beside its name rather than coloured states:
+        # `amber` means a turn is running, and a capability that was amber
+        # whenever the model happened to reason would read as an activity.
+        #
+        # Both are worth the space.  Reasoning explains the pause before an
+        # answer and the block above it, and vision is the one thing a person
+        # has to know *before* typing — `@picture.png` is either going to work
+        # or be refused, and the config already knows which.
+        if thinking:
+            parts.append(f"[{PALETTE['dim']}]{GLYPHS['thinking']} thinking[/]")
+        if vision:
+            parts.append(f"[{PALETTE['dim']}]{GLYPHS['vision']} vision[/]")
+
         # The *last* turn's tokens, not a running total: what a context
         # percentage is a percentage of is the conversation as it now stands,
         # and a sum over every turn is a number that only ever grows.
-        if context_tokens:
-            if context_window:
-                used = context_tokens / context_window * 100
-                colour = PALETTE["amber"] if used >= 80 else PALETTE["dim"]
-                parts.append(
-                    f"[{colour}]{GLYPHS['up']} {context_tokens:,} ({used:.1f}%)[/]"
-                )
-            else:
-                # No window is configured for this model, and inventing one
-                # would render a percentage that means nothing.
-                parts.append(f"[{PALETTE['dim']}]{GLYPHS['up']} {context_tokens:,}[/]")
+        #
+        # Shown from zero when the model has a window, rather than appearing
+        # with the first answer: an indicator that is absent until it has
+        # something to say is one nobody knows is there, and the window is a
+        # fact about the model rather than about the turn.
+        if context_window:
+            used = context_tokens / context_window * 100
+            colour = PALETTE["amber"] if used >= 80 else PALETTE["dim"]
+            parts.append(
+                f"[{colour}]{GLYPHS['up']} {context_tokens:,} ({used:.1f}%)[/]"
+            )
+        elif context_tokens:
+            # No window is configured for this model, and inventing one would
+            # render a percentage that means nothing.
+            parts.append(
+                f"[{PALETTE['dim']}]{GLYPHS['up']} {context_tokens:,} tokens[/]"
+            )
         if steps:
             parts.append(
                 f"[{PALETTE['dim']}]{steps} step{'s' if steps != 1 else ''}[/]"

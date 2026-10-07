@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 
 import slife2
-from slife2 import _parse_args, main, tui_url
-from slife2.config import default_config
+from slife2 import _parse_args, main, tui_model, tui_url
+from slife2.config import default_config, load
 
 pytestmark = pytest.mark.unit
 
@@ -116,3 +116,75 @@ def test_an_unknown_command_is_a_usage_error() -> None:
     """
     with pytest.raises(SystemExit):
         _parse_args(["frobnicate"])
+
+
+# --- what the window starts on -------------------------------------------
+
+
+def test_the_window_starts_on_the_configs_model() -> None:
+    """The reference the TUI sends, and the model entry everything else comes from.
+
+    Both come out of one model, and the model is what was missing: `SlifeApp`
+    has taken a `context_window` since it was written and `main` never passed
+    one, so the status bar rendered `↑ 25,000` and no percentage — while every
+    widget test passed a window itself and so proved nothing about the wiring.
+    This is the assertion that would have caught it.
+    """
+    config = default_config()
+    reference, model = tui_model(config)
+    assert reference == config.default
+    assert model == config.resolve(config.default)[2]
+    assert model.context_window > 0, "the shipped config gives its model a window"
+    assert model.reasoning, "and says it reasons"
+    assert model.accepts_images, "and that it reads images"
+
+
+def test_the_flag_picks_that_models_own_window(tmp_path) -> None:
+    """Two models, two windows, and the flag decides which one is in force.
+
+    The percentage is against the model that answers, so a launch naming a
+    different model must carry a different window — otherwise the bar would
+    divide by the default model's, which is the kind of wrong that looks right.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        """
+providers:
+  p:
+    api: openai-completions
+    models:
+      - model: small
+        context_window: 1000
+      - model: big
+        context_window: 200000
+default: p/small
+""",
+        encoding="utf-8",
+    )
+    config = load(path)
+    assert tui_model(config, "p/big")[1].context_window == 200_000
+    assert tui_model(config, "p")[1].context_window == 1000, "a bare provider"
+    assert tui_model(config)[1].context_window == 1000, "the default"
+    assert tui_model(config, "p/big")[0] == "p/big", "the wire form"
+
+
+def test_a_model_with_no_window_reports_none(tmp_path) -> None:
+    """Zero, not a guess — and the status bar reads that as "no percentage",
+    the same way it reads `reasoning: false` as "no thinking badge" rather than
+    inferring a capability from the model's name."""
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        """
+providers:
+  p:
+    api: openai-completions
+    models:
+      - model: m
+default: p/m
+""",
+        encoding="utf-8",
+    )
+    _, model = tui_model(load(path))
+    assert model.context_window == 0
+    assert not model.reasoning
+    assert not model.accepts_images

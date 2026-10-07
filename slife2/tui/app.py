@@ -82,6 +82,8 @@ class SlifeApp(App[None]):
         model: str = "",
         model_label: str = "",
         context_window: int = 0,
+        thinking: bool = False,
+        vision: bool = False,
         client_factory: Callable[[], AgentClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
@@ -99,6 +101,14 @@ class SlifeApp(App[None]):
         #: bar.  Zero when the config does not say, and then no percentage is
         #: shown rather than one against a number somebody invented.
         self._context_window = context_window
+        #: The model's own two capabilities, also from its config: it reasons
+        #: natively, and it can be shown a picture.  Both are facts about the
+        #: model rather than about a turn, which is why they are read once here
+        #: instead of being reported by the server per turn — the TUI is what
+        #: decides `@image` is worth offering, and the server is what refuses one
+        #: a model cannot read.
+        self._thinking = thinking
+        self._vision = vision
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
@@ -364,5 +374,7 @@ class SlifeApp(App[None]):
             queued=len(self._queue),
             context_tokens=self._context_tokens,
             context_window=self._context_window,
+            thinking=self._thinking,
+            vision=self._vision,
             steps=self._steps,
         )

@@ -724,3 +724,53 @@ async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
         assert "[cancelled]" in shown(app)
         assert "answer to beta" in shown(app)
         assert "answer to alpha" not in shown(app)
+
+
+async def test_the_model_s_capabilities_are_shown_beside_its_name() -> None:
+    """Reasoning and vision, from the model's config, before anything is typed.
+
+    Both are facts about the model rather than about a turn, so they are there
+    from the first frame.  Vision especially: `@picture.png` is either going to
+    work or be refused, and a person should know which before they type it.
+    """
+    client = FakeAgentClient(answering("hi"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="deepseek/deepseek-flash",
+        thinking=True,
+        vision=True,
+    )
+    async with app.run_test(size=SIZE):
+        bar = status(app)
+
+    assert f"{GLYPHS['thinking']} thinking" in bar
+    assert f"{GLYPHS['vision']} vision" in bar
+
+
+async def test_a_text_only_model_claims_no_capabilities() -> None:
+    """No badge rather than a crossed-out one: the bar says what is true."""
+    app = make_app(answering("hi"))
+    async with app.run_test(size=SIZE):
+        bar = status(app)
+
+    assert "thinking" not in bar
+    assert "vision" not in bar
+
+
+async def test_the_context_indicator_is_there_before_the_first_turn() -> None:
+    """From zero, because the window is a fact about the model.
+
+    An indicator that only appears once it has something to say is one nobody
+    knows is there — which is what "our TUI doesn't show the context" looks like
+    from the outside.
+    """
+    client = FakeAgentClient(answering("hi"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="m",
+        context_window=1000,
+    )
+    async with app.run_test(size=SIZE):
+        assert f"{GLYPHS['up']} 0 (0.0%)" in status(app)

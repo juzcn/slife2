@@ -28,6 +28,7 @@ from slife2.config import (
     DEFAULT_AGENT,
     Config,
     ConfigError,
+    ModelSettings,
     find_config_path,
     load,
 )
@@ -159,6 +160,27 @@ def tui_url(config: Config, override: str | None = None) -> str:
     return override or config.agent.server.url
 
 
+def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
+    """Which model the window starts on, and what that model is.
+
+    Two values out of one lookup, and the second is the reason this is a
+    function.  Everything the status bar says about the model — how full the
+    conversation is, whether it reasons, whether it can be shown a picture — is
+    a field of the model's *own* config entry, and none of it was reaching the
+    TUI: `SlifeApp` has taken a `context_window` since it was written and was
+    never passed one, so the bar rendered `↑ 25,000` with no percentage while
+    every widget test passed a window itself and so proved nothing about the
+    wiring.
+
+    Separate for the reason :func:`tui_url` is: assembled inside `main`, these
+    are values nothing can assert on.  The reference is built here too rather
+    than at the call site because `--model` may name a bare provider, and the
+    wire wants `provider/model`.
+    """
+    name, _, model = config.resolve(reference)
+    return f"{name}/{model.model}", model
+
+
 def _status(config: Config) -> int:
     from slife2.launcher import Status, statuses
 
@@ -206,8 +228,15 @@ def main(argv: list[str] | None = None) -> int:
         config_path = find_config_path()
         config: Config = load()
         # The provider itself is not needed here: the TUI talks to the *agent*
-        # server, which is the one that knows which model server to use.
-        provider_name, _, model = config.resolve(args.model)
+        # server, which is the one that knows which model server to use.  What
+        # is needed is the reference — because `--model` may be a bare provider
+        # name and the wire wants `provider/model` — and the model's own entry,
+        # which is where everything the status bar says about the model comes
+        # from: its window, whether it reasons, whether it reads images.
+        #
+        # Resolved here rather than after the servers are up so that a `--model`
+        # naming something that does not exist is one line and no processes.
+        model_reference, model_settings = tui_model(config, args.model or "")
     except ConfigError as exc:
         # A config mistake is worth a one-line message rather than a traceback:
         # nothing has started yet, and the fix is in the file being named.
@@ -236,14 +265,17 @@ def main(argv: list[str] | None = None) -> int:
             claimed = True
             code = _ensure(config, config_path)
             if code == 0:
-                # Resolved, because `--model` may be a bare provider name and
-                # the wire wants `provider/model`.  Passed to the TUI at all is
-                # the point: without it the flag reached the window title and
-                # nothing else, and every turn ran on the config's default.
                 app = SlifeApp(
                     tui_url(config, args.url),
                     agent=args.agent,
-                    model=f"{provider_name}/{model.model}",
+                    model=model_reference,
+                    # What this model is, from its own config entry.  Passed at
+                    # all is the point: the status bar has known how to render
+                    # each of these since it was written, and showed none of
+                    # them for as long as nothing handed them over.
+                    context_window=model_settings.context_window,
+                    thinking=model_settings.reasoning,
+                    vision=model_settings.accepts_images,
                 )
                 app.run()
     except AgentInUse as exc:

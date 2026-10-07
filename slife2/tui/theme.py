@@ -66,4 +66,5 @@ GLYPHS: dict[str, str] = {
     "separator": "│",
     "ellipsis": "…",
     "thinking": "⟐",
+    "vision": "◉",
 }
