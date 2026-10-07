@@ -3,14 +3,20 @@
 Three seams get faked, and each one exists because something real and slow sits
 behind it: the model (an HTTP call to a provider), the agent server (a socket),
 and the observer (nothing — but a recorder is how a test reads what happened).
+
+Plus one that is not a seam but a *shape*: the set of components a toolhub will
+ask for tools.  It is here because three test modules need it and none of them
+owns it — see `component_transports`.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
+from slife2.config import Config
 from slife2.events import TurnEvent
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import Message, StreamChatResult, ToolSpec
@@ -158,3 +164,47 @@ class FakeAgentClient:
         self.prompts.append(prompt)
         self.images.append(images or [])
         return self._respond(prompt, on_event)
+
+
+def component_transports(
+    config: Config, overrides: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """What a toolhub built from `config` needs to reach its own components.
+
+    **A hub with no components is a hub that lists nothing.**  It asks every
+    server slife2 starts — that is where its tools come from, alongside the
+    entries under `tools:` — and it refuses to hand out a list when one of them
+    does not answer, because a component that is not there is a system that has
+    come apart rather than a model with fewer tools.
+
+    So a test that builds a hub stands each one up, the way the launcher does.
+    These are in-memory, and apart from `builtins` they offer the model nothing,
+    which is what most components are: asking them is how "nothing for you"
+    becomes a fact rather than an assumption.
+
+    `overrides` replaces or adds a transport by name — a component the test
+    wants to misbehave, or an entry under `tools:` it wants wired.
+    """
+    from slife2.builtins import build_server as build_builtins
+
+    transports: dict[str, Any] = {
+        name: (lambda settings: build_builtins(config))
+        if name == "builtins"
+        else (lambda settings: blank_component())
+        for name in config.components()
+        if name != "toolhub"
+    }
+    transports.update(overrides or {})
+    return transports
+
+
+def blank_component() -> Any:
+    """One of our own servers, answering, with nothing for the model.
+
+    The ordinary case, and the one worth being able to state: a component whose
+    tools belong to its own code is asked for a list like every other, and the
+    answer is empty rather than absent.
+    """
+    from fastmcp import FastMCP
+
+    return FastMCP("component")

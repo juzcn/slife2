@@ -8,6 +8,7 @@ is what keeps the two halves from drifting apart.
 
 from __future__ import annotations
 
+import json
 import types
 from dataclasses import replace
 from typing import Any
@@ -16,9 +17,10 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.tools import Tool
 
-from slife2.builtins import build_server as build_builtins
 from slife2.config import Config, ToolServerSettings, default_config
+from slife2.memory_server import build_server as build_memory
 from slife2.messages import ToolCall
+from slife2.paths import DATA_ENV_VAR
 from slife2.toolclient import (
     CALL_TOOL,
     LIST_TOOLS,
@@ -27,6 +29,7 @@ from slife2.toolclient import (
 )
 from slife2.toolhub import build_server as build_hub
 from slife2.tools import ToolFailed, ToolRegistry
+from tests.fakes import component_transports
 
 pytestmark = pytest.mark.unit
 
@@ -188,10 +191,7 @@ def hub_with_upstream() -> FastMCP:
     )
     return build_hub(
         config,
-        transports={
-            "fake": lambda settings: upstream,
-            "builtins": lambda settings: build_builtins(default_config()),
-        },
+        transports=component_transports(config, {"fake": lambda settings: upstream}),
     )
 
 
@@ -242,3 +242,54 @@ def test_tool_failed_and_an_ordinary_raise_are_rendered_differently() -> None:
     """The one exception whose class name adds nothing to its message."""
     assert issubclass(ToolFailed, Exception)
     assert Tool.__name__ == "Tool"
+
+
+@pytest.mark.asyncio
+async def test_the_identity_reaches_memory_through_the_hub(
+    tmp_path, monkeypatch
+) -> None:
+    """Two hops, and the conversation survives both.
+
+    This is the whole point of the arrangement: the model is handed
+    `memory__turn_list` with no `agent` argument to fill in, the loop binds the
+    conversation it was built for to the call, the hub forwards it without
+    reading it, and the memory server answers with *that* conversation's turns.
+    Every hop would be individually plausible with the identity dropped — the
+    call would still succeed — and the result would be a model reading a
+    history that is not its own, or none at all.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    memory = build_memory(default_config())
+
+    async with Client(memory) as seed:
+        for agent, said in (("jack", "jack asked"), ("jill", "jill asked")):
+            await seed.call_tool(
+                "remember",
+                {
+                    "agent": agent,
+                    "messages": [
+                        {"role": "user", "content": said},
+                        {"role": "assistant", "content": "…"},
+                    ],
+                },
+            )
+
+    config = default_config()
+    hub = build_hub(
+        config,
+        transports=component_transports(
+            config, {"memory": lambda settings: memory}
+        ),
+    )
+
+    async with Client(hub) as hub_client:
+        offered = await remote_tools(hub_client, ("jack", ""))
+        by_name = {tool.spec.name: tool for tool in offered}
+        # What memory has that the model may not call never left the hub.
+        assert "memory__turn_list" in by_name
+        assert "memory__turn_read" in by_name
+        assert "memory__remember" not in by_name
+
+        payload = json.loads(await by_name["memory__turn_list"].run({}))
+
+    assert [entry["user_message"] for entry in payload["entries"]] == ["jack asked"]

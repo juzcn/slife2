@@ -26,6 +26,18 @@ from __future__ import annotations
 from datetime import datetime
 
 
+def at(moment: datetime) -> str:
+    """A given moment, written the way everything here writes time.
+
+    The second caller is `slife2.timeutil`, which takes a bound a model wrote —
+    `+00:00`, a bare `Z`, whatever the provider's clock said — and has to put it
+    back into the local-offset form the `created_at` column holds.  A bound
+    converted anywhere else would be the same string shape written twice, which
+    is the drift this module exists to prevent.
+    """
+    return moment.astimezone().isoformat(timespec="seconds")
+
+
 def now() -> str:
     """The current wall clock, as `YYYY-MM-DDTHH:MM:SS+HH:MM`."""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return at(datetime.now())

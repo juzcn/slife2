@@ -27,8 +27,9 @@ import asyncio
 import logging
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
+from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import Config, find_config_path, load
 from slife2.mcp_server import (
     configure_logging,
@@ -37,7 +38,7 @@ from slife2.mcp_server import (
     parse_serve_args,
     serve,
 )
-from slife2.memory import store_for
+from slife2.memory import PREVIEW_CHARS, store_for
 from slife2.paths import turns_dir
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,13 @@ SERVER_NAME = "slife2-memory"
 CONFIG_KEY = "memory"
 
 INSTRUCTIONS = (
-    "Persisted turns, one database per client id. Call `remember` after a turn "
-    "and `recent` to read back what was said, naming the same `(agent, subagent)` "
-    "the turn was taken under. The store keeps no opinion about what matters: it "
-    "writes what it is given and returns it in order."
+    "Persisted turns, one database per client id. Call `remember` after a turn, "
+    "naming the `(agent, subagent)` the turn was taken under. The store keeps no "
+    "opinion about what matters: it writes what it is given and returns it in "
+    "order. Reading is by time — `turn_list` browses and pages, `turn_read` "
+    "returns one turn whole — which is the honest thing for a component that "
+    "stores without judging. Both of those are the model's, and neither names an "
+    "agent: they answer about the conversation the call came from."
 )
 
 
@@ -130,25 +134,99 @@ def build_server(config: Config) -> FastMCP:
         logger.info("stored turn %s for %s", turn_id, describe((agent, subagent)))
         return {"turn_id": turn_id, "database": str(store.path)}
 
-    @mcp.tool
-    async def recent(
-        agent: str, limit: int = 10, subagent: str = ""
-    ) -> list[dict[str, Any]]:
-        """The most recent turns, newest first.
+    def _caller(ctx: Context) -> tuple[str, str]:
+        """Whose memory a model's call is about — read from the request.
 
-        Retrieval is by time, which is the honest thing for a component that
-        stores without judging.  Relevance is a question for whoever is reading,
-        and adding an index is a change to this file rather than a change to
-        what was kept.
+        **There is no `agent` argument, and that is the whole point.**  A model
+        that could name a database could read somebody else's memory, and the
+        only thing standing between it and that would be a sentence in its own
+        system prompt — which is an instruction, not a boundary.  The
+        conversation is a fact the caller's side holds (`slife2.toolclient`
+        attaches it to the call) and this side reads; the model neither sees it
+        nor can write it.
+
+        Raises:
+            ValueError: If the call arrived without one.  Every real caller is
+                the hub, which forwards what the agent gave it, so this is a
+                caller that reached the memory server directly — a test, or a
+                component that is not the agent — and it is better told than
+                quietly served whatever it named.
+        """
+        found = request_client(ctx)
+        if found is None:
+            raise ValueError(
+                "this tool reads one conversation's memory and the call did not "
+                "say whose; it is called through the toolhub, which forwards the "
+                "caller's identity (`slife2.audience`)"
+            )
+        return found
+
+    @mcp.tool(meta=FOR_THE_MODEL)
+    async def turn_list(
+        ctx: Context,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Browse what was said before, newest first, one line per turn.
+
+        The way back into a conversation you were not in, or were in long enough
+        ago to have lost: when each turn was, what was asked, what was answered,
+        and the id to read the whole of it with `turn_read`.  Both messages come
+        back cut short — enough to tell whether this is the turn you wanted, not
+        enough to be the turn itself.
+
+        Your own history, and only your own: there is no argument naming whose
+        memory to read, because a model that could name one could read somebody
+        else's.
 
         Args:
-            agent: Whose memory.
-            limit: How many turns at most.
-            subagent: Which of that agent's conversations; empty for its own.
+            since: Lower bound on when the turn was written — an ISO date or
+                datetime, or one of: today, yesterday, tomorrow, now,
+                last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
+                Omit for no lower bound.
+            until: Upper bound on the same grammar.  A date means the whole day.
+            limit: How many turns this page may hold.
+            offset: Skip this many turns — that is how you page back.
+
+        Returns:
+            `entries` — `turn_id`, `created_at`, `user_message`,
+            `assistant_message` and `token_count` per turn — `total`, how many
+            turns the window holds, so `offset + len(entries) < total` says
+            whether there is more — and the `limit` and `offset` that produced
+            this page.
         """
+        store = store_for(*_caller(ctx))
+        records, total = await _on_thread(
+            store.turns, since=since, until=until, limit=limit, offset=offset
+        )
+        return {
+            "entries": [record.to_listing(PREVIEW_CHARS) for record in records],
+            "total": total,
+            "limit": limit,
+            "offset": max(0, offset),
+        }
+
+    @mcp.tool(meta=FOR_THE_MODEL)
+    async def turn_read(ctx: Context, turn_id: int) -> dict[str, Any]:
+        """One turn in full, by the id `turn_list` gave you.
+
+        Everything that happened in it, in the order it happened: what the user
+        said, every assistant message, the tool calls and what they answered.
+        Your own history, like `turn_list` — an id only resolves inside it.
+
+        Args:
+            turn_id: The turn to read, as `turn_list` reported it.
+        """
+        agent, subagent = _caller(ctx)
         store = store_for(agent, subagent)
-        records = await _on_thread(store.recent, limit)
-        return [record.to_wire() for record in records]
+        record = await _on_thread(store.turn, turn_id)
+        if record is None:
+            raise ValueError(
+                f"no turn {turn_id} in {describe((agent, subagent))}"
+            )
+        return record.to_wire()
 
     return mcp
 

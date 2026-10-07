@@ -15,6 +15,7 @@ import sqlite3
 
 import pytest
 
+from slife2.clock import now
 from slife2.memory import (
     TOOL_RESULT_CHARS,
     TurnStore,
@@ -23,6 +24,7 @@ from slife2.memory import (
     store_for,
 )
 from slife2.paths import DATA_ENV_VAR
+from slife2.timeutil import InvalidTimeBound
 
 pytestmark = pytest.mark.unit
 
@@ -78,7 +80,7 @@ def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
 
     assert turn_id == 1
     assert store.count() == 1
-    (record,) = store.recent()
+    (record,), _ = store.turns()
     assert record.turn_id == turn_id
     assert record.messages == messages
     assert record.channel == "human"
@@ -92,7 +94,7 @@ def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     assert (record.summary, record.tags) == ("", "")
 
 
-def test_recent_is_newest_first(tmp_path) -> None:
+def test_turns_are_newest_first(tmp_path) -> None:
     """Retrieval is by time, and the order is the rowid's — not the clock's.
 
     Two turns written in the same second are the common case, so a tie has to
@@ -102,15 +104,16 @@ def test_recent_is_newest_first(tmp_path) -> None:
     for text in ("first", "second", "third"):
         store.save_turn(messages=[{"role": "user", "content": text}])
 
-    assert [r.messages[0]["content"] for r in store.recent()] == [
+    records, total = store.turns()
+    assert [r.messages[0]["content"] for r in records] == [
         "third",
         "second",
         "first",
     ]
-    assert [r.messages[0]["content"] for r in store.recent(limit=2)] == [
-        "third",
-        "second",
-    ]
+    assert total == 3
+
+    records, _ = store.turns(limit=2)
+    assert [r.messages[0]["content"] for r in records] == ["third", "second"]
 
 
 def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
@@ -127,7 +130,7 @@ def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute("UPDATE turn SET messages = 'not json' WHERE rowid = 1")
 
-    records = store.recent()
+    records, _ = store.turns()
     assert [r.messages for r in records] == [[{"role": "assistant", "c": 2}], []]
     assert records[1].messages == []
 
@@ -178,7 +181,7 @@ def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None
     )
 
     assert turn_id == 1
-    (record,) = store.recent()
+    (record,), _ = store.turns()
     assert record.messages == [
         {"role": "user", "content": "an emoji: \U0001f600"},
         {"role": "assistant", "content": "half a character: �"},
@@ -271,3 +274,174 @@ def test_a_name_that_cannot_name_a_file_is_refused(name: str) -> None:
     """Saying no beats writing somewhere nobody intended."""
     with pytest.raises(ValueError):
         safe_agent_name(name)
+
+
+# --- browsing: the window, the page, and the two halves -----------------------
+
+
+def _turn(store: TurnStore, question: str, answer: str, *, at: str, tokens: int = 0):
+    return store.save_turn(
+        messages=[
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer},
+        ],
+        created_at=at,
+        completed_at=at,
+        token_count=tokens,
+    )
+
+
+def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -> None:
+    """`total` is the window's, not the table's.
+
+    That is the number that answers "is there another page", and a total over
+    the whole table would answer it wrongly for every window that is not the
+    whole history.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    _turn(store, "old", "a", at="2026-01-01T10:00:00+08:00")
+    _turn(store, "middle", "b", at="2026-06-01T10:00:00+08:00")
+    _turn(store, "new", "c", at="2026-10-01T10:00:00+08:00")
+
+    records, total = store.turns(since="2026-05-01", limit=5)
+    assert [table(record) for record in records] == ["new", "middle"]
+    assert total == 2
+
+    records, total = store.turns(since="2026-05-01", until="2026-09-30", limit=5)
+    assert [table(r) for r in records] == ["middle"] and total == 1
+
+    records, total = store.turns(limit=5)
+    assert [table(r) for r in records] == ["new", "middle", "old"] and total == 3
+
+
+def table(record) -> str:
+    return record.messages[0]["content"]
+
+
+def test_a_relative_bound_is_resolved_before_it_reaches_sql(tmp_path) -> None:
+    """A word a model wrote narrows the window like a date does."""
+    store = TurnStore(tmp_path / "jack.turn.db")
+    _turn(store, "long ago", "a", at="2001-01-01T10:00:00+08:00")
+    _turn(store, "today", "b", at=now())
+
+    records, total = store.turns(since="today", limit=5)
+    assert [table(r) for r in records] == ["today"] and total == 1
+
+
+def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
+    tmp_path,
+) -> None:
+    """The failure this window must never have: an answer that looks like one.
+
+    SQLite compares an unknown string lexicographically and matches no rows, so
+    a bound nobody understood used to read exactly like a history with nothing
+    in it.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    _turn(store, "anything", "a", at=now())
+
+    with pytest.raises(InvalidTimeBound):
+        store.turns(since="上个月", limit=5)
+
+
+def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
+    """Ten turns, three pages, each turn exactly once.
+
+    Paging on `offset` is only safe because the order is the rowid's: the
+    timestamps here are all identical, which is the case an ordering by
+    `created_at` would resolve differently from one call to the next.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    for number in range(10):
+        _turn(store, f"turn {number}", "a", at="2026-10-07T10:00:00+08:00")
+
+    seen: list[str] = []
+    for offset in (0, 3, 6, 9):
+        records, total = store.turns(limit=3, offset=offset)
+        seen.extend(table(record) for record in records)
+        assert total == 10
+
+    assert seen == [f"turn {number}" for number in reversed(range(10))]
+    assert len(set(seen)) == 10
+
+
+def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
+    """What was asked and what was answered, which no column holds.
+
+    v1 keeps the user's message in a column and lists rows straight out of SQL.
+    Here the turn is one list of messages, so the browse has to read both ends
+    of it out — and the answer is the *last* assistant message with prose in it,
+    not the last assistant message, which on a turn that called a tool is a
+    message with no text at all.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    store.save_turn(
+        messages=[
+            {"role": "user", "content": "what is 2+2?"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "content": "4", "tool_call_id": "c1"},
+            {"role": "assistant", "content": "It is 4."},
+        ],
+        created_at=now(),
+        token_count=12,
+    )
+
+    (record,), _ = store.turns(limit=1)
+    listing = record.to_listing()
+
+    assert listing["user_message"] == "what is 2+2?"
+    assert listing["assistant_message"] == "It is 4."
+    assert listing["token_count"] == 12
+    assert listing["created_at"] and listing["turn_id"] == record.turn_id
+
+
+def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
+    """`…`, because a silent cut is a short answer somebody acts on.
+
+    The listing is what a caller decides from; it has no way to know the message
+    continued except by being told.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    _turn(store, "x" * 5000, "y" * 5000, at=now())
+
+    (record,), _ = store.turns(limit=1)
+    listing = record.to_listing(chars=10)
+
+    assert listing["user_message"] == "x" * 10 + "…"
+    assert listing["assistant_message"] == "y" * 10 + "…"
+
+
+def test_an_image_in_the_message_is_named_in_the_listing(tmp_path) -> None:
+    """A model reading a one-line summary can act on `[image_url]`; it cannot
+    act on the base64 that is actually stored, and it cannot act on silence."""
+    store = TurnStore(tmp_path / "jack.turn.db")
+    store.save_turn(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            },
+            {"role": "assistant", "content": "A cat."},
+        ],
+        created_at=now(),
+    )
+
+    (record,), _ = store.turns(limit=1)
+    listing = record.to_listing()
+
+    assert "what is this?" in listing["user_message"]
+    assert "[image_url]" in listing["user_message"]
+    assert "base64" not in listing["user_message"]
+
+
+def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
+    store = TurnStore(tmp_path / "jack.turn.db")
+    first = _turn(store, "first", "a", at=now())
+    _turn(store, "second", "b", at=now())
+
+    found = store.turn(first)
+    assert found is not None and found.messages[0]["content"] == "first"
+    assert store.turn(999) is None

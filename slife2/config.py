@@ -157,8 +157,9 @@ TOOLHUB_SERVER_NAME = "slife2-toolhub"
 
 #: The components that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
-#: launcher starts them in — see `slife2.launcher.specs` — which is why
-#: `builtins` comes before `toolhub`: the hub connects to it at startup.
+#: launcher starts them in — see `slife2.config.Config.components` — which is why
+#: `builtins` comes before `toolhub`: the hub asks it for a tool list, and the
+#: answer to a first turn should not be "not connected yet".
 LOCAL_SERVERS = ("memory", "builtins", "toolhub", "agent")
 
 
@@ -460,6 +461,23 @@ class Config:
         _, provider, _ = self.resolve(reference)
         return self.server(provider.api).url
 
+    def components(self) -> list[str]:
+        """Every server slife2 itself brings up, in the order it must start.
+
+        The model backends first, then the rest, because a model server
+        answering first is what makes the first turn work rather than fail and
+        retry.
+
+        One statement of what this system runs, read by the launcher that starts
+        them and by the toolhub that asks each one what tools it offers.  The
+        hub has two sources — our own plugins, and the external MCP and REST
+        servers under `tools:` — and this is the first of them: derived here
+        rather than written down beside the hub, because a list of "which of
+        ours" kept in a second place is a list that disagrees with the
+        launcher's.
+        """
+        return [*self.apis_in_use(), *LOCAL_SERVERS]
+
     def apis_in_use(self) -> list[str]:
         """The wire protocols some provider uses, in a stable order.
 
@@ -513,11 +531,13 @@ def default_config() -> Config:
             "memory": ServerSettings(port=8010),
             # The tools slife2 ships — `echo`, `now`, `calc` — served like
             # anybody else's, because the hub is the one place that decides what
-            # the model may call; see `slife2.builtins` and DESIGN.md §8.
+            # the model may call; see `slife2.builtins` and DESIGN.md §8.  It is
+            # not special to the hub, which asks every component above for a
+            # tool list and keeps the ones marked for the model.
             "builtins": ServerSettings(port=8030),
             # The model's tools, and the only process that holds a tool server's
-            # credentials.  It connects to `builtins` above and to everything
-            # under `tools:` in the config file.
+            # credentials.  It has two sources: every component above, and
+            # everything under `tools:` in the config file.
             "toolhub": ServerSettings(port=8020),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.

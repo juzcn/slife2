@@ -101,14 +101,16 @@ async def hub():
     The real server rather than a stub, so the tool names and schemas these
     tests see crossed a real MCP hop.
     """
-    from slife2.builtins import build_server as build_builtins
     from slife2.toolhub import build_server as build_hub
+    from tests.fakes import component_transports
 
-    # The builtins are a server now, so the hub needs one behind it: injecting it
-    # keeps this over the in-memory transport, and keeps `calc` and `now` real.
-    builtins = lambda settings: build_builtins(default_config())  # noqa: E731
+    # The hub asks every component for a tool list and refuses when one does not
+    # answer, so all of them need something behind them.  In-memory, which keeps
+    # `calc` and `now` real without a port.
     async with Client(
-        build_hub(default_config(), transports={"builtins": builtins})
+        build_hub(
+            default_config(), transports=component_transports(default_config())
+        )
     ) as client:
         yield client
 

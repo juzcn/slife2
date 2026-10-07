@@ -82,14 +82,16 @@ servers:
   # The tools slife2 ships — `echo`, `now`, `calc` — served like anybody else's
   # and reached through the hub below, because the hub is the one place that
   # decides what the model may call.  There is no config for it: adding a tool is
-  # one decorated function in `slife2/builtins.py`.
+  # one decorated function in `slife2/builtins.py`, carrying `meta=FOR_THE_MODEL`
+  # so that the hub offers it to the model.
   builtins:
     host: 127.0.0.1
     port: 8030
     path: /mcp
   # The model's tools, and the only process that holds a tool server's
-  # credentials.  It connects to `builtins` above and to everything under
-  # `tools:` below.
+  # credentials.  It has two sources and neither is listed here: every component
+  # above — asked like any other server, and handing over only the tools marked
+  # as the model's — and everything under `tools:` below.
   toolhub:
     host: 127.0.0.1
     port: 8020

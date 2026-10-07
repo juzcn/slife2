@@ -43,6 +43,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from slife2.audience import client_meta
 from slife2.messages import ToolSpec
 from slife2.tools import Tool, ToolFailed
 
@@ -108,8 +109,15 @@ class UpstreamTool:
         )
 
 
-async def remote_tools(client: Client) -> list[Tool]:
+async def remote_tools(
+    client: Client, client_id: tuple[str, str] | None = None
+) -> list[Tool]:
     """Every tool the hub offers, as tools the loop can run.
+
+    `client_id` is the conversation these tools will be run for, and it is bound
+    *here* rather than passed by the model — see `_proxy`.  Optional because a
+    caller with no conversation behind it (a test, a one-off) is a caller that
+    has nobody to be.
 
     Raises:
         ConnectionError: If the hub answers with something this build cannot
@@ -127,17 +135,32 @@ async def remote_tools(client: Client) -> list[Tool]:
             f"daemon from another build does this — try `slife2 down`"
         )
     return [
-        Tool(spec=entry.spec(), run=_proxy(client, entry.name))
+        Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
         for entry in (UpstreamTool.from_wire(raw) for raw in listed)
     ]
 
 
-def _proxy(client: Client, name: str):
-    """A tool body that calls `name` on the far side and reports what it said."""
+def _proxy(
+    client: Client, name: str, client_id: tuple[str, str] | None = None
+):
+    """A tool body that calls `name` on the far side and reports what it said.
+
+    **The conversation rides in `_meta`, not in the arguments.**  A tool that
+    reads memory runs on behalf of one conversation, and which conversation is a
+    fact this process holds and the model does not get to assert.  Passing
+    `agent` as an argument would turn "read my history" into "read anybody's",
+    and make the system prompt's `You are jack` load-bearing in a way nothing
+    checks: a model that wrote another name would simply be believed.  So it
+    goes beside the call rather than in it — off the schema the model reads, and
+    out of reach of a prompt that asks for somebody else's turns.
+    """
+    meta = client_meta(*client_id) if client_id else None
 
     async def run(arguments: dict[str, Any]) -> str:
         payload = _object(
-            await client.call_tool(CALL_TOOL, {"name": name, "arguments": arguments})
+            await client.call_tool(
+                CALL_TOOL, {"name": name, "arguments": arguments}, meta=meta
+            )
         )
         text = str(payload.get("text") or "")
         if not payload.get("ok"):

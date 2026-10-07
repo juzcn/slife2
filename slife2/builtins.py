@@ -18,13 +18,23 @@ second registry in the agent, kept in step by hand.
     tools:     other people's MCP servers, connected by the same hub
     rest-api:  other people's REST APIs, expanded into servers of the first kind
 
-Adding a tool is one function
+Adding a tool is one function, and one mark
 -----------------------------
 Decorate a plain function and it is done — `echo` below is the example, and it
 is deliberately trivial.  FastMCP reads the signature for the schema the model
 sees and the docstring for the description, so there is no hand-written JSON
 Schema to drift from the code and no registry entry to forget.  Type the
 arguments, say what it does and what each argument means, and it is a tool.
+
+`meta=FOR_THE_MODEL` is the other half, and it is not decoration.  The hub finds
+this server the way it finds every other plugin, and a plugin's tools are **not**
+the model's by default — memory's `remember` and the agent's `send_message` are
+served by the same mechanism, and those are exactly the tools a model must never
+pick by reading descriptions (`slife2.audience`).  So a tool here is invisible to
+the model until it says otherwise, and forgetting the mark costs a tool that is
+merely absent rather than one that is merely dangerous.  `echo`, `now` and
+`calc` each carry it because this whole server exists to hold tools the model may
+call — a second builtin server would be the second mechanism this one is.
 
 The two rules worth keeping: a tool **returns text** (raising is for a bug, and
 `calc` only raises because a model asking for `1/0` should be told so), and it
@@ -45,6 +55,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from slife2.audience import FOR_THE_MODEL
 from slife2.config import Config, find_config_path, load
 from slife2.mcp_server import (
     configure_logging,
@@ -77,7 +88,7 @@ def build_server(config: Config) -> FastMCP:  # noqa: ARG001 - house signature
     """
     mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
 
-    @mcp.tool
+    @mcp.tool(meta=FOR_THE_MODEL)
     def echo(text: str) -> str:
         """Say it back, unchanged.
 
@@ -96,7 +107,7 @@ def build_server(config: Config) -> FastMCP:  # noqa: ARG001 - house signature
         """
         return text
 
-    @mcp.tool
+    @mcp.tool(meta=FOR_THE_MODEL)
     def now() -> str:
         """Current date and time in UTC, ISO 8601.
 
@@ -108,7 +119,7 @@ def build_server(config: Config) -> FastMCP:  # noqa: ARG001 - house signature
         """
         return datetime.now(UTC).isoformat()
 
-    @mcp.tool
+    @mcp.tool(meta=FOR_THE_MODEL)
     def calc(e: str = "", expression: str = "") -> str:
         """Evaluate an arithmetic expression, e.g. '2 + 2 * 3'.
 

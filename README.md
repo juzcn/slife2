@@ -53,6 +53,13 @@ signs the assistant's messages, and it renders the system prompt — and it is
 partition is memory: each agent's turns go in their own database. The servers
 themselves stay shared.
 
+That database is where the model can look back. `turn_list` browses it — newest
+first, one line per turn, `since`/`until` taking an ISO date or a phrase a person
+would write (`yesterday`, `last month`, `3 days ago`), paged with
+`limit`/`offset` against a `total` — and `turn_read` returns one turn whole. Neither takes an `agent`: the
+call carries the conversation it is on behalf of, so a model reads its own
+history and nothing else, and no argument of its can change that.
+
 Each component is also its own console script, so a process manager can run one
 without passing an argument:
 
@@ -91,7 +98,8 @@ attached.
 
 The model's tool list — the ones slife2 ships and the ones other people run —
 comes from **`slife2-toolhub`**, which is also the only process that holds a tool
-server's credentials. Three sources feed it:
+server's credentials. It draws from two kinds of place — our own components, and
+the two sections below — and never from a list written down beside it:
 
 ```yaml
 # The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
@@ -126,14 +134,23 @@ Every tool reaches the model as `{name}__{tool}` — `builtins__calc`,
 every model call**, so a server that started a moment ago, or grew a tool, is in
 the next call's list.
 
+The hub has two sources: the components above, which it asks for a tool list the
+way it asks anybody, and everything under `tools:`. Which of a component's tools
+the model may call is said on the tool — `@mcp.tool(meta=FOR_THE_MODEL)`, which
+`now`, `calc` and `echo` carry and memory's `remember` does not. A component's
+tools are its own code's until one of them says otherwise, so a tool you forget
+to mark is invisible rather than dangerous.
+
 `enabled: false` keeps an entry configured but never connects it, which is the
 lever worth knowing: everything enabled is a process at startup and its tools in
 every request. `slife2 down` takes the hub's child processes down with it.
 
-The builtins are the one required tool server: they are a component slife2
-starts, so a hub that cannot reach them fails the turn rather than quietly
-continuing with fewer tools. Everything in `tools:` is somebody else's and
-optional, and is reported rather than fatal.
+A component is required and everything in `tools:` is optional: the hub asks
+each component for a tool list, and one that cannot answer fails the turn rather
+than quietly continuing with fewer tools, while a server that is somebody else's
+is reported and left out. The builtins are the case that makes the rule worth
+having — a model that has quietly lost `now` and `calc` is a failure nobody can
+see.
 
 ## Where things live
 
@@ -196,7 +213,8 @@ slife2/
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
-├─ memory_server.py   # slife2-memory: `remember` and `recent`
+├─ memory_server.py   # slife2-memory: `remember`, and the model's `turn_list`
+│                     #   and `turn_read`
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py         # Chunk <-> progress payload (no I/O)

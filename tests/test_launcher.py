@@ -85,6 +85,24 @@ def test_every_component_has_a_module_and_every_module_a_component() -> None:
     assert set(LOCAL_SERVERS) == set(launcher.SERVER_MODULES)
 
 
+def test_the_hub_asks_exactly_what_the_launcher_starts() -> None:
+    """The third thing that could drift, and the one with teeth.
+
+    The hub reaches into our components for the model's tools, and it asks every
+    one of them because it cannot know which have anything to offer.  So the set
+    it asks has to be the set that exists: a component the launcher starts and
+    the hub does not ask is a whole server's worth of tools nobody can see, and
+    one the hub asks and nothing starts is a connection that can only fail —
+    which, a component being required, fails the tool list of every turn.
+    """
+    config = load(_config_with_every_protocol())
+    started = {
+        spec.name.removeprefix(launcher.BACKEND_PREFIX)
+        for spec in launcher.specs(config)
+    }
+    assert set(config.components()) == started
+
+
 def test_one_server_per_wire_protocol() -> None:
     """Not one per provider — that is what this replaced.
 

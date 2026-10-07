@@ -382,9 +382,30 @@ bound that falls inside the same second. So there is `slife2/clock.py` and one
 format: local time with an offset, seconds precision, which is v1's convention
 and the one a future port of its time-window queries will compare against.
 
-Recall is deliberately absent. Retrieval is by time — `recent` — which is the
-honest thing for a component that stores without judging, and adding an index is
-a change to the file rather than a change to what was kept.
+**Reading is by time, and there are two ways to do it.** `turn_list` browses —
+newest first, one line per turn, paged — and `turn_read` returns one turn whole.
+Both are the *model's* tools, both are the reason memory is a component the hub
+asks rather than ours alone, and both are windows over `created_at` with the
+grammar v1's `timeutil` implemented (ISO, `yesterday`, `last month`,
+`3 days ago`), ported whole so a window means the same thing on both sides of
+the schema. A bound in no known grammar is an error rather than an empty
+result: SQLite answers an unrecognised string with no rows, and "no rows" is an
+answer a caller believes.
+
+**And a model reads only its own history, which is not something an argument can
+say.** V1's memory server ran one process per agent, so the connection *was* the
+identity. This one is shared — one process serves every client id, the way one
+model server serves every provider — so the identity has to travel, and it
+travels in the call's `_meta` rather than in its arguments (`slife2.audience`).
+The agent binds the conversation it is running for when it builds the loop, the
+hub forwards what it was given without reading it, and memory answers about the
+conversation the call came from. A model that could name an agent could read
+somebody else's memory, and the only thing standing in the way would be a
+sentence in its own system prompt — which is an instruction, not a boundary.
+
+Recall in the other sense is still deliberately absent: nothing yet decides
+which past turns are *relevant*. Adding an index is a change to this file rather
+than a change to what was kept.
 
 ## 6. Compatibility notes
 
@@ -468,11 +489,35 @@ credentials.** It is a port of v1's `mcp-gateway`, and the shape that survived
 the port is the whole of it:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  slife2-builtins     (`echo`, `now`, `calc`)
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  components           (ours; `builtins`, `memory`, …)
                           list_tools        └──▶  external tool servers (stdio or http)
                           call_tool
                           servers
 ```
+
+**Two sources, and the hub is the only thing that knows both.** The *components*
+are the servers slife2 starts — `Config.components()`, which is also what the
+launcher starts, so there is no list of them here to go stale. The *tool servers*
+are everybody else's, from `tools:` and `rest-api:`. Which source a tool came
+from is not what decides who may call it; which *caller* it is for does, and that
+is said on the tool itself (`slife2.audience`) rather than in its name, in the
+config, or in the hub. A component's tools belong to that component's own code
+until one of them declares itself the model's — `remember` writes into any
+agent's database and `send_message` drives another conversation, and those are
+exactly the tools a model would reach for if it could read their descriptions —
+while an entry under `tools:` needs no mark, because the operator opted in by
+writing it down. The default is the safe half on purpose: a forgotten mark costs
+a tool that is absent, not a tool that is dangerous.
+
+**A call can say who it is on behalf of, and the hub passes that on without
+reading it.** Memory is the case that needs it: the model may browse its own
+history and must not browse anybody else's, and one memory server serves every
+conversation in the system. So the conversation rides in the call's `_meta`
+rather than in its arguments — off the schema the model reads, out of reach of a
+prompt that asks for somebody else's turns — and the hub, which cannot act on it
+and could not use it, forwards exactly that key and nothing else of `_meta` (the
+protocol's own keys name *this* request's progress stream, and a proxy has no
+business passing those on). §5 has the rest.
 
 **The hub's own tools are the agent's API and never the model's.** Like the
 memory server's `remember` and `recent`, the model never sees `list_tools`,
@@ -536,15 +581,21 @@ left out of the tool list, and retried on the next ask. An upstream *refusing a
 call* is one caller's bad data. Collapsing these is how a config mistake becomes
 an outage, and separating them is most of what the module's prose is about.
 
-**The builtins are a component, not an upstream, and the difference is a flag.**
-Everything under `tools:` is somebody else's and optional; `slife2-builtins` is
-started by slife2, so a hub that cannot reach it *refuses to list anything* —
-because a model that has quietly lost `now` and `calc` is a failure nobody can
-see, and a shorter tool list is exactly what that failure looks like. It is one
-`required` flag on the connection rather than a branch in the tool table, which
-is the test of whether the builtins really are ordinary: everything else about
-them — the URL, the connection, the snapshot, the naming — is the same as
-arxiv's.
+**A component is not an upstream, and the difference is a flag.** Everything
+under `tools:` is somebody else's and optional; a component is started by slife2,
+so a hub that cannot read its tool list *refuses to list anything* — because a
+model that has quietly lost `now` and `calc` is a failure nobody can see, and a
+shorter tool list is exactly what that failure looks like. It is one `required`
+flag on the connection rather than a branch in the tool table, and it is read
+twice: for that failure rule, and for whether the server's tools have to declare
+themselves the model's. The builtins are the worked example of it being ordinary
+— the URL, the connection, the snapshot, the naming and the mark are all
+arxiv's, or would be if arxiv had anything to declare.
+
+There is deliberately no list of "components worth asking". The hub asks all of
+them, including the three model backends and the agent server, which have
+nothing to offer: which tools a server has is not knowable without asking, and a
+second list is a list that goes stale the first time somebody adds a tool.
 
 **REST APIs are not a second mechanism.** A `rest-api:` entry is expanded *by
 the config layer* into the stdio command that serves it — `uvx mcp-openapi-proxy`

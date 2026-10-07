@@ -17,7 +17,8 @@ saw it — OpenAI-shaped JSON in a single column.  There is no separate column f
 what the user said: it is `messages[0]`, and the turn therefore reads back on its
 own, as a conversation rather than as an answer whose question is missing.  An
 attached image is a base64 data URL on that first entry and is stored with the
-rest, so the payload is in the database and every `recent` reads it.
+rest, so the payload is in the database and any read of the turn brings it back
+with everything else.
 
 **Agents are isolated by file.**  `<agent>.turn.db` — there is no agent column
 and no query that can reach another agent's turns, because there is no other
@@ -51,6 +52,7 @@ from typing import Any
 
 from slife2.clock import now
 from slife2.paths import turns_dir
+from slife2.timeutil import normalize_bound
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,18 @@ _legacy_reported: set[Path] = set()
 #: result cannot grow a turn past what is reasonable to store and re-read.
 #: Always announced to the model (see the marker), never silently truncated.
 TOOL_RESULT_CHARS = 8000
+
+#: Most turns one page may hold.  A cap rather than a preference: `limit` comes
+#: from a model, and a model that asks for ten thousand turns should get a page
+#: and a `total`, not a context window full of history.
+MAX_PAGE = 200
+
+#: How much of each message a listing shows.  The browse is for *choosing* a turn
+#: to read, and a preview long enough to choose from is not the same thing as the
+#: turn — which is what `turn_read` is for.  Four hundred characters is roughly a
+#: paragraph: enough for a question and the shape of its answer, and twenty of
+#: them is a request, not a transcript.
+PREVIEW_CHARS = 400
 
 
 def safe_agent_name(name: str) -> str:
@@ -145,6 +159,29 @@ class TurnRecord:
     #: other is what the context window has to hold.
     token_count: int = 0
     context_tokens: int = 0
+
+    def to_listing(self, chars: int = PREVIEW_CHARS) -> dict[str, Any]:
+        """One row of a browse: enough to choose from, and not the turn.
+
+        **The two halves of the exchange, which no column holds.**  v1 keeps the
+        user's message in a column of its own and lists the rows straight out of
+        SQL; slife2 stores the turn as the list of messages the model saw, so
+        what was asked is `messages[0]` and what was answered is the last
+        assistant message in it.  Reading them back is this module's job and not
+        the tool's, because this is the module that knows what a turn is.
+
+        The cut is **announced** (`…`), for the reason the tool-result digest
+        announces itself: a message that reads as short is a message the caller
+        has no reason to `turn_read`, so a silent cut turns one wrong answer
+        into a wrong answer nobody looks up.
+        """
+        return {
+            "turn_id": self.turn_id,
+            "created_at": self.created_at,
+            "user_message": _cut(user_message(self.messages), chars),
+            "assistant_message": _cut(assistant_message(self.messages), chars),
+            "token_count": self.token_count,
+        }
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -235,6 +272,96 @@ def compact_tool_results(
 #: The announcement.  ASCII, and distinctive enough that the idempotence check
 #: cannot be fooled by a tool that happened to return the same words.
 _COMPACTION_MARKER = "... [compacted at save:"
+
+
+# --- reading a turn back ------------------------------------------------------
+
+
+def message_text(content: Any) -> str:
+    """The text of one message's content, whatever shape it arrived in.
+
+    Two shapes, because a provider's wire has two: a plain string, and the list
+    of parts an attachment forces.  A part that is not text is *named* rather
+    than dropped — `[image]` — for the reason `slife2.toolhub.flatten` describes:
+    a reader can act on knowing an image was there, and cannot act on silence.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+        else:
+            parts.append(f"[{part.get('type') or 'attachment'}]")
+    return " ".join(parts)
+
+
+def _first(messages: list[dict[str, Any]], role: str) -> str:
+    for message in messages:
+        if message.get("role") == role:
+            return message_text(message.get("content"))
+    return ""
+
+
+def _last(messages: list[dict[str, Any]], role: str) -> str:
+    """The last message of a role **that has text**.
+
+    Backwards rather than forwards, and skipping empties, because a turn's last
+    assistant message is not always its answer: a model that called a tool has
+    an assistant message carrying the call and no prose at all, and the loop
+    only stops when one of them says something.
+    """
+    for message in reversed(messages):
+        if message.get("role") == role:
+            text = message_text(message.get("content"))
+            if text:
+                return text
+    return ""
+
+
+def user_message(messages: list[dict[str, Any]]) -> str:
+    """What was asked.  `messages[0]` in practice, and the first `user` in fact."""
+    return _first(messages, "user")
+
+
+def assistant_message(messages: list[dict[str, Any]]) -> str:
+    """What was answered — the turn's last assistant message with prose in it."""
+    return _last(messages, "assistant")
+
+
+def _cut(text: str, chars: int) -> str:
+    if len(text) <= chars:
+        return text
+    return text[:chars] + "…"
+
+
+def _time_window(since: str | None, until: str | None) -> tuple[str, list[str]]:
+    """`(where, params)` for a `created_at` window.
+
+    Written once because there is one time axis and two readers of it: the
+    browse below, and whatever a recall selector becomes.  A second spelling of
+    `created_at >= ?` is a second place for the column name and the grammar to
+    drift apart.
+
+    Raises:
+        InvalidTimeBound: If either bound is in no grammar `slife2.timeutil`
+            speaks.  Deliberately not an empty result: a bound nobody understood
+            and a window with nothing in it are the same answer from SQLite, and
+            only one of them is the truth.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if since:
+        clauses.append("created_at >= ?")
+        params.append(normalize_bound(since, role="since"))
+    if until:
+        clauses.append("created_at <= ?")
+        params.append(normalize_bound(until, role="until"))
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
 
 
 class TurnStore:
@@ -338,15 +465,57 @@ class TurnStore:
             )
             return int(cursor.lastrowid or 0)
 
-    def recent(self, limit: int = 10) -> list[TurnRecord]:
-        """The most recent turns, newest first."""
-        limit = max(1, min(int(limit), 1000))
+    def turns(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[TurnRecord], int]:
+        """Turns within a time window, newest first, as `(records, total)`.
+
+        `total` counts the *window*, not the table, which is what lets a caller
+        tell whether there is another page — `offset + len(records) < total` —
+        without asking a second question.
+
+        **Ordered by `rowid`, not by `created_at`.** Rowid is the turn id and is
+        monotonic with creation, so a page boundary can never fall inside a group
+        of turns sharing a timestamp; ordering by the timestamp would let two
+        turns written in the same second be skipped or repeated by a page
+        boundary that moved between calls. The window itself still filters on
+        `created_at`, which is the column with an index on it.
+
+        Raises:
+            InvalidTimeBound: If a bound is in no known grammar.
+        """
+        limit = max(1, min(int(limit), MAX_PAGE))
+        offset = max(0, int(offset))
+        where, params = _time_window(since, until)
         with self._connect() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM turn {where}", params
+            ).fetchone()[0]
             rows = connection.execute(
-                "SELECT rowid AS turn_id, * FROM turn ORDER BY rowid DESC LIMIT ?",
-                (limit,),
+                f"SELECT rowid AS turn_id, * FROM turn {where} "
+                f"ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             ).fetchall()
-        return [_row_to_record(row) for row in rows]
+        return [_row_to_record(row) for row in rows], int(total)
+
+    def turn(self, turn_id: int) -> TurnRecord | None:
+        """One turn by id, or `None` if there is no such row.
+
+        `None` rather than an exception: an id that does not resolve is a value
+        the caller has something useful to say about — `turn_read` names the id
+        it could not find, which is what a model that miscopied one needs.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT rowid AS turn_id, * FROM turn WHERE rowid = ?",
+                (int(turn_id),),
+            ).fetchone()
+        return _row_to_record(row) if row else None
 
     def count(self) -> int:
         with self._connect() as connection:

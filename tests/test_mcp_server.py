@@ -65,7 +65,7 @@ async def test_no_name_falls_back_to_the_tool_list() -> None:
     """A synthesized or absent identity is a real case, so the fallback is
     load-bearing: a client pinned to an exact modern protocol version reports an
     empty name, and a server from another implementation may report none."""
-    present = CountingClient(name=None, tools=("remember", "recent"))
+    present = CountingClient(name=None, tools=("remember", "turn_list"))
     absent = CountingClient(name=None, tools=("stream_chat",))
 
     assert await identifies(present, "slife2-memory", fallback_tool="remember")

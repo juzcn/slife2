@@ -19,7 +19,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
 
-from slife2.builtins import build_server as build_builtins
+from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolServerSettings, default_config
 from slife2.toolhub import (
     Upstream,
@@ -32,6 +32,7 @@ from slife2.toolhub import (
 from slife2.toolhub import (
     build_server as build_hub,
 )
+from tests.fakes import component_transports
 
 pytestmark = pytest.mark.unit
 
@@ -77,22 +78,23 @@ def hub_for(
     configured but *not* wired, which is how the one test that spawns a real
     process gets a real transport.
 
-    **The builtins are always here and always real.**  They are a required
-    upstream, so a hub built without one refuses to hand out a tool list at all
-    — which is what `test_a_component_that_is_not_answering_fails_the_list` is
-    about, and not something every other test should have to trip over.
+    **Every component is here, and only the builtins are real.**  They are the
+    servers slife2 starts, the hub asks each of them for a tool list, and it
+    refuses to hand one out at all when one does not answer — which is what
+    `test_a_component_that_is_not_answering_fails_the_list` is about, and not
+    something every other test should have to trip over.  The rest offer the
+    model nothing, which is what a component's tools are until one of them says
+    otherwise.
     """
-    wired = {
-        "builtins": lambda settings: build_builtins(default_config()),
-        **(connected or {}),
-    }
+    base = default_config()
+    wired = component_transports(base, connected)
     config = replace(
-        default_config(),
+        base,
         tools={
             **{
                 name: ToolServerSettings(name=name, command="in-memory")
                 for name in wired
-                if name != "builtins"
+                if name not in base.components()
             },
             **(entries or {}),
         },
@@ -149,11 +151,60 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
     assert names(listed.data) == {"builtins__echo", "builtins__now", "builtins__calc"}
     assert {tool["server"] for tool in listed.data["tools"]} == {"builtins"}
 
-    row = reported.data["servers"][0]
-    assert row["name"] == "builtins"
-    assert row["kind"] == "builtin"
+    # Found by name, not by position: the hub asks every component, so the
+    # builtins are one row among several and are not first.
+    row = next(
+        one for one in reported.data["servers"] if one["name"] == "builtins"
+    )
+    assert row["kind"] == "component"
     assert row["required"] is True
     assert row["state"] == "ready"
+
+
+def component_with_two_kinds_of_tool() -> FastMCP:
+    """One of our own servers, offering one tool of each kind.
+
+    Which is what every one of them is: `slife2-memory` serves `turn_list` to
+    the model and `remember` to the agent, and the difference is not visible in
+    anything but the tool itself.
+    """
+    server = FastMCP("component")
+
+    @server.tool(meta=FOR_THE_MODEL)
+    def turn_list(limit: int = 10) -> str:
+        """What was said, newest first."""
+        return str(limit)
+
+    @server.tool
+    def remember(text: str) -> str:
+        """The server's own API.  Nothing here marks it, so nothing offers it."""
+        return text
+
+    return server
+
+
+@pytest.mark.asyncio
+async def test_a_components_tool_is_the_models_only_when_it_says_so() -> None:
+    """The rule the two sources turn on, and it is opt-in.
+
+    A component's tools belong to that component's own code until one of them
+    says otherwise — because the ones that would leak are the ones a model
+    would reach for: `remember` here stands in for a write into any agent's
+    database.  An entry under `tools:` needs no mark at all: the operator opted
+    in by writing it down, which is what the tests above are listing.
+    """
+    async with Client(
+        hub_for(connected={"memory": lambda settings: component_with_two_kinds_of_tool()})
+    ) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        unreachable = await call(hub, "memory__remember", {"text": "hi"})
+
+    assert "memory__turn_list" in names(listed.data)
+    assert "memory__remember" not in names(listed.data)
+    # Not merely unlisted: the name is not routable either, so a model that
+    # remembered it from somewhere gets an answer rather than a write.
+    assert unreachable["ok"] is False
+    assert "unknown tool" in unreachable["text"]
 
 
 @pytest.mark.asyncio
@@ -310,8 +361,10 @@ async def test_a_component_that_is_not_answering_fails_the_list() -> None:
         # The report still works, and says which one and why.
         reported = await hub.call_tool("servers", {})
 
-    row = reported.data["servers"][0]
-    assert (row["name"], row["state"]) == ("builtins", "failed")
+    row = next(
+        one for one in reported.data["servers"] if one["name"] == "builtins"
+    )
+    assert row["state"] == "failed"
     assert "no such program" in row["error"]
 
 

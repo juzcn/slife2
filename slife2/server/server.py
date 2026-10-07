@@ -56,6 +56,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
@@ -324,7 +325,7 @@ def build_server(
             assert hub_conn is not None
             return hub_conn
 
-    async def turn_tools() -> list[Tool]:
+    async def turn_tools(client_id: ClientId) -> list[Tool]:
         """What the model may call, asked of the hub.
 
         Asked **before every model call**, not once per turn: the turn's tool
@@ -341,11 +342,16 @@ def build_server(
         It is also asked once when the loop is built, before the user's message
         is appended: a hub that is not there is a system that has come apart, and
         the moment to find that out is before the conversation has been touched.
-        """
-        return await remote_tools(await hub())
 
-    async def registry() -> ToolRegistry:
-        return ToolRegistry(await turn_tools())
+        **The tools come back bound to `client_id`**, so a tool that reads memory
+        reads *this* conversation's.  That is the one thing this process knows
+        and the model does not, and it is why the binding happens here rather
+        than in an argument — see `slife2.toolclient`.
+        """
+        return await remote_tools(await hub(), client_id)
+
+    async def registry(client_id: ClientId) -> ToolRegistry:
+        return ToolRegistry(await turn_tools(client_id))
 
     async def remember_turn(
         agent: str,
@@ -409,14 +415,16 @@ def build_server(
             # to fail here rather than be logged and stepped over.
             logger.warning("memory refused the turn for %s: %s", agent, exc)
 
-    async def make_loop(active: LLMBackend) -> AgentLoop:
+    async def make_loop(active: LLMBackend, client_id: ClientId) -> AgentLoop:
         return AgentLoop(
             active,
-            await registry(),
+            await registry(client_id),
             max_steps=config.agent.max_steps,
             # Handed to the loop so the list is re-read before each model call;
-            # see `turn_tools`.
-            refresh=registry,
+            # see `turn_tools`.  Bound to the key for the same reason the first
+            # call is: every refresh has to hand back tools for *this*
+            # conversation, and a bare `registry` would forget whose it was.
+            refresh=partial(registry, client_id),
         )
 
     async def loop_for(reference: str, client_id: ClientId) -> AgentLoop:
@@ -432,7 +440,7 @@ def build_server(
         per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return await make_loop(backend)
+            return await make_loop(backend, client_id)
 
         name, provider, model = config.resolve(reference)
         async with opening:
@@ -461,7 +469,9 @@ def build_server(
                 logger.info(
                     "model %s via %s", reference, config.server(provider.api).url
                 )
-        return await make_loop(model_backends[name].with_key(*client_id))
+        return await make_loop(
+            model_backends[name].with_key(*client_id), client_id
+        )
 
     # --- the registry --------------------------------------------------------
 

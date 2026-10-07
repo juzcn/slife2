@@ -18,23 +18,44 @@ agent loop cannot leak a token it never had, and `grep` for a provider SDK in
 the agent's tree still finds nothing. Switching what tools the model has is
 editing a URL or a command in `slife2.yaml`, exactly as switching models is.
 
+Two sources, one list
+---------------------
+The tools come from two places and this is the only thing that knows both.
+
+**Plugins** are the servers slife2 starts — builtins, memory, the agent, a model
+backend — and each offers its tools to one of two callers.  `now` and `calc` are
+for the model; `remember` and `send_message` are for our own code, called at a
+moment the code already knows.  **Tool servers** are everybody else's, under
+`tools:` and `rest-api:`, and they are for the model by the simple fact that an
+operator wrote them down.
+
+Which source a tool came from is not what decides who may call it — which
+*caller* it is for does, and that is said on the tool itself (`slife2.audience`)
+rather than in its name, in this file, or in the config.  **A plugin's tools
+belong to that plugin's own code until one of them says otherwise**, so
+`remember` stays where it was and `now` carries the mark, while an entry under
+`tools:` needs no mark at all: the operator opted in by writing the entry.  The
+list of plugins is not written down here either — it is `Config.components()`,
+which is what the launcher starts, so the hub cannot drift from the set of
+processes that exist.
+
 Why the tools are *here* and not in the agent
 ---------------------------------------------
-The two builtins, `now` and `calc`, are pure functions with no process and no
-credential, so reaching them through a hub costs a hop — and they are behind one
-anyway, because **the model's tool list is one thing and it should have one
-owner.**  Provenance (whose tool is this), the naming rule that keeps two
-servers' `search` apart, and — the first time it appears — the question of which
-tools may run without asking the user, are all questions about the *set*, and a
-set assembled in two places is a set that will disagree with itself.
+`now` and `calc` are pure functions with no process and no credential, so
+reaching them through a hub costs a hop — and they are behind one anyway,
+because **the model's tool list is one thing and it should have one owner.**
+Provenance (whose tool is this), the naming rule that keeps two servers' `search`
+apart, and — the first time it appears — the question of which tools may run
+without asking the user, are all questions about the *set*, and a set assembled
+in two places is a set that will disagree with itself.
 
 That is why `now` and `calc` are not served by this process but by
-`slife2-builtins`, which the hub connects to exactly as it connects to somebody
-else's arxiv server.  **Nothing here is served by this process.**  A builtin
-that took a shortcut would be the second mechanism this whole arrangement exists
-to avoid, and the first thing to drift: it would not be in `servers()`, it would
-not have a connection to fail, and it would not appear in the list a tool search
-would one day be built on.
+`slife2-builtins`, which the hub reaches exactly as it reaches somebody else's
+arxiv server.  **Nothing here is served by this process.**  A builtin that took a
+shortcut would be the second mechanism this whole arrangement exists to avoid,
+and the first thing to drift: it would not be in `servers()`, it would not have a
+connection to fail, and it would not appear in the list a tool search would one
+day be built on.
 
 REST APIs are not a second mechanism
 ------------------------------------
@@ -55,12 +76,14 @@ reach are the operator's decision, made in a file, once.
 
 The failure rules, all three
 ----------------------------
-* **A tool server slife2 starts is a component, and one that is missing is a
-  broken system.**  That is `builtins`, and nothing else: `list_tools` refuses
-  rather than serving the model a shorter list, because a model that has quietly
-  lost `now` and `calc` is a failure nobody can see.  It is a *flag on the
-  connection* rather than a special case in the tool table — the builtins are an
-  upstream like any other, and what makes them ours is that we start them.
+* **A plugin that is not answering is a broken system.**  Everything under
+  `servers:` is ours: slife2 starts it, the launcher refuses to bring the system
+  up without it, and a hub that cannot read its tool list refuses to hand one out
+  rather than serving the model a shorter one — a model that has quietly lost
+  `now` and `calc` is a failure nobody can see.  It is a *flag on the
+  connection* rather than a branch in the tool table, and which section a server
+  was configured in is the whole of the difference: a plugin is required, an
+  upstream is not.
 * **An upstream missing is not.**  An external server is the operator's
   configuration and somebody else's process; it can be slow, paid, or down
   without our system being broken.  It is reported by `servers()` and left out
@@ -80,9 +103,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.client.messages import MessageHandler
 
+from slife2.audience import for_the_model, forwarded_client, request_meta
 from slife2.config import Config, ToolServerSettings, find_config_path, load
 from slife2.mcp_server import (
     configure_logging,
@@ -96,6 +120,13 @@ from slife2.toolclient import SEPARATOR, UpstreamTool
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-toolhub"
+
+#: This server's key in the config's `servers:` table — and therefore the one
+#: name in `Config.components()` that is not a source of tools.  The hub asks
+#: every plugin but itself; a connection to itself would list the three tools of
+#: its own API and drop all three, which is a loopback nobody should have to
+#: reason about.
+CONFIG_KEY = "toolhub"
 
 INSTRUCTIONS = (
     "The tools the agent may run. Call `list_tools` for the whole set, "
@@ -267,7 +298,9 @@ class Upstream:
         #: cannot be reached is a tool the model does not have; a required one
         #: that cannot be reached is this system coming apart, and `list_tools`
         #: refuses rather than quietly serving a shorter list.  Nothing in
-        #: `tools:` sets this — it is what makes a component a component.
+        #: `tools:` sets this — it is what makes a component a component, and it
+        #: is read twice: for that failure rule, and for whether this server's
+        #: tools have to ask before the model is given them (`_offered`).
         self.required = required
         self._client: Client | None = None
         self._tools: list[UpstreamTool] = []
@@ -415,16 +448,42 @@ class Upstream:
             await self.disconnect()
             self._fail(exc)
             return
-        self._tools = [_advertise(self.settings.name, tool) for tool in listed]
+        self._tools = self._offered(listed)
         self._names = {tool.name: tool.tool for tool in self._tools}
         self._error = ""
         self._ready = True
+        # Both counts, because the interesting number when a tool is missing is
+        # the one that says the server had it all along.
         logger.info(
-            "%s: %d tool(s) via %s",
+            "%s: %d of %d tool(s) offered to the model, via %s",
             self.settings.name,
             len(self._tools),
+            len(listed),
             self.settings.transport,
         )
+
+    def _offered(self, listed: list[Any]) -> list[UpstreamTool]:
+        """The tools of one listing the model may be given.
+
+        **Ours have to ask, and the answer is no until they do**
+        (`slife2.audience`).  A component's tools belong to that component's own
+        code until one says otherwise, because the ones that would leak —
+        `remember`, which writes into any agent's database, `send_message`,
+        which drives another conversation — are exactly the ones a model would
+        reach for if it could read their descriptions.  Somebody else's tools do
+        not ask: the operator asked by writing the entry down.
+
+        `required` is the flag this reads, and it is not a coincidence.  It means
+        "slife2 starts this server", and a server we start is one whose tools are
+        ours to decide about — which is why nothing under `tools:` sets it.
+        """
+        if not self.required:
+            return [_advertise(self.settings.name, tool) for tool in listed]
+        return [
+            _advertise(self.settings.name, tool)
+            for tool in listed
+            if for_the_model(getattr(tool, "meta", None))
+        ]
 
     def invalidate(self) -> None:
         """Forget the tool list, keeping the connection.
@@ -454,7 +513,12 @@ class Upstream:
 
     # --- a call --------------------------------------------------------------
 
-    async def call(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+    ) -> tuple[str, bool]:
         """Run a tool, returning `(text, ok)`.  Never raises.
 
         **One rebuild, and only for a transport failure.**  A peer that answered
@@ -463,11 +527,16 @@ class Upstream:
         link would only repeat it.  A link that died mid-call is the one case
         where trying again is not superstition, and it is tried exactly once:
         a server that is down must not turn every call into two timeouts.
+
+        `meta` is the caller's identity, carried across unchanged.  This process
+        does not read it and could not: one hub serves every conversation in the
+        system over one connection, so whose behalf a call is on is a fact only
+        the far end can act on — see `slife2.audience`.
         """
         if not await self.ready():
             return f"{self.settings.name} is not connected: {self._error}", False
 
-        result = await self._call_once(name, arguments)
+        result = await self._call_once(name, arguments, meta)
         if result is not None:
             return result
 
@@ -475,13 +544,16 @@ class Upstream:
         await self.disconnect()
         if not await self.ready():
             return f"{self.settings.name} is not connected: {self._error}", False
-        result = await self._call_once(name, arguments)
+        result = await self._call_once(name, arguments, meta)
         if result is None:
             return f"{self.settings.name} is not connected: {self._error}", False
         return result
 
     async def _call_once(
-        self, name: str, arguments: dict[str, Any]
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
     ) -> tuple[str, bool] | None:
         """One attempt.  `None` means the transport failed, not the tool."""
         client = self._client
@@ -500,6 +572,10 @@ class Upstream:
                 # are, and collapsing them would rebuild the link every time a
                 # model passed a bad argument.
                 raise_on_error=False,
+                # The caller's identity, forwarded rather than interpreted.  A
+                # hub is a proxy, and this is the one thing it passes on that
+                # did not come from the model.
+                meta=meta,
             )
         except Exception as exc:
             logger.warning("%s: calling %s failed: %s", self.settings.name, name, exc)
@@ -533,24 +609,27 @@ def _advertise(server: str, tool: Any) -> UpstreamTool:
     )
 
 
-def builtins_settings(config: Config) -> ToolServerSettings:
-    """The builtins server, as the one upstream that is not in the config file.
+def component_settings(config: Config, name: str) -> ToolServerSettings:
+    """One of our own servers, as one upstream of the hub.
 
-    **It is written here rather than under `tools:` because it is ours.**  An
-    entry in `tools:` is somebody else's process, which slife2 may fail to reach
-    without anything being wrong; this is a component slife2 starts, and the
-    hub treats it accordingly (`required` on an `Upstream`).  What it does share
-    with every other entry is the mechanism — a URL, a connection, a tool list —
-    which is the whole point of it existing as a server at all.
+    **Written here rather than under `tools:` because it is ours.**  An entry in
+    `tools:` is somebody else's process, which slife2 may fail to reach without
+    anything being wrong; a component is one slife2 starts, and the hub treats it
+    accordingly (`required` on an `Upstream`, which is also what makes its tools
+    ask before they are offered to the model).
 
-    The address comes from `servers.builtins`, so a config that moves the port
-    moves both halves at once and there is no second place to update.
+    What it shares with every other entry is the mechanism — a URL, a connection,
+    a tool list — and that is the point of the hub having two *sources* rather
+    than two code paths.  The address comes from `servers:`, so a config that
+    moves a port moves both halves at once and there is no second place to
+    update, and there is no list of components here at all: it is
+    `Config.components()`, which is what the launcher starts.
     """
     return ToolServerSettings(
-        name="builtins",
-        kind="builtin",
-        url=config.server("builtins").url,
-        description="The tools that ship with slife2, served like anybody else's.",
+        name=name,
+        kind="component",
+        url=config.server(name).url,
+        description="",
     )
 
 
@@ -577,14 +656,22 @@ def build_server(
     def default_transport(settings: ToolServerSettings) -> Any:
         return mcp_config(settings, cwd=str(directory))
 
-    #: The builtins first, so that `servers()` reads in the order a person would
-    #: look for them, and required — see `list_tools`.
+    #: The components first, in the order slife2 starts them, and required — see
+    #: `list_tools`.  The hub asks every one of them, including the ones with
+    #: nothing to offer the model: which
+    #: tools a server has is not knowable without asking, and a second list of
+    #: "components worth asking" is a list that goes stale the first time
+    #: somebody adds a tool.
     upstreams = [
-        Upstream(
-            builtins_settings(config),
-            transport=(transports or {}).get("builtins", default_transport),
-            client_factory=client_factory,
-            required=True,
+        *(
+            Upstream(
+                component_settings(config, name),
+                transport=(transports or {}).get(name, default_transport),
+                client_factory=client_factory,
+                required=True,
+            )
+            for name in config.components()
+            if name != CONFIG_KEY
         ),
         *(
             Upstream(
@@ -663,18 +750,24 @@ def build_server(
     async def list_tools() -> dict[str, Any]:
         """Every tool the agent may offer the model, with its schema.
 
-        The whole set in one call, builtins and upstreams together, because the
-        caller is assembling a tool list and half a tool list is not a smaller
-        answer — it is a wrong one.
+        The whole set in one call, components and tool servers together, because
+        the caller is assembling a tool list and half a tool list is not a
+        smaller answer — it is a wrong one.
+
+        A component's tools are left out unless they declare themselves the
+        model's (`slife2.audience`); a tool server's are all here, because the
+        operator put the server in the config.  Nothing in this answer says
+        which is which — by the time a tool is listed, the question has been
+        answered.
 
         Raises:
-            ConnectionError: If a tool server slife2 *starts* is not answering.
-                Deliberately not a shorter list instead: a component that is gone
-                is a system that has come apart, and a model that has quietly
-                lost `now` and `calc` is a failure nobody can see.  A server from
-                the `tools:` section is the opposite case and is simply left out
-                — it is the operator's configuration and somebody else's
-                process.  See DESIGN.md §5 and §8.
+            ConnectionError: If a component is not answering.  Deliberately not
+                a shorter list instead: a component that is gone is a system
+                that has come apart, and a model that has quietly lost `now` and
+                `calc` is a failure nobody can see.  A server from the `tools:`
+                section is the opposite case and is simply left out — it is the
+                operator's configuration and somebody else's process.  See
+                DESIGN.md §5 and §8.
 
         Returns:
             `tools`: one entry per tool, with `name` as the model will call it,
@@ -704,12 +797,21 @@ def build_server(
         return {"tools": [tool.to_wire() for tool in advertised()]}
 
     @mcp.tool
-    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call_tool(
+        ctx: Context, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         """Run one tool by the name `list_tools` gave it.
 
         Never raises for anything a tool did: a refusal, a bad argument and a
         server that is down all come back as `ok` false with text saying so,
         which is what lets the model read the problem and correct itself.
+
+        A call that is made on behalf of one conversation carries that
+        conversation in its `_meta`, and it is forwarded unchanged to whichever
+        server ends up running the tool.  Nothing here reads it — one hub serves
+        every conversation, so it is the far end that can act on it — and
+        nothing here *adds* to it: what the caller said it was is the whole of
+        what the far end is told.
 
         Args:
             name: The tool's advertised name, `server__tool` for an upstream's.
@@ -718,6 +820,7 @@ def build_server(
         Returns:
             `text` — the result, or why there is none — and `ok`.
         """
+        forwarded = forwarded_client(request_meta(ctx))
         upstream = routes().get(name)
         if upstream is None:
             # Not routable *yet*, which is not the same as unknown: a server may
@@ -736,7 +839,7 @@ def build_server(
                 "ok": False,
             }
 
-        text, ok = await upstream.call(name, arguments)
+        text, ok = await upstream.call(name, arguments, forwarded)
         return {"text": text, "ok": ok}
 
     @mcp.tool
@@ -749,12 +852,15 @@ def build_server(
         different problems that look identical from the tool list.
 
         Returns:
-            `servers`: one row per configured server — `name`, `kind` (`mcp`,
-            `rest` or `builtin`), `transport`, `state` (`ready`, `connecting`,
-            `failed` or `idle`), how many `tools` it offers, the `description` it
-            was configured with, the `error` if there is one, and `required` —
-            whether slife2 starts it, which is what decides if its absence fails
-            a turn or merely shortens the tool list.
+            `servers`: one row per source of tools — `name`, `kind` (`mcp`,
+            `rest` or `component`), `transport`, `state` (`ready`, `connecting`,
+            `failed` or `idle`), how many `tools` it offers *the model*, the
+            `description` it was configured with, the `error` if there is one,
+            and `required` — whether slife2 starts it, which is what decides if
+            its absence fails a turn or merely shortens the tool list.  A
+            component that offers fewer tools than it has is the normal case,
+            not a fault: the rest are its own code's, and this count is the one
+            the model sees.
         """
         # Settles for the same reason `list_tools` does: this is the answer to
         # "why is my tool missing", and a server that failed to start a moment
@@ -772,13 +878,14 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     config_path: Path | None = find_config_path()
     config = load()
-    settings = config.server("toolhub")
+    settings = config.server(CONFIG_KEY)
     logger.info(
-        "serving %s on http://%s:%d%s (%d tool server(s))",
+        "serving %s on http://%s:%d%s (%d component(s), %d tool server(s))",
         SERVER_NAME,
         args.host or settings.host,
         args.port or settings.port,
         settings.path,
+        len([name for name in config.components() if name != CONFIG_KEY]),
         len(config.tool_servers()),
     )
     serve(
