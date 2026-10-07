@@ -73,8 +73,8 @@ def test_the_tui_connects_to_the_agent_server() -> None:
     """Not to a model server — the two are one word apart in the config.
 
     `agent.server` and a provider's `server` are both "the server", and swapping
-    them fails at startup with "not a slife2 agent server": a model server
-    answers `stream_chat` and has never heard of `run_turn`.
+    them fails at startup with "not slife2-agent": a model server answers
+    `stream_chat` and has never heard of `run_turn`.
     """
     config = default_config()
     assert tui_url(config) == config.agent.server.url

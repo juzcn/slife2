@@ -212,23 +212,26 @@ beats isolation as a `WHERE` clause somebody can forget to write — and it is t
 one place `--agent` partitions anything, since the servers themselves stay
 shared.
 
-**A write failure never fails a turn.** Memory is an enhancement, not part of
-correctness: a store that is down, a disk that is full, a name that cannot be a
-filename — none is a reason for a conversation that succeeded to be reported as
-failed. Every failure is logged and swallowed.
+**A missing server is a broken system, not a degraded one.** `slife2` starts
+every component together and refuses to start at all if one of them will not come
+up — before it draws anything, so the failure is two lines rather than a terminal
+that can never connect. A peer that goes missing *later* takes the same answer:
+the turn fails where the peer is used, rather than being answered and not
+recorded.
 
-Two things about that turned out to need care:
+That rule lives in one place, `slife2.mcp_server.open_server` — connect, prove the
+server is the one you meant, raise otherwise. It is there because it had four
+implementations and one of them was its own opposite: the LLM backend and the TUI
+each probed and raised, and the agent server's memory client swallowed the
+failure and latched itself off, which made the same situation fatal at startup
+and silent a minute later.
 
-- **Absence has to be remembered, not re-tested.** The write being free
-  *logically* did not make the attempt free: building an MCP client against a
-  dead port spends a couple of seconds inside the transport's own retries, on
-  the first answer of every session. So the port is asked before the protocol —
-  a refused TCP connect returns at once — and the answer is kept for the life of
-  the process. Measured, 2.15s to 0.27s.
-- **A `ToolError` is not absence.** It means the memory server answered and
-  refused this one request — an agent name that cannot be a filename, say — and
-  that is one caller's problem rather than a reason to stop recording for
-  everyone.
+One thing is deliberately not fatal: **a `ToolError` is not absence.** It means
+the memory server answered and refused *this* request — an agent name that cannot
+be a filename, say — which is one caller's problem rather than a sign that
+anything is down.
+
+Two things about the daemons themselves still need care:
 - **A daemon outlives the build that started it.** Reuse is by identity — the
   launcher attaches to whatever answers to the name it expects — which is the
   right policy and has one sharp edge. Change what a tool *takes*, and a server

@@ -6,10 +6,10 @@ What they agree on lives here rather than in whichever server was written first:
 how a server is started, how it records that it is here, and the two options
 that are pinned because flipping either is *silent*.
 
-It also holds the client half of the same question, :func:`identifies`, because
-"is this server the one I think it is" and "what does it mean to be one of our
-servers" are the same piece of protocol knowledge, and splitting them is how the
-two halves drift.
+It also holds the client half of the same question — :func:`identifies` and
+:func:`open_server` — because "is this server the one I think it is", "is it
+there at all", and "what does it mean to be one of our servers" are the same
+piece of protocol knowledge, and splitting them is how the halves drift.
 
 Nothing here is LLM-specific.  That is the point of the module: the memory
 server and the agent server used to reach into `slife2.llm` for this, which put
@@ -19,18 +19,20 @@ the serving scaffold of a non-LLM component inside the LLM package.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastmcp import Client, FastMCP
 
 from slife2 import __version__
 from slife2.config import ServerSettings
 from slife2.paths import add_data_dir_argument, apply_data_dir
-from slife2.runtime import ServerRecord, clear_record, write_record
+from slife2.runtime import ServerRecord, clear_record, tcp_listening, write_record
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,76 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
 
     names = {tool.name for tool in await client.list_tools()}
     return fallback_tool in names
+
+
+async def open_server(
+    url: str,
+    *,
+    name: str = "",
+    fallback_tool: str = "",
+    timeout: float | None = None,
+) -> Client:
+    """Connect to one of our servers, or raise naming what could not be reached.
+
+    **A server here is either there, or the system has come apart.**  `slife2`
+    starts every component together and refuses to start at all if one of them
+    will not come up — before it draws anything, so the failure is two lines
+    rather than a terminal that can never connect.  A peer that goes missing
+    later is the same situation arriving late, and it takes the same answer:
+    fail where it is used, rather than run on quietly with a piece gone.
+
+    That convention lives here, in one function, because it had four
+    implementations and one of them was its own opposite.  The LLM backend and
+    the TUI each connected and probed and raised; the agent server's memory
+    client swallowed the failure and latched itself off, so that the same
+    situation was fatal at startup and silent at runtime.
+
+    `name` is the MCP name the server should be advertising.  Empty skips the
+    check, which is what a caller that does not know it wants — a test, or a URL
+    nobody configured.  :func:`identifies` explains why the handshake's own
+    identity is asked first and the tool list second.
+
+    The client is *not* closed on success; the caller owns its lifetime, and
+    :func:`close_server` is the other half of this pair.
+    """
+    # Ask the port before asking the protocol.  A refused TCP connect comes back
+    # at once, where building an MCP client against nothing spends a couple of
+    # seconds inside the transport's own retries — measured here at 0.27s
+    # against 2.29s.  It used to be worth this only for the memory server, whose
+    # absence was the one that could be discovered on the first turn of a
+    # session; now that any missing peer fails the turn, it is worth it for all
+    # of them, and it costs a quarter of a second only when something is
+    # genuinely wrong.
+    parts = urlsplit(url)
+    if parts.hostname and parts.port and not tcp_listening(parts.hostname, parts.port):
+        raise ConnectionError(
+            f"{url}: nothing is listening on {parts.hostname}:{parts.port}"
+        )
+
+    client: Client = Client(url, timeout=timeout)
+    try:
+        await client.__aenter__()
+        if name and not await identifies(client, name, fallback_tool=fallback_tool):
+            names = sorted(tool.name for tool in await client.list_tools())
+            raise ConnectionError(f"not {name} (tools: {names or 'none'})")
+    except Exception as exc:
+        # Closed on the way out because there is no client to hand back, and a
+        # half-open one would hold a connection nobody owns.
+        with contextlib.suppress(Exception):
+            await client.__aexit__(None, None, None)
+        raise ConnectionError(f"{url}: {exc}") from exc
+    return client
+
+
+async def close_server(client: Client) -> None:
+    """Release a client opened by :func:`open_server`.
+
+    Suppressed, because this runs on the way out: a transport that is already
+    gone has nothing left to fail at, and a close that raises would replace
+    whatever the caller was actually doing with a message about the shutdown.
+    """
+    with contextlib.suppress(Exception):
+        await client.__aexit__(None, None, None)
 
 
 def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:

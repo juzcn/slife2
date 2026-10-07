@@ -22,7 +22,7 @@ from fastmcp import Client
 
 from slife2.llm.base import Chunk, Stream
 from slife2.llm.wire import decode_chunk
-from slife2.mcp_server import identifies
+from slife2.mcp_server import open_server
 from slife2.messages import Message, StreamChatResult, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -159,43 +159,14 @@ async def open_backend(
     `server_name` is the MCP name the server should be advertising.  Empty skips
     the identity check, which is what a caller that does not know it — a test,
     or a server reached by a URL nobody configured — wants.
+
+    Connecting, probing and the policy on failure are all
+    `slife2.mcp_server.open_server`'s; what is left here is the LLM half, which
+    is wrapping the client in the backend that speaks this wire format.
     """
-    client: Client = Client(url, timeout=timeout)
-    await client.__aenter__()
-    try:
-        if server_name:
-            await _probe(client, server_name, url)
-    except Exception:
-        # A server that is not there — or is the wrong server — should say so
-        # now, while the message can still name the URL, rather than at the
-        # first turn.
-        await client.__aexit__(None, None, None)
-        raise
+    client = await open_server(
+        url, name=server_name, fallback_tool="stream_chat", timeout=timeout
+    )
     return client, MCPBackend(
         client, model, provider=provider, name=name, timeout=timeout
     )
-
-
-async def _probe(client: Client, server_name: str, url: str) -> None:
-    """Check the server is up and is the one we think it is.
-
-    Not `ping`: the 2026-07-28 revision removed the protocol-level ping, and a
-    client that still calls it gets ``MCPError: Method not found`` from every
-    conforming server.  The spec names no replacement probe, so this is a choice
-    rather than an instruction — and it earns its place by catching a URL
-    pointed at some *other* MCP server, which a bare connection test waves
-    through and which would otherwise fail halfway through a turn.
-
-    Identity comes from the handshake the client already performed, so it costs
-    nothing; see `slife2.mcp_server.identifies`.
-    """
-    if await identifies(client, server_name, fallback_tool="stream_chat"):
-        return
-    names = sorted(tool.name for tool in await client.list_tools())
-    raise ConnectionError(f"{url}: not {server_name} (tools: {names or 'none'})")
-
-
-async def close_backend(client: Client) -> None:
-    """Release a client opened by :func:`open_backend`."""
-    with contextlib.suppress(Exception):
-        await client.__aexit__(None, None, None)

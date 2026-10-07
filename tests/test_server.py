@@ -19,8 +19,10 @@ import socket
 from dataclasses import replace
 
 import pytest
+import pytest_asyncio
 from fakes import FakeBackend, ScriptedTurn
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.config import default_config
 from slife2.events import TurnEvent, decode
@@ -58,6 +60,25 @@ def answering(text: str) -> FakeBackend:
     return FakeBackend(ScriptedTurn(result=StreamChatResult(text=text)))
 
 
+@pytest_asyncio.fixture(loop_scope="function")
+async def memory():
+    """A memory server that actually answers, over the in-memory transport.
+
+    Every turn writes one, and a turn **cannot run without it**: a memory server
+    that is not there is a broken system rather than a degraded one, so
+    `run_turn` fails before it spends anything on a model call.  See
+    `slife2.mcp_server.open_server`.
+
+    The real server rather than a stub, so what these tests exercise is the
+    component the agent server actually talks to — the one test that is *about*
+    the failure passes its own client instead.
+    """
+    from slife2.memory_server import build_server as build_memory
+
+    async with Client(build_memory(default_config())) as client:
+        yield client
+
+
 async def call(server: FastMCP, **arguments):
     async with Client(server) as client:
         return await client.call_tool("run_turn", arguments)
@@ -67,23 +88,25 @@ async def call(server: FastMCP, **arguments):
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_exactly_one_tool() -> None:
+async def test_the_server_exposes_exactly_one_tool(memory) -> None:
     """`reset` is gone: with no server-side history there is nothing to reset."""
-    async with Client(build_server(config(), backend=FakeBackend())) as client:
+    async with Client(
+        build_server(config(), memory_client=memory, backend=FakeBackend())
+    ) as client:
         tools = await client.list_tools()
     assert [t.name for t in tools] == ["run_turn"]
 
 
 @pytest.mark.asyncio
-async def test_run_turn_returns_the_final_text() -> None:
-    server = build_server(config(), backend=tool_then_answer())
+async def test_run_turn_returns_the_final_text(memory) -> None:
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     result = await call(server, messages=[], prompt="what is 6*7?")
     assert result.data["text"] == "It is 42."
 
 
 @pytest.mark.asyncio
-async def test_run_turn_reports_what_the_caller_must_remember() -> None:
-    server = build_server(config(), backend=tool_then_answer())
+async def test_run_turn_reports_what_the_caller_must_remember(memory) -> None:
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     result = await call(server, messages=[], prompt="what is 6*7?")
 
     roles = [m["role"] for m in result.data["new_messages"]]
@@ -96,7 +119,7 @@ async def test_run_turn_reports_what_the_caller_must_remember() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_server_remembers_nothing_between_calls() -> None:
+async def test_the_server_remembers_nothing_between_calls(memory) -> None:
     """Two identical calls from an empty history behave identically.
 
     This is the property that makes the design stateless: if the server kept
@@ -106,7 +129,7 @@ async def test_the_server_remembers_nothing_between_calls() -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), backend=backend)
+    server = build_server(config(), memory_client=memory, backend=backend)
 
     first = await call(server, messages=[], prompt="hi")
     second = await call(server, messages=[], prompt="hi")
@@ -119,7 +142,7 @@ async def test_the_server_remembers_nothing_between_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_server_serves_two_instances_without_mixing_them() -> None:
+async def test_one_server_serves_two_instances_without_mixing_them(memory) -> None:
     """Two instances, one agent server on one port, no cross-talk.
 
     This is why the agent server can be a single process: it keeps no state, so
@@ -146,7 +169,7 @@ async def test_one_server_serves_two_instances_without_mixing_them() -> None:
 
             return Stream(chunks=chunks(), result=result())
 
-    server = build_server(config(), backend=EchoBackend())
+    server = build_server(config(), memory_client=memory, backend=EchoBackend())
 
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
@@ -268,22 +291,32 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_succeeds_with_no_memory_server(tmp_path, monkeypatch) -> None:
-    """Memory is an enhancement; its absence is not a reason to fail.
+async def test_a_turn_fails_when_the_memory_server_is_gone() -> None:
+    """A missing memory server is a broken system, not a degraded one.
 
-    The store here is a URL that nothing is listening on, which is what a
-    `slife2 down` looks like from the agent server's side.
+    The store here is a URL nothing is listening on, which is what a `slife2
+    down` looks like from the agent server's side.  The turn is *refused* rather
+    than answered-and-not-recorded, which is what the CLI already does at
+    startup — `slife2` will not draw anything if a component will not come up,
+    so a component that goes missing later takes the same answer.  See
+    `slife2.mcp_server.open_server`.
+
+    Port 9 rather than the configured 8010, which would make this pass or fail
+    on whether the developer happens to have slife2 running.
     """
-    from slife2.paths import DATA_ENV_VAR
+    base = default_config()
+    cfg = replace(
+        base,
+        servers={**base.servers, "memory": replace(base.servers["memory"], port=9)},
+    )
+    server = build_server(cfg, backend=answering("the answer"))
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    server = build_server(config(), backend=answering("the answer"))
-    result = await call(server, messages=[], prompt="hi", agent="jack")
-    assert result.data["text"] == "the answer"
+    with pytest.raises(ToolError, match="nothing is listening on 127.0.0.1:9"):
+        await call(server, messages=[], prompt="hi", agent="jack")
 
 
 @pytest.mark.asyncio
-async def test_images_reach_the_model_as_content_parts() -> None:
+async def test_images_reach_the_model_as_content_parts(memory) -> None:
     """A prompt with an image is a list of parts, not a string."""
     from slife2.config import ModelSettings, ProviderSettings
 
@@ -303,7 +336,7 @@ async def test_images_reach_the_model_as_content_parts() -> None:
             )
         },
     )
-    server = build_server(vision, backend=backend)
+    server = build_server(vision, memory_client=memory, backend=backend)
     await call(
         server,
         messages=[],
@@ -318,7 +351,7 @@ async def test_images_reach_the_model_as_content_parts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_are_refused_by_a_model_that_cannot_read_them() -> None:
+async def test_images_are_refused_by_a_model_that_cannot_read_them(memory) -> None:
     """Dropping an attachment somebody made is worse than saying no.
 
     The config listing only `text` under `input` is the config saying so, and
@@ -341,7 +374,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them() -> None:
     )
     with pytest.raises(Exception, match="cannot read images"):
         await call(
-            build_server(text_only, backend=answering("ok")),
+            build_server(text_only, memory_client=memory, backend=answering("ok")),
             messages=[],
             prompt="look",
             images=["data:image/png;base64,AAAA"],
@@ -349,10 +382,10 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them() -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_sent_by_the_caller_is_used() -> None:
+async def test_history_sent_by_the_caller_is_used(memory) -> None:
     """The caller owns memory; sending it back is what continues a conversation."""
     backend = answering("second answer")
-    server = build_server(config(), backend=backend)
+    server = build_server(config(), memory_client=memory, backend=backend)
 
     history = [
         {"role": "user", "content": "one"},
@@ -366,13 +399,13 @@ async def test_history_sent_by_the_caller_is_used() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_full_round_trip_carries_the_conversation() -> None:
+async def test_a_full_round_trip_carries_the_conversation(memory) -> None:
     """Feed each result's `new_messages` back in, as a client would."""
     backend = FakeBackend(
         ScriptedTurn(result=StreamChatResult(text="first answer")),
         ScriptedTurn(result=StreamChatResult(text="second answer")),
     )
-    server = build_server(config(), backend=backend)
+    server = build_server(config(), memory_client=memory, backend=backend)
 
     history: list[dict] = []
     first = await call(server, messages=history, prompt="one")
@@ -385,7 +418,7 @@ async def test_a_full_round_trip_carries_the_conversation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_interrupted_turn_leaves_the_caller_history_intact() -> None:
+async def test_an_interrupted_turn_leaves_the_caller_history_intact(memory) -> None:
     """Cancellation needs no repair, because nothing shared was written.
 
     The plan called this the sharpest correctness edge in the system; making the
@@ -399,7 +432,7 @@ async def test_an_interrupted_turn_leaves_the_caller_history_intact() -> None:
         ),
         ScriptedTurn(result=StreamChatResult(text="fine")),
     )
-    server = build_server(config(), backend=backend)
+    server = build_server(config(), memory_client=memory, backend=backend)
     history: list[dict] = [{"role": "user", "content": "earlier"}]
 
     async with Client(server) as client:
@@ -430,10 +463,12 @@ def template(tmp_path, body: str):
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_a_template(tmp_path) -> None:
+async def test_the_system_prompt_is_a_template(tmp_path, memory) -> None:
     backend = answering("ok")
     server = build_server(
-        config(system_prompt=template(tmp_path, "be terse")), backend=backend
+        config(system_prompt=template(tmp_path, "be terse")),
+        memory_client=memory,
+        backend=backend,
     )
     await call(server, messages=[], prompt="hi")
 
@@ -443,7 +478,9 @@ async def test_the_system_prompt_is_a_template(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_template_is_rendered_per_turn_with_the_agent_name(tmp_path) -> None:
+async def test_the_template_is_rendered_per_turn_with_the_agent_name(
+    tmp_path, memory
+) -> None:
     """One template, personalised by whoever is asking.
 
     Rendered per turn rather than once, because the agent name arrives *with the
@@ -457,6 +494,7 @@ async def test_the_template_is_rendered_per_turn_with_the_agent_name(tmp_path) -
     )
     server = build_server(
         config(system_prompt=template(tmp_path, "You are {{ agent_name }}.")),
+        memory_client=memory,
         backend=backend,
     )
 
@@ -481,20 +519,28 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_not_handed_back_to_the_caller(tmp_path) -> None:
+async def test_the_system_prompt_is_not_handed_back_to_the_caller(
+    tmp_path, memory
+) -> None:
     """Otherwise it would accumulate one copy per turn in the caller's history."""
     server = build_server(
-        config(system_prompt=template(tmp_path, "be terse")), backend=answering("ok")
+        config(system_prompt=template(tmp_path, "be terse")),
+        memory_client=memory,
+        backend=answering("ok"),
     )
     result = await call(server, messages=[], prompt="hi")
     assert all(m["role"] != "system" for m in result.data["new_messages"])
 
 
 @pytest.mark.asyncio
-async def test_a_caller_supplied_system_message_is_not_doubled(tmp_path) -> None:
+async def test_a_caller_supplied_system_message_is_not_doubled(
+    tmp_path, memory
+) -> None:
     backend = answering("ok")
     server = build_server(
-        config(system_prompt=template(tmp_path, "from config")), backend=backend
+        config(system_prompt=template(tmp_path, "from config")),
+        memory_client=memory,
+        backend=backend,
     )
     await call(
         server, messages=[{"role": "system", "content": "from caller"}], prompt="hi"
@@ -508,7 +554,7 @@ async def test_a_caller_supplied_system_message_is_not_doubled(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_max_steps_comes_from_the_config() -> None:
+async def test_max_steps_comes_from_the_config(memory) -> None:
     backend = FakeBackend(
         *[
             ScriptedTurn(
@@ -520,7 +566,7 @@ async def test_max_steps_comes_from_the_config() -> None:
             for i in range(2)
         ]
     )
-    server = build_server(config(max_steps=2), backend=backend)
+    server = build_server(config(max_steps=2), memory_client=memory, backend=backend)
     result = await call(server, messages=[], prompt="loop forever")
 
     assert len(backend.calls) == 2
@@ -531,8 +577,8 @@ async def test_max_steps_comes_from_the_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_events_arrive_as_progress_notifications() -> None:
-    server = build_server(config(), backend=tool_then_answer())
+async def test_events_arrive_as_progress_notifications(memory) -> None:
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     seen: list[TurnEvent] = []
 
     async def on_progress(progress, total, message):
@@ -559,8 +605,8 @@ async def test_events_arrive_as_progress_notifications() -> None:
 
 
 @pytest.mark.asyncio
-async def test_progress_values_are_a_monotonic_counter() -> None:
-    server = build_server(config(), backend=tool_then_answer())
+async def test_progress_values_are_a_monotonic_counter(memory) -> None:
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     values: list[float] = []
 
     async def on_progress(progress, total, message):
@@ -577,9 +623,9 @@ async def test_progress_values_are_a_monotonic_counter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_works_without_a_progress_handler() -> None:
+async def test_a_turn_works_without_a_progress_handler(memory) -> None:
     """A non-streaming client gets the same answer and the server does no extra work."""
-    server = build_server(config(), backend=tool_then_answer())
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     result = await call(server, messages=[], prompt="x")
     assert result.data["text"] == "It is 42."
 
@@ -608,7 +654,7 @@ async def test_report_progress_is_a_no_op_without_a_token() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_progress_streams_over_real_http() -> None:
+async def test_progress_streams_over_real_http(memory) -> None:
     """The one test that binds a port.
 
     The in-memory transport cannot prove that progress notifications survive
@@ -616,7 +662,7 @@ async def test_progress_streams_over_real_http() -> None:
     returning correct results — so this asserts they arrive *during* the call
     with more than one of them, not as a single buffered dump at the end.
     """
-    server = build_server(config(), backend=tool_then_answer())
+    server = build_server(config(), memory_client=memory, backend=tool_then_answer())
     app = server.http_app(path="/mcp", json_response=False, stateless_http=True)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -15,7 +15,8 @@ from types import SimpleNamespace
 import pytest
 from fastmcp import Client, FastMCP
 
-from slife2.mcp_server import house_server, identifies
+from slife2 import mcp_server as mcp_server_module
+from slife2.mcp_server import house_server, identifies, open_server
 
 pytestmark = pytest.mark.unit
 
@@ -115,3 +116,72 @@ def test_house_server_carries_instructions_and_omits_empty_ones() -> None:
         "Read me."
     )
     assert not house_server("slife2-test").instructions
+
+
+# --- connecting: the rule every client follows -------------------------------
+
+
+class StubTransport:
+    """The MCP client `open_server` would have built."""
+
+    def __init__(self, *, name: str | None = None, tools: tuple[str, ...] = ()) -> None:
+        self.server_info = SimpleNamespace(name=name) if name else None
+        self.tools = list(tools)
+        self.closed = False
+
+    async def __aenter__(self) -> StubTransport:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.closed = True
+
+    async def list_tools(self) -> list[SimpleNamespace]:
+        return [SimpleNamespace(name=n) for n in self.tools]
+
+
+def stub(monkeypatch, transport: StubTransport) -> None:
+    """Stand in for the transport, on a URL with no port.
+
+    No port because the TCP gate runs before anything is constructed, and this
+    URL is not somewhere a socket could be opened anyway.
+    """
+    monkeypatch.setattr(mcp_server_module, "Client", lambda *a, **k: transport)
+
+
+@pytest.mark.asyncio
+async def test_a_port_with_nothing_on_it_is_refused_before_the_protocol() -> None:
+    """Ask the port first, because asking the protocol costs seconds.
+
+    Port 9 is the discard port: nothing answers it by convention.  The message
+    is the assertion because only the gate can produce it — a transport failure
+    would say the client could not connect, which is the thing this exists to
+    avoid waiting two seconds for.
+    """
+    with pytest.raises(ConnectionError, match="nothing is listening on 127.0.0.1:9"):
+        await open_server("http://127.0.0.1:9/mcp", name="slife2-memory")
+
+
+@pytest.mark.asyncio
+async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
+    monkeypatch,
+) -> None:
+    """Being reachable is not the same as being the one we meant."""
+    transport = StubTransport(name="someone-elses-server")
+    stub(monkeypatch, transport)
+
+    with pytest.raises(ConnectionError, match="not slife2-memory"):
+        await open_server("http://test/mcp", name="slife2-memory")
+
+    assert transport.closed, "a client we are not keeping has to be released"
+
+
+@pytest.mark.asyncio
+async def test_a_server_we_recognise_is_handed_back_still_open(monkeypatch) -> None:
+    """The other half: what comes back is the caller's to keep and to close."""
+    transport = StubTransport(name="slife2-memory")
+    stub(monkeypatch, transport)
+
+    client = await open_server("http://test/mcp", name="slife2-memory")
+
+    assert client is transport
+    assert not transport.closed

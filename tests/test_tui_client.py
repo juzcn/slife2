@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from slife2.tui import client as client_module
+from slife2 import mcp_server as mcp_server_module
 from slife2.tui.client import MCPAgentClient
 
 pytestmark = pytest.mark.unit
@@ -64,8 +64,14 @@ class FakeTransport:
 
 
 def install(monkeypatch, transport: FakeTransport) -> None:
-    """Point the client at a stubbed transport instead of a URL."""
-    monkeypatch.setattr(client_module, "Client", lambda *a, **k: transport)
+    """Point the client at a stubbed transport instead of a URL.
+
+    Patched in `slife2.mcp_server` rather than here: the client no longer builds
+    its own `Client` — `open_server` does, for every component in this system —
+    so that module is where the construction happens and therefore where a test
+    has to stand in for it.
+    """
+    monkeypatch.setattr(mcp_server_module, "Client", lambda *a, **k: transport)
 
 
 @pytest.mark.asyncio
@@ -139,7 +145,7 @@ async def test_a_server_that_is_not_ours_is_refused(monkeypatch) -> None:
     install(monkeypatch, FakeTransport(tools=("stream_chat",)))
     client = MCPAgentClient("http://test/mcp")
 
-    with pytest.raises(ConnectionError, match="not a slife2 agent server"):
+    with pytest.raises(ConnectionError, match="not slife2-agent"):
         await client.connect()
 
 
@@ -154,7 +160,7 @@ async def test_a_server_that_says_it_is_something_else_is_refused(monkeypatch) -
     install(monkeypatch, FakeTransport(name="someone-elses-server"))
     client = MCPAgentClient("http://test/mcp")
 
-    with pytest.raises(ConnectionError, match="not a slife2 agent server"):
+    with pytest.raises(ConnectionError, match="not slife2-agent"):
         await client.connect()
 
 

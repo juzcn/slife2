@@ -341,9 +341,11 @@ def _storable(text: str) -> str:
     """Text SQLite will encode.
 
     Surrogates cannot be encoded to UTF-8, so binding one raises
-    `UnicodeEncodeError` — and a failed write here does not fail the turn, it
-    *loses* it: the caller treats memory as an enhancement and swallows the
-    error, so what is left is a warning in a log and no record.
+    `UnicodeEncodeError` — which is a failed write, and a failed write now fails
+    the turn outright rather than losing it quietly (see
+    `slife2.mcp_server.open_server`). Neither is something an emoji in somebody's
+    answer should be able to bring about, which is why the surrogate is dealt
+    with here rather than the failure being handled there.
 
     Surrogates are reachable without anybody typing one, because a provider's
     token stream is JSON and CPython's `json` does not combine `\\uXXXX` pairs:

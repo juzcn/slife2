@@ -26,7 +26,6 @@ removes the dependency entirely, and takes three things with it:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -39,26 +38,35 @@ from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
     DEFAULT_AGENT,
+    MEMORY_SERVER_NAME,
     Config,
     find_config_path,
     load,
 )
 from slife2.events import TurnEvent, encode
 from slife2.llm.base import LLMBackend
-from slife2.llm.client import MCPBackend, close_backend, open_backend
+from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop
-from slife2.mcp_server import configure_logging, house_server, parse_serve_args, serve
+from slife2.mcp_server import (
+    close_server,
+    configure_logging,
+    house_server,
+    open_server,
+    parse_serve_args,
+    serve,
+)
 from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
-from slife2.runtime import tcp_listening
 from slife2.tools import ToolRegistry, builtin_tools
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-agent"
 
-#: How long to wait on the memory server.  Short: remembering is not worth
-#: holding an answer for, and the write is best-effort anyway.
+#: How long to wait on the memory server.  Short: the write happens once the
+#: answer already exists, and a slow store is not worth holding that answer for.
+#: A store that is *gone* is a different matter — that fails the turn outright;
+#: see `slife2.mcp_server.open_server`.
 MEMORY_TIMEOUT_SECONDS = 10.0
 
 INSTRUCTIONS = (
@@ -120,55 +128,29 @@ def build_server(
     #: Whether *we* opened it, and so whether we should close it.  An injected
     #: client belongs to whoever made it.
     memory_owned = memory_client is None
-    #: Set once the memory server has been found absent, so the attempt is not
-    #: repeated.  See `memory`.
-    memory_off = False
 
-    async def memory() -> Client | None:
-        """The client for the memory server, or None once we know there isn't one.
+    async def memory() -> Client:
+        """The client for the memory server, opened on first use.
 
-        **A server that is not there is remembered as not being there.**  The
-        write is best-effort, so a missing memory server costs nothing but the
-        attempt — and the attempt is not free: it is a connection that has to
-        time out, paid on every turn, for a component whose whole contribution
-        is a record nobody is waiting for.  Trying once and giving up turns an
-        unbounded tax into a single one.
+        Opened once and kept for the process, the same arrangement as the model
+        backends and for the same reason: a handshake per turn is a handshake
+        per turn.
 
-        The cost is that a memory server started *later* is not picked up until
-        this process restarts.  That is the trade, and it is the right way
-        round: `slife2` starts its components together, so the case is a
-        deliberate `slife2 down` and not something to wait for.
+        A memory server that is not there **raises**, like every other peer in
+        this system.  `slife2.mcp_server.open_server` is where that rule lives
+        and why; what matters here is that this component is not the exception
+        to it.  It used to be — a server found missing was remembered as missing
+        and every turn afterwards ran on without a record — which made the same
+        situation fatal at startup and silent a minute later.
         """
-        nonlocal memory_conn, memory_off
-        if memory_off:
-            return None
+        nonlocal memory_conn
         if memory_conn is None:
-            address = config.server("memory")
-            # Ask the port before asking the protocol.  A refused TCP connect
-            # comes back at once, where building an MCP client against nothing
-            # spends a couple of seconds in the transport's own retries — and
-            # that cost lands on the first answer of the session, which is the
-            # one somebody is watching for.
-            if not tcp_listening(address.host, address.port):
-                memory_off = True
-                logger.warning(
-                    "no memory server on %s:%d; turns will not be recorded",
-                    address.host,
-                    address.port,
-                )
-                return None
-
-            client: Client = Client(address.url, timeout=MEMORY_TIMEOUT_SECONDS)
-            try:
-                await client.__aenter__()
-            except Exception:  # noqa: BLE001 - absent is an expected state
-                memory_off = True
-                logger.warning(
-                    "no memory server at %s; turns will not be recorded",
-                    address.url,
-                )
-                return None
-            memory_conn = client
+            memory_conn = await open_server(
+                config.server("memory").url,
+                name=MEMORY_SERVER_NAME,
+                fallback_tool="remember",
+                timeout=MEMORY_TIMEOUT_SECONDS,
+            )
         return memory_conn
 
     async def remember_turn(
@@ -181,19 +163,20 @@ def build_server(
         created_at: str,
         completed_at: str,
     ) -> None:
-        """Persist a turn, and never let that decision cost the turn.
+        """Persist a turn.
 
-        Memory is an enhancement, not part of correctness: a store that is down,
-        a disk that is full, a name that cannot be a filename — none of them is
-        a reason for a conversation that just succeeded to be reported as
-        failed.  So every failure is logged and swallowed, and the caller gets
-        its answer either way.
+        A store that is *gone* fails the turn, and that is the system's rule
+        rather than this function's — `slife2.mcp_server.open_server` is where a
+        missing peer is decided to be a broken system rather than a degraded
+        one, and nothing here softens it.  It is the answer the CLI already
+        gives at startup, where a component that will not come up stops `slife2`
+        before it draws anything: a component that goes missing later is that
+        situation arriving late, not a new one to paper over.
 
-        A `ToolError` is *not* a reason to stop trying.  It means the memory
-        server answered and refused this one request — an agent name that cannot
-        be a filename, say — and that is one caller's problem rather than
-        everyone's.  Anything else is the transport, and the transport going
-        away is what `memory` remembers.
+        A `ToolError` is left alone, and it is a different thing.  It means the
+        memory server answered and refused *this* request — an agent name that
+        cannot be a filename, say — which is one caller's problem rather than a
+        sign that anything is down.
 
         Two token counts go over, and they are not interchangeable.  `usage` is
         the turn's total across however many model calls it took — the bill.
@@ -202,10 +185,7 @@ def build_server(
         and so the one that says how close the context window is to full.  A sum
         cannot answer that, which is why the loop reports both.
         """
-        nonlocal memory_off
         client = await memory()
-        if client is None:
-            return
 
         try:
             await client.call_tool(
@@ -226,13 +206,11 @@ def build_server(
                 },
             )
         except ToolError as exc:
+            # Caught, and only this. The server answered and refused one
+            # request; everything else — the transport gone, a store that
+            # stopped answering — is a system that has come apart and is meant
+            # to fail here rather than be logged and stepped over.
             logger.warning("memory refused the turn for %s: %s", agent, exc)
-        except Exception:  # noqa: BLE001 - see the docstring
-            memory_off = True
-            logger.warning(
-                "memory stopped answering; turns will no longer be recorded",
-                exc_info=True,
-            )
 
     def make_loop(active: LLMBackend) -> AgentLoop:
         return AgentLoop(
@@ -284,12 +262,11 @@ def build_server(
             yield {}
         finally:
             for client in clients.values():
-                await close_backend(client)
+                await close_server(client)
             clients.clear()
             model_backends.clear()
             if memory_owned and memory_conn is not None:
-                with contextlib.suppress(Exception):
-                    await memory_conn.__aexit__(None, None, None)
+                await close_server(memory_conn)
 
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
@@ -346,6 +323,12 @@ def build_server(
         # takes time — including `loop_for`, which opens a connection on a cold
         # cache — has to fall inside it.
         started_at = now()
+
+        # Asked before anything is spent on the turn.  A memory server that is
+        # not there is a broken system rather than a degraded one, and the
+        # moment to find that out is *before* a model call has been paid for —
+        # not at the write, when the answer exists and has nowhere to go.
+        await memory()
 
         loop, answered_by = await loop_for(model)
         logger.debug("turn from agent %s on %s", agent, model or "the default")
