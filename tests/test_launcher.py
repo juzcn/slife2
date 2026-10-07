@@ -19,6 +19,7 @@ import pytest
 
 from slife2 import launcher, runtime
 from slife2.config import (
+    LOCAL_SERVERS,
     Config,
     default_config,
     load,
@@ -37,14 +38,17 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 
 def test_there_is_one_component_per_job() -> None:
-    """One agent loop, one memory store, one process per wire protocol.
+    """One agent loop, one memory store, one builtins server, one hub of tools,
+    one process per wire protocol.
 
     The granularity is the point: a backend speaks one wire protocol and does
     nothing else, and a provider is a row in that backend's config rather than a
     process of its own.  Four providers on three protocols is three model
     processes, not four.  Note which way the list is ordered, too — it is
     `API_BACKENDS` order, because the servers start in the order they are
-    needed and the model ones come before the agent that talks to them.
+    needed and the model ones come before the agent that talks to them, with the
+    three peers the agent reaches out to — memory, the builtins, and the hub that
+    fronts them — coming after.
     """
     config = load(_config_with_every_protocol())
     names = [spec.name for spec in launcher.specs(config)]
@@ -53,6 +57,8 @@ def test_there_is_one_component_per_job() -> None:
         "llm:anthropic-messages",
         "llm:openai-responses",
         "memory",
+        "builtins",
+        "toolhub",
         "agent",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
@@ -61,8 +67,22 @@ def test_there_is_one_component_per_job() -> None:
         "slife2.llm.anthropic_server",
         "slife2.llm.openai_responses_server",
         "slife2.memory_server",
+        "slife2.builtins",
+        "slife2.toolhub",
         "slife2.server.server",
     }
+
+
+def test_every_component_has_a_module_and_every_module_a_component() -> None:
+    """The two lists that could drift, held together.
+
+    `config.LOCAL_SERVERS` says which names a `servers:` section may use and in
+    what order they start; `launcher.SERVER_MODULES` says which module serves
+    each.  A name in one and not the other is a config key that cannot be
+    started or a module nothing starts, and both are silent until somebody edits
+    the other one.
+    """
+    assert set(LOCAL_SERVERS) == set(launcher.SERVER_MODULES)
 
 
 def test_one_server_per_wire_protocol() -> None:
@@ -79,6 +99,8 @@ def test_one_server_per_wire_protocol() -> None:
         "llm:anthropic-messages",
         "llm:openai-responses",
         "memory",
+        "builtins",
+        "toolhub",
         "agent",
     ]
 
@@ -119,7 +141,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         encoding="utf-8",
     )
     names = [spec.name for spec in launcher.specs(load(path))]
-    assert names == ["llm:openai-completions", "memory", "agent"]
+    assert names == ["llm:openai-completions", "memory", "builtins", "toolhub", "agent"]
 
 
 def test_the_agent_server_takes_no_provider() -> None:
@@ -127,16 +149,24 @@ def test_the_agent_server_takes_no_provider() -> None:
     assert "--provider" not in launcher._argv(spec, Path("slife2.yaml"))
 
 
-def test_model_servers_start_before_the_agent_server() -> None:
-    """The agent server connects to its model in its lifespan.
+def test_every_peer_the_agent_reaches_starts_before_it() -> None:
+    """The agent server connects to its peers in its lifespan.
 
     Starting them together races, and the failure is confusing rather than
-    obvious: the agent server comes up healthy and every turn fails.
+    obvious: the agent server comes up healthy and every turn fails.  The peers
+    are its model, and the three servers it calls during a turn — memory, and the
+    toolhub with the builtins behind it — all of which it now *needs*, since the
+    model's tool list comes from the hub.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-1] == "agent"
     # Everything else is a dependency of it, whatever kind it is.
-    assert set(names[:-1]) == {"llm:openai-completions", "memory"}
+    assert set(names[:-1]) == {
+        "llm:openai-completions",
+        "memory",
+        "builtins",
+        "toolhub",
+    }
 
 
 def test_specs_carry_where_each_server_listens() -> None:

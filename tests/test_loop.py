@@ -9,21 +9,50 @@ rather than something inferred from a live model.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fakes import FakeBackend, ListObserver, RaisingObserver, ScriptedTurn, text_turn
 
+from slife2.builtins import evaluate
 from slife2.events import TextDelta, ToolCallFinished, ToolCallStarted, TurnFinished
 from slife2.llm.base import Chunk, ToolCallDelta
 from slife2.loop import AgentLoop
-from slife2.messages import Message, StreamChatResult, ToolCall, Usage
-from slife2.tools import ToolRegistry, builtin_tools
+from slife2.messages import Message, StreamChatResult, ToolCall, ToolSpec, Usage
+from slife2.tools import Tool, ToolRegistry
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
+def a_tool(name: str, run) -> Tool:
+    return Tool(
+        spec=ToolSpec(name=name, description="", parameters={"type": "object"}),
+        run=run,
+    )
+
+
 def registry() -> ToolRegistry:
-    return ToolRegistry(builtin_tools())
+    return ToolRegistry(tools())
+
+
+def tools() -> list[Tool]:
+    """Two tools, defined here rather than fetched from a server.
+
+    The loop is handed a registry and must not care where it came from, so its
+    tests build one instead of talking to the builtins server — what is under
+    test is the round trip, not the arithmetic.  `evaluate` is borrowed because
+    writing a second expression parser to test a loop would be silly, and `now`
+    is real because a tool that returns text is all this file needs.
+    """
+
+    async def calc(arguments: dict[str, Any]) -> str:
+        return str(evaluate(str(arguments.get("e") or "")))
+
+    async def now(_arguments: dict[str, Any]) -> str:
+        return datetime.now(UTC).isoformat()
+
+    return [a_tool("now", now), a_tool("calc", calc)]
 
 
 def tool_turn(*calls: ToolCall, text: str = "") -> ScriptedTurn:
@@ -282,6 +311,64 @@ async def test_tool_specs_are_advertised_to_the_model() -> None:
     await AgentLoop(backend, registry()).run_turn([], "hi")
     _, tools = backend.calls[0]
     assert {t.name for t in tools} == {"now", "calc"}
+
+
+async def test_the_tool_list_is_asked_for_before_every_model_call() -> None:
+    """Not once per turn — once per call, so a change lands mid-turn.
+
+    A turn that takes several steps makes several requests to the model, and
+    each carries its own tool list.  Asking once per turn would leave the
+    second call advertising a tool the first call's answer had just removed.
+    """
+    asked = 0
+
+    async def growing() -> ToolRegistry:
+        nonlocal asked
+        asked += 1
+        late = (
+            [a_tool("late", lambda arguments: asyncio.sleep(0, result="ok"))]
+            if asked > 1
+            else []
+        )
+        return ToolRegistry([*tools(), *late])
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="now", arguments={})), text_turn("done")
+    )
+    loop = AgentLoop(backend, await growing(), refresh=growing)
+
+    await loop.run_turn([], "go")
+
+    assert asked == 3, "once when it was built, then once per model call"
+    assert [sorted(spec.name for spec in sent) for _, sent in backend.calls] == [
+        ["calc", "late", "now"],
+        ["calc", "late", "now"],
+    ]
+
+
+async def test_the_seed_list_is_the_loops_own_until_it_is_refreshed() -> None:
+    """No refresh given, nothing is asked for: an injected backend's registry
+    stands, which is what keeps the loop runnable without a hub at all."""
+    backend = FakeBackend(text_turn("hi"))
+    await AgentLoop(backend, registry()).run_turn([], "hi")
+    _, tools = backend.calls[0]
+    assert {t.name for t in tools} == {"now", "calc"}
+
+
+async def test_a_refresh_that_fails_ends_the_turn() -> None:
+    """Deliberately not swallowed.
+
+    A model called with the previous step's tool list is a silently wrong
+    request; a turn that fails is a visible one.  See
+    `slife2.mcp_server.open_server`.
+    """
+
+    async def broken() -> ToolRegistry:
+        raise ConnectionError("the toolhub is gone")
+
+    backend = FakeBackend(text_turn("hi"))
+    with pytest.raises(ConnectionError):
+        await AgentLoop(backend, registry(), refresh=broken).run_turn([], "hi")
 
 
 async def test_tool_call_started_precedes_finished() -> None:

@@ -13,12 +13,13 @@ from collections.abc import AsyncIterator
 import pytest
 from fastmcp import Client
 
+from slife2.builtins import evaluate
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.client import MCPBackend
 from slife2.llm.server_common import build_llm_server
 from slife2.loop import AgentLoop
 from slife2.messages import Message, ToolCall, ToolSpec
-from slife2.tools import ToolRegistry, builtin_tools
+from slife2.tools import Tool, ToolRegistry
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -40,6 +41,29 @@ async def collect(backend: MCPBackend, messages=None, tools=None):
     )
     chunks = [chunk async for chunk in stream.chunks]
     return chunks, await stream.result
+
+
+async def _calc(arguments: dict) -> str:
+    return str(evaluate(str(arguments.get("e") or "")))
+
+
+def registry() -> ToolRegistry:
+    """One tool, local.
+
+    `calc` is convenient here and is not the subject: what this file is about is
+    the model hop, and the real calculator is behind a server now — a second hop
+    in front of a test about the first one would be noise.
+    """
+    return ToolRegistry(
+        [
+            Tool(
+                spec=ToolSpec(
+                    name="calc", description="m", parameters={"type": "object"}
+                ),
+                run=_calc,
+            )
+        ]
+    )
 
 
 async def test_chunks_arrive_in_order_and_the_result_follows() -> None:
@@ -169,7 +193,7 @@ async def test_the_agent_loop_runs_over_mcp() -> None:
     messages: list[Message] = []
 
     async with Client(server) as client:
-        loop = AgentLoop(MCPBackend(client, "m"), ToolRegistry(builtin_tools()))
+        loop = AgentLoop(MCPBackend(client, "m"), registry())
         result = await loop.run_turn(messages, "what is 6*7?")
 
     assert result.text == "It is 42."

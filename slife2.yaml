@@ -79,6 +79,242 @@ servers:
     host: 127.0.0.1
     port: 8010
     path: /mcp
+  # The tools slife2 ships — `echo`, `now`, `calc` — served like anybody else's
+  # and reached through the hub below, because the hub is the one place that
+  # decides what the model may call.  There is no config for it: adding a tool is
+  # one decorated function in `slife2/builtins.py`.
+  builtins:
+    host: 127.0.0.1
+    port: 8030
+    path: /mcp
+  # The model's tools, and the only process that holds a tool server's
+  # credentials.  It connects to `builtins` above and to everything under
+  # `tools:` below.
+  toolhub:
+    host: 127.0.0.1
+    port: 8020
+    path: /mcp
+
+# ── External tool servers ───────────────────────────────────────────────────
+# Other people's MCP servers, connected to by the toolhub — which is why they
+# are `tools:` and not `servers:`.  The difference matters: `servers:` above is
+# *our* components, which slife2 starts, shares and stops, and a missing one is
+# a system that has come apart.  An entry here is somebody else's process; if it
+# is slow, paid or down, the hub says so through its `servers` tool and the
+# model simply has fewer tools, while the conversation keeps working.
+#
+# Every tool arrives as `{name}__{tool}` — so `filesystem` below offers
+# `filesystem__read_file` — and the name is what the model calls.
+#
+#   command + args + env     stdio: a process slife2 starts
+#   url + headers            http: an endpoint somebody else runs
+#   cwd                      stdio only; defaults to the data directory, which
+#                            is what the `.` in an argument means
+#   description              what it is for; for a person, not for the model —
+#                            the model reads the descriptions the server itself
+#                            gives each tool
+#   enabled: false           stays configured, is never connected
+#
+# `env` and `headers` are the two places a tool server is handed a credential,
+# and both go through the same chain as a provider key: ${VAR} resolves through
+# shell env -> credstore -> literal default.
+#
+# **Everything enabled here is connected when the hub starts**, so the list is
+# the budget.  `enabled: false` is how a server stays configured without being
+# one of the processes at every start, and it is worth using: an entry that is
+# on is a process, a handshake, and its tools in every turn's list.
+tools:
+  # Local filesystem operations — read, write, list, and search files within
+  # allowed directories.  Off by default: `.` below is the *data directory*, so
+  # turning it on gives the model the config, the runtime state and the turn
+  # databases.  Point it at something narrower if that is not what you want.
+  filesystem:
+    command: npx
+    args:
+      - -y
+      - '@modelcontextprotocol/server-filesystem'
+      - .
+    description: Local filesystem operations — read, write, list, and search files within allowed directories.
+    enabled: false
+  serper:
+    command: npx
+    args:
+      - -y
+      - serper-search-scrape-mcp-server
+    env:
+      SERPER_API_KEY: ${SERPER_API_KEY}
+    description: Google web search via Serper — search the web and scrape result pages.
+  fetch:
+    command: uvx
+    args:
+      - --with
+      - mcp>=1.0,<1.29
+      - mcp-server-fetch
+    description: Fetch and convert web pages to markdown. Pins mcp<1.29 for McpError compatibility.
+  tavily-mcp:
+    command: npx
+    args:
+      - -y
+      - tavily-mcp@latest
+    env:
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+    description: Tavily AI-optimized web search — designed for LLM agents, returns clean structured results.
+  duckduckgo-search:
+    command: uvx
+    args:
+      - --with
+      - duckduckgo-mcp-server[browser]
+      - duckduckgo-mcp-server
+      - --fetch-backend
+      - auto
+      - --search-backend
+      - auto
+    description: DuckDuckGo search MCP server — web search and content extraction via DuckDuckGo.
+  amap-maps:
+    command: npx
+    args:
+      - -y
+      - '@amap/amap-maps-mcp-server'
+    env:
+      AMAP_MAPS_API_KEY: ${AMAP_MAPS_API_KEY}
+    description: 高德地图官方 MCP Server，提供地理编码、逆地理编码、IP定位、天气查询、骑行/步行/驾车/公交路径规划、距离测量、关键词/周边/详情POI搜索、专属地图、输入提示、搜索提示、矩形区域交通态势、路径信息、距离测量等多种地图和位置服务。免费，需要申请 Web服务 API Key。
+  # v1 ran this with `os_paths: true`, which injected `--allow-path` for the
+  # OS-accessible path set.  slife2 has no equivalent, so it starts confined to
+  # the data directory — which is a different tool from the one v1 ran, and the
+  # reason it is off.
+  iflow-mcp:
+    command: uvx
+    args:
+      - --from
+      - iflow-mcp-mcp-claude-code
+      - claudecode
+    description: MCP implementation of Claude Code capabilities — directly execute instructions for modifying and improving project files.
+    enabled: false
+  file-search:
+    command: npx
+    args:
+      - -y
+      - file-search-mcp
+    description: 'Blazingly fast MCP server for searching files and content in large codebases — uses ripgrep (100x faster than grep), fuzzy find, and tree view. Tools: search_files, search_content, fuzzy_find, tree.'
+  playwright:
+    command: npx
+    args:
+      - -y
+      - '@playwright/mcp@latest'
+      - --headless
+    description: Playwright MCP server (official Microsoft) — headless browser automation via accessibility snapshots. Supports navigation, clicks, typing, screenshots, form filling, file uploads, and JavaScript execution.
+  context7:
+    command: npx
+    args:
+      - -y
+      - '@upstash/context7-mcp'
+    env:
+      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}
+    description: Context7 MCP server (Upstash) — up-to-date library/framework API docs to eliminate LLM hallucinations. Resolution-based lookups for any version or commit (Unpkg-compatible projects only).
+  chrome-devtools:
+    command: npx
+    args:
+      - -y
+      - chrome-devtools-mcp@latest
+      - --no-usage-statistics
+    description: Chrome DevTools MCP (official Google) — control and inspect real Chrome browser with performance profiling, network inspection, console access, DOM manipulation, and screenshots.
+  citecheck:
+    command: npx
+    args:
+      - -y
+      - '@jhlee0619/citecheck'
+    description: citecheck MCP server — automatically validate and fix references in academic papers. Extracts references from .tex/.md/.docx/.txt/.bib, validates against databases, and fixes inconsistencies. Supports arXiv/DOI/DBLP/ACL/custom APIs.
+  mcp-pandoc:
+    command: uvx
+    args:
+      - mcp-pandoc
+    description: mcp-pandoc document format converter — use Pandoc to convert between Markdown/HTML/PDF/DOCX/RST/LaTeX/EPUB/TXT/IPYNB and more.
+  markitdown:
+    command: uvx
+    args:
+      - markitdown-mcp
+    description: MarkItDown MCP server (Microsoft) — convert various file formats (PDF, DOCX, PPTX, XLSX, images via OCR, audio transcription, HTML, CSV, JSON, XML, ZIP) to Markdown.
+  office-word-mcp:
+    command: uvx
+    args:
+      - --from
+      - office-word-mcp-server
+      - word_mcp_server
+    description: Office-Word-MCP server — create/read/edit Microsoft Word documents. Supports document management (create, merge, convert to PDF), content creation (headings, paragraphs, tables, images, page breaks), formatting (font, alignment, spacing), and comments.
+  excel-mcp:
+    command: npx
+    args:
+      - --yes
+      - '@negokaz/excel-mcp-server'
+    env:
+      EXCEL_MCP_PAGING_CELLS_LIMIT: '4000'
+    description: 'Excel MCP server — read/write MS Excel files. Supports reading/writing text values and formulas, creating worksheets/tables, copying worksheets, formatting cells (Windows: live editing + screenshots). Supports .xlsx/.xlsm/.xltx/.xltm. Free and open source.'
+  pdf-toolkit:
+    command: npx
+    args:
+      - -y
+      - '@aryanbv/pdf-toolkit-mcp'
+    description: 'PDF Toolkit MCP — 22-tool PDF suite: create PDFs from Markdown/structured data, render pages as images (for vision models to read scans), fill forms and extract values, split/merge/rotate/crop pages, add text/watermarks/annotations, extract and re-embed attachments.'
+  sqlite:
+    command: uvx
+    args:
+      - --with
+      - mcp>=1.0,<1.29
+      - mcp-server-sqlite
+    description: 'SQLite MCP (official modelcontextprotocol/servers reference) — query and manipulate SQLite databases via natural language: create tables, CRUD operations, schema inspection, and more.'
+  # v1 also carried `command: uvx` / `args: [arxiv-mcp-server]` beside this URL,
+  # and an entry with both is refused here — `transport` is read off which field
+  # is set, so two of them is a precedence rule nobody would remember.  The URL
+  # is what ran; the leftover command is what v1's file grew.  If the endpoint
+  # ever goes away, delete `url` and the command below is what brings it back:
+  #   command: uvx
+  #   args: [arxiv-mcp-server]
+  arxiv:
+    url: https://arxiv.mcp.brunosan.de/mcp
+    description: arXiv paper search, download and reading for AI/ML/NLP/CV/robotics — free, no API key, uses the public arXiv API.
+  crossref:
+    command: npx
+    args:
+      - -y
+      - '@cyanheads/crossref-mcp-server'
+    description: Search and retrieve scholarly metadata from the Crossref REST API — 150M+ academic works, journals and funders; DOI resolution and reference lookup. No API key required.
+  google-scholar:
+    command: uvx
+    args:
+      - hasdata-google-scholar-mcp
+    env:
+      HASDATA_API_KEY: ${HASDATA_API_KEY}
+    description: Google Scholar search results, citation counts and citation export formats, as structured JSON (HasData). Local stdio build; credential via HASDATA_API_KEY.
+
+# ── REST APIs as tools ──────────────────────────────────────────────────────
+# The same thing said a shorter way.  Writing `spec:` gets the standard
+# OpenAPI-to-MCP proxy (`uvx mcp-openapi-proxy`) with the environment it reads
+# filled in from this entry, and every endpoint in the document becomes a tool.
+# Writing `command:` instead gets a proxy of your own — a pinned version, a
+# private fork — for the cases the standard one does not cover.
+#
+# It is the *same mechanism* either way: an entry here is expanded into the
+# stdio server it describes before anything connects to it, so the toolhub does
+# not know that REST exists.
+#
+#   spec        the OpenAPI document, a URL or a path
+#   base_url    overrides the server the document names (SERVER_URL_OVERRIDE)
+#   api_key     sent as the API_KEY the proxy reads; usually ${VAR}
+#
+# A spec is a large document and these proxies generate a tool per endpoint, so
+# one entry here can outweigh every other server in the list.  That is what
+# `enabled: false` is for.
+rest-api:
+  github:
+    spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
+    base_url: https://api.github.com
+    api_key: ${GITHUB_TOKEN}
+    description: GitHub REST API via mcp-openapi-proxy — manage repos, issues, PRs, users, and more.
+    enabled: false
+  mcp-registry:
+    spec: https://registry.modelcontextprotocol.io/openapi.json
+    base_url: https://registry.modelcontextprotocol.io
+    description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
 
 providers:
   deepseek:

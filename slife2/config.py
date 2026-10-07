@@ -18,6 +18,29 @@ configuration has to answer:
             temperature: 0.7
             top_p: 1.0
 
+The other section worth reading here is `tools:` — the *external* MCP servers the
+toolhub connects to:
+
+    tools:
+      filesystem:
+        command: npx                    # stdio: a process we start
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      serper:
+        command: npx
+        args: ["-y", "serper-search-scrape-mcp-server"]
+        env:
+          SERPER_API_KEY: ${SERPER_API_KEY}
+      arxiv:
+        url: https://arxiv.mcp.brunosan.de/mcp    # http: someone else's process
+        headers:
+          Authorization: Bearer ${ARXIV_TOKEN}
+
+Note the two words that are one letter apart throughout this file: `servers:` is
+*our* components — the ones slife2 starts, shares and stops — while `tools:` is
+other people's, which the toolhub connects to as a client.  They are different
+things with different failure rules (`slife2.toolhub`), and this is the only
+place both are configured.
+
 Three things are worth stating outright.
 
 **A provider holds its own credentials; a wire protocol holds the process.**  A
@@ -119,7 +142,7 @@ DEFAULT_CONFIG_NAME = "slife2.yaml"
 #: apart, which is exactly why both say so here.
 DEFAULT_AGENT = "slife2"
 
-#: The MCP names the two always-present servers advertise, as `Client.server_info`
+#: The MCP names the servers in this system advertise, as `Client.server_info`
 #: reports them.  A client proves it reached the server it meant by comparing
 #: against these; see `slife2.mcp_server.identifies`.
 #:
@@ -129,6 +152,14 @@ DEFAULT_AGENT = "slife2"
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
 MEMORY_SERVER_NAME = "slife2-memory"
+BUILTINS_SERVER_NAME = "slife2-builtins"
+TOOLHUB_SERVER_NAME = "slife2-toolhub"
+
+#: The components that are not model backends, and so have a name of their own
+#: rather than one derived from a wire protocol.  The order is the order the
+#: launcher starts them in — see `slife2.launcher.specs` — which is why
+#: `builtins` comes before `toolhub`: the hub connects to it at startup.
+LOCAL_SERVERS = ("memory", "builtins", "toolhub", "agent")
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -304,12 +335,78 @@ class AgentSettings:
 
 
 @dataclass(frozen=True)
+class ToolServerSettings:
+    """One external MCP server, as the toolhub needs to reach it.
+
+    **Two transports, and which one is a fact about the entry rather than a
+    field.**  A `command` means a process we start and talk to over its standard
+    input; a `url` means somebody else's process, reached over the network.  So
+    :attr:`transport` is computed rather than stored, and an entry that names
+    both — or neither — is refused at load time (`_tool_server`) rather than
+    resolved by a precedence rule nobody would remember.
+
+    `env` and `headers` are where a secret lives, and both go through
+    :func:`resolve_secret`, so `${VAR}` resolves through the same chain as a
+    provider key.  Nothing else here is secret: a `command` is a program name
+    and an `args` list is on the command line of a process anyone can inspect.
+
+    Not frozen-by-accident: this is read-only configuration, and the hub keeps
+    its *state* — whether it is connected, what it last listed — in its own
+    object beside it.  Config that a connection could write back into is how a
+    running system stops matching the file it was started from.
+    """
+
+    #: The name it is configured under.  It prefixes every tool this server
+    #: offers, so it is also the name a person reads in a tool call.
+    name: str
+    #: Which section it was written in — `"mcp"` or `"rest"`.  A label, not a
+    #: behaviour: a REST API entry has already been expanded into the stdio
+    #: command it describes by the time one of these exists (see `_rest_api`),
+    #: so nothing downstream branches on this.  It is kept because it is the
+    #: answer to the first question anyone debugging asks, which is why a server
+    #: they never wrote a `command:` for is running `uvx`.
+    kind: str = "mcp"
+    #: What the server is for, in the operator's words.  Not the model's: the
+    #: descriptions the model reads come from the server itself, tool by tool.
+    #: This one is for whoever opens the config a year later and for `servers()`,
+    #: which is where "why is that connected" gets answered.
+    description: str = ""
+    #: stdio: the program to start.
+    command: str = ""
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+    #: http: the endpoint, either transport.  A URL ending in `/sse` is the
+    #: older SSE transport; anything else is Streamable HTTP.
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    #: stdio only, and it matters more than it looks: a server started with a
+    #: relative path in its arguments resolves that path against its working
+    #: directory, and a daemon's own working directory is the runtime folder.
+    #: Empty means the data directory — where a person means `.` to point.
+    cwd: str = ""
+    #: `false` stays configured but is never connected, and by itself keeps the
+    #: hub process from starting at all.  This is how a slow, paid or
+    #: currently-broken server stays in the file without being in the way.
+    enabled: bool = True
+
+    @property
+    def transport(self) -> str:
+        """`"http"` or `"stdio"` — read off which field is set."""
+        return "http" if self.url else "stdio"
+
+
+@dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
 
     #: name -> where it listens, keyed by `"agent"` and by each `api` in use.
     servers: dict[str, ServerSettings] = field(default_factory=dict)
     providers: dict[str, ProviderSettings] = field(default_factory=dict)
+    #: The external tool servers the toolhub connects to, from both `tools:` and
+    #: `rest-api:` — one mapping, because the hub connects to one kind of thing
+    #: and the difference between the two sections is how an entry is written,
+    #: not what it becomes.  `ToolServerSettings.kind` keeps the provenance.
+    tools: dict[str, ToolServerSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
@@ -372,6 +469,17 @@ class Config:
         used = {p.api for p in self.providers.values()}
         return [api for api in API_BACKENDS if api in used]
 
+    def tool_servers(self) -> list[ToolServerSettings]:
+        """The external tool servers the hub should connect to, in file order.
+
+        **One accessor, because "disabled is not connected" has to be one rule.**
+        The launcher and the hub both ask this question — the first to decide
+        whether there is anything to connect at all, the second to decide what to
+        connect — and two spellings of `enabled` is how an entry ends up started
+        by one and skipped by the other.
+        """
+        return [server for server in self.tools.values() if server.enabled]
+
 
 def default_config() -> Config:
     """The config used when no file is found.
@@ -403,6 +511,14 @@ def default_config() -> Config:
             # A component of its own: keeping turns is one job, and it is not a
             # wire protocol like the model backends.
             "memory": ServerSettings(port=8010),
+            # The tools slife2 ships — `echo`, `now`, `calc` — served like
+            # anybody else's, because the hub is the one place that decides what
+            # the model may call; see `slife2.builtins` and DESIGN.md §8.
+            "builtins": ServerSettings(port=8030),
+            # The model's tools, and the only process that holds a tool server's
+            # credentials.  It connects to `builtins` above and to everything
+            # under `tools:` in the config file.
+            "toolhub": ServerSettings(port=8020),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
@@ -410,6 +526,7 @@ def default_config() -> Config:
             "openai-responses": ServerSettings(port=8003),
         },
         providers={"deepseek": deepseek},
+        tools={},
         agent=AgentSettings(),
         default="deepseek/deepseek-flash",
     )
@@ -476,10 +593,10 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
 
     servers = dict(base.servers)
     for name, spec in _mapping(raw.get("servers"), "servers").items():
-        if name not in ("agent", "memory") and name not in API_BACKENDS:
+        if name not in LOCAL_SERVERS and name not in API_BACKENDS:
             raise ConfigError(
                 f"servers.{name}: not a server this system runs "
-                f"(known: agent, memory, {', '.join(API_BACKENDS)})"
+                f"(known: {', '.join(LOCAL_SERVERS)}, {', '.join(API_BACKENDS)})"
             )
         servers[str(name)] = _server(
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
@@ -504,9 +621,157 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     return Config(
         servers=servers,
         providers=providers,
+        tools=_tools(raw),
         agent=agent,
         default=str(raw.get("default") or _first_reference(providers)),
     )
+
+
+#: The proxy a `rest-api:` entry is expanded into when it does not name a command
+#: of its own: an OpenAPI document in, an MCP server out.  Both halves are v1's,
+#: kept because they are what the ecosystem actually publishes — there is no
+#: other well-known tool that does this — and because keeping them in one place
+#: is what lets the *hub* stay ignorant of REST entirely.
+OPENAPI_PROXY_COMMAND = "uvx"
+OPENAPI_PROXY_ARGS = ("mcp-openapi-proxy",)
+
+#: The environment the proxy reads.  v1's names, for the same reason.
+OPENAPI_SPEC_URL = "OPENAPI_SPEC_URL"
+OPENAPI_SERVER_URL = "SERVER_URL_OVERRIDE"
+OPENAPI_API_KEY = "API_KEY"
+
+
+def _tools(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
+    """Both tool sections, as one mapping of upstreams.
+
+    `tools:` is an MCP server written out; `rest-api:` is a REST API written
+    out, and is *expanded* here into the stdio command that serves it.  After
+    this function there is only the first kind, which is what keeps the hub from
+    having to know that REST exists.
+
+    A name in both sections is refused rather than resolved.  Both would become
+    one entry called `{name}__{tool}` in the model's tool list, so which of the
+    two won would be invisible at every point a person could look.
+    """
+    result: dict[str, ToolServerSettings] = {}
+
+    for name, spec in _mapping(raw.get("tools"), "tools").items():
+        result[str(name)] = _tool_server(spec, str(name))
+
+    for name, spec in _mapping(raw.get("rest-api"), "rest-api").items():
+        if str(name) in result:
+            raise ConfigError(
+                f"rest-api.{name}: already configured under `tools:`; the two "
+                f"would collide as tool names"
+            )
+        result[str(name)] = _rest_api(spec, str(name))
+
+    return result
+
+
+def _tool_server(raw: Any, name: str) -> ToolServerSettings:
+    """One `tools:` entry: an MCP server, over stdio or over the network."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"tools.{name}: expected a mapping")
+
+    command = str(raw.get("command") or "")
+    url = str(raw.get("url") or "")
+    if command and url:
+        raise ConfigError(
+            f"tools.{name}: has both `command` and `url`; one entry is one "
+            f"transport — write two entries if you meant two servers"
+        )
+    if not command and not url:
+        raise ConfigError(
+            f"tools.{name}: needs `command` (a program to start) or `url` (an "
+            f"endpoint to connect to)"
+        )
+
+    return ToolServerSettings(
+        name=name,
+        description=str(raw.get("description") or ""),
+        command=command,
+        args=_string_list(raw.get("args"), f"tools.{name}.args"),
+        env=_secrets(raw.get("env"), f"tools.{name}.env"),
+        url=url,
+        headers=_secrets(raw.get("headers"), f"tools.{name}.headers"),
+        cwd=str(raw.get("cwd") or ""),
+        enabled=bool(raw.get("enabled", True)),
+    )
+
+
+def _rest_api(raw: Any, name: str) -> ToolServerSettings:
+    """One `rest-api:` entry, expanded into the stdio upstream that serves it.
+
+    Two spellings, one mechanism.  Writing `spec:` gets the standard proxy
+    (an OpenAPI document in, an MCP server out) with the three environment
+    variables it reads filled in from this entry; writing `command:` gets
+    whatever proxy you have, for the cases the standard one does not cover — a
+    pinned version, a private fork, a spec that needs an argument.
+
+    What is *not* available is neither: an entry with no `spec` and no `command`
+    describes a REST API nobody can reach, and finding that out at load says so
+    once instead of on every turn.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"rest-api.{name}: expected a mapping")
+
+    command = str(raw.get("command") or "")
+    spec = str(raw.get("spec") or "")
+    if not command and not spec:
+        raise ConfigError(
+            f"rest-api.{name}: needs `spec` (the OpenAPI document's URL or "
+            f"path) or an explicit `command`"
+        )
+
+    env = _secrets(raw.get("env"), f"rest-api.{name}.env")
+    if not command:
+        command = OPENAPI_PROXY_COMMAND
+        env = {OPENAPI_SPEC_URL: spec, **env}
+        args = (*OPENAPI_PROXY_ARGS, *_string_list(raw.get("args"), name))
+    else:
+        args = _string_list(raw.get("args"), f"rest-api.{name}.args")
+        if spec:
+            env = {OPENAPI_SPEC_URL: spec, **env}
+
+    # These two are the proxy's, and they are written from the entry rather than
+    # into `env:` because they are what the entry is *about*: which API, and
+    # where, is not an environment variable a person should have to spell.
+    if base_url := str(raw.get("base_url") or ""):
+        env[OPENAPI_SERVER_URL] = base_url
+    if raw.get("api_key") is not None:
+        env[OPENAPI_API_KEY] = resolve_secret(raw.get("api_key"))
+
+    return ToolServerSettings(
+        name=name,
+        kind="rest",
+        description=str(raw.get("description") or ""),
+        command=command,
+        args=args,
+        env=env,
+        cwd=str(raw.get("cwd") or ""),
+        enabled=bool(raw.get("enabled", True)),
+    )
+
+
+def _string_list(raw: Any, where: str) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: expected a list")
+    return tuple(str(item) for item in raw)
+
+
+def _secrets(raw: Any, where: str) -> dict[str, str]:
+    """A mapping whose values go through the secret chain.
+
+    Only `env` and `headers`, because those are the two places a tool server is
+    handed a credential; a `command` or an `args` list is a program name and is
+    visible in the process table regardless.
+    """
+    return {
+        str(key): resolve_secret(value) for key, value in _mapping(raw, where).items()
+    }
 
 
 def _template_path(raw: Any, config_dir: Path | None, default: str) -> str:
@@ -624,8 +889,11 @@ __all__ = [
     "AGENT_SERVER_NAME",
     "API_BACKENDS",
     "API_SERVER_NAMES",
+    "BUILTINS_SERVER_NAME",
     "DEFAULT_AGENT",
+    "LOCAL_SERVERS",
     "MEMORY_SERVER_NAME",
+    "TOOLHUB_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",
     "Config",
@@ -633,6 +901,7 @@ __all__ = [
     "ModelSettings",
     "ProviderSettings",
     "ServerSettings",
+    "ToolServerSettings",
     "default_config",
     "find_config_path",
     "load",

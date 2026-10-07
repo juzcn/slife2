@@ -3,13 +3,16 @@
 **Terminal-based AI agent — slife v2, a clean-slate rebuild.**
 
 Every component is an MCP server. The TUI is a client; the agent loop is a server
-and a client; each model backend is its own server. Two properties follow from
-that, and they are the point of the whole arrangement:
+and a client; each model backend is its own server, and so is the hub the tools
+come from. Two properties follow from that, and they are the point of the whole
+arrangement:
 
-- **A provider API key exists only inside the LLM server process that needs it.**
-  The agent loop cannot leak one because it never has one.
+- **A key exists only inside the process that needs it.** A provider's API key
+  lives in the LLM server that calls it; a tool server's token lives in the
+  toolhub that connects to it. The agent loop cannot leak either, because it
+  never has one.
 - **The agent loop imports no provider SDK.** Switching providers is changing a
-  URL.
+  URL, and adding tools is adding an entry to a config file.
 
 [DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
 
@@ -55,6 +58,8 @@ without passing an argument:
 
 ```bash
 uv run slife2-agent            # the agent loop,             :8000
+uv run slife2-toolhub          # the model's tools,          :8020
+uv run slife2-builtins         # echo, now, calc,            :8030
 uv run slife2-memory           # turns, one db per agent,    :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -81,6 +86,54 @@ The marker stays in the transcript, so the record shows what was sent. Only
 local files, and only when the model's config lists `image` under `input` — a
 model that cannot read images says so rather than quietly ignoring what you
 attached.
+
+## Tools
+
+The model's tool list — the ones slife2 ships and the ones other people run —
+comes from **`slife2-toolhub`**, which is also the only process that holds a tool
+server's credentials. Three sources feed it:
+
+```yaml
+# The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
+# There is no config for them — adding one is a decorated function in
+# `slife2/builtins.py`, and it arrives at the model the same way as everything
+# below.
+
+tools:                                  # other people's MCP servers
+  arxiv:
+    url: https://arxiv.mcp.brunosan.de/mcp
+  serper:
+    command: npx                        # stdio: a process slife2 starts
+    args: [-y, serper-search-scrape-mcp-server]
+    env:
+      SERPER_API_KEY: ${SERPER_API_KEY}
+
+rest-api:                               # OpenAPI documents, one tool per endpoint
+  github:
+    spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
+    base_url: https://api.github.com
+    api_key: ${GITHUB_TOKEN}
+```
+
+`command` starts a process and talks over its standard input; `url` connects to
+somebody else's over the network. A `rest-api` entry is the same thing said
+shorter — it is expanded into the `uvx mcp-openapi-proxy` invocation that serves
+it, so the hub has one mechanism rather than two. `${VAR}` resolves through the
+same chain as a provider key.
+
+Every tool reaches the model as `{name}__{tool}` — `builtins__calc`,
+`arxiv__arxiv_search_papers` — and the list is re-read from the hub **before
+every model call**, so a server that started a moment ago, or grew a tool, is in
+the next call's list.
+
+`enabled: false` keeps an entry configured but never connects it, which is the
+lever worth knowing: everything enabled is a process at startup and its tools in
+every request. `slife2 down` takes the hub's child processes down with it.
+
+The builtins are the one required tool server: they are a component slife2
+starts, so a hub that cannot reach them fails the turn rather than quietly
+continuing with fewer tools. Everything in `tools:` is somebody else's and
+optional, and is reported rather than fatal.
 
 ## Where things live
 
@@ -130,7 +183,14 @@ slife2/
 ├─ prompt.py          # the Jinja2 system prompt, rendered per turn
 ├─ messages.py        # the neutral message model — what crosses `stream_chat`
 ├─ events.py          # the turn event vocabulary, and its progress encoding
-├─ tools.py           # the tool registry, plus `now` and `calc`
+├─ tools.py           # the tool registry: what the loop can call, and how a
+│                     #   failure reaches the model as text
+├─ builtins.py        # slife2-builtins: `echo`, `now`, `calc`, and `calc`'s
+│                     #   AST walker — a tool is one decorated function
+├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
+│                     #   and a listed tool as one the loop can run
+├─ toolhub.py         # slife2-toolhub: the model's tools, the servers behind
+│                     #   them, and the credentials they need
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ memory.py          # TurnStore: one SQLite file per agent
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
@@ -159,14 +219,18 @@ slife2/
 
 The dependency direction is one-way and is what makes each layer testable alone:
 `tui/` → MCP → `server/` → `loop.py` → {`llm/base.py`, `tools.py`, `events.py`,
-`messages.py`} → `config.py`. The loop imports neither `server/` nor `tui/`.
+`messages.py`} → `config.py`. The loop imports neither `server/` nor `tui/`, and
+it does not import `toolhub.py` or `toolclient.py` either: it is handed a
+coroutine that returns a registry, and where that registry came from is the
+agent server's business.
 
 `mcp_server.py` is a leaf every server sits on: it holds what being one of our
 servers means — the flags, the HTTP transport, the record that says a daemon is
 here, and the two conventions (`house_server`) that would otherwise be copied
 into each server. It is not LLM-specific, which is why it is not under
-`llm/`: the memory server and the agent server are not LLM components, and the
-scaffold they serve on should not come out of the LLM package.
+`llm/`: the memory server, the toolhub and the agent server are not LLM
+components, and the scaffold they serve on should not come out of the LLM
+package.
 
 ## Tests
 

@@ -21,18 +21,28 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
   ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-memory                 (one SQLite file per agent)
+  ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub
+  │                                 ├── :8030/mcp ──▶ slife2-builtins   (`echo`, `now`, `calc`)
+  │                                 └── MCP ──▶    external tool servers, and REST via a proxy
   ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai             (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
   └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
 ```
 
 **One component, one job, and the granularity is deliberate.**  A model backend
-speaks one wire protocol; memory keeps turns; the agent loop runs turns.  A
-provider is a row in a backend's config rather than a process of its own, so
-three providers that happen to speak two protocols are two model processes and
-not three — the smallness is in what each process *does*, not in how many there
-are.  The count in the diagram is what one config uses, not a fixed number:
-a protocol no provider speaks is not started at all.
+speaks one wire protocol; memory keeps turns; the hub is where the tools come
+from; the agent loop runs turns.  A provider is a row in a backend's config
+rather than a process of its own, so three providers that happen to speak two
+protocols are two model processes and not three — the smallness is in what each
+process *does*, not in how many there are.  The count in the diagram is what one
+config uses, not a fixed number: a protocol no provider speaks is not started at
+all, and the hub is one process whether it fronts one tool server or twenty.
+
+The builtins being a server of their own is the same rule applied to the one
+place it looks like overkill: they have no credential and no network, and they
+are still behind the hub, because "where the tools come from" is a job and a
+component that is sometimes the answer to it is a component with a branch in it.
+See §8.
 
 The two OpenAI entries are the point worth checking, because they look like
 duplication and are not.  **Responses is a different wire format, not a flag on
@@ -44,7 +54,10 @@ branch inside the server rather than a fact about the config.
 Two properties fall out of this and are the reason for it:
 
 - **A provider API key exists only inside the model server process that needs
-  it.** The agent loop cannot leak one because it never has one.
+  it.** The agent loop cannot leak one because it never has one. The same holds
+  for tools, which is the second thing the hub buys: `SERPER_API_KEY` and
+  `GITHUB_TOKEN` are read by `slife2-toolhub` and exported into the environment
+  of a child process, and the agent that asks for the tool never sees either.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
   switching providers is changing a URL. `grep -r "import openai\|import anthropic"
   slife2/` matches only files under `llm/` that are model servers — one per wire
@@ -136,7 +149,7 @@ displaying". The premise stopped holding. A loop has to be addressable in its
 own right, for two reasons that are really one: so that a message arriving while
 it is busy can **wait** for it rather than displace what is running, and so that
 a caller which is not displaying the conversation can still continue one. (A
-subagent is that caller — see §8.)
+subagent is that caller — see §9.)
 
 So a conversation is an object, and the surface is two tools:
 
@@ -190,7 +203,7 @@ avoided:
   so truncating to the snapshot would delete the very message this arrangement
   exists to not lose.
 - **A conversation store that can grow without bound**, which is now the
-  server's problem rather than the caller's. See §8.
+  server's problem rather than the caller's. See §9.
 
 **Every turn of a loop that has memory is recorded, cancelled ones included.**
 The rule is deliberately not "remember to record the cancel path": a write that
@@ -232,9 +245,10 @@ whole point.
 
 ## 4. Shared servers, and the launcher
 
-The servers are **shared infrastructure**, not four terminals a user babysits.
-`slife2` brings up what its config needs and attaches to whatever is already
-running, so a second instance is one command and no duplicate process appears.
+The servers are **shared infrastructure**, not a row of terminals a user
+babysits. `slife2` brings up what its config needs and attaches to whatever is
+already running, so a second instance is one command and no duplicate process
+appears.
 
 Four decisions carry that:
 
@@ -447,7 +461,105 @@ Three load-bearing details:
   broken observer cannot end a turn — the loop swallows its exceptions, but
   deliberately lets `CancelledError` through.
 
-## 8. Deferred
+## 8. The toolhub
+
+**Where the model's tools come from, and the only process that holds their
+credentials.** It is a port of v1's `mcp-gateway`, and the shape that survived
+the port is the whole of it:
+
+```
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  slife2-builtins     (`echo`, `now`, `calc`)
+                          list_tools        └──▶  external tool servers (stdio or http)
+                          call_tool
+                          servers
+```
+
+**The hub's own tools are the agent's API and never the model's.** Like the
+memory server's `remember` and `recent`, the model never sees `list_tools`,
+`call_tool` or `servers`; it sees the *proxied* tools, under `{server}__{tool}`
+names. That indirection is what keeps the hub's surface constant: a server
+coming and going changes what the model may call without changing anything about
+the hub's own protocol.
+
+**Nothing is served by the hub process itself, and the builtins are why that is
+worth saying.** `echo`, `now` and `calc` have no credential, no config and no
+network, so a hop to reach them buys nothing — and they are behind one anyway,
+served by `slife2-builtins` and reached through exactly the code path that
+reaches arxiv. The alternative, a hub that serves a few tools itself, is the
+second mechanism this whole arrangement exists to avoid: those tools would not be
+in `servers()`, they would not have a connection that can fail, they would not be
+in whatever a tool search is eventually built on, and the first thing to drift
+would be the one place the tool table has a branch in it. What the hop costs is
+one loopback call per model call; what it buys is that "where the tools come
+from" has one answer and no exceptions.
+
+**A tool list is one thing and it has one owner.** Provenance (whose tool is
+this), the naming rule that keeps two servers' `search` apart, and — the first
+time it appears — which tools may run without asking, are all questions about
+the *set*, and a set assembled in two places disagrees with itself. That is why
+the agent holds no registry of its own and why the builtins are not exempt from
+it.
+
+**The list is read before every model call, and that is what keeps it in sync.**
+The tool list goes out *with* each request, so it is asked for with each request:
+`AgentLoop` is handed a coroutine (`refresh=`) and calls it at the top of every
+step, and step 1's list is also what a missing hub fails on, before the
+conversation has been touched. A tool a server grew, or a server that just
+finished starting, is in the next *call*'s list rather than the next turn's. v1
+needed a `tools/list_changed` subscription, a shared catalog and a reconcile
+pass to arrive at the same place; here the answer can be at most one call old,
+and nothing has to be kept in step to make that true. The loop still does not
+know what a tool server is — it is handed a coroutine that returns a registry.
+
+**Health is a tool list, not a connection** — v1's rule, and it is most of what
+`Upstream` does. A server is either usable, meaning its tool list is in hand, or
+it is not, and in the second case the useful fact is what it said the last time
+we asked. There is no connection state machine and no timer: the snapshot is
+dropped when the peer says `tools/list_changed`, when a call fails at the
+transport, or when a connect fails, and the next ask re-reads it.
+
+**Two failures that look alike and are not.** The hub distinguishes a *transport*
+failure from a peer's *refusal*, and does opposite things with them. A refusal —
+an unknown tool, bad arguments, a permission it will not grant — is a value the
+model reads and acts on, and rebuilding the link would only be told the same
+thing again. A link that died mid-call is retried, **once**: a tool that never
+ran is worth a second attempt, and a server that is down must not turn every
+call into two timeouts. FastMCP makes the split visible for free —
+`call_tool(..., raise_on_error=False)` returns `is_error` where the raising form
+throws — which is one of the reasons this port is a few hundred lines where v1's
+was three thousand.
+
+**Three kinds of missing, and only one of them is ours.** A missing *hub* is a
+component gone and fails the turn, like memory. A missing *upstream* is the
+operator's configuration and somebody else's process: reported by `servers()`,
+left out of the tool list, and retried on the next ask. An upstream *refusing a
+call* is one caller's bad data. Collapsing these is how a config mistake becomes
+an outage, and separating them is most of what the module's prose is about.
+
+**The builtins are a component, not an upstream, and the difference is a flag.**
+Everything under `tools:` is somebody else's and optional; `slife2-builtins` is
+started by slife2, so a hub that cannot reach it *refuses to list anything* —
+because a model that has quietly lost `now` and `calc` is a failure nobody can
+see, and a shorter tool list is exactly what that failure looks like. It is one
+`required` flag on the connection rather than a branch in the tool table, which
+is the test of whether the builtins really are ordinary: everything else about
+them — the URL, the connection, the snapshot, the naming — is the same as
+arxiv's.
+
+**REST APIs are not a second mechanism.** A `rest-api:` entry is expanded *by
+the config layer* into the stdio command that serves it — `uvx mcp-openapi-proxy`
+with the environment it reads — so what reaches the hub is an ordinary upstream
+and nothing in the hub knows that REST exists. That wrapper is v1's, kept because
+it is what the ecosystem publishes and because writing an OpenAPI-to-tools
+converter here would be a large feature that is wrong in interesting ways.
+
+What was deliberately **not** ported: v1's `mcp_set`/`mcp_remove` tools, which
+let the model write its own `tools.yaml`. slife2's config is one file read by
+every process and by the launcher, and the launcher already refuses to let a
+command line name an arbitrary program; a language model choosing one is the
+same capability with a worse author.
+
+## 9. Deferred
 
 Named so they are decisions rather than oversights:
 
@@ -472,7 +584,29 @@ Named so they are decisions rather than oversights:
 - **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
   does not have to answer it. A tool that writes a file reopens the question v1
   answered with a model-driven `_approve` parameter — and a tool that spawns a
-  subagent is the first such tool this design has an obvious use for.
+  subagent is the first such tool this design has an obvious use for. §8 says why
+  the hub is where the answer goes: it is the one place that knows the whole set,
+  and the only one that could hold a per-tool policy without the agent learning
+  what a tool server is.
+- **A tool list that is too long.** Everything enabled in `tools:` is in every
+  model call's list, and the working config enables twenty servers — hundreds of
+  tools, which is a large request, a large bill, and a model choosing worse.
+  v1's answer was on-demand loading: a `tool_search` the model runs, then
+  `func_tool_load`, with `tool_load.threshold` (100 in v1's config) as the point
+  where tools start being evicted and `autoload: true` to exempt one. That is a
+  real feature and not a port, because it needs a catalog the hub does not have;
+  until then `enabled: false` is the lever, and it is a per-server one.
+- **Device-code OAuth for tool servers.** v1's gateway ran the whole RFC 8628
+  flow, kept tokens in the OS keyring through `credstore`, and held the token
+  beside the configured headers so a re-auth did not churn them. Not ported:
+  `${VAR}` headers cover a token somebody already has, and FastMCP's own `auth:`
+  key passes through to the SDK's browser flow for the rest. The gap is the
+  headless case, where the browser flow has no browser.
+- **Digesting an oversized tool result.** A tool can return more text than the
+  conversation can hold, and nothing here bounds it. Memory already has the
+  pattern for the turn record — an oversized result becomes an announced
+  head-and-tail digest — and the same rule belongs on the way *into* the model,
+  not only on the way into the database.
 - **Subagents.** The shape is decided and the seams are in: one agent has one
   loop with memory, plus N worker loops that have none. `Loop.records` and
   `Loop.children` exist for it, workers hang off their parent so a worker id is

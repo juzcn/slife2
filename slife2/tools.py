@@ -1,10 +1,11 @@
-"""The tools the agent loop can run, and the registry that dispatches them.
+"""The tool registry: what the loop can call, and what happens when a call fails.
 
-This cut ships two side-effect-free tools.  They are not meant to be useful —
-they exist to prove the chain works end to end: the model asks for a call, the
-loop runs it, the result goes back into the conversation, and the model answers
-using it.  A tool that touched the filesystem would test the same chain while
-adding a sandboxing question this cut is not ready to answer.
+This is the loop's *vocabulary* for tools and nothing more — `Tool` is a spec
+and a function, `ToolRegistry` looks one up and runs it, and both are unaware
+that anything is served over a socket.  The tools themselves live where they are
+served: `slife2.builtins` for the ones slife2 ships, and whatever process
+`slife2.toolhub` connected to for everything else.  That split is deliberate —
+`loop.py` imports this module, and the loop must not import a server.
 
 The registry's one interesting property is that :meth:`ToolRegistry.execute`
 **never raises**.  A tool that fails produces error *text*, which is handed back
@@ -16,12 +17,9 @@ not a failure mode.
 
 from __future__ import annotations
 
-import ast
 import logging
-import operator
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from slife2.messages import ToolCall, ToolSpec
@@ -31,6 +29,25 @@ logger = logging.getLogger(__name__)
 #: How a tool is implemented: arguments in, result text out.  Returning text
 #: rather than raising is the convention — see the module docstring.
 ToolFunc = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+class ToolFailed(Exception):
+    """A tool that failed *without* anything going wrong inside it.
+
+    The distinction is what the exception's name would have carried.  When a
+    tool raises by itself, the class is the useful part of the message —
+    `KeyError: 'e'` tells the model which argument it got wrong, and
+    `ZeroDivisionError` tells it what to avoid.  But a tool that proxies another
+    process has already been *told* it failed, and its own message is the whole
+    story: naming this class in front of it would add a word that was never in
+    the error and that no model can act on.
+
+    So this is the one exception `ToolRegistry.execute` renders bare, and it
+    exists so that "the call failed" can reach the transcript as a failure.  A
+    hub-backed tool that returned error text as an ordinary result would show up
+    as a success with a discouraging message under it, which is worse than
+    either.
+    """
 
 
 @dataclass(frozen=True)
@@ -65,135 +82,11 @@ class ToolRegistry:
 
         try:
             return await tool.run(call.arguments), True
+        except ToolFailed as exc:
+            logger.warning("tool %s failed: %s", call.name, exc)
+            return f"Error: {exc}", False
         except Exception as exc:
             # Includes the exception type: "KeyError: 'e'" tells the model which
             # argument it got wrong, where "tool failed" does not.
             logger.warning("tool %s raised: %s", call.name, exc)
             return f"Error: {type(exc).__name__}: {exc}", False
-
-
-# --- builtin tools -----------------------------------------------------------
-
-
-async def _now(_arguments: dict[str, Any]) -> str:
-    """Current UTC time, ISO 8601.
-
-    Deliberately takes no timezone.  Accepting an IANA zone would mean
-    `zoneinfo.ZoneInfo("Asia/Shanghai")`, which raises on a Windows machine with
-    no `tzdata` package installed — so the tool would drag in a dependency to
-    answer a question the model can do arithmetic on.  UTC has no such problem.
-    """
-    return datetime.now(UTC).isoformat()
-
-
-#: Binary operators `calc` will evaluate, and the one-line reason each is here.
-_BINARY_OPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-}
-
-_UNARY_OPS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-}
-
-#: Largest exponent `calc` will evaluate.  `9**9**9` is a few keystrokes that
-#: would otherwise hang the process computing an integer with millions of
-#: digits; the model gets an error instead.
-_MAX_EXPONENT = 1000
-
-
-def evaluate(expression: str) -> float | int:
-    """Evaluate an arithmetic expression safely.
-
-    Walks the AST and permits only numbers, parentheses, and the operators in
-    `_BINARY_OPS`/`_UNARY_OPS`.  `eval()` is not an option — this input comes
-    from a language model, and a model is an attacker who has read the prompt.
-
-    Raises:
-        ValueError: On any expression containing something not on the list.
-        ZeroDivisionError: On division by zero, which the caller renders.
-    """
-    try:
-        tree = ast.parse(expression, mode="eval")
-    except SyntaxError as exc:
-        raise ValueError(f"not a valid expression: {expression!r}") from exc
-    return _eval_node(tree.body)
-
-
-def _eval_node(node: ast.expr) -> float | int:
-    match node:
-        case ast.Constant(value=bool()):
-            # Checked before the numeric case: `bool` is a subclass of `int`,
-            # so `True + 1` would otherwise quietly evaluate to 2.
-            raise ValueError("booleans are not numbers here")
-        case ast.Constant(value=int() | float() as value):
-            return value
-        case ast.BinOp(left=left, op=op, right=right):
-            handler = _BINARY_OPS.get(type(op))
-            if handler is None:
-                raise ValueError(f"operator not allowed: {type(op).__name__}")
-            return _apply_binary(handler, _eval_node(left), _eval_node(right), op)
-        case ast.UnaryOp(op=op, operand=operand):
-            unary = _UNARY_OPS.get(type(op))
-            if unary is None:
-                raise ValueError(f"operator not allowed: {type(op).__name__}")
-            return unary(_eval_node(operand))
-        case _:
-            raise ValueError(f"not allowed in an expression: {type(node).__name__}")
-
-
-def _apply_binary(
-    handler: Callable[[Any, Any], Any],
-    left: float | int,
-    right: float | int,
-    op: ast.operator,
-) -> float | int:
-    """Apply an operator, bounding the one that can run away."""
-    if isinstance(op, ast.Pow) and abs(right) > _MAX_EXPONENT:
-        raise ValueError(f"exponent too large (limit {_MAX_EXPONENT})")
-    return handler(left, right)
-
-
-async def _calc(arguments: dict[str, Any]) -> str:
-    """Evaluate an arithmetic expression."""
-    expression = arguments.get("e") or arguments.get("expression")
-    if not isinstance(expression, str) or not expression.strip():
-        raise ValueError("expected a string expression in the 'e' argument")
-    return str(evaluate(expression))
-
-
-def builtin_tools() -> list[Tool]:
-    """The tools this cut ships."""
-    return [
-        Tool(
-            spec=ToolSpec(
-                name="now",
-                description="Current date and time in UTC, ISO 8601.",
-                parameters={"type": "object", "properties": {}},
-            ),
-            run=_now,
-        ),
-        Tool(
-            spec=ToolSpec(
-                name="calc",
-                description="Evaluate an arithmetic expression, e.g. '2 + 2 * 3'.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "e": {
-                            "type": "string",
-                            "description": "The expression to evaluate.",
-                        }
-                    },
-                    "required": ["e"],
-                },
-            ),
-            run=_calc,
-        ),
-    ]

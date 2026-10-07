@@ -23,6 +23,13 @@ call both carry it — so a hop is never anonymous.  What the model servers do
 *not* do with it is keep the conversation: see DESIGN.md §3 for why the history
 has to live here, on the side of the hop that does not speak a wire protocol.
 
+**The tools come from the toolhub**, and are asked for again before every model
+call — the list goes out with each request, so it is read with each request.
+That is why this server holds no tool registry of its own and why `loop.py`
+still knows nothing about MCP: it is handed a coroutine, and where the registry
+came from is nobody else's business.  The builtins included: one owner for the
+model's whole tool list is worth one hop.  See DESIGN.md §8.
+
 Two consequences of owning the history are paid for here rather than avoided,
 because they are the price of the state:
 
@@ -35,7 +42,7 @@ because they are the price of the state:
   inside the lock.
 
 What statelessness bought and is now given up deliberately: a conversation store
-that can grow without bound.  See DESIGN.md §8 — trimming is the next thing, not
+that can grow without bound.  See DESIGN.md §9 — trimming is the next thing, not
 a thing this cut pretends to have solved.
 """
 
@@ -58,6 +65,7 @@ from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
     MEMORY_SERVER_NAME,
+    TOOLHUB_SERVER_NAME,
     Config,
     find_config_path,
     load,
@@ -78,7 +86,8 @@ from slife2.mcp_server import (
 )
 from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
-from slife2.tools import ToolRegistry, builtin_tools
+from slife2.toolclient import remote_tools
+from slife2.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +98,13 @@ SERVER_NAME = "slife2-agent"
 #: A store that is *gone* is a different matter — that fails the turn outright;
 #: see `slife2.mcp_server.open_server`.
 MEMORY_TIMEOUT_SECONDS = 10.0
+
+#: How long to wait on the toolhub.  Longer than the memory server's, because
+#: this call is not a write after the fact: `list_tools` is what the turn's tool
+#: list is built from, and it may briefly wait for tool servers that are still
+#: connecting (`slife2.toolhub.LIST_SETTLE_SECONDS`).  A timeout shorter than
+#: that would turn "waiting for a server that is starting" into a failed turn.
+TOOLHUB_TIMEOUT_SECONDS = 30.0
 
 #: How long a conversation survives with nothing asked of it.  This is
 #: housekeeping, not a lifetime a caller can observe: the sweep only reclaims
@@ -201,12 +217,13 @@ def build_server(
     *,
     backend: LLMBackend | None = None,
     memory_client: Client | None = None,
+    hub_client: Client | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
 
-    `backend` and `memory_client` are injectable so the whole server — model
-    call, tools, memory write — can be exercised over the in-memory transport
-    with no network at all.
+    `backend`, `memory_client` and `hub_client` are injectable so the whole
+    server — model call, tools, memory write — can be exercised over the
+    in-memory transport with no network at all.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -214,6 +231,11 @@ def build_server(
     wanted is a property of the *loop*: a caller names one when it opens one, and
     this server serves every caller.  A model nobody asks for is a connection
     nobody opens.
+
+    The toolhub is the same arrangement with a different lifetime question
+    answered: its *connection* is kept for the process, and its *tool list* is
+    asked for on every turn.  See `turn_tools` for why those are not the same
+    choice.
     """
     #: Cached per model *name*, because the connection behind one is expensive
     #: and a conversation's model never changes.  `MCPBackend` rather than the
@@ -226,6 +248,9 @@ def build_server(
     #: Whether *we* opened it, and so whether we should close it.  An injected
     #: client belongs to whoever made it.
     memory_owned = memory_client is None
+    #: The toolhub client, on the same terms.
+    hub_conn: Client | None = hub_client
+    hub_owned = hub_client is None
 
     #: Every conversation, by key.  One entry per `(agent, subagent)` that has
     #: been used, which is what makes isolation a property of the key rather than
@@ -271,6 +296,56 @@ def build_server(
                 )
             assert memory_conn is not None  # open_server returns one or raises
             return memory_conn
+
+    async def hub() -> Client:
+        """The client for the toolhub, opened on first use.
+
+        **Never optional.**  There used to be a branch here for a config with no
+        tools at all, and it was wrong for the reason the builtins are in the hub
+        rather than here: the model's tool list has one owner, so a system whose
+        toolhub is missing is not a system with no tools — it is a system that
+        has come apart, and it fails the turn like any other missing peer.
+
+        A toolhub that is there and whose *upstreams* are not is an entirely
+        different thing, and is not an error at all: that is the operator's
+        configuration and somebody else's process (`slife2.toolhub`).
+        """
+        nonlocal hub_conn
+        if hub_conn is not None:
+            return hub_conn
+        async with opening:
+            if hub_conn is None:
+                hub_conn = await open_server(
+                    config.server("toolhub").url,
+                    name=TOOLHUB_SERVER_NAME,
+                    fallback_tool="list_tools",
+                    timeout=TOOLHUB_TIMEOUT_SECONDS,
+                )
+            assert hub_conn is not None
+            return hub_conn
+
+    async def turn_tools() -> list[Tool]:
+        """What the model may call, asked of the hub.
+
+        Asked **before every model call**, not once per turn: the turn's tool
+        list goes out with each request to the model, so each request asks
+        afresh.  One loopback round trip on a path that already exists, and what
+        it buys is a list that is live — a tool server that finished starting,
+        or grew a tool, is in the next *call*'s list, and nothing here had to
+        notice that it happened.
+
+        v1 needed a `tools/list_changed` subscription, a shared catalog and a
+        reconcile pass to arrive at the same place.  Here the answer can be at
+        most one call old, and nothing has to be kept in step to make that true.
+
+        It is also asked once when the loop is built, before the user's message
+        is appended: a hub that is not there is a system that has come apart, and
+        the moment to find that out is before the conversation has been touched.
+        """
+        return await remote_tools(await hub())
+
+    async def registry() -> ToolRegistry:
+        return ToolRegistry(await turn_tools())
 
     async def remember_turn(
         agent: str,
@@ -334,11 +409,14 @@ def build_server(
             # to fail here rather than be logged and stepped over.
             logger.warning("memory refused the turn for %s: %s", agent, exc)
 
-    def make_loop(active: LLMBackend) -> AgentLoop:
+    async def make_loop(active: LLMBackend) -> AgentLoop:
         return AgentLoop(
             active,
-            ToolRegistry(builtin_tools()),
+            await registry(),
             max_steps=config.agent.max_steps,
+            # Handed to the loop so the list is re-read before each model call;
+            # see `turn_tools`.
+            refresh=registry,
         )
 
     async def loop_for(reference: str, client_id: ClientId) -> AgentLoop:
@@ -354,7 +432,7 @@ def build_server(
         per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return make_loop(backend)
+            return await make_loop(backend)
 
         name, provider, model = config.resolve(reference)
         async with opening:
@@ -383,7 +461,7 @@ def build_server(
                 logger.info(
                     "model %s via %s", reference, config.server(provider.api).url
                 )
-        return make_loop(model_backends[name].with_key(*client_id))
+        return await make_loop(model_backends[name].with_key(*client_id))
 
     # --- the registry --------------------------------------------------------
 
@@ -552,6 +630,8 @@ def build_server(
             model_backends.clear()
             if memory_owned and memory_conn is not None:
                 await close_server(memory_conn)
+            if hub_owned and hub_conn is not None:
+                await close_server(hub_conn)
 
             # `loops` is deliberately **not** cleared here.  It is state the
             # process owns, and this hook is not the process's lifetime: over

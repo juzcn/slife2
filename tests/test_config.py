@@ -83,13 +83,21 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     """
     import importlib
 
-    from slife2.config import AGENT_SERVER_NAME, API_SERVER_NAMES, MEMORY_SERVER_NAME
+    from slife2.config import (
+        AGENT_SERVER_NAME,
+        API_SERVER_NAMES,
+        MEMORY_SERVER_NAME,
+        TOOLHUB_SERVER_NAME,
+    )
 
     assert importlib.import_module("slife2.server.server").SERVER_NAME == (
         AGENT_SERVER_NAME
     )
     assert importlib.import_module("slife2.memory_server").SERVER_NAME == (
         MEMORY_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.toolhub").SERVER_NAME == (
+        TOOLHUB_SERVER_NAME
     )
     for api, module in API_BACKENDS.items():
         assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]
@@ -380,3 +388,132 @@ def test_api_key_is_resolved_lazily(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     provider = load(write(tmp_path, A_PROVIDER)).provider("local")
     assert provider.api_key_ref == "${SLIFE2_TEST_KEY:-none}"
     assert provider.api_key == "resolved-later"
+
+
+# --- the tool sections --------------------------------------------------------
+#
+# `tools:` is other people's MCP servers and `rest-api:` is other people's REST
+# APIs, and the second is expanded into the first at load time — so what these
+# are about is the expansion, and the refusals that keep an ambiguous entry from
+# becoming a silent precedence rule.
+
+TOOLS = """
+tools:
+  filesystem:
+    command: npx
+    args: [-y, server-filesystem, .]
+    description: Files on disk.
+  serper:
+    command: npx
+    args: [-y, serper]
+    env:
+      SERPER_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+  arxiv:
+    url: https://example.test/mcp
+    headers:
+      Authorization: Bearer ${SLIFE2_TEST_KEY:-unset}
+  off:
+    command: npx
+    args: [-y, slow-thing]
+    enabled: false
+rest-api:
+  registry:
+    spec: https://example.test/openapi.json
+    base_url: https://api.example.test
+    api_key: ${SLIFE2_TEST_KEY:-unset}
+"""
+
+
+def test_a_stdio_entry_is_a_command(tmp_path) -> None:
+    server = load(write(tmp_path, TOOLS)).tools["filesystem"]
+    assert (server.transport, server.command) == ("stdio", "npx")
+    assert server.args == ("-y", "server-filesystem", ".")
+    assert server.description == "Files on disk."
+
+
+def test_an_entry_with_a_url_is_http(tmp_path) -> None:
+    """Which field is set *is* the transport; there is no separate switch."""
+    server = load(write(tmp_path, TOOLS)).tools["arxiv"]
+    assert server.transport == "http"
+    assert server.url == "https://example.test/mcp"
+
+
+def test_a_tool_servers_secrets_go_through_the_same_chain(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
+    config = load(write(tmp_path, TOOLS))
+    assert config.tools["serper"].env["SERPER_API_KEY"] == "resolved"
+    assert config.tools["arxiv"].headers["Authorization"] == "Bearer resolved", (
+        "a header is a credential too"
+    )
+
+
+def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
+    """Nothing downstream knows that REST exists.
+
+    The entry becomes an ordinary stdio upstream here, which is what lets the
+    hub have one mechanism instead of two.
+    """
+    server = load(write(tmp_path, TOOLS)).tools["registry"]
+    assert server.kind == "rest"
+    assert (server.transport, server.command) == ("stdio", "uvx")
+    assert server.args == ("mcp-openapi-proxy",)
+    assert server.env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
+    assert server.env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
+    assert server.env["API_KEY"] == "unset"  # the ${VAR:-default} form
+
+
+def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
+    """The escape hatch, for a pinned version or a private fork."""
+    config = load(
+        write(
+            tmp_path,
+            "rest-api:\n  mine:\n    command: uvx\n    args: [--from, my-proxy, run]\n",
+        )
+    )
+    assert config.tools["mine"].args == ("--from", "my-proxy", "run")
+
+
+def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="needs `command`"):
+        load(write(tmp_path, "tools:\n  nothing:\n    args: [x]\n"))
+
+
+def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
+    """Not resolved by a precedence rule nobody would remember.
+
+    This is not hypothetical: v1's own config grew a `url` on an entry that
+    still had a `command`, and its rule was that the URL won.
+    """
+    text = "tools:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
+    with pytest.raises(ConfigError, match="both"):
+        load(write(tmp_path, text))
+
+
+def test_a_rest_api_with_neither_spec_nor_command_is_refused(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="needs `spec`"):
+        load(write(tmp_path, "rest-api:\n  nothing: {}\n"))
+
+
+def test_a_name_in_both_sections_is_refused(tmp_path) -> None:
+    """Both would become `{name}__{tool}` in the model's list, so which won
+    would be invisible at every point a person could look."""
+    text = (
+        "tools:\n  twice:\n    command: npx\n"
+        "rest-api:\n  twice:\n    spec: https://example.test/openapi.json\n"
+    )
+    with pytest.raises(ConfigError, match="collide"):
+        load(write(tmp_path, text))
+
+
+def test_a_disabled_entry_is_configured_but_not_connected(tmp_path) -> None:
+    config = load(write(tmp_path, TOOLS))
+    assert "off" in config.tools, "still in the file, and still readable"
+    assert "off" not in [server.name for server in config.tool_servers()]
+
+
+def test_the_hub_is_a_component_the_config_knows(tmp_path) -> None:
+    assert default_config().server("toolhub").port == 8020
+    with pytest.raises(ConfigError, match="not a server this system runs"):
+        load(write(tmp_path, "servers:\n  nonsense: {port: 9}\n"))

@@ -14,7 +14,7 @@ one made it harder to test than it needed to be.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,13 +69,35 @@ class AgentLoop:
         tools: ToolRegistry,
         *,
         max_steps: int = 16,
+        refresh: Callable[[], Awaitable[ToolRegistry]] | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tools
+        #: Where the tool list comes from, asked again before every model call.
+        #:
+        #: Once per turn is the arrangement this replaced, and the difference
+        #: shows up in a turn that takes several steps: a tool a server grew, or
+        #: a server that finished starting, is in the *next* call's list rather
+        #: than the next turn's.  The loop still does not know what a tool server
+        #: is — this is a coroutine that returns a registry, and it is the server
+        #: that hands one over.
+        self._refresh = refresh
         #: Model calls allowed in one turn before it is cut off.  A model that
         #: keeps calling tools would otherwise burn tokens indefinitely; the
         #: cap produces an ordinary result, not an exception.
         self._max_steps = max_steps
+
+    async def _retool(self) -> None:
+        """Ask where the tools come from, before a model call.
+
+        A refresh that fails is deliberately *not* swallowed: the tool list is
+        what the call is made with, and calling a model with last step's list
+        because the hub is unreachable would be a silently wrong request rather
+        than a failed turn.  `slife2.mcp_server.open_server` is where that rule
+        is argued.
+        """
+        if self._refresh is not None:
+            self._tools = await self._refresh()
 
     async def run_turn(
         self,
@@ -98,13 +120,15 @@ class AgentLoop:
         """
         messages.append(Message(role="user", content=user))
 
-        specs = self._tools.specs
         total_usage = Usage()
         last_text = ""
         last_usage = Usage()
 
         for step in range(1, self._max_steps + 1):
-            stream = self._backend.stream(messages, specs)
+            # The tool list goes with the call, so it is asked for with the
+            # call.  `specs` is read after this and never cached across steps.
+            await self._retool()
+            stream = self._backend.stream(messages, self._tools.specs)
 
             # Phase A: exhaust the stream before doing anything with it.  A tool
             # must not run inside this loop -- that would hold the provider's

@@ -32,7 +32,10 @@ from slife2.config import (
     AGENT_SERVER_NAME,
     API_BACKENDS,
     API_SERVER_NAMES,
+    BUILTINS_SERVER_NAME,
+    LOCAL_SERVERS,
     MEMORY_SERVER_NAME,
+    TOOLHUB_SERVER_NAME,
     Config,
 )
 from slife2.mcp_server import identifies
@@ -61,17 +64,32 @@ from slife2.runtime import (
     write_claim,
 )
 
-#: The components that are always present: a module, the MCP name that module's
-#: server advertises, and the tool that identifies it for a server that reports
-#: no name at all.  See `slife2.mcp_server.identifies` for why both are needed.
+#: The components that are not model backends, keyed by the name the config's
+#: `servers:` section uses for each: the module that serves it, the MCP name
+#: that module advertises, and the tool that identifies it for a server that
+#: reports no name at all.  See `slife2.mcp_server.identifies` for why both are
+#: needed.
 #:
 #: In code rather than in the config.  Letting an operator name an arbitrary
 #: command would be a capability nobody asked for and one more thing to get
 #: wrong.  The model backends need no entry here — their module *and* their
 #: advertised name both come from the `api` they speak, which is already a
 #: closed set.
+#:
+#: The *order* these start in is `slife2.config.LOCAL_SERVERS`, so that what a
+#: component is and when it starts are each said once; `tests/test_launcher.py`
+#: holds the two together.
 AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 MEMORY_SERVER = ("slife2.memory_server", MEMORY_SERVER_NAME, "remember")
+BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
+TOOLHUB_SERVER = ("slife2.toolhub", TOOLHUB_SERVER_NAME, "list_tools")
+
+SERVER_MODULES: dict[str, tuple[str, str, str]] = {
+    "memory": MEMORY_SERVER,
+    "builtins": BUILTINS_SERVER,
+    "toolhub": TOOLHUB_SERVER,
+    "agent": AGENT_SERVER,
+}
 
 #: The tool every model server answers to, and how they are named.  One tool
 #: and one prefix for all of them, because a backend is a backend whatever
@@ -202,10 +220,8 @@ def specs(config: Config) -> list[ServerSpec]:
             )
         )
 
-    for name, (module, server_name, tool) in (
-        ("memory", MEMORY_SERVER),
-        ("agent", AGENT_SERVER),
-    ):
+    for name in LOCAL_SERVERS:
+        module, server_name, tool = SERVER_MODULES[name]
         address = config.server(name)
         result.append(
             ServerSpec(
