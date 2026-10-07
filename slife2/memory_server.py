@@ -178,6 +178,11 @@ def build_server(config: Config) -> FastMCP:
         back cut short — enough to tell whether this is the turn you wanted, not
         enough to be the turn itself.
 
+        Neither bound is required, and neither has a default window: leaving
+        both out browses the newest turns.  A bound narrows what you see and
+        never decides it — a default range would hide turns with nothing saying
+        they were hidden, which is the one thing a browse must not do.
+
         Your own history, and only your own: there is no argument naming whose
         memory to read, because a model that could name one could read somebody
         else's.
@@ -188,6 +193,7 @@ def build_server(config: Config) -> FastMCP:
                 last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
                 Omit for no lower bound.
             until: Upper bound on the same grammar.  A date means the whole day.
+                Omit for no upper bound.
             limit: How many turns this page may hold.
             offset: Skip this many turns — that is how you page back.
 
