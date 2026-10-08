@@ -647,6 +647,83 @@ async def test_ctrl_c_quits_when_no_turn_is_running() -> None:
         assert not app.is_running
 
 
+async def test_escape_cancels_and_stops_there() -> None:
+    """The cancel key, and the only thing it does.
+
+    Slife's rule.  Escape is pressed by reflex — to back out of a half-typed
+    thought, to dismiss what is not there — and a terminal where that reflex
+    closes the window is one nobody dares press it in.  Ctrl+C and Ctrl+Q are
+    the ways out; with no turn running this leaves the app up.
+    """
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert app._turn is None
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.is_running
+
+
+async def test_ctrl_c_copies_the_selection_in_the_prompt() -> None:
+    """Ctrl+C is the copy key, and the prompt is where a person copies from.
+
+    Which is why the app's binding is not priority: the priority pass runs
+    *before* the focused widget, so a priority ctrl+c here takes the key from
+    `TextArea`'s own copy, and from the screen's, which is what copies a mouse
+    selection out of the transcript.  Both copy actions skip themselves when
+    there is nothing selected, and that skip is the only reason the key ever
+    reaches the app.
+    """
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(HistoryInput)
+        prompt.text = "copy me"
+        prompt.select_all()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app.clipboard == "copy me"
+        # Copying is not cancelling, and it is not a way to lose the draft.
+        assert app.is_running
+        assert prompt.text == "copy me"
+
+
+async def test_a_selection_keeps_ctrl_c_off_a_running_turn() -> None:
+    """The price of the key being copy first: the turn keeps running.
+
+    Escape is the way out of exactly this state — nothing claims it, and it
+    never quits — unlike ctrl+c, which the focused widget takes whenever it has
+    something to copy.  A terminal that cannot copy is worse than one that asks
+    for a second key to stop a runaway turn; the second key is checked here
+    rather than in a test of its own because *this* is the state that needs it.
+    """
+    started = asyncio.Event()
+
+    async def never_finishes(prompt, on_event, *, images=None):
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = never_finishes  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        prompt = app.query_one(HistoryInput)
+        prompt.text = "still typing"
+        prompt.select_all()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.clipboard == "still typing"
+        assert app._turn is not None and not app._turn.done()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "[cancelled]" in shown(app)
+
+
 async def test_a_second_prompt_waits_and_both_are_answered() -> None:
     """The behaviour this whole change exists for, seen from the window.
 

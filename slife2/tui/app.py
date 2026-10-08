@@ -20,7 +20,11 @@ Four things here are worth knowing before changing them:
    ticket is what makes that a dropped fragment instead of a wrong transcript.
 4. **`ctrl+c` cancels the running turn, never the queue.**  The message the user
    is still waiting on must not go with the one they gave up on.  With no turn
-   running it quits, because a user cannot stop a runaway turn otherwise.
+   running it quits, because a user cannot stop a runaway turn otherwise.  It is
+   also the copy key — a selection in the prompt or in the transcript is copied
+   and nothing is cancelled — and that first refusal is why `escape` is bound to
+   the cancel alone: the interrupt that always fires, and the one that cannot
+   close the window.
 """
 
 from __future__ import annotations
@@ -66,10 +70,19 @@ class SlifeApp(App[None]):
     CSS_PATH = "app.tcss"
 
     BINDINGS = [
-        # priority: TextArea binds ctrl+c to *copy*, and a terminal that cannot
-        # stop a runaway turn is worse than one that cannot copy from the input.
-        Binding("ctrl+c", "interrupt", "Cancel or quit", priority=True, show=False),
-        Binding("escape", "interrupt", "Cancel", show=False),
+        # Deliberately *not* priority.  The priority pass runs before the
+        # focused widget, so binding ctrl+c here with `priority=True` takes the
+        # key from the two copy actions that want it first: the focused
+        # `TextArea`'s ("copy the selection") and the screen's ("copy the mouse
+        # selection").  Both skip themselves when there is nothing selected,
+        # and that skip is what lands the key here — so ctrl+c copies when
+        # there is a selection and interrupts when there is not.
+        Binding("ctrl+c", "interrupt", "Cancel or quit", show=False),
+        # Escape is the cancel and only the cancel; see `action_cancel`.  The
+        # two keys are separate actions rather than one because escape must not
+        # be able to close the window — it is the interrupt to reach for while
+        # something is selected, and that has to be safe to press.
+        Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+n", "new_conversation", "New conversation"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -327,12 +340,38 @@ class SlifeApp(App[None]):
 
     # --- keyboard ------------------------------------------------------------
 
+    def _cancel_turn(self) -> bool:
+        """Cancel the turn in flight, reporting whether there was one.
+
+        The flag is set before the cancel so the drain can tell this
+        cancellation from the one an exit or a reset causes; see
+        `_interrupting`.
+        """
+        if self._turn is None or self._turn.done():
+            return False
+        self._interrupting = True
+        self._turn.cancel()
+        return True
+
+    def action_cancel(self) -> None:
+        """Stop the running turn — and nothing else, which is the point.
+
+        Slife's rule, kept: escape is never a way out of the app, so pressing it
+        by reflex at the wrong moment costs a cancelled turn at worst and never
+        the window.  That is what makes it the interrupt to offer while
+        something is selected, where ctrl+c is busy deciding whether to copy.
+        """
+        self._cancel_turn()
+
     def action_interrupt(self) -> None:
-        """Stop the running turn, or quit when there is nothing to stop."""
-        if self._turn is not None and not self._turn.done():
-            self._interrupting = True
-            self._turn.cancel()
-        else:
+        """Stop the running turn, or quit when there is nothing to stop.
+
+        Bound to ctrl+c, where the copy actions get first refusal: this runs
+        only when there was no selection to copy.  Quitting is what is left
+        here rather than in `action_cancel` because a user with no turn running
+        and nothing selected is trying to leave.
+        """
+        if not self._cancel_turn():
             self.exit()
 
     async def action_new_conversation(self) -> None:
@@ -342,6 +381,11 @@ class SlifeApp(App[None]):
         meant for the conversation being abandoned — and the loop is replaced,
         which is also what forgets the history: the server ends a name's old
         loop when it opens a new one for that name.
+
+        The turn is cancelled without `_cancel_turn`, so `_interrupting` stays
+        clear and the drain adds no `[cancelled]` note — this window is about to
+        be emptied, and a note about the turn nobody is watching is not worth
+        saying.
         """
         if self._turn is not None and not self._turn.done():
             self._turn.cancel()

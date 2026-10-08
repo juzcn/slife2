@@ -699,6 +699,9 @@ class StatusBar(Static):
             parts.append(
                 f"[{PALETTE['dim']}]{steps} step{'s' if steps != 1 else ''}[/]"
             )
-        hints = "Ctrl+C cancel  Ctrl+N new  Ctrl+Q quit"
+        # Both keys, because they are not interchangeable: the copy actions get
+        # first refusal on ctrl+c, and escape is the one that stops the turn and
+        # cannot do anything else — nothing else claims it, and it never quits.
+        hints = "Esc/Ctrl+C cancel  Ctrl+N new  Ctrl+Q quit"
         parts.append(f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {hints}[/]")
         self.update("  ".join(parts))

@@ -77,9 +77,17 @@ In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
 conversation, **Ctrl+Q** quits.
 
+**Ctrl+C is still the copy key.** With something selected — in the prompt, or
+with the mouse in the transcript — it copies, and nothing is cancelled; that is
+what it does in every other program, and a terminal where it cannot copy is
+worse than one where stopping a turn has a second spelling. **Esc** is that
+second spelling, and it is only that: it cancels the turn in flight and will not
+close the window however often it is pressed. With nothing selected, **Ctrl+C**
+cancels the turn; with nothing running either, it quits.
+
 Send a second message while one is still being answered and it **queues**: the
 turn already running finishes, yours runs next, and the status bar says how many
-are waiting. Ctrl+C stops the turn in flight and leaves the queue alone — the
+are waiting. Esc stops the turn in flight and leaves the queue alone — the
 message you gave up on and the one you are still waiting for are not the same
 message.
 
