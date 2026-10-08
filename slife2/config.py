@@ -178,6 +178,13 @@ BUILTINS_SERVER_NAME = "slife2-builtins"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
+#: The db component's key in the `servers:` table, where a *client* of it needs
+#: to look it up: the toolhub asks the db for the tool catalogue by this name.
+#: Here rather than only in `slife2.db_server`, because a client that imported
+#: the server to read one string would pull a server into a process that must
+#: not have one.
+DB_KEY = "db"
+
 #: The components that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
 #: launcher starts them in — see `slife2.config.Config.components` — and two of
@@ -476,11 +483,48 @@ class ToolServerSettings:
     #: hub process from starting at all.  This is how a slow, paid or
     #: currently-broken server stays in the file without being in the way.
     enabled: bool = True
+    #: Every tool this server offers starts **loaded** and is never evicted,
+    #: where the default is that they are on demand — the model finds one with
+    #: `tool_search` and puts it in its list with `func_tool_load`.  v1's flag,
+    #: in v1's place and with v1's meaning, and the reason it is worth having: a
+    #: server whose tools are wanted every turn should not cost a search and a
+    #: load, and one with ninety tools should not cost a prompt.
+    #:
+    #: A flag rather than a load state for the same reason `enabled` is: the
+    #: file says what the operator decided, and `load_status` — which the model
+    #: decides — lives in the catalogue, where a reconcile can never overwrite
+    #: it by accident.
+    autoload: bool = False
 
     @property
     def transport(self) -> str:
         """`"http"` or `"stdio"` — read off which field is set."""
         return "http" if self.url else "stdio"
+
+
+#: How many function tools the model's list may hold before the least recently
+#: used are evicted.  v1's `tool_load: threshold: 100`, and the number is v1's:
+#: it was arrived at by watching a real tool set, and nothing about slife2 is a
+#: reason to differ.
+DEFAULT_TOOL_LOAD = 100
+
+
+@dataclass(frozen=True)
+class ToolLoadSettings:
+    """The `tool_load:` section — how many function tools the model may hold.
+
+    **A cap, because the list goes out with every request.**  The tools the model
+    has loaded are re-sent on every model call, so an unbounded loaded set is an
+    unbounded prompt — and the thing that makes the bound bearable is that being
+    evicted costs a `tool_search` and a `func_tool_load`, not a capability.
+
+    Eviction never touches a tool of ours (a component's) or a server marked
+    `autoload: true`: those are loaded because the operator said so, and a
+    budget that could take `now` and `calc` away is the failure DESIGN.md §8 is
+    about.  See `slife2.db.ToolStore.injectable`.
+    """
+
+    threshold: int = DEFAULT_TOOL_LOAD
 
 
 @dataclass(frozen=True)
@@ -572,6 +616,10 @@ class Config:
     #: ambient environment is the whole of what that skill is given.
     skills: dict[str, SkillSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
+    #: How many function tools the model's list may hold.  Read by the db
+    #: component, which owns the catalogue and therefore the budget: the count it
+    #: bounds is a `SELECT COUNT(*)` over its own rows.
+    tool_load: ToolLoadSettings = field(default_factory=ToolLoadSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
     #: section rather than entries under `providers:`, for the reason
     #: `EmbeddingProviderSettings` gives.
@@ -845,9 +893,31 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         cli=_cli_tools(raw),
         skills=_skills(raw),
         agent=agent,
+        tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         default=str(raw.get("default") or _first_reference(providers)),
     )
+
+
+def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
+    """The `tool_load:` section, defaulted.
+
+    Absent means v1's default rather than an error, the same rule every other
+    section follows.  A present one has to hold a positive number: a threshold of
+    zero is a tool list that is always empty, which is not a configuration to
+    accept quietly — the model would have `tool_search` and no way to keep what
+    it found.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "tool_load")
+    threshold = int(section.get("threshold") or base.threshold)
+    if threshold < 1:
+        raise ConfigError(
+            f"tool_load.threshold: {threshold} would evict every tool the model "
+            f"loads, leaving it a search it cannot keep"
+        )
+    return ToolLoadSettings(threshold=threshold)
 
 
 def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
@@ -989,6 +1059,7 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
         headers=_secrets(raw.get("headers"), f"tools.{name}.headers"),
         cwd=str(raw.get("cwd") or ""),
         enabled=bool(raw.get("enabled", True)),
+        autoload=raw.get("autoload") is True,
     )
 
 
@@ -1043,6 +1114,7 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
         env=env,
         cwd=str(raw.get("cwd") or ""),
         enabled=bool(raw.get("enabled", True)),
+        autoload=raw.get("autoload") is True,
     )
 
 
@@ -1258,6 +1330,7 @@ __all__ = [
     "API_SERVER_NAMES",
     "BUILTINS_SERVER_NAME",
     "DB_SERVER_NAME",
+    "DB_KEY",
     "DEFAULT_AGENT",
     "EMBEDDINGS_SERVER_NAME",
     "EmbeddingProviderSettings",
@@ -1273,6 +1346,7 @@ __all__ = [
     "ProviderSettings",
     "ServerSettings",
     "SkillSettings",
+    "ToolLoadSettings",
     "ToolServerSettings",
     "default_config",
     "find_config_path",

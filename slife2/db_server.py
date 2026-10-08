@@ -1,6 +1,22 @@
 """slife2-db — persistence: what slife2 keeps, one database per client id.
 
-The turns are what it keeps today.  Keeping is the whole of the job — it does
+The turns are what it keeps today, and the **tool catalogue** is the second
+thing — the rows and two indexes of v1's `tools.db`, in `<data>/slife2.db/
+tools.db`, one file for the whole data directory rather than one per agent,
+because the tool set is not a property of a conversation.  It is served here
+rather than in the toolhub for the reason this module's opening paragraph gives:
+a catalogue is rows and two indexes over them, and the store, the embedder and
+the normalization they need are already in this component.
+
+That makes the two halves of this server the same *kind* of thing — a thing
+worth keeping, and the API to keep it — and it draws the line that keeps the
+hub and this component out of each other's half: **which tools exist is the
+hub's decision** (the servers, the names, who may call them), and **what is
+known about them is this file's record** (the rows, the load state, the two
+indexes, the budget).  The `tool_*` tools below are that record's public API,
+callable by any peer over MCP; the hub is the caller today.
+
+Keeping is the whole of the job — it does
 not summarise, does not decide what mattered, does not put anything back into a
 conversation, and does not decide *whether* a turn is worth keeping: the caller
 does that, and the agent server is the caller that knows a worker's turns are
@@ -58,7 +74,7 @@ from slife2.config import (
     find_config_path,
     load,
 )
-from slife2.db import PREVIEW_CHARS, Embedder, TurnStore, store_for
+from slife2.db import PREVIEW_CHARS, Embedder, ToolStore, TurnStore, store_for
 from slife2.mcp_server import (
     close_server,
     configure_logging,
@@ -69,7 +85,7 @@ from slife2.mcp_server import (
     serve,
     tool_payload,
 )
-from slife2.paths import db_dir
+from slife2.paths import db_dir, tools_db
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +112,9 @@ INSTRUCTIONS = (
     "order. Reading is by time — `turn_list` browses and pages, `turn_read` "
     "returns one turn whole — which is the honest thing for a component that "
     "stores without judging. Both of those are the model's, and neither names an "
-    "agent: they answer about the conversation the call came from."
+    "agent: they answer about the conversation the call came from. The same "
+    "component holds the tool catalogue, which is the toolhub's: the `tool_*` "
+    "tools record what tools exist and find them by keyword and by meaning."
 )
 
 
@@ -231,6 +249,50 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             await indexed(store, await embeddings())
         return store
 
+    #: The tool catalogue, built once per process, and whether its indexes have
+    #: been brought up to date.  One file for the whole data directory, so unlike
+    #: the turn stores there is no per-client id step: `--agent` partitions the
+    #: turns and nothing else.
+    catalogue: ToolStore | None = None
+    catalogue_ready = False
+
+    async def catalogue_store() -> ToolStore:
+        """The tool catalogue, with both its indexes current.
+
+        The config decides four things the store needs and cannot work out for
+        itself: how many tools the model may hold, which sources are wanted every
+        turn, which ones are switched off, and which ones it names at all — the
+        last of those being what the boot pass needs to tell a stale row from one
+        the hub is about to speak for.  Read here because this is the process
+        that reads the config: the file is the operator's, and one reader is how
+        "off is not down" means the same thing to the boot pass and to the
+        budget.
+        """
+        nonlocal catalogue, catalogue_ready
+        store = catalogue
+        if store is None:
+            store = await _on_thread(
+                ToolStore,
+                tools_db(),
+                threshold=config.tool_load.threshold,
+                autoload=frozenset(
+                    name for name, entry in config.tools.items() if entry.autoload
+                ),
+                disabled=frozenset(
+                    name for name, entry in config.tools.items() if not entry.enabled
+                ),
+                known=frozenset(config.tools) | frozenset(config.components()),
+            )
+            catalogue = store
+        if not catalogue_ready:
+            # The same pass the turn files get, for the same reason: an index
+            # built by another model (or another set of rules) is an index this
+            # one cannot search, and a changed model re-embeds every tool.
+            status = await store.sync_indexes(await embeddings())
+            catalogue_ready = True
+            logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
+        return store
+
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, Any]]:
         """Bring every database up to date before answering anything at all.
@@ -246,6 +308,12 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         model = await embeddings()
         for path in sorted(db_dir().glob("*.turn.db")):
             await indexed(await _on_thread(TurnStore, path), model)
+        # The catalogue too, and for the same reason: a file whose vectors came
+        # from another model, or whose rows predate this build, has to be put
+        # right before anything reads it.  The first start pays for every tool
+        # of every server; after that this is one read of `meta` and a query
+        # that returns no rows.
+        await catalogue_store()
         try:
             yield {}
         finally:
@@ -427,6 +495,239 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         return record.to_wire()
+
+    # --- the tool catalogue ---------------------------------------------------
+    #
+    #  The other thing this component keeps, and the same kind of API: the
+    #  record's own operations, named for what they do to the record rather than
+    #  for who calls them.  None of these carries the model's audience mark —
+    #  they are the hub's tools, and the hub's own rule (`slife2.audience`) keeps
+    #  them out of the model's list without a second filter here.
+    #
+    #  Two of them are worth reading twice, because they are where the layering
+    #  shows.  `tool_merge` takes a source's whole list and the *facts* about it
+    #  — the hub decided what the tools are called and who may call them, and
+    #  this side decides nothing but how they are stored.  `tool_set_load`
+    #  answers with a word rather than a sentence: what a refusal means to a
+    #  model is the hub's to phrase, and a store that wrote prose would be the
+    #  second place model-facing text lived.
+
+    @mcp.tool
+    async def tool_merge(
+        source: str, category: str, tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Merge one source's whole tool list into the catalogue.
+
+        Four outcomes and no fifth: a name that is not here is added, one the
+        source dropped is deleted, one whose columns changed is updated, and one
+        already identical is left alone.  So a steady state — the hub asks before
+        every model call — writes nothing at all.
+
+        The list is the *whole* truth about that source: what a server offers is
+        known only by asking it, so a name missing from the list is a tool it no
+        longer has.
+
+        Args:
+            source: The server or component these tools came from — the key
+                every row is owned by, and what `tool_injectable` filters on.
+            category: `component` (ours), `mcp` or `rest` (somebody else's).
+                A skill has no server behind it and is not merged by this.
+            tools: One entry per tool: `name` (what the model calls, and the
+                row's identity — two sources cannot offer one), `description`,
+                `remote_name` (what the far end calls it, which differs when the
+                name has been sanitised), and `schema` (the parameter JSON, or
+                `'n/a'` when it declares nothing).
+
+        Returns:
+            `inserted`, `updated`, `reconnected` (rows whose source is answering
+            again), `purged`, `skipped` — names, and a count for `skipped`.
+
+        Raises:
+            ValueError: If a name already belongs to another source.  A name is
+                a row's identity, so this is refused rather than written over —
+                and it fails this source's list, not the whole catalogue.
+        """
+        store = await catalogue_store()
+        return await store.merge(source, category, tools, embedder=await embeddings())
+
+    @mcp.tool
+    async def tool_source_state(source: str, state: str) -> dict[str, Any]:
+        """Record the runtime's verdict on one source: `enabled` or `error`.
+
+        Called when the hub has just listed a source, and when a link died or a
+        connect would not start.  It says whether that source's tool list is in
+        hand — which is the only thing either side can act on — and it never
+        touches a source the config switches off: `disabled` is the operator's
+        answer and this is the runtime's.
+
+        Returns:
+            `changed`: how many rows moved.
+        """
+        store = await catalogue_store()
+        return {"changed": await _on_thread(store.set_source_state, source, state)}
+
+    @mcp.tool
+    async def tool_injectable(sources: list[str]) -> dict[str, Any]:
+        """The tools the model may be given now: loaded, and owned by a live source.
+
+        **`sources` is the caller's, because liveness is the one thing a database
+        cannot know.**  Which servers are answering is a fact about the hub's
+        connections; this side has no way to ask, so the caller says which
+        sources it is holding a tool list from.
+
+        A name beginning with `_` is never in this answer: that is the harness's
+        own tool — see `_injectable_sql` in `slife2.db` — and the machinery calls
+        it, not the model.
+
+        **The budget is not applied here.**  Trimming the list is a turn-boundary
+        decision and it has its own tool (`tool_evict`), because a gate that
+        evicted would be taking tools away underneath a model still using them.
+
+        Returns:
+            `tools`: whole rows, schema included, for the caller to advertise.
+        """
+        store = await catalogue_store()
+        return await _on_thread(store.injectable, sources)
+
+    @mcp.tool
+    async def tool_evict(sources: list[str]) -> dict[str, Any]:
+        """Trim the loaded set to `tool_load.threshold`, least recently used first.
+
+        **Used**, which is the stamp `tool_touch` writes, and not merely when
+        the row entered the list — a tool the model has been calling is the last
+        thing the budget should take, whatever order things were loaded in.
+
+        Called by the harness at a turn boundary — the hub's `_func_tool_unload`
+        is what carries it, and the agent server invokes that before it saves a
+        turn.  Nothing of ours is evicted and neither is anything marked
+        `autoload: true`: the budget bounds somebody else's ninety tools, and
+        `tools`/`loaded` in `tool_sources` are how the effect is seen.
+
+        Args:
+            sources: The live sources, as `tool_injectable` takes them — the
+                budget bounds what the model is *holding*, so a server that is
+                down cannot have its rows evicted by a trim it is not part of.
+
+        Returns:
+            `unloaded`: the names the budget took out, which is what the caller
+            reports.  Empty when the list was already within it.
+        """
+        store = await catalogue_store()
+        return {"unloaded": await _on_thread(store.evict, sources)}
+
+    @mcp.tool
+    async def tool_route(name: str) -> dict[str, Any]:
+        """The row for one advertised name — how a call finds its way.
+
+        What a call needs and what the model's list does not carry: which source
+        owns the name, and what that source calls the tool itself.  A call is
+        gated on there being something behind the name, never on the load state:
+        a name the model just found with `tool_search` is a name it can use.
+
+        Returns:
+            `tool`: the row, or `None` when no such name is in the catalogue.
+        """
+        store = await catalogue_store()
+        return {"tool": await _on_thread(store.route, name)}
+
+    @mcp.tool
+    async def tool_sources() -> dict[str, Any]:
+        """Per source: how many tools it has, and how many the model holds.
+
+        Two numbers, because "why is my tool missing" needs both: a source with
+        ninety tools and none loaded is a healthy server the model has not asked
+        anything of yet, and `tools` falling to zero is a server that is not
+        listing what it used to.
+        """
+        store = await catalogue_store()
+        return {"sources": await _on_thread(store.source_counts)}
+
+    @mcp.tool
+    async def tool_search(
+        query: str,
+        category: str = "",
+        source_id: str = "",
+        status: str = "",
+        load_status: str = "",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Find a tool by keyword and by meaning — a hybrid search, fused by rank.
+
+        Two legs over the same rows: `bm25` over what a tool is called and
+        described, and a cosine distance over a vector of the same text, fused
+        because their scores are not on one scale and a rank is comparable by
+        construction.  A tool both legs found outranks one only a single leg did.
+
+        An empty query **browses** rather than returning nothing: the filters
+        alone are how "what is in this category" becomes answerable.
+
+        Args:
+            query: What to look for.  Empty browses, ordered by category and
+                name.
+            category: `component`, `mcp`, `rest` or `skill`; empty for any.
+            source_id: One owner's name; empty for any.
+            status: `enabled`, `disabled` (the config switched it off) or
+                `error` (its source is not answering); empty for any.
+            load_status: `loaded`, `unloaded` or `n/a`; empty for any.
+            limit: How many results at most.
+
+        Returns:
+            `results`, best first: `name`, `description`, `category`,
+            `source_id`, `status`, `load_status`, `schema_bytes` (a size, not
+            the schema — what it tells a reader is whether the tool declares
+            anything at all), and `similarity` where the semantic leg found it.
+            `browsed` is true when there was no query.
+        """
+        store = await catalogue_store()
+        return await store.search(
+            query,
+            embedder=await embeddings(),
+            limit=limit,
+            category=category,
+            source_id=source_id,
+            status=status,
+            load_status=load_status,
+        )
+
+    @mcp.tool
+    async def tool_set_load(name: str, load_status: str) -> dict[str, Any]:
+        """Put one tool in the model's list, or take it out.
+
+        The answer is a *fact* — one of a closed set of words — and not a
+        sentence, because what a refusal means to a model is the caller's to
+        phrase:
+
+        * `loaded` / `unloaded` — the row moved.
+        * `already` — it is where the caller wants it.
+        * `unknown` — no such name.
+        * `no_load_state` — a skill is a document, not something to load.
+        * `disabled` / `error` — its owner is switched off, or is not answering.
+
+        Args:
+            name: The advertised name, as `tool_search` reports it.
+            load_status: `loaded` or `unloaded`.
+
+        Returns:
+            `outcome`, and `tool` — the row as it is after the move, or `None`
+            when there was no such row.
+        """
+        store = await catalogue_store()
+        return await _on_thread(store.set_load, name, load_status)
+
+    @mcp.tool
+    async def tool_touch(name: str) -> dict[str, Any]:
+        """Mark one tool as *called*, which is what the eviction order reads.
+
+        The hub calls this after every tool call it routes — it is the process
+        that makes the call, so it is the process that knows.  Without it the
+        budget would be ordering by when things were loaded, and a long turn
+        would evict the very tool it was using.
+
+        Returns:
+            `changed`: 1 when the row was stamped, 0 when there is no such row.
+        """
+        store = await catalogue_store()
+        return {"changed": await _on_thread(store.touch, name)}
 
     return mcp
 

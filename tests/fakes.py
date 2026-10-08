@@ -234,21 +234,31 @@ def component_transports(
     come apart rather than a model with fewer tools.
 
     So a test that builds a hub stands each one up, the way the launcher does.
-    These are in-memory, and apart from `builtins` they offer the model nothing,
-    which is what most components are: asking them is how "nothing for you"
-    becomes a fact rather than an assumption.
+    These are in-memory, and apart from `builtins` and `db` they offer the model
+    nothing, which is what most components are: asking them is how "nothing for
+    you" becomes a fact rather than an assumption.
+
+    **`db` is the real server**, because the hub is a client of it: the tool
+    catalogue lives there, and a stand-in with no `tool_*` tools would be a
+    catalogueless hub.  It runs over the same in-memory transport, on the
+    deterministic `StubEmbedder`, so a test gets the real merge, the real search
+    and the real budget with no embedding endpoint behind them.
 
     `overrides` replaces or adds a transport by name — a component the test
     wants to misbehave, or an entry under `tools:` it wants wired.
     """
     from slife2.builtins import build_server as build_builtins
+    from slife2.db_server import build_server as build_db
+
+    def for_component(name: str) -> Any:
+        if name == "builtins":
+            return lambda settings: build_builtins(config)
+        if name == "db":
+            return lambda settings: build_db(config, embedder=StubEmbedder())
+        return lambda settings: blank_component()
 
     transports: dict[str, Any] = {
-        name: (lambda settings: build_builtins(config))
-        if name == "builtins"
-        else (lambda settings: blank_component())
-        for name in config.components()
-        if name != "toolhub"
+        name: for_component(name) for name in config.components() if name != "toolhub"
     }
     transports.update(overrides or {})
     return transports

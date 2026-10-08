@@ -125,6 +125,13 @@ servers:
 #                            the model reads the descriptions the server itself
 #                            gives each tool
 #   enabled: false           stays configured, is never connected
+#   autoload: true           every tool this server offers is in the model's
+#                            tool list from the start, and is never evicted.
+#                            Without it they are on demand: the model finds one
+#                            with `tool_search` and puts it in its list with
+#                            `func_tool_load`.  Worth setting for a server whose
+#                            tools are wanted every turn, and worth *not*
+#                            setting for one with ninety of them
 #
 # `env` and `headers` are the two places a tool server is handed a credential,
 # and both go through the same chain as a provider key: ${VAR} resolves through
@@ -366,6 +373,21 @@ rest-api:
 # a real answer, and a playbook that needs nothing is the common case.  Nothing
 # runs these scripts yet (DESIGN.md §9), so today this is what `skill_use`
 # reads to tell the model whether the skill it just read can actually work.
+# ── How many tools the model may hold at once ───────────────────────────────
+# The tools the model has loaded go out with *every* request, so the set is
+# bounded: over this many function tools, the least recently *called* are
+# unloaded again — before a turn is saved, by the harness, which is the moment
+# nothing is in flight.  A tool that has never been called since it was loaded
+# is ordered by when it was loaded, so a tool just brought in is not the first
+# to go either.  Nothing of slife2's own is ever evicted (`tool_search`,
+# `func_tool_load`, `skill_use`, `_func_tool_unload`), and neither is anything
+# from a server marked `autoload: true`.
+#
+# Being evicted costs a `tool_search` and a `func_tool_load`, not a capability —
+# and 100 is v1's number, arrived at by watching a real tool set.
+tool_load:
+  threshold: 100
+
 skills:
   baidu-search:
     env:

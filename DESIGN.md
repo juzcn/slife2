@@ -423,6 +423,29 @@ one column of `turn` changed to make room for them, which is why there is still
 no migration layer — the tables are additions, and `CREATE TABLE IF NOT EXISTS`
 is what additions need.
 
+**And the second thing worth keeping is kept here, which is what this module's
+own docstring said it would be.** `ToolStore` is the tool catalogue — v1's
+`tools.db`, rows plus a keyword index and a vector index — in
+`<data>/slife2.db/tools.db`, beside the turn files and for the same reason: the
+store, the embedder, the text normalization and the vector index are already
+here, and a catalogue needs all four. It is served over MCP by this component
+(`tool_merge`, `tool_injectable`, `tool_search`, …) and §8 has what it is for.
+
+**One file for the tool catalogue and one per agent for the turns**, which is
+not an inconsistency but the same rule read twice. `--agent` partitions what
+belongs to a conversation; the tools are not anybody's — one hub serves every
+conversation and cannot tell them apart — so what is installed, and what has
+been loaded, belongs to the machine. It is also why a tool loaded in one
+conversation is loaded for the next, and still loaded after a restart.
+
+**Every row in the catalogue is derived from a server except one column.**
+`load_status` is what the *model* decided, and it is the only thing in that file
+that a server cannot be asked for again; everything else — the names, the
+descriptions, the schemas, the two indexes — is rebuilt by listing a source. So
+a stale file is reported and rebuilt rather than migrated, exactly as a stale
+`turn` file is, and the loaded set is what the rebuild costs (a `tool_search`
+and a `func_tool_load` per tool, which is why it is a cost and not a loss).
+
 An index whose recorded identity no longer matches the configuration is dropped
 and rebuilt rather than read, and that is one mechanism for all four things that
 can invalidate one: a different normalization rule, a different embedding model,
@@ -580,9 +603,11 @@ business passing those on). §5 has the rest.
 `servers`; it sees the *proxied* tools, under `{server}__{tool}` names. That
 indirection is what keeps the hub's surface constant: a server coming and going
 changes what the model may call without changing anything about the hub's own
-protocol. `skill_use` is the one tool this process serves *to a model*, and it
-is not part of that API — it is a source of tools like any other, which is why
-it appears in the list and not in the protocol.
+protocol. `skill_use`, `tool_search` and `func_tool_load` are the three tools
+this process serves *to a model*, and they are not part of that API — they are a
+source of tools like any other, which is why they appear in the list and not in
+the protocol. `_func_tool_unload` goes the other way: it is on the API, called by
+the harness, and in no model's list at all.
 
 **Nothing with a server behind it is served by the hub process, and the builtins
 are why that is worth saying.** `echo`, `now` and `calc` have no credential, no
@@ -646,9 +671,12 @@ know what a tool server is — it is handed a coroutine that returns a registry.
 **Health is a tool list, not a connection** — v1's rule, and it is most of what
 `Upstream` does. A server is either usable, meaning its tool list is in hand, or
 it is not, and in the second case the useful fact is what it said the last time
-we asked. There is no connection state machine and no timer: the snapshot is
-dropped when the peer says `tools/list_changed`, when a call fails at the
-transport, or when a connect fails, and the next ask re-reads it.
+we asked. There is no connection state machine and no timer: the listing goes to
+the catalogue when it arrives, the source stops counting as *live* when the peer
+says `tools/list_changed`, when a call fails at the transport, or when a connect
+fails, and the next ask re-lists it. **What the hub no longer holds is the tool
+list itself** — that is a row now, and the hub's `_ready` is a flag saying whose
+rows may be injected. §8's "the snapshot is dropped" survives as that flag.
 
 **Two failures that look alike and are not.** The hub distinguishes a *transport*
 failure from a peer's *refusal*, and does opposite things with them. A refusal —
@@ -662,11 +690,61 @@ throws — which is one of the reasons this port is a few hundred lines where v1
 was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
-component gone and fails the turn, like the db. A missing *upstream* is the
-operator's configuration and somebody else's process: reported by `servers()`,
-left out of the tool list, and retried on the next ask. An upstream *refusing a
-call* is one caller's bad data. Collapsing these is how a config mistake becomes
-an outage, and separating them is most of what the module's prose is about.
+component gone and fails the turn, like the db. A missing *catalogue* — the db
+itself — is the same kind of thing and is said in its own words rather than
+reported as "that tool server is broken". A missing *upstream* is the operator's
+configuration and somebody else's process: reported by `servers()`, its rows left
+in the catalogue with `error` on them, and retried on the next ask. An upstream
+*refusing a call* is one caller's bad data. Collapsing these is how a config
+mistake becomes an outage, and separating them is most of what the module's prose
+is about.
+
+**The model's list is the tools it has loaded, and the rest are on demand.** This
+is the change that a catalogue buys, and it is v1's mechanism restored with one
+difference that matters: because the list is re-read before every *model call*,
+a load takes effect one step later **inside the same turn** — v1 needed a turn
+boundary for that. `tool_search` is the way in and `func_tool_load` is the way
+through; both are the hub's own rows, so they are found and loaded like anything
+else, and both are in the whitelist that is never evicted (`skill_use` is the
+third). A component's tools start loaded, because a model that has quietly lost
+`now` and `calc` is the failure this section is built around; a server's do not
+unless its entry says `autoload: true`, which is the operator saying that this
+one is wanted every turn.
+
+**The budget is enforced by the harness, at a turn boundary, and it says what it
+took.** Over `tool_load.threshold` (a hundred, v1's number), the least recently
+*called* function tools are unloaded — never a component's, never an `autoload`
+one — and the trim is a call rather than a rule inside the gate: `_func_tool_unload`
+is on the hub's API, the agent server runs it before it saves a turn, and the
+answer names the tools the model has just lost. That is the whole reason it is a
+call. Trimming inside the gate would be taking a tool away underneath a model
+that is still using it, and trimming silently would leave a model looking for a
+tool it believes it still has. The leading underscore is the system's mark for a
+tool the *machinery* calls rather than one a model chooses, and it is what keeps
+that name out of every model's tool list.
+
+**Recency is a call, and the hub is where it is learned.** The row carries two
+stamps — `last_loaded`, written when it entered the list, and `last_used`,
+written when the model called it — and the trim orders by the newer of the two.
+One stamp would not do: ordering by the load alone evicts the wrong tool, because
+a batch `func_tool_load` restamps everything it brings in and the tools the model
+is actually working with — loaded long ago, called all turn — then look like the
+oldest in the list. And no notification path is needed to know about a call: the
+hub is not told which tools the model called, it is the process that *makes* the
+call, so `call_tool` stamps the row beside the call it just routed — every routed
+call, refused ones included, since a tool that keeps erroring is one the model
+keeps wanting. The stamp is written before the answer is returned, which is what
+keeps it ahead of the trim: a detached write could land after the turn boundary
+and cost the model the tool it had just been using.
+
+**A name is a row's identity, and two sources cannot offer one.** That is the
+catalogue's primary key and the merge's match key, so a collision is refused
+rather than resolved by whoever happened to be listed last — silently replacing
+somebody's `search` is how a model calls one server and reaches another. The
+merge itself has four outcomes and no fifth: a name that is not there is added,
+one the source dropped is deleted, one whose columns moved is updated, and one
+already identical is left alone. A steady state therefore writes nothing at all,
+which is what makes asking before every model call affordable.
 
 **A component is not an upstream, and the difference is a flag.** Everything
 under `tools:` is somebody else's and optional; a component is started by slife2,
@@ -697,6 +775,16 @@ every process and by the launcher, and the launcher already refuses to let a
 command line name an arbitrary program; a language model choosing one is the
 same capability with a worse author.
 
+**And one thing was un-ported after a first pass left it out.** v1's
+`_func_tool_unload` is back, as the tool that carries the budget. The first
+version of this port had the gate itself drop the excess — no tool, no call, one
+less thing to explain — and it was wrong for the reason this whole arrangement is
+about: the model's tool list is what its next request carries, so a list that
+quietly lost three tools between two turns is a model looking for a tool it
+believes it has, and the harness is the only party that can say otherwise. What
+the trim needed was not to be *removed* but to be *answered*: one call at a turn
+boundary, naming what it took.
+
 ## 9. Deferred
 
 Named so they are decisions rather than oversights:
@@ -717,6 +805,24 @@ Named so they are decisions rather than oversights:
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
+- **Skills as catalogue rows.** v1 catalogues each `SKILL.md` as a `skill:<name>`
+  row whose schema is the whole document, which is what lets a search find a
+  playbook by what it is about — "drive a browser" reaching
+  `skill:browser-harness` — and that is the largest single win the semantic leg
+  has here. Not in this cut: a skill is read on demand today (`skill_use`), the
+  row would be a second thing to keep in step with the folder, and the search
+  works without it. The schema is ready for it — `skill` is a category,
+  `load_status` is `'n/a'`, and a file that cannot be read is a status the row
+  can carry.
+- **`cli:` entries as rows, and the tool that runs them.** The config section
+  exists and nothing serves it (README's Tools section says so). When a tool
+  does, it is a row like any other — v1 catalogued them the same way — and the
+  same "installed, but not a tool" answer applies.
+- **A word to the model about the loaded set.** `tool_search` and
+  `func_tool_load` explain themselves in their own descriptions and nothing else
+  does. v1 also carried a per-turn prompt saying how many tools were loaded;
+  nobody has measured whether a model uses the mechanism without a nudge, and
+  until somebody has, the descriptions are the nudge.
 - **Recall, offered.** The store now decides relevance — `TurnStore.search`
   fuses a keyword leg with a semantic one — but **nothing yet offers it to a
   model**: there is no `turn_search` tool, on purpose, so the two legs could

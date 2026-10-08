@@ -605,8 +605,13 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     ]
     assert turns_messages[0]["content"] == "what is 2+2?"
 
-    # ...and no other agent's database was created along the way.
-    assert [p.name for p in db_dir().glob("*.db")] == ["jack.turn.db"]
+    # ...and no other agent's database was created along the way.  The tool
+    # catalogue is the one other file the directory holds, and it is one file
+    # for the whole data directory rather than one per agent.
+    assert sorted(p.name for p in db_dir().glob("*.db")) == [
+        "jack.turn.db",
+        "tools.db",
+    ]
 
 
 @pytest.mark.asyncio

@@ -122,7 +122,8 @@ The model's tool list — the ones slife2 ships and the ones other people run �
 comes from **`slife2-toolhub`**, which is also the only process that holds a tool
 server's credentials. It draws from three kinds of place — our own components,
 the sections below, and the one thing that has no server behind it at all — and
-never from a list written down beside it:
+never from a list written down beside it. What the model is *handed* is the part
+of that it has loaded, which is the section after the config:
 
 ```yaml
 # The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
@@ -150,6 +151,9 @@ cli:                                    # programs already on this machine
     command: yt-dlp
     description: Download video from 1000+ sites, subtitles and playlists.
     install: uv pip install yt-dlp
+
+tool_load:                              # how many tools the model may hold
+  threshold: 100
 ```
 
 `command` starts a process and talks over its standard input; `url` connects to
@@ -168,9 +172,34 @@ is what a person is told when the command turns out not to be on `PATH`.
 above.
 
 A tool that came from a server reaches the model as `{name}__{tool}` —
-`builtins__calc`, `arxiv__arxiv_search_papers` — and the list is re-read from the
-hub **before every model call**, so a server that started a moment ago, or grew a
-tool, is in the next call's list.
+`builtins__calc`, `arxiv__arxiv_search_papers`.
+
+**What the model is handed is the tools it has loaded, not the tools that
+exist.** The list is re-read from the hub before *every model call*, and it
+holds `tool_search`, `func_tool_load` and `skill_use` plus whatever the model has
+loaded — a server with ninety tools costs nothing until one of them is wanted.
+`tool_search` searches the whole catalogue by keyword *and* by meaning, one
+hybrid search; `func_tool_load` puts one or several names in the list, and they
+are there from the next step of the same turn. The catalogue is
+`<data>/slife2.db/tools.db`, one file for the data directory rather than one per
+agent: a tool loaded in one conversation is loaded for the next, and still loaded
+after a restart.
+
+Two things decide what starts loaded. **Ours always do** — a model that has
+quietly lost `now` and `calc` is a failure nobody can see — and somebody else's
+do when their entry says `autoload: true`, which is how a server whose tools are
+wanted every turn is written down as such. Everything else arrives on demand.
+
+The list is bounded, because it goes out with every request: over
+`tool_load: threshold:` (100, in `slife2.yaml`) the least recently *called* tools
+are unloaded, never ours and never an `autoload` one. Calling, not loading, is
+what counts — a tool the model has been using all turn outlives one that was
+just brought in — and a tool never called since it was loaded is ordered by when
+it was loaded. That trim happens at a turn
+boundary — the harness calls `_func_tool_unload` before it saves the turn, and
+the names come back, so what the model just lost is something the log can say
+rather than something nothing notices. Being evicted costs a search and a load,
+not a capability.
 
 Which of a component's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
@@ -190,7 +219,15 @@ nothing a connection could tell you about it; a server wrapping one `read_text`
 would exist only to be connected to. Its name says as much: it is `skill_use` and
 not `{server}__{tool}`, because there is no server to name. Skills are installed
 by putting a directory in that folder — the tool reads the disk on every call, so
-there is nothing to restart.
+there is nothing to restart. `tool_search` and `func_tool_load` are the same kind
+of thing, and are the other two names without a server in front of them.
+
+**Everything the model may call is a row in the tool catalogue**, the hub's own
+three included. The hub decides what tools *are* — which servers, the
+`{server}__{tool}` naming, who may call one — and `slife2-db` keeps the record
+and answers the questions: which rows are loaded, what one is called at the far
+end, and the two search legs. Nothing in the hub opens a database, and nothing in
+the catalogue knows what a proxy name is.
 
 A skill is a document, and it can still need a key: `baidu-search` declares
 `BAIDU_API_KEY` in its own header, and its first instruction runs a script that
@@ -232,6 +269,7 @@ runtime state of what is running, and the turns they produced:
   slife2.yaml                      the config; absent means the defaults
   runtime/                         records, locks, logs — reconstructible
   slife2.db/                       <agent>.turn.db — not reconstructible
+                                   tools.db — the tool catalogue, one file
   skills/                          <name>/SKILL.md — playbooks, written by you
 ```
 
@@ -247,7 +285,11 @@ or `skills/`: those are written by a person rather than produced by a run, and
 they are the point of the arrangement.
 
 The split that remains is the one that matters: deleting `runtime/` costs
-nothing, deleting `slife2.db/` costs the record.
+nothing, deleting `slife2.db/` costs the record. The two files in there are kept
+differently on purpose: a turn is one conversation's and there is one per agent,
+while the tool catalogue is the whole data directory's — the tools are not
+anybody's, so one hub serves them to every conversation, and a tool loaded in one
+is loaded for the next.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
@@ -277,20 +319,24 @@ slife2/
 ├─ builtins.py        # slife2-builtins: `echo`, `now`, `calc`, and `calc`'s
 │                     #   AST walker — a tool is one decorated function
 ├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
-│                     #   and a listed tool as one the loop can run
+│                     #   a listed tool as one the loop can run, and the trim
+│                     #   the harness makes before a turn is saved
 ├─ toolhub.py         # slife2-toolhub: the model's tools, the servers behind
-│                     #   them, and the credentials they need
+│                     #   them, and the credentials they need — the tool *set*,
+│                     #   not the tool record (that is db.py's)
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ textindex.py       # how a turn becomes searchable text, and how a query
 │                     #   becomes a MATCH (no I/O)
-├─ db.py              # the store: TurnStore, one SQLite file per agent, and
-│                     #   the two derived indexes over its turns
+├─ db.py              # the store: TurnStore, one SQLite file per agent, with the
+│                     #   two derived indexes over its turns — and ToolStore,
+│                     #   the tool catalogue, one file per data directory
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
 ├─ db_server.py       # slife2-db: `remember`, the model's `turn_list` and
-│                     #   `turn_read`, and the startup pass that brings every
-│                     #   index up to date with the embedding model
+│                     #   `turn_read`, the `tool_*` catalogue API the hub calls,
+│                     #   and the startup pass that brings every index up to date
+│                     #   with the embedding model
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py         # Chunk <-> progress payload (no I/O)

@@ -10,6 +10,7 @@ it.
       slife2.yaml   the config; absent means the built-in defaults
       runtime/      records, locks, logs, claims — a daemon's bookkeeping
       slife2.db/    <agent>.turn.db — the turns, one file per agent
+                    tools.db — the tool catalogue, one file for the data dir
       skills/       <name>/SKILL.md — the playbooks the model may read
 
 **Where that root is depends on what you are running.**  A checkout keeps it
@@ -125,10 +126,33 @@ def runtime_dir() -> Path:
 
 
 def db_dir() -> Path:
-    """Where the per-agent databases live.  Not safe to delete."""
+    """Where the databases live.  Not safe to delete.
+
+    Two kinds of thing, and the difference is who they belong to: the turns are
+    one file per agent (`<agent>.turn.db`) because a turn belongs to a
+    conversation, and the tool catalogue is **one file for the whole data
+    directory**, because the tools are not anybody's — one hub serves every
+    conversation and cannot tell them apart, so what is installed and what has
+    been loaded is a property of the machine, not of a conversation.
+    """
     path = data_dir() / "slife2.db"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def tools_db() -> Path:
+    """The tool catalogue — `<data>/slife2.db/tools.db`.
+
+    Beside the turns rather than in a component of its own, which is what
+    `slife2.db`'s own docstring said the second thing worth keeping would be:
+    the catalogue is rows and two indexes over them, and the machinery for that
+    (the embedder, the vector index, the text normalization) is already here.
+
+    **One file, not one per agent.**  `--agent` partitions the *turns* and
+    nothing else — the servers are shared, the hub is shared, and a tool one
+    conversation loaded is one the next conversation can call.
+    """
+    return db_dir() / "tools.db"
 
 
 def skills_dir() -> Path:

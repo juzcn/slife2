@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import types
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
 
 from slife2.config import Config, ToolServerSettings, default_config
@@ -26,6 +28,7 @@ from slife2.toolclient import (
     LIST_TOOLS,
     UpstreamTool,
     remote_tools,
+    unload_tools,
 )
 from slife2.toolhub import build_server as build_hub
 from slife2.tools import ToolFailed, ToolRegistry
@@ -187,7 +190,11 @@ def hub_with_upstream() -> FastMCP:
 
     config: Config = replace(
         default_config(),
-        tools={"fake": ToolServerSettings(name="fake", command="in-memory")},
+        # `autoload` because this is a test about the hop, not about the load
+        # gate: the tool servers here are wanted in the list from the start.
+        tools={
+            "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
+        },
     )
     return build_hub(
         config,
@@ -205,13 +212,18 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
     async with Client(hub_with_upstream()) as hub:
         registry = ToolRegistry(await remote_tools(hub))
         assert [spec.name for spec in registry.specs] == [
+            "builtins__calc",
             "builtins__echo",
             "builtins__now",
-            "builtins__calc",
+            "db__turn_list",
+            "db__turn_read",
             "fake__echo",
-            # The hub's own, crossing this hop like everything else — a tool
-            # with no server behind it arrives through the same list.
+            # The hub's own three, crossing this hop like everything else — a
+            # tool with no server behind it arrives through the same list, and
+            # `_func_tool_unload` does *not*, because the harness calls it.
+            "func_tool_load",
             "skill_use",
+            "tool_search",
         ]
         text, ok = await registry.execute(
             ToolCall(id="c1", name="fake__echo", arguments={"text": "through"})
@@ -294,3 +306,61 @@ async def test_the_identity_reaches_the_db_through_the_hub(
         payload = json.loads(await by_name["db__turn_list"].run({}))
 
     assert [entry["user_message"] for entry in payload["entries"]] == ["jack asked"]
+
+
+@pytest.mark.asyncio
+async def test_the_trim_is_a_call_the_harness_makes_and_a_model_cannot() -> None:
+    """`_func_tool_unload` is on the hub's API, which is the agent's.
+
+    The agent server calls it before it saves a turn, and what it gets back is
+    the point: the names of the tools the model has just lost.  A model never
+    sees it — the underscore is the system's mark for a tool the machinery
+    calls — so it is not in the list this hop returns.
+    """
+    async with Client(hub_with_upstream()) as hub:
+        registry = ToolRegistry(await remote_tools(hub))
+        assert "_func_tool_unload" not in [spec.name for spec in registry.specs]
+
+        trimmed = await unload_tools(hub)
+
+    assert trimmed["unloaded"] == [], "a hundred is room for everything here"
+    assert "within its budget" in trimmed["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_trim_that_cannot_happen_does_not_fail_the_turn() -> None:
+    """Bookkeeping runs after the answer, so it cannot be what fails it.
+
+    A hub from an older build has no such tool and answers with a refusal; a hub
+    that is gone cannot answer at all.  Either way the turn is over — and the
+    list is asked for again before the next model call, which is where a missing
+    hub becomes impossible to miss.
+    """
+
+    class Refuses:
+        async def call_tool(self, *_: object, **__: object) -> object:
+            raise ToolError("Unknown tool: '_func_tool_unload'")
+
+    assert await unload_tools(Refuses()) == {
+        "unloaded": [],
+        "refused": [],
+        "not_loaded": [],
+        "text": "",
+    }
+
+
+def test_the_hub_holds_no_database() -> None:
+    """各司其职, as a property of the import graph rather than a promise.
+
+    Every operation on the tool catalogue goes through the db component, over
+    MCP: the hub decides what tools *are* — the servers, the names, who may call
+    them — and it asks for everything else.  A `sqlite3` import in this module
+    would be the first sign that the two halves had started to overlap, and it
+    would be invisible until something drifted.
+    """
+    import slife2.toolhub as hub
+
+    source = Path(hub.__file__).read_text(encoding="utf-8")
+    assert "sqlite3" not in source
+    assert "from slife2.db import" not in source
+    assert "import slife2.db" not in source

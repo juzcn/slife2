@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import types
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,9 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
 
 from slife2.audience import FOR_THE_MODEL
-from slife2.config import ToolServerSettings, default_config
+from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
 from slife2.toolhub import (
+    Catalogue,
     Upstream,
     flatten,
     make_client,
@@ -68,6 +70,7 @@ def hub_for(
     *,
     connected: dict[str, Any] | None = None,
     entries: dict[str, ToolServerSettings] | None = None,
+    threshold: int | None = None,
     **kwargs: Any,
 ) -> FastMCP:
     """A hub over in-db servers, keyed by entry name.
@@ -79,27 +82,44 @@ def hub_for(
     configured but *not* wired, which is how the one test that spawns a real
     process gets a real transport.
 
-    **Every component is here, and only the builtins are real.**  They are the
-    servers slife2 starts, the hub asks each of them for a tool list, and it
-    refuses to hand one out at all when one does not answer — which is what
+    **Every component is here, and only the builtins and the db are real.**  They
+    are the servers slife2 starts, the hub asks each of them for a tool list, and
+    it refuses to hand one out at all when one does not answer — which is what
     `test_a_component_that_is_not_answering_fails_the_list` is about, and not
-    something every other test should have to trip over.  The rest offer the
-    model nothing, which is what a component's tools are until one of them says
-    otherwise.
+    something every other test should have to trip over.  The db is real because
+    the hub is a client of it: the tool catalogue is there, so a hub built here
+    has a catalogue, which is what `connected={"db": refuses_to_start}` takes
+    away for the tests about that.
+
+    **The tool servers below are `autoload: true`**, which is what a test wants
+    them to be: these are servers whose tools are in the model's list, so a test
+    about naming, routing or the sanitiser is about that and not about having to
+    load one first.  What it means to be on demand instead is
+    `test_a_servers_tools_are_on_demand_until_they_are_loaded`, which is the same
+    hub built without the flag.
     """
     base = default_config()
-    wired = component_transports(base, connected)
+    # The tools first, then the transports: the db server is built *from* the
+    # config — it reads which entries are `autoload` and which are switched off
+    # — so a hub whose catalogue was built before the entries were added would
+    # seed every one of them unloaded.
     config = replace(
         base,
         tools={
             **{
-                name: ToolServerSettings(name=name, command="in-memory")
-                for name in wired
+                name: ToolServerSettings(name=name, command="in-memory", autoload=True)
+                for name in [*base.components(), *(connected or {})]
                 if name not in base.components()
             },
             **(entries or {}),
         },
     )
+    if threshold is not None:
+        # The budget is a hundred by default, which is the right number and not
+        # a testable one: a trim is how the eviction *order* is observed from
+        # outside, and the order is only visible when something is over the cap.
+        config = replace(config, tool_load=ToolLoadSettings(threshold=threshold))
+    wired = component_transports(config, connected)
     return build_hub(config, transports=wired, **kwargs)
 
 
@@ -157,7 +177,14 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         "builtins__now",
         "builtins__calc",
     }
-    assert {tool["server"] for tool in listed.data["tools"]} == {"builtins", "skills"}
+    # Three sources, and each is a real one: the builtins are a component, the
+    # db offers the model its two history tools (they carry the mark), and the
+    # third is this process's own — `tool_search`, `func_tool_load`, `skill_use`.
+    assert {tool["server"] for tool in listed.data["tools"]} == {
+        "builtins",
+        "db",
+        "toolhub",
+    }
 
     # Found by name, not by position: the hub asks every component, so the
     # builtins are one row among several and are not first.
@@ -165,6 +192,8 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
     assert row["kind"] == "component"
     assert row["required"] is True
     assert row["state"] == "ready"
+    assert row["tools"] == 3
+    assert row["loaded"] == 3, "a component's tools are in the model's list"
 
 
 def write_skill(data_dir: Path, name: str = "one") -> Path:
@@ -200,7 +229,9 @@ async def test_a_local_tool_is_served_by_the_hub_itself(isolated_runtime: Path) 
 
     assert "skill_use" in names(listed.data)
     tool = next(one for one in listed.data["tools"] if one["name"] == "skill_use")
-    assert tool["server"] == "skills"
+    # This process's own tool, catalogued as this process's: the folder it reads
+    # is not a source of tools, and the row says who serves it.
+    assert tool["server"] == "toolhub"
     assert tool["tool"] == "skill_use"
     assert "name" in tool["parameters"]["properties"]
 
@@ -259,13 +290,15 @@ async def test_a_components_tool_is_the_models_only_when_it_says_so() -> None:
     in by writing it down, which is what the tests above are listing.
     """
     async with Client(
-        hub_for(connected={"db": lambda settings: component_with_two_kinds_of_tool()})
+        hub_for(
+            connected={"agent": lambda settings: component_with_two_kinds_of_tool()}
+        )
     ) as hub:
         listed = await hub.call_tool("list_tools", {})
-        unreachable = await call(hub, "db__remember", {"text": "hi"})
+        unreachable = await call(hub, "agent__remember", {"text": "hi"})
 
-    assert "db__turn_list" in names(listed.data)
-    assert "db__remember" not in names(listed.data)
+    assert "agent__turn_list" in names(listed.data)
+    assert "agent__remember" not in names(listed.data)
     # Not merely unlisted: the name is not routable either, so a model that
     # remembered it from somewhere gets an answer rather than a write.
     assert unreachable["ok"] is False
@@ -289,6 +322,238 @@ async def test_an_upstream_tool_is_named_for_its_server() -> None:
     assert echo["tool"] == "echo"
     assert echo["description"].startswith("[fake] ")
     assert "text" in echo["parameters"]["properties"]
+
+
+@pytest.mark.asyncio
+async def test_a_servers_tools_are_on_demand_until_they_are_loaded() -> None:
+    """The gate, and the whole reason the tool catalogue exists.
+
+    What the model is handed is the tools it has *loaded*, not everything
+    installed: a server with ninety tools would otherwise cost a prompt on every
+    request.  `autoload: true` is the operator saying this server's are wanted
+    every turn, which is what every other test in this file relies on.
+    """
+    entry = ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    async with Client(
+        hub_for(
+            connected={"fake": lambda settings: upstream_server()},
+            entries={"fake": entry},
+        )
+    ) as hub:
+        before = await hub.call_tool("list_tools", {})
+        assert "fake__echo" not in names(before.data)
+
+        # Findable, though: the catalogue holds it and the search answers for
+        # the whole of what is installed, not only what is in front of the model.
+        found = await call(hub, "tool_search", {"query": "echo"})
+        assert "fake__echo" in found["text"]
+        assert "func_tool_load" in found["text"], "and the answer says how to use it"
+
+        loaded = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
+        assert loaded["ok"] is True
+        after = await hub.call_tool("list_tools", {})
+        assert "fake__echo" in names(after.data)
+
+        # And the call works either way — loading is about *seeing* a tool, and
+        # the route is what makes one callable (v1's rule, kept).
+        assert (await call(hub, "fake__echo", {"text": "hi"}))["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_budget_spares_the_tool_the_model_called(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recency is a *call*, and the hub is where it is learned.
+
+    **No notification from the loop is involved, and none is needed.**  A model's
+    tool call has one path — the hub's `call_tool`, which is the process that
+    reaches the far end — so the stamp is written beside the call it just
+    routed, and it is written *before* the answer goes back: the harness trims
+    the list at the turn boundary, and a stamp that could land after it would
+    cost the model the tool it had spent the turn using.
+
+    All three tools are loaded in one call, so they share a `last_loaded` — the
+    clock is second-precision on purpose.  What separates them afterwards is
+    what the model *did* with them: `fake__echo` was called and worked,
+    `fake__boom` was called and refused, `fake__read_file` was never touched.  A
+    refusal counts, because a model reaching for a tool is the evidence the
+    budget decides on; and ordering by the load alone would take them in name
+    order instead, which is the bug this whole arrangement exists to fix.
+    """
+    when = "2026-01-01T00:00:00+00:00"
+    monkeypatch.setattr("slife2.db.now", lambda: when)
+    entry = ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    async with Client(
+        hub_for(
+            connected={"fake": lambda settings: upstream_server()},
+            entries={"fake": entry},
+            threshold=1,
+        )
+    ) as hub:
+        # The upstream has to have answered before a name of its can be loaded:
+        # `list_tools` is the ask that starts the connect and gives it a moment.
+        await hub.call_tool("list_tools", {})
+
+        loaded = await call(
+            hub,
+            "func_tool_load",
+            {"names": ["fake__boom", "fake__echo", "fake__read_file"]},
+        )
+        assert loaded["ok"] is True, loaded["text"]
+
+        when = "2026-01-02T00:00:00+00:00"
+        assert (await call(hub, "fake__echo", {"text": "hi"}))["ok"] is True
+        when = "2026-01-03T00:00:00+00:00"
+        assert (await call(hub, "fake__boom"))["ok"] is False, "refused, and counted"
+
+        when = "2026-01-04T00:00:00+00:00"
+        trimmed = await hub.call_tool("_func_tool_unload", {})
+
+    assert trimmed.data["unloaded"] == [
+        "fake__read_file",
+        "fake__echo",
+        "fake__boom",
+    ], "least recently called first, and the never-called one before both"
+
+
+@pytest.mark.asyncio
+async def test_loading_says_why_it_cannot() -> None:
+    """A name that resolves to nothing is answered with the way to find one.
+
+    The refusals that depend on a row's own state are the store's to make and
+    are tested there (`tests/test_toolsdb.py`); what this checks is the hop —
+    that the model reads a sentence, and that the sentence says what to do next.
+    """
+    async with Client(hub_for()) as hub:
+        unknown = await call(hub, "func_tool_load", {"names": ["nothing__at_all"]})
+
+    assert unknown["ok"] is False
+    assert "unknown tool" in unknown["text"]
+    assert "tool_search" in unknown["text"], "the way to find the right name"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
+    """`enabled: false` leaves the row and takes the server away.
+
+    Which is the whole reason the catalogue keeps rows for a source that is not
+    connected: "there is a tool for this, and its server is switched off" is a
+    different answer from "no such tool", and it is the one a person needs —
+    nothing is wrong, somebody turned it off.
+
+    The row survives a restart because it is on disk; what makes it `disabled`
+    is the boot pass, which is told which sources the config switches off.
+    """
+    live = replace(
+        default_config(),
+        tools={"fake": ToolServerSettings(name="fake", command="in-memory")},
+    )
+    async with Client(
+        build_hub(
+            live,
+            transports=component_transports(
+                live, {"fake": lambda settings: upstream_server()}
+            ),
+        )
+    ) as first:
+        # The list first, as the agent asks for it before every model call —
+        # which is also the moment a server's tools become catalogue rows.
+        await first.call_tool("list_tools", {})
+        found = await call(first, "tool_search", {"query": "echo"})
+        assert "fake__echo" in found["text"], "recorded while the server was up"
+
+    # The same data directory, with the entry switched off: no connection, no
+    # transport, and the row it left behind.
+    off = replace(
+        default_config(),
+        tools={
+            "fake": ToolServerSettings(name="fake", command="in-memory", enabled=False)
+        },
+    )
+    async with Client(build_hub(off, transports=component_transports(off))) as hub:
+        refused = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
+        found = await call(hub, "tool_search", {"query": "echo"})
+
+    assert refused["ok"] is False
+    assert "switched off" in refused["text"]
+    assert "fake__echo" in found["text"], "shown, and marked as not usable"
+    assert "NOT USABLE: disabled" in found["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_loaded_set_outlives_the_process() -> None:
+    """The point of moving the tool table out of memory and into the catalogue.
+
+    A hub that restarts — or a second conversation on a hub that has been up for
+    days — finds the tools that were loaded still loaded, because the row is on
+    disk and not in a snapshot.  Nothing here re-asks a server for anything: the
+    data directory is the whole of what carried it across.
+    """
+    connected = {"fake": lambda settings: upstream_server()}
+    entries = {
+        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    }
+
+    async with Client(hub_for(connected=connected, entries=entries)) as first:
+        # The list first, as the agent asks for it before every model call —
+        # which is also what makes a server's tools *known* to the catalogue.
+        await first.call_tool("list_tools", {})
+        assert (await call(first, "func_tool_load", {"names": ["fake__echo"]}))["ok"]
+
+    async with Client(hub_for(connected=connected, entries=entries)) as second:
+        listed = await second.call_tool("list_tools", {})
+
+    assert "fake__echo" in names(listed.data)
+
+
+@pytest.mark.asyncio
+async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
+    """`_func_tool_unload`, which is the harness's and not the model's.
+
+    **The answer names what went**, and that is the reason the trim is a call at
+    a turn boundary rather than a rule inside the gate: the agent server is the
+    party that has to know what the model just lost.  It is not in the model's
+    list — a name beginning with `_` is the machinery's — and the four tools the
+    system works by are refused rather than obeyed.
+
+    The budget itself is the store's (`tests/test_toolsdb.py` has the counting);
+    what this checks is the hop and the two ways to call it.
+    """
+    config = replace(
+        default_config(),
+        tools={"fake": ToolServerSettings(name="fake", command="in-memory")},
+    )
+    hub = build_hub(
+        config,
+        transports=component_transports(
+            config, {"fake": lambda settings: upstream_server()}
+        ),
+    )
+    async with Client(hub) as client:
+        listed = await client.call_tool("list_tools", {})
+        assert "_func_tool_unload" not in names(listed.data)
+
+        await call(client, "func_tool_load", {"names": ["fake__echo", "fake__boom"]})
+        named = await client.call_tool("_func_tool_unload", {"names": ["fake__echo"]})
+        after = await client.call_tool("list_tools", {})
+
+        # No names means "enforce the budget", and at a hundred there is nothing
+        # to do — which is an answer, not a silence.
+        idle = await client.call_tool("_func_tool_unload", {})
+        refused = await client.call_tool(
+            "_func_tool_unload", {"names": ["tool_search"]}
+        )
+
+    assert named.data["unloaded"] == ["fake__echo"]
+    assert "fake__echo" in named.data["text"], "the caller reads the name off this"
+    assert "fake__echo" not in names(after.data)
+    assert "fake__boom" in names(after.data), "only what was named"
+
+    assert idle.data["unloaded"] == []
+    assert "within its budget" in idle.data["text"]
+
+    assert refused.data["refused"] == ["tool_search"]
+    assert refused.data["unloaded"] == []
 
 
 @pytest.mark.asyncio
@@ -379,14 +644,21 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         reported = await hub.call_tool("servers", {})
 
     # The builtins are still there, and the model simply has fewer tools.  So
-    # is the hub's own tool, which never depended on anybody connecting.
-    assert {name for name in names(listed.data) if "__" not in name} == {"skill_use"}
+    # is the hub's own three, which never depended on anybody connecting — and
+    # `_func_tool_unload` is *not* one of them: it is the harness's tool, and
+    # the gate keeps it out of the model's list however the catalogue holds it.
+    assert {name for name in names(listed.data) if "__" not in name} == {
+        "skill_use",
+        "tool_search",
+        "func_tool_load",
+    }
     assert "builtins__now" in names(listed.data)
     assert "broken__anything" not in names(listed.data)
 
     rows = {row["name"]: row for row in reported.data["servers"]}
     assert rows["broken"]["state"] == "failed"
     assert "no such program" in rows["broken"]["error"]
+    assert rows["broken"]["tools"] == 0, "it never listed anything"
 
 
 @pytest.mark.asyncio
@@ -552,24 +824,61 @@ async def test_a_refusal_does_not_rebuild_the_link() -> None:
     assert made[0].calls == 1
 
 
+class RecordingCatalogue(Catalogue):
+    """A catalogue that keeps what it was told, for the tests that drive one
+    `Upstream` on its own.
+
+    The hub always has a real catalogue behind it — `hub_for` stands the db
+    server up over the in-memory transport — and this is for the tests that
+    build a connection directly, where what is under test is the link's own
+    behaviour and what the rows say is somebody else's business.  It is a
+    `Catalogue` and not a stand-in object because that is the type the
+    connection takes; the connection it would open is never asked for.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_never_connect)
+        self.merges: list[tuple[str, str, list[dict[str, Any]]]] = []
+        self.states: list[tuple[str, str]] = []
+
+    async def merge(
+        self, source: str, category: str, tools: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        self.merges.append((source, category, [dict(tool) for tool in tools]))
+        return {"inserted": [str(tool["name"]) for tool in tools]}
+
+    async def source_state(self, source: str, state: str) -> None:
+        self.states.append((source, state))
+
+
+async def _never_connect() -> Client:  # pragma: no cover - never reached
+    raise AssertionError("this catalogue is a recorder; it opens nothing")
+
+
 @pytest.mark.asyncio
 async def test_a_changed_tool_list_is_read_again() -> None:
     """What the peer's `tools/list_changed` leads to, without the notification.
 
-    Nothing polls: the snapshot is dropped and the next ask re-reads it.
+    Nothing polls: the listing is dropped and the next ask re-reads it — which
+    is also what makes the source stop counting as *live* for one ask, so its
+    rows are out of the model's list until it has answered again.
     """
+    recorded = RecordingCatalogue()
     upstream = Upstream(
         ToolServerSettings(name="fake", command="in-memory"),
         transport=lambda settings: upstream_server(),
+        catalogue=recorded,
     )
     assert await upstream.ready() is True
     assert upstream.attempt is None
+    assert recorded.merges[0][0] == "fake", "the listing went to the catalogue"
 
     upstream.invalidate()
     assert upstream.snapshot()["state"] != "ready"
 
     assert await upstream.ready() is True
     assert upstream.snapshot()["state"] == "ready"
+    assert len(recorded.merges) == 2, "the second ask re-listed and re-merged"
     await upstream.close()
 
 
@@ -743,14 +1052,31 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
     )
 
     async with Client(hub) as client:
+        # The entry is on demand — it says nothing about `autoload` — so its
+        # tool is *not* in the list yet, and the model has to ask for it.  That
+        # is the whole of the mechanism, end to end: no config flag, so the
+        # search-and-load path is what puts a server's tools in front of a model.
         listed = await client.call_tool("list_tools", {})
         assert names(listed.data) == {
             "builtins__echo",
             "builtins__now",
             "builtins__calc",
-            "spawned__greet",
+            # The db's two history tools are the model's — they carry the mark —
+            # so the real db component brings them along.
+            "db__turn_list",
+            "db__turn_read",
             "skill_use",
+            "tool_search",
+            "func_tool_load",
         }
+
+        loaded = await call(client, "func_tool_load", {"names": ["spawned__greet"]})
+        assert loaded["ok"] is True
+
+        # One step later, without a new turn: the list is rebuilt before every
+        # model call, so loading takes effect inside the same turn.
+        again = await client.call_tool("list_tools", {})
+        assert "spawned__greet" in names(again.data)
 
         result = await call(client, "spawned__greet", {"name": "ada"})
         assert result == {"text": "hello ada", "ok": True}

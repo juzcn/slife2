@@ -1,10 +1,21 @@
-"""The db's storage — the turns, one SQLite file per agent.
+"""The db's storage — the turns, and the tool catalogue.
 
-The turns are what it holds today, and they are the whole of what slife2
-persists: a second thing worth keeping — a tool catalogue, a search index —
-belongs beside these rows or beside these files rather than in a component of
-its own, which is why this module is named for the component and not for the
-table.  Everything below the next paragraph is about turns.
+Two things are kept, and they are not the same kind of thing.  **The turns** are
+one SQLite file per agent: a conversation's history, which cannot be derived
+from anything and would be a loss.  **The tool catalogue** is one file for the
+whole data directory: what tools exist, what each one is, and which of them the
+model has loaded — derived from servers that can be asked again, except for that
+last column, which is the model's own decision.  The first half of this module
+is the turns; `ToolStore` and everything after it is the catalogue.
+
+That a second thing worth keeping belongs *here* rather than in a component of
+its own is what this module's opening sentence always said — and it is not a
+guess: the machinery a catalogue needs is the machinery the turns already have,
+so sharing it means writing one embedder, one normalization and one vector
+index rather than two.  What the two files have in common ends at the file:
+they are written by the same process, in different shapes, for different
+questions, and `ToolStore` is the second half rather than a variation on the
+first.
 
 The schema is slife v1's, minus one column.  This module originally had a `turns`
 table of its own invention — `(id, agent, created_at, prompt, messages, model,
@@ -68,6 +79,7 @@ import json
 import logging
 import re
 import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -717,7 +729,7 @@ class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
-def _vector_ddl(dimension: int) -> str:
+def _vector_ddl(dimension: int, table: str = "turn_vec") -> str:
     """The vector index's DDL, for one width.
 
     `distance_metric=cosine` is declared rather than left to the default, and
@@ -729,20 +741,99 @@ def _vector_ddl(dimension: int) -> str:
 
     The accepted spelling was checked against the installed extension rather
     than its documentation, which describes itself as a work in progress.
+
+    `table` is a parameter because there are two indexes now — a turn's vectors
+    and the tool catalogue's — and one of the two spellings of "cosine, this
+    width" is all this needs to be.
     """
     return (
-        "CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec USING vec0("
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0("
         f"embedding float[{int(dimension)}] distance_metric=cosine)"
     )
+
+
+def _load_vector_index(connection: sqlite3.Connection) -> None:
+    """Load the extension into one connection, or say why nothing can work.
+
+    Raises:
+        VectorIndexUnavailable: If this interpreter cannot load extensions
+            (Apple's and python.org's builds both ship that way) or the wheel is
+            not importable.  Named here rather than left to surface as an
+            `OperationalError` about a missing function, because the two causes
+            need different things done about them.
+    """
+    if not hasattr(connection, "enable_load_extension"):
+        raise VectorIndexUnavailable(
+            "this Python's sqlite3 cannot load extensions, so there is no "
+            "vector index: it was built without "
+            "--enable-loadable-sqlite-extensions"
+        )
+    try:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    except Exception as exc:  # noqa: BLE001 — re-raised as the one cause
+        raise VectorIndexUnavailable(f"cannot load sqlite-vec: {exc}") from exc
+    finally:
+        connection.enable_load_extension(False)
+
+
+def _meta(connection: sqlite3.Connection, table: str = "index_meta") -> dict[str, str]:
+    """What each index was built with, as recorded in the file itself.
+
+    `table` is a parameter because the catalogue has a `meta` table of its own:
+    the two files record different things (a turn's text rules and a tool's) and
+    the shape of the record is all this helper has ever been.
+    """
+    return {
+        str(row["key"]): str(row["value"])
+        for row in connection.execute(f"SELECT key, value FROM {table}")
+    }
+
+
+def _set_meta(
+    connection: sqlite3.Connection, table: str = "index_meta", **values: str
+) -> None:
+    connection.executemany(
+        f"INSERT INTO {table} (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        list(values.items()),
+    )
+
+
+def _connect_to(path: Path) -> sqlite3.Connection:
+    """One connection to one database file, with this module's pragmas.
+
+    A connection per call rather than one held open.  SQLite connections are
+    cheap and are not shareable across threads, and the callers — MCP tools and
+    the hub — run on an event loop where blocking it even briefly is worth
+    avoiding; a fresh connection per call means the stores need no locking of
+    their own.
+
+    Write-ahead logging, so a read while a write is in flight sees the last
+    committed state instead of waiting for the writer, and a `busy_timeout`, so
+    the short load/evict writes back off instead of failing with
+    `SQLITE_BUSY` — which matters more here than for the turns, because two of
+    these files are written by different processes.
+
+    The vector index arrives as a loadable extension, and an extension is loaded
+    *into a connection* — so this, which opens one per call, loads it every
+    time.  Measured at about half a microsecond, which is why it happens here
+    unconditionally: a second connection path used only where a vector is
+    touched would be a second thing to keep in step, and would buy nothing.
+    """
+    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_MS / 1000)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    _load_vector_index(connection)
+    return connection
 
 
 class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
-    A connection per call rather than one held open.  SQLite connections are
-    cheap and are not shareable across threads, and the caller — an MCP tool —
-    runs on an event loop where blocking it even briefly is worth avoiding; a
-    fresh connection per call means the store needs no locking of its own.
+    A connection per call rather than one held open — see `_connect`, which is
+    the one place that is decided for both stores in this module.
     """
 
     def __init__(self, path: Path) -> None:
@@ -750,45 +841,7 @@ class TurnStore:
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_MS / 1000)
-        connection.row_factory = sqlite3.Row
-        # Write-ahead logging: a read while a turn is being written sees the
-        # last committed state instead of waiting for the writer.
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-        # The vector index arrives as a loadable extension, and an extension is
-        # loaded *into a connection* — so this store, which opens one per call,
-        # loads it every time.  Measured at about half a microsecond, which is
-        # why it happens here unconditionally: a second connection path used
-        # only where a vector is touched would be a second thing to keep in
-        # step, and would buy nothing.
-        self._load_vector_index(connection)
-        return connection
-
-    @staticmethod
-    def _load_vector_index(connection: sqlite3.Connection) -> None:
-        """Load the extension, or say why the component cannot run at all.
-
-        Raises:
-            VectorIndexUnavailable: If this interpreter cannot load extensions
-                (Apple's and python.org's builds both ship that way) or the
-                wheel is not importable.  Named here rather than left to surface
-                as an `OperationalError` about a missing function, because the
-                two causes need different things done about them.
-        """
-        if not hasattr(connection, "enable_load_extension"):
-            raise VectorIndexUnavailable(
-                "this Python's sqlite3 cannot load extensions, so there is no "
-                "vector index: it was built without "
-                "--enable-loadable-sqlite-extensions"
-            )
-        try:
-            connection.enable_load_extension(True)
-            sqlite_vec.load(connection)
-        except Exception as exc:  # noqa: BLE001 — re-raised as the one cause
-            raise VectorIndexUnavailable(f"cannot load sqlite-vec: {exc}") from exc
-        finally:
-            connection.enable_load_extension(False)
+        return _connect_to(self.path)
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -1144,20 +1197,14 @@ class TurnStore:
         }
 
     @staticmethod
+    @staticmethod
     def _meta(connection: sqlite3.Connection) -> dict[str, str]:
         """What each index was built with, as recorded in the file itself."""
-        return {
-            str(row["key"]): str(row["value"])
-            for row in connection.execute("SELECT key, value FROM index_meta")
-        }
+        return _meta(connection)
 
     @staticmethod
     def _set_meta(connection: sqlite3.Connection, **values: str) -> None:
-        connection.executemany(
-            "INSERT INTO index_meta (key, value) VALUES (?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            list(values.items()),
-        )
+        _set_meta(connection, **values)
 
     # --- finding a turn by what it was about ----------------------------------
 
@@ -1399,3 +1446,1478 @@ def _loads(raw: Any, default: Any) -> Any:
 def store_for(agent: str, subagent: str = "") -> TurnStore:
     """The store for one client id, creating its file if needed."""
     return TurnStore(database_path(agent, subagent))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  The tool catalogue — v1's `tools.db`
+#
+#  One row per tool the model may be given, with two indexes over the rows: a
+#  keyword one (`tool_fts`) and a semantic one (`tool_vec`).  It lives in this
+#  module rather than in a component of its own because that is what this
+#  module's opening paragraph already said the second thing worth keeping would
+#  be: rows and two indexes over them, with the embedder, the normalization and
+#  the vector index already here.
+#
+#  **One file for the whole data directory, not one per agent.**  `--agent`
+#  partitions the turns and nothing else: one hub serves every conversation and
+#  cannot tell them apart, so which tools are installed — and which of them the
+#  model has loaded — is a property of the machine.
+#
+#  **The hub never reads this file.**  The catalogue is served over MCP by
+#  `slife2-db` (`tool_reconcile`, `tool_injectable`, `tool_search`, …) and the
+#  hub is a client of it, the way the hub is a client of every tool server:
+#  which tools exist is the hub's decision, what is known about them is this
+#  file's record, and neither process reaches into the other's half.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: The categories whose owner is a *server* — and therefore the only rows with a
+#: load state and a connectivity verdict.  This set is the whole of what "is
+#: this a function tool?" means, so there is no second column to keep in sync
+#: with it: v1 dropped its derived `type` column for exactly this reason.
+FUNCTION_CATEGORIES = frozenset({"component", "mcp", "rest"})
+
+#: The one category with nothing behind it: a skill is a document, read by the
+#: hub itself, and it has no connection that could be down and no load state to
+#: have.  Its row exists so that a search can find the playbook — the model
+#: still reads it with `skill_use`.
+SKILL = "skill"
+
+#: Everything the code can write, which is what the live table's `CHECK` must
+#: accept.  v1 also had `job`, `plugin` and `cli`; nothing writes them here yet
+#: (`cli:` entries have no tool serving them — DESIGN.md §9), and adding one
+#: later is free: the DDL is checked at open and a file that is not this build's
+#: is rebuilt rather than migrated.
+CATEGORIES = FUNCTION_CATEGORIES | {SKILL}
+
+#: `tool.status` — the row's whole closed domain, and three MUTUALLY EXCLUSIVE
+#: values: a row is in exactly one of them, so an `error` row is never also an
+#: enabled one.  `disabled` is the *config's* answer (the `enabled: false`
+#: switch), `error` is the *runtime's* verdict (whose owner is unusable right
+#: now), and `enabled` is everything else.  Off is not down: a server switched
+#: off while it was failing is `disabled`, and the two are different things to
+#: do something about.
+STATUS_ENABLED = "enabled"
+STATUS_DISABLED = "disabled"
+STATUS_ERROR = "error"
+
+#: `tool.load_status` — what the *model* decided, and the one thing in this file
+#: that is not derived from anything: every other column can be rebuilt by
+#: asking the servers again, and this one cannot.  `'n/a'` for a skill, which
+#: has no load concept.
+LOADED = "loaded"
+UNLOADED = "unloaded"
+
+#: The stored spelling of "not applicable" — the same literal for every column
+#: that would otherwise be NULL: no owner, no schema, no load state.  One value
+#: per absence rather than NULL, so that no read point needs an `IS NULL` branch
+#: and a forgotten one cannot silently return an empty set.
+NA = "n/a"
+
+#: The columns the code reads or writes on `tool`, checked at open in BOTH
+#: directions: a missing column cannot answer a query, and an unknown one is a
+#: leftover from a schema this code no longer writes.
+_TOOL_COLUMNS = frozenset(
+    {
+        "name",
+        "description",
+        "category",
+        "source_id",
+        "remote_name",
+        "schema",
+        "status",
+        "load_status",
+        "last_loaded",
+        "last_used",
+    }
+)
+
+#: The `category` values a live `tool` DDL accepts, parsed rather than
+#: substring-matched: `'skill'` is an ordinary word another clause could carry.
+_TOOL_CATEGORY_RE = re.compile(
+    r"check\s*\(\s*category\s+in\s*\(([^)]*)\)",
+    re.IGNORECASE,
+)
+
+#: The version of what a tool row is *found* by and *about* — the FTS document's
+#: normalization and the text a vector is made from.  Recorded beside both
+#: indexes, because an index built by other rules cannot be searched by these:
+#: a change here is what makes them rebuild, and it is the same lever as a
+#: changed embedding model rather than a second one.
+TOOL_TEXT_VERSION = "1"
+
+#: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
+#: its name far more often than by anything else about it — "the calculator" and
+#: `builtins__calc` have to meet — so the name dominates and the schema, which is
+#: long and full of punctuation, counts for least.  v1's weights.
+BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5)
+
+#: How many rows a tool search may return.  A cap rather than a preference:
+#: `limit` arrives from a model, and a model that asks for the whole catalogue
+#: should get a page and be told how many there are.
+MAX_TOOL_PAGE = 200
+
+#: The category list the DDL's `CHECK` is built from, so the two cannot drift:
+#: the constant is the one statement of which categories exist, and the live
+#: table is compared against it at open.
+_CATEGORY_CHECK = ",".join(f"'{name}'" for name in sorted(CATEGORIES))
+
+_TOOL_SCHEMA = f"""
+-- One row is one tool, and `category` is the whole of what it is: there is no
+-- derived `type` column, because every question one would answer ("does this
+-- row have a load state?") is a membership test over FUNCTION_CATEGORIES.
+--
+-- Every column carries a default and none is nullable: "local", "no schema" and
+-- "no load state" are real values ('n/a'), so no reader needs an IS NULL arm.
+--
+-- Two stamps, and they answer two different questions.  `last_loaded` is when
+-- the row entered the model's list — the operator's `autoload`, or the model's
+-- own `func_tool_load`.  `last_used` is when the model last *called* it, written
+-- by the hub after every routed call.  The budget evicts by whichever of the two
+-- is newer (`MAX`), so a tool that is being called outlives one that was merely
+-- loaded later, and a tool loaded a moment ago and not yet used is not the first
+-- thing to go.  `''` means "never", and sorts below every timestamp.
+CREATE TABLE IF NOT EXISTS tool (
+    name        TEXT PRIMARY KEY NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL CHECK (category IN ({_CATEGORY_CHECK})),
+    source_id   TEXT NOT NULL DEFAULT 'n/a',
+    remote_name TEXT NOT NULL DEFAULT 'n/a',
+    schema      TEXT NOT NULL DEFAULT 'n/a',
+    status      TEXT NOT NULL DEFAULT 'enabled'
+                CHECK (status IN ('enabled','disabled','error')),
+    load_status TEXT NOT NULL DEFAULT 'unloaded'
+                CHECK (load_status IN ('loaded','unloaded','n/a')),
+    last_loaded TEXT NOT NULL DEFAULT '',
+    last_used   TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_status ON tool(status);
+CREATE INDEX IF NOT EXISTS idx_tool_source ON tool(source_id);
+CREATE INDEX IF NOT EXISTS idx_tool_category ON tool(category);
+CREATE INDEX IF NOT EXISTS idx_tool_load ON tool(load_status);
+
+-- The keyword leg.  Not `content='tool'`: the text an FTS5 table has to hold is
+-- *normalized* — a space between every pair of CJK characters, because that is
+-- what makes each of them a token (`slife2.textindex`) — and normalization is
+-- not a column value, so there is nothing for an external-content index to
+-- point at.  The row is written by this module, in the same transaction as the
+-- row it indexes.
+CREATE VIRTUAL TABLE IF NOT EXISTS tool_fts USING fts5(
+    name, description, category, source_id, schema,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Which tool a vector belongs to.  A row in `tool_vec` is a *chunk*, not a tool
+-- — `vec0` holds one vector per row, and a long schema embedded whole would
+-- describe all of it a little and none of it well — so this is what turns a hit
+-- back into a name, and what a rebuild deletes by.
+CREATE TABLE IF NOT EXISTS tool_chunk (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_chunk_name ON tool_chunk(name);
+
+-- What the two indexes were built with, so that a changed embedding model, width
+-- or normalization rule is a rebuild rather than a migration.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+#: The columns a search result carries, in the order it carries them.  `schema`
+#: is reported as a *size* rather than as text: it is the tool's whole parameter
+#: JSON, a model reading a result has no use for it, and what it does tell a
+#: reader is whether the tool declares anything at all.  v1's choice.
+_SEARCH_COLUMNS = (
+    "name",
+    "description",
+    "category",
+    "source_id",
+    "status",
+    "load_status",
+)
+
+#: The five columns the keyword index holds, in `BM25_WEIGHTS`'s order.
+_FTS_FIELDS = ("name", "description", "category", "source_id", "schema")
+
+#: How many candidates each leg of a search brings to the fusion, as a multiple
+#: of what was asked for.  A fusion is a vote between ranked lists, so the lists
+#: want to be deeper than the answer; and one leg needs the slack for a second
+#: reason, since a KNN counts *chunks* and several of them belong to one tool.
+_TOOL_OVERFETCH = 4
+
+
+def _in_list(values: Any) -> str:
+    """A SQL `IN` list of quoted literals, from a set of constants."""
+    return ",".join(f"'{value}'" for value in sorted(values))
+
+
+def _marks(values: Any) -> str:
+    """A SQL `IN` list of placeholders, for values that are bound."""
+    return ",".join("?" * len(list(values)))
+
+
+def _indexable(value: Any) -> str:
+    """One column's contribution to the keyword document.
+
+    **A sentinel is a value in the column, not a word in the document.**  `'n/a'`
+    means "this tool has no schema" — indexing it would make a search for `n/a`
+    match every tool that declares nothing, and the row would be found by text
+    that was never about it.
+    """
+    text = str(value or "")
+    return "" if text == NA else text
+
+
+def tool_document(row: Mapping[str, Any]) -> str:
+    """The text a tool is *about*, which is what its vector is a vector of.
+
+    Name, description and the parameter schema, and nothing else: those are the
+    three things a model chooses a tool by, and the rest of the row is
+    bookkeeping (`source_id`, `status`) that describes the record rather than the
+    tool.  Through `_storable` for the reason the turn's text is: this string
+    goes out as JSON on its way to an embedding model, and a lone surrogate
+    cannot be encoded.
+
+    **Every row has one, so every row has a vector.**  v1 asked whether the
+    *schema* was worth embedding, because in v1 the column held the whole tool
+    definition; here it holds only the parameters, and a tool with none is
+    exactly the kind a model looks for by what it does — "open a page and take a
+    screenshot" is a description, not an argument list.  A name is never empty,
+    so the document never is either.
+    """
+    parts = [str(row.get("name") or ""), str(row.get("description") or "").strip()]
+    schema = _indexable(row.get("schema"))
+    if schema.strip():
+        parts.append(schema)
+    return _storable("\n\n".join(part for part in parts if part))
+
+
+def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """One stored row, as the callers of this module read it."""
+    return {
+        "name": str(row["name"]),
+        "description": str(row["description"]),
+        "category": str(row["category"]),
+        "source_id": str(row["source_id"]),
+        "remote_name": str(row["remote_name"]),
+        "schema": str(row["schema"]),
+        "status": str(row["status"]),
+        "load_status": str(row["load_status"]),
+    }
+
+
+def _search_dict(row: sqlite3.Row, similarity: float | None = None) -> dict[str, Any]:
+    """One search result: what a chooser needs, and no more.
+
+    The similarity is present only when the semantic leg produced one — a
+    keyword hit has no distance to report, and a `0.0` invented for it would
+    read as "found by meaning, and it is a bad match".
+    """
+    found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
+    schema = str(row["schema"] or "")
+    found["schema_bytes"] = 0 if schema in ("", NA) else len(schema)
+    if similarity is not None:
+        found["similarity"] = similarity
+    return found
+
+
+class ToolStore:
+    """The tool catalogue: what the model may call, and what it has loaded.
+
+    The hub writes and reads it, over MCP, and this is the half that remembers —
+    see the section banner above for why the two are separate.
+
+    **Nothing here is per-conversation.**  One file, and one loaded set in it:
+    the hub serves every conversation and cannot tell them apart, so what is
+    installed and what has been loaded belongs to the data directory.
+
+    **A row goes in with its search text, and its vector right after.**  The
+    keyword row is written in the same transaction as the row it indexes, so the
+    two cannot disagree; the vector needs a call to a model, which belongs on
+    the event loop and not inside a transaction, so a row can be left without
+    one for as long as that call takes.  It is not a hole: a vector is derived
+    from the row, and `sync_indexes` puts back whatever a crash lost — where a
+    *turn* with no vector would be a turn nothing could ever find, which is why
+    that store embeds before it writes and refuses to store otherwise.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        threshold: int,
+        autoload: Iterable[str] = (),
+        disabled: Iterable[str] = (),
+        known: Iterable[str] = (),
+    ) -> None:
+        #: The most function tools the model may hold — see
+        #: `slife2.config.ToolLoadSettings`.  Held here rather than passed per
+        #: call because the count it bounds is a `SELECT COUNT(*)` over these
+        #: rows: the budget and the rows it applies to live in one place.
+        self.threshold = max(1, int(threshold))
+        #: Sources whose tools are wanted every turn: a component's (ours are
+        #: few and the model is expected to have them) and an entry the operator
+        #: marked `autoload: true`.  Such a row starts *loaded* and is never
+        #: evicted, which is v1's rule for the same two cases.
+        self.autoload = frozenset(str(name) for name in autoload)
+        #: Sources the config switches off.  Their rows are `disabled` rather
+        #: than `error` — off is not down — and being switched off is what they
+        #: stay, however many times this file is opened.
+        self.disabled = frozenset(str(name) for name in disabled)
+        #: Every source the config names at all, which is what the boot pass
+        #: needs to tell a stale row from a slow one: see `reset`.
+        self.known = frozenset(str(name) for name in known)
+        self.path = path
+        self._ensure_schema()
+        # Built means a process has just started, and a verdict this file
+        # carries from an older run may be one nothing can justify any more —
+        # `reset` is what withdraws the ones the config can speak to.
+        self.reset()
+
+    def _connect(self) -> sqlite3.Connection:
+        return _connect_to(self.path)
+
+    # --- the file -------------------------------------------------------------
+
+    def _ensure_schema(self) -> None:
+        """Create the tables, on a file that is not this build's.
+
+        **No migration layer, for the reason `db.py` gives for the turns**, and
+        one thing more: the only column here that is not derived from a server
+        is `load_status`, so a stale file costs the model its loaded set — one
+        `tool_search` and a `tool_func_load` each to get back — where an upgrade
+        in place would be a permanent second way to build these tables.  v1
+        reported the stale file and asked a person to delete it; this deletes
+        and rebuilds, because a rebuild is a statement this layer can run
+        itself, and the report is a log line naming the file.
+        """
+        with self._connect() as connection:
+            self._rebuild_if_stale(connection)
+            connection.executescript(_TOOL_SCHEMA)
+
+    def _rebuild_if_stale(self, connection: sqlite3.Connection) -> None:
+        """Empty a `tool` table that is not the one this code writes.
+
+        Checked against the DDL rather than a version number, because the DDL is
+        what actually decides whether an INSERT is accepted: `CREATE TABLE IF
+        NOT EXISTS` never touches an existing table, so a file from another
+        build keeps its own columns and its own `CHECK` for as long as it lives.
+        Both directions are checked — a missing column cannot answer a query and
+        an unknown one is a leftover nothing maintains.
+        """
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(tool)")
+        }
+        if not columns:  # no table yet: the schema creates it complete
+            return
+        allowed = _category_check_values(str(_table_ddl(connection, "tool") or ""))
+        missing = sorted(_TOOL_COLUMNS - columns)
+        unexpected = sorted(columns - _TOOL_COLUMNS)
+        wrong = sorted(CATEGORIES - allowed) if allowed is not None else []
+        if not missing and not unexpected and not wrong:
+            return
+        logger.warning(
+            "%s holds a tool catalogue this build does not write (%s); it is "
+            "rebuilt from the servers, which costs the model whatever it had "
+            "loaded",
+            self.path,
+            "/".join(
+                [
+                    *(f"no {name} column" for name in missing),
+                    *(f"unknown {name} column" for name in unexpected),
+                    *(f"no {name} category" for name in wrong),
+                ]
+            ),
+        )
+        for table in ("tool_fts", "tool", "tool_chunk", "tool_vec", "meta"):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+    # --- what the hub writes --------------------------------------------------
+
+    async def merge(
+        self,
+        source: str,
+        category: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        embedder: Embedder,
+    ) -> dict[str, Any]:
+        """Merge one source's whole tool list into the catalogue.
+
+        **Four outcomes and no fifth**: a name that is not here is *added*, one
+        the source dropped is *deleted*, one whose columns changed is *updated*,
+        and one already identical is *left alone*.  A steady state — the hub
+        asks before every model call — therefore touches no row at all, which
+        matters because the keyword document is rewritten with every write.
+
+        **`name` is the row's identity, and two sources cannot own one.**  That
+        is the primary key's rule and not a convention: a name is what the model
+        calls, what a vector belongs to, and what the merge matches on, so an
+        incoming name another source already owns is refused rather than written
+        over — silently replacing somebody's tool is how a model calls `search`
+        and reaches a different server than the one it read about.
+
+        **The load state is the model's, and a merge never touches it.**  A new
+        row gets the seed this module decides (`_seed`); a row that exists keeps
+        whatever it says, so a server relisting its tools cannot unload one the
+        model is holding.  `status` is the other half of that: a source that
+        answers has usable tools, so rows that were `error` go back to `enabled`
+        — that, and not the load state, is what a merge may move.
+
+        **Rows and vectors are written together, in one transaction.**  The
+        embedding is a call to a model, so it happens between the two halves —
+        planned, embedded, then applied — and a merge that cannot embed stores
+        nothing rather than storing rows the semantic leg could never find.  That
+        is the turn store's arrangement, for the turn store's reason.
+
+        Returns `{inserted, updated, reconnected, purged, skipped}`.
+
+        Raises:
+            ValueError: If `category` is not one of `CATEGORIES`, or if a name
+                belongs to another source.  Both are facts about the caller's
+                input, and the second is a naming problem the caller can fix —
+                so it fails this source's list rather than the whole catalogue.
+        """
+        plan = await asyncio.to_thread(self._plan, source, category, rows)
+        # Before anything is written: a vector needs a table, the table needs a
+        # width, and only the embedder knows the width.  One read of `meta` once
+        # it is there.
+        await asyncio.to_thread(self.ensure_index, embedder)
+        vectors = await self._embed(plan["documents"], embedder)
+        applied = await asyncio.to_thread(self._apply, plan, vectors)
+        logger.info(
+            "%s: %d tool(s) — %d added, %d changed, %d deleted, %d unchanged",
+            source,
+            len(plan["incoming"]),
+            len(plan["inserts"]),
+            len(plan["updates"]),
+            len(plan["purged"]),
+            plan["skipped"],
+        )
+        return applied
+
+    def _plan(
+        self, source: str, category: str, rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        """The difference between what a source offers and what is stored.
+
+        Read-only, and separate from the write for the reason the write is
+        separate from the read: what has to be embedded is known only after the
+        comparison, and the embedding belongs on the event loop with the notes
+        of the file made before it.  Nothing is written until all of it is
+        known, so a refused merge leaves the catalogue exactly as it was.
+        """
+        if category not in CATEGORIES:
+            raise ValueError(
+                f"{category!r} is not a tool category; known: "
+                + ", ".join(sorted(CATEGORIES))
+            )
+        inserts: list[dict[str, Any]] = []
+        updates: list[dict[str, Any]] = []
+        reconnected: list[str] = []
+        documents: list[tuple[str, str]] = []
+        skipped = 0
+        incoming: set[str] = set()
+
+        with self._connect() as connection:
+            existing = {
+                str(row["name"]): _tool_dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM tool WHERE source_id = ?", (source,)
+                )
+            }
+            owned_elsewhere = {
+                str(row["name"]): str(row["source_id"])
+                for row in connection.execute(
+                    "SELECT name, source_id FROM tool WHERE source_id != ?", (source,)
+                )
+            }
+            for row in rows:
+                name = str(row.get("name") or "")
+                if not name:  # a tool with no name is one nothing could call
+                    skipped += 1
+                    continue
+                if name in owned_elsewhere:
+                    raise ValueError(
+                        f"{name!r} is already {owned_elsewhere[name]}'s tool; a name "
+                        f"is a row's identity, so two sources cannot offer one "
+                        f"(rename the server or the tool)"
+                    )
+                if name in incoming:  # one list naming one tool twice
+                    logger.warning(
+                        "%s listed %s twice in one list; keeping the first",
+                        source,
+                        name,
+                    )
+                    skipped += 1
+                    continue
+                incoming.add(name)
+                fields = {
+                    "name": name,
+                    "description": str(row.get("description") or ""),
+                    "category": category,
+                    "source_id": source,
+                    "remote_name": str(row.get("remote_name") or name),
+                    "schema": str(row.get("schema") or NA) or NA,
+                }
+                previous = existing.get(name)
+                if previous is None:
+                    load_status = self._seed(category, source)
+                    entry = {
+                        **fields,
+                        "status": STATUS_ENABLED,
+                        "load_status": load_status,
+                        # The list's stamp, and only that one: a row nobody has
+                        # called yet has no call to record, and `''` is what
+                        # says so — see `touch`.
+                        "last_loaded": now() if load_status == LOADED else "",
+                        "last_used": "",
+                    }
+                    inserts.append(entry)
+                    documents.append((name, tool_document(entry)))
+                    continue
+
+                moved = {
+                    column: value
+                    for column, value in fields.items()
+                    if previous[column] != value
+                }
+                if moved:
+                    updates.append({**previous, **fields, "moved": sorted(moved)})
+                    # A description or a schema that moved is a document that
+                    # moved, and the vector it had is a vector of text that is
+                    # no longer there.
+                    documents.append((name, tool_document(fields)))
+                if previous["status"] != STATUS_ENABLED:
+                    reconnected.append(name)
+                if not moved and previous["status"] == STATUS_ENABLED:
+                    skipped += 1
+
+        return {
+            "incoming": incoming,
+            "inserts": inserts,
+            "updates": updates,
+            "reconnected": reconnected,
+            "purged": sorted(name for name in existing if name not in incoming),
+            "documents": documents,
+            "skipped": skipped,
+        }
+
+    async def _embed(
+        self, documents: Sequence[tuple[str, str]], embedder: Embedder
+    ) -> dict[str, list[list[float]]]:
+        """One request for every chunk of every row that needs a vector.
+
+        The count is checked: a short answer would otherwise read as "these
+        tools had nothing worth embedding", and the rows would keep no vector at
+        all — a hole in the index that nothing outside could see.
+        """
+        chunks, spans = _chunk_documents(documents, embedder.max_chars)
+        if not chunks:
+            return {}
+        vectors = await embedder.embed(chunks)
+        if len(vectors) != len(chunks):
+            raise RuntimeError(
+                f"the embedding model answered {len(vectors)} vectors for "
+                f"{len(chunks)} chunks, so {len(spans)} tool(s) would be "
+                f"searchable only by keyword"
+            )
+        return {name: vectors[start : start + count] for name, start, count in spans}
+
+    def _apply(
+        self, plan: Mapping[str, Any], vectors: Mapping[str, list[list[float]]]
+    ) -> dict[str, Any]:
+        """Write the plan, and the vectors it earned, in one transaction.
+
+        Everything a merge does to the file happens here: the rows, the keyword
+        documents, the vectors, and the deletions.  So the catalogue a reader
+        sees is always a whole source's list as of one moment — never a tool
+        that is stored but unindexed, or a vector whose row is gone.
+        """
+        inserted: list[str] = []
+        updated: list[str] = []
+        with self._connect() as connection:
+            for entry in plan["inserts"]:
+                cursor = connection.execute(
+                    "INSERT INTO tool(name, description, category, source_id,"
+                    " remote_name, schema, status, load_status, last_loaded,"
+                    " last_used)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry["name"],
+                        entry["description"],
+                        entry["category"],
+                        entry["source_id"],
+                        entry["remote_name"],
+                        entry["schema"],
+                        entry["status"],
+                        entry["load_status"],
+                        entry["last_loaded"],
+                        entry["last_used"],
+                    ),
+                )
+                rowid = int(cursor.lastrowid or 0)
+                self._index(connection, rowid, entry)
+                _write_tool_vectors(
+                    connection, str(entry["name"]), vectors.get(entry["name"], [])
+                )
+                inserted.append(str(entry["name"]))
+
+            for entry in plan["updates"]:
+                name = str(entry["name"])
+                sets = [f"{column} = ?" for column in entry["moved"]]
+                values = [entry[column] for column in entry["moved"]]
+                connection.execute(
+                    f"UPDATE tool SET {', '.join(sets)} WHERE name = ?",
+                    [*values, name],
+                )
+                rowid = int(
+                    connection.execute(
+                        "SELECT rowid FROM tool WHERE name = ?", (name,)
+                    ).fetchone()["rowid"]
+                )
+                self._index(connection, rowid, entry)
+                if name in vectors:
+                    _write_tool_vectors(connection, name, vectors[name])
+                updated.append(name)
+
+            for name in plan["reconnected"]:
+                # No `status != 'disabled'` guard here, and that is the one place
+                # this differs from v1: a merge only ever runs for a source that
+                # has just answered, and a source that answers is one the config
+                # connects — so a row left `disabled` by an older config is a row
+                # whose switch has been turned back on.
+                connection.execute(
+                    "UPDATE tool SET status = ? WHERE name = ? AND status != ?",
+                    (STATUS_ENABLED, name, STATUS_ENABLED),
+                )
+
+            self._delete(connection, plan["purged"])
+
+        return {
+            "inserted": inserted,
+            "updated": updated,
+            "reconnected": list(plan["reconnected"]),
+            "purged": list(plan["purged"]),
+            "skipped": int(plan["skipped"]),
+        }
+
+    def _seed(self, category: str, source: str) -> str:
+        """What a tool's load state is when it is first seen.
+
+        **Ours are loaded; somebody else's are on demand.**  A component's tools
+        are few and the model is expected to have them — a model that has
+        quietly lost `now` and `calc` is the failure DESIGN.md §8 is built
+        around — while a server under `tools:` may offer ninety tools that cost
+        a prompt on every call until one is wanted.  `autoload: true` is the
+        operator saying this one is wanted, and it is the same set of sources
+        `_protected` keeps from eviction: a tool that starts loaded because
+        somebody asked for it must not be evicted by the budget either.
+
+        A new row is the only thing this decides.  Discovery never puts a tool
+        into the model's list by itself, and it never takes one out.
+        """
+        if category == "component" or source in self.autoload:
+            return LOADED
+        return UNLOADED
+
+    def _index(
+        self, connection: sqlite3.Connection, rowid: int, fields: Mapping[str, Any]
+    ) -> None:
+        """Rewrite one row's keyword document, in the caller's transaction.
+
+        Deleted and inserted rather than updated, because an FTS5 row has no
+        `UPDATE` that replaces its text: what a row is found by is a whole
+        document, and writing the new one is the only way to stop the old one
+        being a hit.
+        """
+        connection.execute("DELETE FROM tool_fts WHERE rowid = ?", (rowid,))
+        connection.execute(
+            "INSERT INTO tool_fts(rowid, name, description, category,"
+            " source_id, schema) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                rowid,
+                *(
+                    textindex.normalize(_indexable(fields.get(field, "")))
+                    for field in _FTS_FIELDS
+                ),
+            ),
+        )
+
+    def _delete(self, connection: sqlite3.Connection, names: Sequence[str]) -> None:
+        """Remove rows, and everything derived from them, explicitly.
+
+        Not by trusting the foreign key's cascade: SQLite does not enforce
+        foreign keys unless it is asked to, and a chunk row whose tool is gone is
+        a search that returns a name nothing can resolve.  Takes a connection so
+        that a merge's deletions happen in the merge's transaction — the rows it
+        wrote and the rows it removed are one change to the file.
+        """
+        if not names:
+            return
+        marks = _marks(names)
+        _clear_vectors(connection, names)
+        connection.execute(
+            f"DELETE FROM tool_fts WHERE rowid IN"
+            f" (SELECT rowid FROM tool WHERE name IN ({marks}))",
+            list(names),
+        )
+        connection.execute(f"DELETE FROM tool WHERE name IN ({marks})", list(names))
+
+    def set_source_state(self, source: str, state: str) -> int:
+        """Record the runtime's verdict on one source: `enabled` or `error`.
+
+        Called when the hub has just listed a source, and when a link failed or
+        a connect would not start.  It is a *verdict* and not a connection
+        state: what it says is whether the tool list is in hand, which is the
+        only thing either side can act on.
+
+        **It never touches a switched-off source.**  `disabled` is the config's
+        answer and this is the runtime's; a server the operator turned off
+        cannot become `error` because somebody tried to reach it, and one that
+        comes back cannot resurrect a row the config switched off.
+        """
+        if state not in (STATUS_ENABLED, STATUS_ERROR):
+            raise ValueError(f"{state!r} is not a verdict; use enabled or error")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tool SET status = ? WHERE source_id = ? AND status != ?",
+                (state, source, STATUS_DISABLED),
+            )
+        return int(cursor.rowcount)
+
+    def reset(self) -> dict[str, int]:
+        """Withdraw the verdicts this config can no longer justify — run at open.
+
+        A verdict is a statement about *now*, and this file outlives the process
+        that wrote it, so some of what it holds is about a moment that has
+        passed.  Two of those the config can speak to on its own:
+
+        * a source it **switches off** is `disabled`, not `error` — off is not
+          down, and the order of the two statements below is the guard that keeps
+          the two apart: the config's arm moves its rows out of the way first,
+          and the runtime's arm only ever moves an `enabled` row;
+        * a source the config **no longer names at all** is `error`: whatever
+          wrote its rows is not something this file can be asked about any more.
+
+        **Everything else is left alone, deliberately.**  A source the config
+        still names is one the hub is about to connect to, and whether it is
+        answering is the hub's to say — it is the party holding the connections,
+        and it writes the verdict when it lists, and again when a link fails.
+        Marking those rows `error` here would be this file guessing at a fact it
+        cannot observe, and the guess would be visible: a db restarted under a
+        running hub would report every tool as unusable while the model was
+        still holding and calling them.
+        """
+        with self._connect() as connection:
+            switched_off = 0
+            if self.disabled:
+                cursor = connection.execute(
+                    f"UPDATE tool SET status = ? WHERE status != ?"
+                    f" AND source_id IN ({_marks(self.disabled)})",
+                    (STATUS_DISABLED, STATUS_DISABLED, *sorted(self.disabled)),
+                )
+                switched_off = int(cursor.rowcount)
+            marks = _marks(self.known)
+            cursor = connection.execute(
+                f"UPDATE tool SET status = ? WHERE status = ?"
+                f" AND category IN ({_in_list(FUNCTION_CATEGORIES)})"
+                + (f" AND source_id NOT IN ({marks})" if self.known else ""),
+                (STATUS_ERROR, STATUS_ENABLED, *sorted(self.known)),
+            )
+        return {"error": int(cursor.rowcount), "disabled": switched_off}
+
+    def set_load(self, name: str, load_status: str) -> dict[str, Any]:
+        """Flip one row's load state, and say what happened.
+
+        The answer is a *fact* — one of a closed set of words — and not a
+        sentence: what a refusal means to a model is the caller's to phrase, and
+        this layer has no business writing prose.  The facts are `unknown` (no
+        such row), `no_load_state` (a skill is a document, not something to
+        load), `disabled` and `error` (its owner is switched off, or is not
+        answering), `already` (it is where the caller wants it), and the two
+        states themselves when the row moved.
+
+        The guards are checked here rather than by the caller so that "cannot be
+        loaded" is one statement in one place — and so that the row returned is
+        the row *after* the move, which is what makes the answer worth reading.
+
+        **A load stamps the list and nothing else.**  `last_loaded` moves and
+        `last_used` does not, because loading is not a use: the model asked to
+        *see* the tool, and the budget's ordering depends on the two staying
+        apart.  See `touch`.
+        """
+        if load_status not in (LOADED, UNLOADED):
+            raise ValueError(f"{load_status!r} is not a load state")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tool WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                return {"outcome": "unknown", "tool": None}
+            found = _tool_dict(row)
+            outcome = _load_outcome(found, load_status)
+            if outcome not in (LOADED, UNLOADED):
+                return {"outcome": outcome, "tool": found}
+            bump = ", last_loaded = ?" if load_status == LOADED else ""
+            values: list[Any] = [load_status]
+            if load_status == LOADED:
+                values.append(now())
+            values.extend([name, load_status])
+            connection.execute(
+                f"UPDATE tool SET load_status = ?{bump}"
+                " WHERE name = ? AND load_status != ?",
+                values,
+            )
+            found["load_status"] = load_status
+        return {"outcome": outcome, "tool": found}
+
+    def touch(self, name: str) -> int:
+        """Mark one row as *called* — the stamp the budget mostly evicts by.
+
+        **Called, and not loaded**, which is the whole distinction `last_used`
+        exists for.  The budget's question is which tools the model has stopped
+        reaching for, and loading is not a use: a tool the model asked for by
+        name five minutes ago is a better thing to keep than one it pulled in
+        with a batch load this second.  Loading keeps its own stamp
+        (`last_loaded`, written by `set_load` and by a new row's seed), and
+        `evict` orders by whichever of the two is *newer* — so a tool that was
+        just loaded is not the first victim either, which is the answer a
+        strictly-called ordering would get wrong.
+
+        **Every row, not only a loaded one.**  What the model called is a fact
+        about the tool; the ordering takes the newer stamp, so a call recorded
+        against a row nobody is holding cannot make it look older than it is,
+        and it is *worth* recording — the model may call a name it found with
+        `tool_search` without loading it, and that call is evidence about the
+        tool the next eviction should see.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE tool SET last_used = ? WHERE name = ?", (now(), name)
+            )
+        return int(cursor.rowcount)
+
+    # --- what the hub reads ---------------------------------------------------
+
+    def injectable(self, sources: Sequence[str]) -> dict[str, Any]:
+        """The tools the model may be given now: loaded, and owned by a live source.
+
+        **`sources` is the caller's, because liveness is the one thing this file
+        cannot know.**  Which servers are connected is a fact about the hub's
+        connections — its rule is that a source is usable when its tool list is
+        in hand — and the db has no way to ask.  So the caller says which sources
+        it is holding a list from, and this answers with those.
+
+        **The row's `status` deliberately does not gate this.**  It is the
+        record of the last verdict, which is what `tool_search` reports and what
+        a person reads when something is missing; the *gate* is the live-source
+        list, and the two disagreeing — a db restarted under a running hub —
+        must not be able to empty the model's tool list.
+
+        The budget is **not** enforced here.  It is a turn-boundary decision —
+        the harness trims the list before it saves the turn (`evict`) — and a
+        gate that also evicted would be trimming the list underneath a model
+        that is still using it.
+        """
+        live = [str(name) for name in dict.fromkeys(sources)]
+        if not live:
+            return {"tools": []}
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM tool WHERE {_injectable_sql(live)} ORDER BY name", live
+            ).fetchall()
+        return {"tools": [_tool_dict(row) for row in rows]}
+
+    def evict(self, sources: Sequence[str]) -> list[str]:
+        """Trim the loaded set to `threshold`, least recently *used* first.
+
+        **Use, with the load as the fallback, and not the load alone.**  The
+        ordering key is the newer of the two stamps (`last_used`, which the hub
+        writes after every call the model makes, and `last_loaded`, written when
+        the row entered the list), so a tool the model has been calling outlives
+        one that was merely loaded after it, while a tool loaded a moment ago
+        and not yet reached for is not the first thing thrown away.  **The
+        obvious rule — order by the load — is the one that gets it wrong**: a
+        batch `func_tool_load` restamps everything it brings in, so the tools
+        the model is actually working with, loaded long ago and called all turn,
+        look like the oldest in the list.
+
+        **Called at a turn boundary, by the harness** — `_func_tool_unload` is
+        the tool that carries it, and the agent server invokes it before a turn
+        is saved.  That is where a trim belongs: the *model's* list is rebuilt
+        before every request, so trimming it mid-turn would take away a tool the
+        model had just loaded and was about to use, while a boundary is a moment
+        nothing is in flight.
+
+        The victim is chosen among the tools the model is *holding* — the same
+        rows `injectable` answers with — so a server that is down, or a row the
+        config switched off, cannot absorb the budget by being counted and not
+        injected.  Nothing of ours is ever a victim, and neither is anything the
+        operator marked `autoload`: the budget exists to stop somebody else's
+        ninety tools crowding the prompt, not to take away the tools this system
+        guarantees (DESIGN.md §8).
+
+        **The count is of everything held, protected tools included** — v1's
+        arithmetic, and it is worth knowing what it means at the edges: a
+        threshold below the number of tools slife2 ships means the budget can
+        never be met, and every evictable tool goes.  A sane threshold is well
+        above them, which is why the default is a hundred.
+
+        Returns the names it unloaded, which is what the caller reports.
+        """
+        live = [str(name) for name in dict.fromkeys(sources)]
+        if not live:
+            return []
+        where = _injectable_sql(live)
+        with self._connect() as connection:
+            held = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM tool WHERE {where}", live
+                ).fetchone()[0]
+            )
+            excess = held - self.threshold
+            if excess <= 0:
+                return []
+            values = list(live)
+            protected = "category = 'component'"
+            if self.autoload:
+                protected += f" OR source_id IN ({_marks(self.autoload)})"
+                values.extend(sorted(self.autoload))
+            # `MAX` of the two stamps: the newer event wins, so a call outranks
+            # a later load and a load outranks an earlier one.  Both columns are
+            # `''` for "never", which sorts below every timestamp — so a row
+            # with neither is the first to go, which is the right answer for a
+            # row nothing has ever happened to.
+            victims = [
+                str(row["name"])
+                for row in connection.execute(
+                    f"SELECT name FROM tool WHERE {where} AND NOT ({protected})"
+                    " ORDER BY MAX(last_used, last_loaded) ASC, name LIMIT ?",
+                    (*values, excess),
+                )
+            ]
+            if not victims:
+                return []
+            connection.execute(
+                f"UPDATE tool SET load_status = ? WHERE name IN ({_marks(victims)})",
+                (UNLOADED, *victims),
+            )
+        logger.info(
+            "%d tool(s) unloaded to stay under %d: %s",
+            len(victims),
+            self.threshold,
+            ", ".join(victims),
+        )
+        return victims
+
+    def route(self, name: str) -> dict[str, Any] | None:
+        """The row for one advertised name, or `None` if there is no such tool.
+
+        What a call needs and what the gate does not carry: which source owns
+        the name, and what that source calls the tool itself.  A routed call is
+        gated on there being an instance behind the name and **not** on the load
+        state — v1's rule, and the right one: loading is about what the model can
+        *see*, and a name it just found with `tool_search` is a name it can use.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tool WHERE name = ?", (name,)
+            ).fetchone()
+        return _tool_dict(row) if row else None
+
+    def source_counts(self) -> dict[str, dict[str, int]]:
+        """Per source: how many tools it has, and how many the model holds.
+
+        Two numbers because they answer two questions.  `tools` is what the
+        source last offered — the answer to "why is my tool missing" when it is
+        not the same as `loaded`, which is how many of them the model has in its
+        list right now.  A source with ninety tools and none loaded is a healthy
+        server, and saying so is the difference between a fault and a choice.
+        """
+        where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT source_id, COUNT(*) AS tools,"
+                f" SUM(CASE WHEN load_status = '{LOADED}' THEN 1 ELSE 0 END) AS loaded"
+                f" FROM tool WHERE {where} GROUP BY source_id"
+            ).fetchall()
+        return {
+            str(row["source_id"]): {
+                "tools": int(row["tools"]),
+                "loaded": int(row["loaded"]),
+            }
+            for row in rows
+        }
+
+    # --- finding a tool -------------------------------------------------------
+
+    async def search(
+        self,
+        query: str,
+        *,
+        embedder: Embedder,
+        limit: int = 10,
+        category: str = "",
+        source_id: str = "",
+        status: str = "",
+        load_status: str = "",
+    ) -> dict[str, Any]:
+        """Tools matching `query`, best first — by keyword and by meaning.
+
+        Two legs and one fusion, the same shape as a turn search and for the
+        same reason: `bm25` is unbounded and depends on the corpus, a cosine
+        distance depends on the model, and a rank is comparable by construction.
+        A tool both legs found outranks one only one of them did.
+
+        **An empty query is a browse, not an empty answer.**  Nothing asks for
+        the whole catalogue by accident — the caller has to write no query —
+        and v1's rule is the useful one: a list of what exists is how a model or
+        a person finds out what a category holds.
+
+        The filters narrow and never decide: a search with a category is about
+        that category, and one with `status='disabled'` is how "it exists but is
+        switched off" becomes answerable rather than a guess.
+        """
+        limit = max(1, min(int(limit), MAX_TOOL_PAGE))
+        clauses, values = _tool_filters(
+            category=category,
+            source_id=source_id,
+            status=status,
+            load_status=load_status,
+        )
+        if not query.strip():
+            rows = [
+                _search_dict(row)
+                for row in await asyncio.to_thread(self._browse, limit, clauses, values)
+            ]
+            return {"results": rows, "browsed": True}
+
+        expression = textindex.match_expression(query)
+        over = min(limit * _TOOL_OVERFETCH, _MAX_SQL_VARS)
+        ranked = {
+            "keyword": await asyncio.to_thread(
+                self._keyword_hits, expression, over, clauses, values
+            ),
+            "semantic": await self._semantic_hits(query, embedder, over),
+        }
+        similarity = dict(ranked["semantic"])
+        fused = [
+            rowid
+            for rowid, _ in fuse_ranked(
+                {
+                    "keyword": ranked["keyword"],
+                    "semantic": [rowid for rowid, _ in ranked["semantic"]],
+                }
+            )
+        ]
+        rows = await asyncio.to_thread(
+            self._rows_in_order, fused, clauses, values, limit
+        )
+        results = []
+        for row in rows:
+            rowid = int(row["rowid"])
+            results.append(_search_dict(row, similarity.get(rowid)))
+        return {"results": results, "browsed": False}
+
+    def _browse(
+        self, limit: int, clauses: list[str], values: list[Any]
+    ) -> list[sqlite3.Row]:
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            return connection.execute(
+                f"SELECT rowid AS rowid, * FROM tool {where}"
+                " ORDER BY category, name LIMIT ?",
+                (*values, limit),
+            ).fetchall()
+
+    def _keyword_hits(
+        self, expression: str, limit: int, clauses: list[str], values: list[Any]
+    ) -> list[int]:
+        """Rowids by `bm25`, best first.
+
+        The filters are applied in SQL rather than to the fused answer, which is
+        the one place they can be exact: `rank` orders *every* match, so cutting
+        to the limit afterwards still returns the best rows inside the filter.
+        """
+        weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
+        where = f"AND {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT f.rowid AS rowid FROM tool_fts f"
+                f" JOIN tool t ON t.rowid = f.rowid"
+                f" WHERE tool_fts MATCH ? {where}"
+                f" ORDER BY bm25(tool_fts, {weights}) LIMIT ?",
+                (expression, *values, limit),
+            ).fetchall()
+        return [int(row["rowid"]) for row in rows]
+
+    async def _semantic_hits(
+        self, query: str, embedder: Embedder, k: int
+    ) -> list[tuple[int, float]]:
+        """Rowids by vector distance, nearest first, with a similarity each.
+
+        The **raw** query, not the normalized one: normalization is the keyword
+        leg's rule, and it inserts a space between every pair of CJK characters,
+        which is what makes them tokens there and is nonsense as text handed to
+        a model.
+        """
+        vectors = await embedder.embed([query])
+        if len(vectors) != 1:
+            raise RuntimeError(
+                f"the embedding model answered {len(vectors)} vectors for one "
+                f"query, so this search cannot say what a tool is about"
+            )
+        nearest = await asyncio.to_thread(
+            self._nearest, sqlite_vec.serialize_float32(vectors[0]), k
+        )
+        return [
+            (rowid, round(max(0.0, 1.0 - distance), 4)) for rowid, distance in nearest
+        ]
+
+    def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
+        """The KNN, and the dedup it cannot do itself.
+
+        `k` counts *chunks*, and a tool with a long schema has several, so the
+        best chunk per tool is what is kept — a KNN in `vec0` refuses the
+        `GROUP BY` that would say so.  A vector of another width is skipped
+        rather than compared: rows from two models cannot be ranked against each
+        other, and a distance between them is a number with no meaning at all.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT t.rowid AS rowid, t.name AS name, v.distance AS distance"
+                " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
+                " JOIN tool t ON t.name = c.name"
+                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+                (query_vector, k),
+            ).fetchall()
+        nearest: dict[str, tuple[int, float]] = {}
+        for row in rows:
+            nearest.setdefault(
+                str(row["name"]), (int(row["rowid"]), float(row["distance"]))
+            )
+        return list(nearest.values())
+
+    def _rows_in_order(
+        self,
+        rowids: list[int],
+        clauses: list[str],
+        values: list[Any],
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Those rows, in the order they were ranked, filtered and cut.
+
+        One query rather than one per row, because the order comes from the
+        fusion and the rows come from the table.  The semantic leg cannot apply
+        a filter — a KNN has no `WHERE` — so it is applied here, which is why a
+        filtered search can return fewer than it was asked for.
+        """
+        if not rowids:
+            return []
+        where = f"AND {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT rowid AS rowid, * FROM tool"
+                f" WHERE rowid IN ({_marks(rowids)}) {where}",
+                (*rowids, *values),
+            ).fetchall()
+        found = {int(row["rowid"]): row for row in rows}
+        return [found[rowid] for rowid in rowids if rowid in found][:limit]
+
+    # --- the derived indexes --------------------------------------------------
+
+    async def sync_indexes(self, embedder: Embedder) -> dict[str, Any]:
+        """Make both indexes agree with `embedder`, rebuilding what does not.
+
+        Run at startup, before anything is served.  The things that can leave an
+        index unreadable — text written by other rules, a different embedding
+        model, a different width, a repointed endpoint — all arrive here as "the
+        recorded identity is not the current one", and all take the same answer:
+        build it again.  That is what makes a changed embedding model a rebuild
+        rather than a migration, and it is one mechanism for all of them.
+
+        This is also the only thing that embeds a row which lost its vector, for
+        the reason it is the only thing that does so for turns: a merge embeds
+        what it changed and nothing else.
+
+        **The first start pays and the rest do not.**  A fresh identity — a new
+        file, or a changed model — re-embeds every tool of every server, which
+        is a real wait before anything is served; afterwards the identity
+        matches, nothing is missing, and this is one read of `meta` and one
+        query that returns no rows.
+        """
+        await asyncio.to_thread(self._sync_text_index)
+        await asyncio.to_thread(self.ensure_index, embedder)
+        missing = await asyncio.to_thread(self.tools_without_vectors)
+        vectors = await self._embed(missing, embedder)
+        await asyncio.to_thread(self._place, vectors)
+        return {
+            "vectors": len(vectors),
+            "identity": _tool_index_identity(embedder),
+        }
+
+    def ensure_index(self, embedder: Embedder) -> None:
+        """Create the vector index, or rebuild it if its identity has changed.
+
+        Cheap when it is current: one read of `meta`.  A rebuild here **drops
+        the vectors** without re-embedding anything, because the caller is a
+        reconcile that is embedding the rows it just wrote — putting the rest
+        back is `sync_indexes`, and the two are separate for the same reason
+        they are in the turn store.
+        """
+        identity = _tool_index_identity(embedder)
+        with self._connect() as connection:
+            if _meta(connection, "meta").get("vector_identity", "") == identity:
+                return
+            connection.execute("DROP TABLE IF EXISTS tool_vec")
+            connection.execute("DELETE FROM tool_chunk")
+            connection.execute(_vector_ddl(embedder.dimension, "tool_vec"))
+            _set_meta(
+                connection,
+                "meta",
+                vector_identity=identity,
+                vector_dim=str(embedder.dimension),
+            )
+            logger.info(
+                "the tool index is built again for %s (%.60s)", self.path, identity
+            )
+
+    def _place(self, vectors: Mapping[str, list[list[float]]]) -> None:
+        """Write a batch of vectors, in one transaction."""
+        with self._connect() as connection:
+            for name, rows in vectors.items():
+                _write_tool_vectors(connection, name, rows)
+
+    def _sync_text_index(self) -> None:
+        """Rebuild the keyword index when the rules that built it have changed.
+
+        One condition, because the other case cannot happen: a row can only be
+        missing from this index if the version stamp says the rules match — and
+        then it cannot be, since the row is indexed in the transaction that
+        writes it.  A file with no stamp at all is the version-mismatch case,
+        and is rebuilt whole.
+        """
+        with self._connect() as connection:
+            if _meta(connection, "meta").get("text_version", "") == TOOL_TEXT_VERSION:
+                return
+            connection.execute("DELETE FROM tool_fts")
+            for row in connection.execute("SELECT rowid AS rowid, * FROM tool"):
+                self._index(
+                    connection,
+                    int(row["rowid"]),
+                    {
+                        "name": str(row["name"]),
+                        "description": str(row["description"]),
+                        "category": str(row["category"]),
+                        "source_id": str(row["source_id"]),
+                        "schema": str(row["schema"]),
+                    },
+                )
+            _set_meta(connection, "meta", text_version=TOOL_TEXT_VERSION)
+
+    def tools_without_vectors(self) -> list[tuple[str, str]]:
+        """Every row the vector index does not hold, as `(name, document)`.
+
+        Oldest first, so a first run embeds a server's tools in the order they
+        were first seen rather than in whatever order the table happens to be
+        in.  "Has no vector" means exactly one thing here — the row is new, or
+        its text moved — because those are the only two paths that leave a row
+        without one; a rebuild for a changed model leaves them all without one,
+        which is how the same query fills the index back in.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT t.rowid AS rowid, t.name AS name, t.description AS description,"
+                " t.schema AS schema FROM tool t"
+                " LEFT JOIN tool_chunk c ON c.name = t.name"
+                " WHERE c.id IS NULL"
+                " ORDER BY t.rowid",
+            ).fetchall()
+        return [(str(row["name"]), tool_document(dict(row))) for row in rows]
+
+
+def _tool_index_identity(embedder: Embedder) -> str:
+    """What the vector index was built with, as one comparable string.
+
+    The text contract is part of it and not only the model, because a vector is
+    a function of the text it was made from: changing what goes into one makes
+    every stored vector the wrong vector for its tool, which is the same failure
+    as changing the model and takes the same rebuild.
+    """
+    return f"{TOOL_TEXT_VERSION}|{embedder.identity}|{embedder.dimension}"
+
+
+def _chunk_documents(
+    rows: Sequence[tuple[str, str]], max_chars: int
+) -> tuple[list[str], list[tuple[str, int, int]]]:
+    """`(every chunk in order, where each row's chunks are)`.
+
+    Split out so the one request that carries the whole batch can be built
+    before anything is sent: an embedding call per tool is a round trip per
+    tool, and a first run has every tool of every server to embed.
+    """
+    chunks: list[str] = []
+    spans: list[tuple[str, int, int]] = []
+    for name, document in rows:
+        pieces = embed_chunks(document, limit=max_chars)
+        spans.append((name, len(chunks), len(pieces)))
+        chunks.extend(pieces)
+    return chunks, spans
+
+
+def _load_outcome(row: Mapping[str, Any], load_status: str) -> str:
+    """What flipping one row's load state would do — v1's refusals, in order.
+
+    Order matters for one case: a row can be `loaded` *and* unusable — its
+    server went down after the model loaded it — and answering "already loaded"
+    there would be a lie the model can see through, since nothing of it is in
+    its list.  So the owner's state is asked first, and the answer is the reason
+    rather than the state.
+    """
+    if row["category"] not in FUNCTION_CATEGORIES:
+        return "no_load_state"
+    if load_status == LOADED:
+        if row["status"] == STATUS_DISABLED:
+            return STATUS_DISABLED
+        if row["status"] == STATUS_ERROR:
+            return STATUS_ERROR
+    if row["load_status"] == load_status:
+        return "already"
+    return str(load_status)
+
+
+def _injectable_sql(sources: Sequence[str]) -> str:
+    """The gate, in SQL: a loaded function tool whose owner is live.
+
+    Built from the constants rather than spelled out, so the SQL cannot drift
+    from `FUNCTION_CATEGORIES` — the same reason `_CATEGORY_CHECK` is.
+
+    **A name beginning with `_` is a harness tool and is never injected.**  v1's
+    convention, and it is a name and not a column for v1's reason: what makes a
+    tool the harness's is that the *machinery* calls it — `_func_tool_unload` is
+    run by the agent server at a turn boundary, with nobody choosing it — and a
+    fact about who calls a thing belongs on the thing, where both sides can read
+    it without a second register to keep in step.  It is in the catalogue like
+    everything else, with its state, and the gate is what keeps it out of the
+    model's list.
+    """
+    return (
+        f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
+        f" AND load_status = '{LOADED}'"
+        f" AND source_id IN ({_marks(sources)})"
+        f" AND name NOT LIKE '\\_%' ESCAPE '\\'"
+    )
+
+
+def _category_check_values(ddl: str) -> set[str] | None:
+    """The categories a live `tool` DDL accepts; `None` when it has no CHECK.
+
+    Scoped to the `category` clause rather than the whole statement on purpose:
+    `'skill'` and `'rest'` are ordinary words another clause could carry, and a
+    substring test would call a category list complete when it was not.
+    """
+    found = _TOOL_CATEGORY_RE.search(ddl)
+    if found is None:
+        return None
+    return {
+        value.strip().strip("'\"")
+        for value in found.group(1).split(",")
+        if value.strip()
+    }
+
+
+def _table_ddl(connection: sqlite3.Connection, table: str) -> str | None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+    ).fetchone()
+    return None if row is None else str(row["sql"] or "")
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    """Whether a table (or a virtual one) is there at all.
+
+    Asked for the vector index, which cannot be created with the rest of the
+    schema: `vec0` fixes its width in the DDL and only an embedder knows the
+    width, so a catalogue can hold rows before it holds vectors.
+    """
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _tool_filters(
+    *, category: str, source_id: str, status: str, load_status: str
+) -> tuple[list[str], list[Any]]:
+    """The optional filters of a search, as `(clauses, params)`.
+
+    Each is an equality on a column whose domain is closed, so a caller that
+    passes something else gets no rows rather than an error: a filter that
+    matched everything because of a typo would be worse than one that matches
+    nothing.
+    """
+    clauses: list[str] = []
+    values: list[Any] = []
+    for column, value in (
+        ("category", category),
+        ("source_id", source_id),
+        ("status", status),
+        ("load_status", load_status),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            values.append(str(value))
+    return clauses, values
+
+
+def _write_tool_vectors(
+    connection: sqlite3.Connection, name: str, vectors: list[list[float]]
+) -> None:
+    """Place one tool's chunks, one vector each, under ids of their own.
+
+    A row in `tool_vec` is a chunk and not a tool — `vec0` has no way to hold
+    several vectors in one row — so `tool_chunk` is what remembers which tool a
+    chunk came from, and the two are written together: a chunk whose vector is
+    missing would be a tool the index believes it holds.
+
+    **What was there goes first, vectors included.**  `tool_chunk.id` is a
+    plain rowid and SQLite hands the same one out again once the last row using
+    it is deleted — so writing new chunks over an old tool's ids means writing
+    vectors over the ones still in `tool_vec`, which `vec0` refuses.  The
+    delete is the only thing that makes this call idempotent, and it is why
+    re-embedding a row is safe.
+    """
+    _clear_vectors(connection, [name])
+    for index, vector in enumerate(vectors):
+        cursor = connection.execute(
+            "INSERT INTO tool_chunk (name, chunk_index) VALUES (?, ?)", (name, index)
+        )
+        connection.execute(
+            "INSERT INTO tool_vec (rowid, embedding) VALUES (?, ?)",
+            (int(cursor.lastrowid or 0), sqlite_vec.serialize_float32(vector)),
+        )
+
+
+def _clear_vectors(connection: sqlite3.Connection, names: Sequence[str]) -> None:
+    """Forget the vectors of these rows, keeping the rows themselves.
+
+    The vector table may not exist yet — it is created with a *width*, which
+    only an embedder can supply — and nothing to clear is not an error.
+    """
+    if not names:
+        return
+    marks = _marks(names)
+    if _table_exists(connection, "tool_vec"):
+        connection.execute(
+            f"DELETE FROM tool_vec WHERE rowid IN"
+            f" (SELECT id FROM tool_chunk WHERE name IN ({marks}))",
+            list(names),
+        )
+    connection.execute(f"DELETE FROM tool_chunk WHERE name IN ({marks})", list(names))

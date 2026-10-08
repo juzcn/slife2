@@ -87,7 +87,7 @@ from slife2.mcp_server import (
 )
 from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
-from slife2.toolclient import remote_tools
+from slife2.toolclient import remote_tools, unload_tools
 from slife2.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -578,6 +578,7 @@ def build_server(
             # Nothing to record, or a caller cancelled while queued — in which case its
             # turn never started and there is nothing that happened to record.
             return
+        await trim_tools(loop)
         await remember_turn(
             loop.agent,
             loop.subagent,
@@ -588,6 +589,38 @@ def build_server(
             created_at=outcome.started_at or outcome.completed_at,
             completed_at=outcome.completed_at,
         )
+
+    async def trim_tools(loop: Loop) -> None:
+        """Bring the model's tool list back within its budget, before saving.
+
+        **A turn boundary, and the harness's own call.**  The tools a model has
+        loaded go out with every request, so a turn that loaded several has left
+        the list longer than the config allows — and it is trimmed here rather
+        than by the gate because this is the moment nothing is in flight: the
+        list is rebuilt before every *model call*, so dropping the excess
+        mid-turn would take away a tool the model had just loaded and was about
+        to use.
+
+        It is also the moment the harness can *say* what happened.  The answer
+        names the tools that went, and they are logged — a model whose next
+        request carries three fewer tools than it thinks it has is a model that
+        will look for one of them.
+
+        Best-effort by construction (`slife2.toolclient.unload_tools` swallows a
+        hub that will not answer): the turn is over and has been answered, and
+        bookkeeping that runs after it must not turn a good turn into a failed
+        one.  A hub that is really gone makes itself heard on the next turn's
+        tool list, which is asked for before the conversation is touched.
+        """
+        found = await unload_tools(await hub())
+        unloaded = [str(name) for name in found.get("unloaded") or []]
+        if unloaded:
+            logger.info(
+                "%s: %d tool(s) unloaded to stay within the budget: %s",
+                describe((loop.agent, loop.subagent)),
+                len(unloaded),
+                ", ".join(unloaded),
+            )
 
     async def run_turn_into(
         loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome

@@ -343,3 +343,98 @@ async def test_the_vectors_come_back_as_floats() -> None:
         [1.0, 2.0],
         [3.0, 4.0],
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_catalogue_is_a_capability_of_this_component(
+    tmp_path, monkeypatch
+) -> None:
+    """The `tool_*` tools, and who may see them.
+
+    They are the record's public API — the hub is the caller today, and a second
+    caller is an ordinary thing rather than a surprise — so none of them carries
+    the model's audience mark.  That is what keeps them out of the model's tool
+    list without a second filter anywhere: the hub's own rule drops an unmarked
+    component tool by itself.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        listed = await client.list_tools()
+        names = {tool.name for tool in listed}
+        assert {
+            "tool_merge",
+            "tool_source_state",
+            "tool_injectable",
+            "tool_evict",
+            "tool_route",
+            "tool_sources",
+            "tool_search",
+            "tool_set_load",
+            "tool_touch",
+        } <= names
+
+        merged = await client.call_tool(
+            "tool_merge",
+            {
+                "source": "builtins",
+                "category": "component",
+                "tools": [
+                    {
+                        "name": "builtins__calc",
+                        "description": "Evaluate an arithmetic expression.",
+                        "remote_name": "calc",
+                        "schema": '{"e": "expression"}',
+                    }
+                ],
+            },
+        )
+        assert merged.data["inserted"] == ["builtins__calc"]
+
+        injected = await client.call_tool("tool_injectable", {"sources": ["builtins"]})
+        assert [row["name"] for row in injected.data["tools"]] == ["builtins__calc"]
+
+        found = await client.call_tool("tool_search", {"query": "arithmetic"})
+        assert [row["name"] for row in found.data["results"]] == ["builtins__calc"]
+
+        routed = await client.call_tool("tool_route", {"name": "builtins__calc"})
+        assert routed.data["tool"]["remote_name"] == "calc"
+
+
+@pytest.mark.asyncio
+async def test_the_catalogue_is_indexed_before_anything_is_served(
+    tmp_path, monkeypatch
+) -> None:
+    """A file whose vectors came from another model is put right on the way up.
+
+    The same pass the turn files get: the identity is compared and a mismatch
+    re-embeds every tool.  Afterwards the identity matches, so the next start is
+    a read of one row and a query that returns nothing — which is why the first
+    start pays and the rest do not.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    first = StubEmbedder()
+    async with Client(build_server(default_config(), embedder=first)) as client:
+        await client.call_tool(
+            "tool_merge",
+            {
+                "source": "builtins",
+                "category": "component",
+                "tools": [
+                    {
+                        "name": "builtins__calc",
+                        "description": "Evaluate an arithmetic expression.",
+                        "remote_name": "calc",
+                        "schema": "",
+                    }
+                ],
+            },
+        )
+    assert first.calls, "the row was embedded when it was written"
+
+    # A second process, with a different model: the index it left behind cannot
+    # be searched by this one, so every tool is embedded again.
+    second = StubEmbedder(identity="stub:two")
+    async with Client(build_server(default_config(), embedder=second)) as client:
+        found = await client.call_tool("tool_search", {"query": "arithmetic"})
+        assert [row["name"] for row in found.data["results"]] == ["builtins__calc"]
+    assert second.calls, "rebuilt for the model that is in use now"

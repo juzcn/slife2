@@ -39,6 +39,7 @@ Three tool names, one payload shape, and one rule about failure:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,8 @@ from slife2.audience import client_meta
 from slife2.mcp_server import tool_payload
 from slife2.messages import ToolSpec
 from slife2.tools import Tool, ToolFailed
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # the agent never imports a server, and this is a client one
     from fastmcp import Client
@@ -56,6 +59,13 @@ if TYPE_CHECKING:  # the agent never imports a server, and this is a client one
 LIST_TOOLS = "list_tools"
 CALL_TOOL = "call_tool"
 SERVERS = "servers"
+
+#: The harness's own trim, and the one hub tool the *agent* calls on the hub's
+#: API rather than through `call_tool`.  Its leading underscore is the system's
+#: mark for a tool the machinery calls rather than one a model chooses, and the
+#: hub's docstring on it says why the trim is a call at all: the answer names
+#: what the model lost, and the harness is the party that has to know.
+FUNC_TOOL_UNLOAD = "_func_tool_unload"
 
 #: What separates a server from a tool in a proxied name.  Double, not single:
 #: FastMCP's own multi-server client prefixes with one underscore, and one
@@ -140,6 +150,40 @@ async def remote_tools(
     ]
 
 
+async def unload_tools(client: Client) -> dict[str, Any]:
+    """Trim the model's tool list to its budget, and say what was trimmed.
+
+    **Called by the harness at a turn boundary, never by a model.**  The tools
+    the model has loaded are what its next request carries, so a list that grew
+    over a turn is trimmed before the turn is saved — and the names come back,
+    because the caller is the party that has to know what the model just lost.
+    The hub's `_func_tool_unload` docstring is where that is argued.
+
+    A trim that cannot happen is **not** a turn that failed: the turn is over,
+    the answer has been given, and this is bookkeeping that runs after it.  So a
+    hub which does not know the tool — a daemon from a previous build, which
+    answers with a refusal rather than a payload — leaves the list as it was and
+    says so in the log, where the next `list_tools` will make a missing hub
+    impossible to miss.
+
+    Returns:
+        The hub's payload: `unloaded` (the names that moved), `refused` and
+        `not_loaded`, and `text` — the same thing in a sentence.
+    """
+    empty: dict[str, Any] = {
+        "unloaded": [],
+        "refused": [],
+        "not_loaded": [],
+        "text": "",
+    }
+    try:
+        payload = tool_payload(await client.call_tool(FUNC_TOOL_UNLOAD, {}))
+    except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
+        logger.warning("the tool list was not trimmed: %s", exc)
+        return empty
+    return payload or empty
+
+
 def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
     """A tool body that calls `name` on the far side and reports what it said.
 
@@ -173,9 +217,11 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
 
 __all__ = [
     "CALL_TOOL",
+    "FUNC_TOOL_UNLOAD",
     "LIST_TOOLS",
     "SEPARATOR",
     "SERVERS",
     "UpstreamTool",
     "remote_tools",
+    "unload_tools",
 ]
