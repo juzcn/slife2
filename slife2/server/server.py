@@ -65,7 +65,7 @@ from fastmcp.exceptions import ToolError
 from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
-    MEMORY_SERVER_NAME,
+    DB_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
     find_config_path,
@@ -94,13 +94,13 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-agent"
 
-#: How long to wait on the memory server.  Short: the write happens once the
+#: How long to wait on the db server.  Short: the write happens once the
 #: answer already exists, and a slow store is not worth holding that answer for.
 #: A store that is *gone* is a different matter — that fails the turn outright;
 #: see `slife2.mcp_server.open_server`.
 MEMORY_TIMEOUT_SECONDS = 10.0
 
-#: How long to wait on the toolhub.  Longer than the memory server's, because
+#: How long to wait on the toolhub.  Longer than the db server's, because
 #: this call is not a write after the fact: `list_tools` is what the turn's tool
 #: list is built from, and it may briefly wait for tool servers that are still
 #: connecting (`slife2.toolhub.LIST_SETTLE_SECONDS`).  A timeout shorter than
@@ -270,13 +270,13 @@ def build_server(
     background: set[asyncio.Task[None]] = set()
 
     async def memory() -> Client:
-        """The client for the memory server, opened on first use.
+        """The client for the db server, opened on first use.
 
         Opened once and kept for the process, the same arrangement as the model
         backends and for the same reason: a handshake per turn is a handshake
         per turn.
 
-        A memory server that is not there **raises**, like every other peer in
+        A db server that is not there **raises**, like every other peer in
         this system.  `slife2.mcp_server.open_server` is where that rule lives
         and why; what matters here is that this component is not the exception
         to it.
@@ -290,8 +290,8 @@ def build_server(
         async with opening:
             if memory_conn is None:
                 memory_conn = await open_server(
-                    config.server("memory").url,
-                    name=MEMORY_SERVER_NAME,
+                    config.server("db").url,
+                    name=DB_SERVER_NAME,
                     fallback_tool="remember",
                     timeout=MEMORY_TIMEOUT_SECONDS,
                 )
@@ -377,7 +377,7 @@ def build_server(
         rather than this function's — `slife2.mcp_server.open_server` is where a
         missing peer is decided to be a broken system rather than a degraded
         one.  A `ToolError` is left alone, and it is a different thing: it means
-        the memory server answered and refused *this* request — an agent name
+        the db server answered and refused *this* request — an agent name
         that cannot be a filename, say — which is one caller's problem rather
         than a sign that anything is down.
 
@@ -574,7 +574,7 @@ def build_server(
         """Write this turn to memory if this loop has any.
 
         Called *after* the lock is released: it is a network call, and a queued
-        turn waiting on the memory server is a wait with no reason behind it.
+        turn waiting on the db server is a wait with no reason behind it.
         """
         if not loop.records or not outcome.messages:
             # No memory, or a caller cancelled while queued — in which case its
@@ -715,7 +715,7 @@ def build_server(
             `model` that answered — which a bare provider or an empty reference
             does not otherwise reveal.
         """
-        # Asked before anything is spent.  A memory server that is not there is a
+        # Asked before anything is spent.  A db server that is not there is a
         # broken system rather than a degraded one, and the moment to find that
         # out is *before* the first model call has been paid for — not at the
         # write, when the answer exists and has nowhere to go.

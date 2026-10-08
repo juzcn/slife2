@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from slife2.clock import now
-from slife2.paths import turns_dir
+from slife2.paths import db_dir
 from slife2.timeutil import normalize_bound
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 #: and a path is not something a command line should be able to reach.
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
-#: How long SQLite waits for a lock before giving up.  The memory server is the
+#: How long SQLite waits for a lock before giving up.  The database server is the
 #: only writer, but a read may be in flight while a turn is being written.
 _BUSY_TIMEOUT_MS = 5000
 
@@ -127,7 +127,7 @@ def database_path(agent: str, subagent: str = "") -> Path:
     safe = safe_agent_name(agent)
     if subagent:
         safe = f"{safe}{_CLIENT_SEPARATOR}{safe_agent_name(subagent)}"
-    return turns_dir() / f"{safe}.turn.db"
+    return db_dir() / f"{safe}.turn.db"
 
 
 @dataclass(frozen=True)

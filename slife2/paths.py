@@ -9,7 +9,7 @@ it.
     <data>/
       slife2.yaml   the config; absent means the built-in defaults
       runtime/      records, locks, logs, claims — a daemon's bookkeeping
-      turns/        <agent>.turn.db — the turns, one file per agent
+      slife2.db/    <agent>.turn.db — the turns, one file per agent
 
 **Where that root is depends on what you are running.**  A checkout keeps it
 beside itself, so the checked-in `slife2.yaml` is the one in use and the
@@ -17,8 +17,8 @@ databases are directories you can open; an installation keeps it at `~/.slife2`,
 per-user and independent of wherever it was started from.  See `data_dir`.
 
 The split that remains is the one that matters: `runtime/` is *reconstructible*
-— delete it and the next start rebuilds whatever it needs — while `turns/` is
-not.  Anything that would be a disaster to lose does not go in `runtime/`.
+— delete it and the next start rebuilds whatever it needs — while `slife2.db/`
+is not.  Anything that would be a disaster to lose does not go in `runtime/`.
 
 `SLIFE2_DATA_DIR` overrides the whole thing, which is what tests use to keep off
 a developer's real state, and what `--data-dir` sets.
@@ -93,7 +93,7 @@ def data_dir() -> Path:
     **A checkout keeps everything beside itself; an installation keeps it under
     the home directory.**  Working on slife2 means the config, the runtime state
     and the databases are the ones in front of you — the checked-in
-    `slife2.yaml` is read, `turns/` is a directory you can open, and deleting
+    `slife2.yaml` is read, `slife2.db/` is a directory you can open, and deleting
     the checkout deletes the lot.  An installation has no checkout to sit in, so
     it uses `~/.slife2`, which is per-user and survives whatever directory it
     happens to be started from.
@@ -117,8 +117,8 @@ def runtime_dir() -> Path:
     return path
 
 
-def turns_dir() -> Path:
+def db_dir() -> Path:
     """Where the per-agent databases live.  Not safe to delete."""
-    path = data_dir() / "turns"
+    path = data_dir() / "slife2.db"
     path.mkdir(parents=True, exist_ok=True)
     return path

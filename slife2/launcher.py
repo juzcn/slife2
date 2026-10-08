@@ -33,8 +33,8 @@ from slife2.config import (
     API_BACKENDS,
     API_SERVER_NAMES,
     BUILTINS_SERVER_NAME,
+    DB_SERVER_NAME,
     LOCAL_SERVERS,
-    MEMORY_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
 )
@@ -80,12 +80,12 @@ from slife2.runtime import (
 #: component is and when it starts are each said once; `tests/test_launcher.py`
 #: holds the two together.
 AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
-MEMORY_SERVER = ("slife2.memory_server", MEMORY_SERVER_NAME, "remember")
+DB_SERVER = ("slife2.db_server", DB_SERVER_NAME, "remember")
 BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
 TOOLHUB_SERVER = ("slife2.toolhub", TOOLHUB_SERVER_NAME, "list_tools")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
-    "memory": MEMORY_SERVER,
+    "db": DB_SERVER,
     "builtins": BUILTINS_SERVER,
     "toolhub": TOOLHUB_SERVER,
     "agent": AGENT_SERVER,

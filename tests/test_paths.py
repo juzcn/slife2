@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from slife2.paths import DATA_ENV_VAR, data_dir, in_checkout, runtime_dir, turns_dir
+from slife2.paths import DATA_ENV_VAR, data_dir, db_dir, in_checkout, runtime_dir
 
 pytestmark = pytest.mark.unit
 
@@ -82,7 +82,7 @@ def test_the_parts_live_under_the_root(
 ) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     assert runtime_dir() == tmp_path / "runtime"
-    assert turns_dir() == tmp_path / "turns"
+    assert db_dir() == tmp_path / "slife2.db"
     # ...and are made on demand, so a first run has somewhere to write.
     assert runtime_dir().is_dir()
-    assert turns_dir().is_dir()
+    assert db_dir().is_dir()

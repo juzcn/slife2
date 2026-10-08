@@ -23,7 +23,7 @@ streams different events, so it gets its own process like any other wire format.
 
 Serving a server at all — the flags, the HTTP transport, the record that says a
 daemon is here — is deliberately *not* in this package.  It is not an LLM
-concern, and the memory server and the agent server need it too, so it lives in
+concern, and the db server and the agent server need it too, so it lives in
 :mod:`slife2.mcp_server`.  Neither of those two should have to import
 `slife2.llm` to be a server.
 

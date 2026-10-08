@@ -1,4 +1,4 @@
-"""slife2-memory — turns, persisted, one database per client id.
+"""slife2-db — turns, persisted, one database per client id.
 
 A component with one job: keep what was said.  It does not summarise, does not
 decide what mattered, does not put anything back into a conversation, and does
@@ -39,14 +39,14 @@ from slife2.mcp_server import (
     serve,
 )
 from slife2.memory import PREVIEW_CHARS, store_for
-from slife2.paths import turns_dir
+from slife2.paths import db_dir
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-memory"
+SERVER_NAME = "slife2-db"
 
 #: This server's key in the config's `servers:` table.
-CONFIG_KEY = "memory"
+CONFIG_KEY = "db"
 
 INSTRUCTIONS = (
     "Persisted turns, one database per client id. Call `remember` after a turn, "
@@ -149,7 +149,7 @@ def build_server(config: Config) -> FastMCP:
         Raises:
             ValueError: If the call arrived without one.  Every real caller is
                 the hub, which forwards what the agent gave it, so this is a
-                caller that reached the memory server directly — a test, or a
+                caller that reached the db server directly — a test, or a
                 component that is not the agent — and it is better told than
                 quietly served whatever it named.
         """
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         args.host or address.host,
         args.port or address.port,
         address.path,
-        turns_dir(),
+        db_dir(),
     )
     serve(
         build_server(config),

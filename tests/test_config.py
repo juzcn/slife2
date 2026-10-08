@@ -86,16 +86,14 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     from slife2.config import (
         AGENT_SERVER_NAME,
         API_SERVER_NAMES,
-        MEMORY_SERVER_NAME,
+        DB_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
 
     assert importlib.import_module("slife2.server.server").SERVER_NAME == (
         AGENT_SERVER_NAME
     )
-    assert importlib.import_module("slife2.memory_server").SERVER_NAME == (
-        MEMORY_SERVER_NAME
-    )
+    assert importlib.import_module("slife2.db_server").SERVER_NAME == DB_SERVER_NAME
     assert importlib.import_module("slife2.toolhub").SERVER_NAME == (
         TOOLHUB_SERVER_NAME
     )

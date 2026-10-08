@@ -69,7 +69,7 @@ def hub_for(
     entries: dict[str, ToolServerSettings] | None = None,
     **kwargs: Any,
 ) -> FastMCP:
-    """A hub over in-memory servers, keyed by entry name.
+    """A hub over in-db servers, keyed by entry name.
 
     `connected` maps a name to a *transport*, which is anything a `Client` can
     be built from and therefore always a callable: `lambda settings: server` for
@@ -164,7 +164,7 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
 def component_with_two_kinds_of_tool() -> FastMCP:
     """One of our own servers, offering one tool of each kind.
 
-    Which is what every one of them is: `slife2-memory` serves `turn_list` to
+    Which is what every one of them is: `slife2-db` serves `turn_list` to
     the model and `remember` to the agent, and the difference is not visible in
     anything but the tool itself.
     """
@@ -194,13 +194,13 @@ async def test_a_components_tool_is_the_models_only_when_it_says_so() -> None:
     in by writing it down, which is what the tests above are listing.
     """
     async with Client(
-        hub_for(connected={"memory": lambda settings: component_with_two_kinds_of_tool()})
+        hub_for(connected={"db": lambda settings: component_with_two_kinds_of_tool()})
     ) as hub:
         listed = await hub.call_tool("list_tools", {})
-        unreachable = await call(hub, "memory__remember", {"text": "hi"})
+        unreachable = await call(hub, "db__remember", {"text": "hi"})
 
-    assert "memory__turn_list" in names(listed.data)
-    assert "memory__remember" not in names(listed.data)
+    assert "db__turn_list" in names(listed.data)
+    assert "db__remember" not in names(listed.data)
     # Not merely unlisted: the name is not routable either, so a model that
     # remembered it from somewhere gets an answer rather than a write.
     assert unreachable["ok"] is False

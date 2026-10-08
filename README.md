@@ -67,7 +67,7 @@ without passing an argument:
 uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-toolhub          # the model's tools,          :8020
 uv run slife2-builtins         # echo, now, calc,            :8030
-uv run slife2-memory           # turns, one db per agent,    :8010
+uv run slife2-db           # turns, one db per agent,    :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
 uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
@@ -142,7 +142,7 @@ the next call's list.
 The hub has two sources: the components above, which it asks for a tool list the
 way it asks anybody, and everything under `tools:`. Which of a component's tools
 the model may call is said on the tool — `@mcp.tool(meta=FOR_THE_MODEL)`, which
-`now`, `calc` and `echo` carry and memory's `remember` does not. A component's
+`now`, `calc` and `echo` carry and the db's `remember` does not. A component's
 tools are its own code's until one of them says otherwise, so a tool you forget
 to mark is invisible rather than dangerous.
 
@@ -166,7 +166,7 @@ runtime state of what is running, and the turns they produced:
 <data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
   slife2.yaml                      the config; absent means the defaults
   runtime/                         records, locks, logs — reconstructible
-  turns/                           <agent>.turn.db — not reconstructible
+  slife2.db/                       <agent>.turn.db — not reconstructible
 ```
 
 **Where that folder is depends on what you are running.** In a checkout it is
@@ -176,11 +176,11 @@ wherever the command happened to be started. `--data-dir DIR` (or
 `$SLIFE2_DATA_DIR`) overrides both.
 
 A checkout therefore keeps generated state in the working tree, which is why
-`.gitignore` covers `runtime/` and `turns/`. It does *not* cover `slife2.yaml`:
+`.gitignore` covers `runtime/` and `slife2.db/`. It does *not* cover `slife2.yaml`:
 that file is the point of the arrangement.
 
 The split that remains is the one that matters: deleting `runtime/` costs
-nothing, deleting `turns/` costs the memory.
+nothing, deleting `slife2.db/` costs the memory.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
@@ -218,7 +218,7 @@ slife2/
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
-├─ memory_server.py   # slife2-memory: `remember`, and the model's `turn_list`
+├─ db_server.py       # slife2-db: `remember`, and the model's `turn_list`
 │                     #   and `turn_read`
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
@@ -251,7 +251,7 @@ agent server's business.
 servers means — the flags, the HTTP transport, the record that says a daemon is
 here, and the two conventions (`house_server`) that would otherwise be copied
 into each server. It is not LLM-specific, which is why it is not under
-`llm/`: the memory server, the toolhub and the agent server are not LLM
+`llm/`: the db server, the toolhub and the agent server are not LLM
 components, and the scaffold they serve on should not come out of the LLM
 package.
 

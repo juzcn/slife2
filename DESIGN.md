@@ -20,7 +20,7 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
   ▼
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
-  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-memory                 (one SQLite file per agent)
+  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-db                     (one SQLite file per agent)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub
   │                                 ├── :8030/mcp ──▶ slife2-builtins   (`echo`, `now`, `calc`)
   │                                 └── MCP ──▶    external tool servers, and REST via a proxy
@@ -30,7 +30,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
 ```
 
 **One component, one job, and the granularity is deliberate.**  A model backend
-speaks one wire protocol; memory keeps turns; the hub is where the tools come
+speaks one wire protocol; the db keeps turns; the hub is where the tools come
 from; the agent loop runs turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
@@ -221,7 +221,7 @@ created outside the cancelled scope does land, so the cancel path detaches the
 write and logs its failure instead of dropping it. What that gives up is
 ordering: if a queued turn follows immediately, it may write first. That is a
 cosmetic inversion in `recent`, and it is the cheaper half of the trade — the
-alternative is every queued turn waiting on the memory server.
+alternative is every queued turn waiting on the db server.
 
 **The id travels with the call, at every hop.** It is not only the agent server
 that receives it: the memory write and the model call are both made under the
@@ -336,7 +336,7 @@ failure and latched itself off, which made the same situation fatal at startup
 and silent a minute later.
 
 One thing is deliberately not fatal: **a `ToolError` is not absence.** It means
-the memory server answered and refused *this* request — an agent name that cannot
+the db server answered and refused *this* request — an agent name that cannot
 be a filename, say — which is one caller's problem rather than a sign that
 anything is down.
 
@@ -395,7 +395,7 @@ and the one a future port of its time-window queries will compare against.
 
 **Reading is by time, and there are two ways to do it.** `turn_list` browses —
 newest first, one line per turn, paged — and `turn_read` returns one turn whole.
-Both are the *model's* tools, both are the reason memory is a component the hub
+Both are the *model's* tools, both are the reason the db is a component the hub
 asks rather than ours alone, and both are windows over `created_at` with the
 grammar v1's `timeutil` implemented (ISO, `yesterday`, `last month`,
 `3 days ago`), ported whole so a window means the same thing on both sides of
@@ -404,12 +404,12 @@ result: SQLite answers an unrecognised string with no rows, and "no rows" is an
 answer a caller believes.
 
 **And a model reads only its own history, which is not something an argument can
-say.** V1's memory server ran one process per agent, so the connection *was* the
+say.** V1's db server ran one process per agent, so the connection *was* the
 identity. This one is shared — one process serves every client id, the way one
 model server serves every provider — so the identity has to travel, and it
 travels in the call's `_meta` rather than in its arguments (`slife2.audience`).
 The agent binds the conversation it is running for when it builds the loop, the
-hub forwards what it was given without reading it, and memory answers about the
+hub forwards what it was given without reading it, and the db answers about the
 conversation the call came from. A model that could name an agent could read
 somebody else's memory, and the only thing standing in the way would be a
 sentence in its own system prompt — which is an instruction, not a boundary.
@@ -500,7 +500,7 @@ credentials.** It is a port of v1's `mcp-gateway`, and the shape that survived
 the port is the whole of it:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  components           (ours; `builtins`, `memory`, …)
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  components           (ours; `builtins`, `db`, …)
                           list_tools        └──▶  external tool servers (stdio or http)
                           call_tool
                           servers
@@ -522,7 +522,7 @@ a tool that is absent, not a tool that is dangerous.
 
 **A call can say who it is on behalf of, and the hub passes that on without
 reading it.** Memory is the case that needs it: the model may browse its own
-history and must not browse anybody else's, and one memory server serves every
+history and must not browse anybody else's, and one db server serves every
 conversation in the system. So the conversation rides in the call's `_meta`
 rather than in its arguments — off the schema the model reads, out of reach of a
 prompt that asks for somebody else's turns — and the hub, which cannot act on it
@@ -531,7 +531,7 @@ protocol's own keys name *this* request's progress stream, and a proxy has no
 business passing those on). §5 has the rest.
 
 **The hub's own tools are the agent's API and never the model's.** Like the
-memory server's `remember` and `recent`, the model never sees `list_tools`,
+db server's `remember` and `recent`, the model never sees `list_tools`,
 `call_tool` or `servers`; it sees the *proxied* tools, under `{server}__{tool}`
 names. That indirection is what keeps the hub's surface constant: a server
 coming and going changes what the model may call without changing anything about
@@ -586,7 +586,7 @@ throws — which is one of the reasons this port is a few hundred lines where v1
 was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
-component gone and fails the turn, like memory. A missing *upstream* is the
+component gone and fails the turn, like the db. A missing *upstream* is the
 operator's configuration and somebody else's process: reported by `servers()`,
 left out of the tool list, and retried on the next ask. An upstream *refusing a
 call* is one caller's bad data. Collapsing these is how a config mistake becomes
@@ -685,6 +685,6 @@ Named so they are decisions rather than oversights:
 - **A client id on the turn record.** Nothing reads it yet, and adding a column
   to `turn` means deleting every existing `*.turn.db` (there is no migration
   layer, §5). The failure mode of getting it wrong is worse than the gap: the
-  new INSERT would raise `OperationalError`, the memory server would report it
+  new INSERT would raise `OperationalError`, the db server would report it
   as one caller's bad data, and every turn after the upgrade would run perfectly
   and never be recorded. Add it with the reader that needs it.

@@ -180,7 +180,7 @@ async def open_server(
     # Ask the port before asking the protocol.  A refused TCP connect comes back
     # at once, where building an MCP client against nothing spends a couple of
     # seconds inside the transport's own retries — measured here at 0.27s
-    # against 2.29s.  It used to be worth this only for the memory server, whose
+    # against 2.29s.  It used to be worth this only for the db server, whose
     # absence was the one that could be discovered on the first turn of a
     # session; now that any missing peer fails the turn, it is worth it for all
     # of them, and it costs a quarter of a second only when something is

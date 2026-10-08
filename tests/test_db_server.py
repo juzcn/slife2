@@ -1,4 +1,4 @@
-"""slife2-memory over the wire.
+"""slife2-db over the wire.
 
 The tools are thin — a store call hopped off the event loop — and that thinness
 is exactly what a payload mismatch hides behind.  FastMCP validates the
@@ -16,7 +16,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.audience import client_meta
 from slife2.config import default_config
-from slife2.memory_server import build_server
+from slife2.db_server import build_server
 from slife2.paths import DATA_ENV_VAR
 
 pytestmark = pytest.mark.unit
@@ -64,7 +64,7 @@ async def test_an_agent_name_that_cannot_be_a_file_is_refused(
     """The one refusal the agent server tells apart from a dead transport.
 
     `server.py` reads a `ToolError` as "this one request, from this one caller"
-    and keeps talking to the memory server; anything else it reads as the
+    and keeps talking to the db server; anything else it reads as the
     transport being gone.  That distinction only holds if a bad name really does
     come back as a `ToolError` rather than as a dropped connection.
     """

@@ -49,7 +49,7 @@ classifiers = [
 [project.scripts]
 slife2 = "slife2:main"
 slife2-agent = "slife2.server.server:main"
-slife2-memory = "slife2.memory_server:main"
+slife2-db = "slife2.db_server:main"
 slife2-builtins = "slife2.builtins:main"
 slife2-toolhub = "slife2.toolhub:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"

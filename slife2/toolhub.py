@@ -2,7 +2,7 @@
 credentials.
 
 Every other component in this system is a place a capability comes from: a model
-backend speaks one wire protocol, memory keeps turns, the agent loop runs turns.
+backend speaks one wire protocol, the db keeps turns, the agent loop runs turns.
 This one is where **the tools come from**, and it exists because tools are the
 one capability that has to reach *outside* the machine — to somebody else's MCP
 server, to a REST API, to a program that wants an API key in its environment.
@@ -22,7 +22,7 @@ Two sources, one list
 ---------------------
 The tools come from two places and this is the only thing that knows both.
 
-**Plugins** are the servers slife2 starts — builtins, memory, the agent, a model
+**Plugins** are the servers slife2 starts — builtins, the db, the agent, a model
 backend — and each offers its tools to one of two callers.  `now` and `calc` are
 for the model; `remember` and `send_message` are for our own code, called at a
 moment the code already knows.  **Tool servers** are everybody else's, under

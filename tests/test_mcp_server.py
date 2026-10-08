@@ -42,8 +42,8 @@ async def test_a_matching_name_is_enough_and_costs_no_round_trip() -> None:
     exposes nothing still identifies, and `list_tools` is never called.  That
     `list_calls == 0` is the point of the test, not a detail.
     """
-    client = CountingClient(name="slife2-memory")
-    assert await identifies(client, "slife2-memory", fallback_tool="remember")
+    client = CountingClient(name="slife2-db")
+    assert await identifies(client, "slife2-db", fallback_tool="remember")
     assert client.list_calls == 0
 
 
@@ -56,7 +56,7 @@ async def test_a_server_calling_itself_something_else_is_not_ours() -> None:
     a signature change turns into a refusal on every turn.
     """
     client = CountingClient(name="someone-else", tools=("remember",))
-    assert not await identifies(client, "slife2-memory", fallback_tool="remember")
+    assert not await identifies(client, "slife2-db", fallback_tool="remember")
     assert client.list_calls == 0
 
 
@@ -68,8 +68,8 @@ async def test_no_name_falls_back_to_the_tool_list() -> None:
     present = CountingClient(name=None, tools=("remember", "turn_list"))
     absent = CountingClient(name=None, tools=("stream_chat",))
 
-    assert await identifies(present, "slife2-memory", fallback_tool="remember")
-    assert not await identifies(absent, "slife2-memory", fallback_tool="remember")
+    assert await identifies(present, "slife2-db", fallback_tool="remember")
+    assert not await identifies(absent, "slife2-db", fallback_tool="remember")
     assert present.list_calls == 1 and absent.list_calls == 1
 
 
@@ -81,9 +81,9 @@ async def test_a_real_server_reports_the_name_it_was_built_with() -> None:
     handshake the client performs as part of connecting.  A fake can be told to
     report a name; only a real server shows that one is actually there.
     """
-    mcp = house_server("slife2-memory", instructions="Keep what was said.")
+    mcp = house_server("slife2-db", instructions="Keep what was said.")
     async with Client(mcp) as client:
-        assert await identifies(client, "slife2-memory", fallback_tool="remember")
+        assert await identifies(client, "slife2-db", fallback_tool="remember")
         assert not await identifies(client, "slife2-agent", fallback_tool="remember")
 
 
@@ -158,7 +158,7 @@ async def test_a_port_with_nothing_on_it_is_refused_before_the_protocol() -> Non
     avoid waiting two seconds for.
     """
     with pytest.raises(ConnectionError, match="nothing is listening on 127.0.0.1:9"):
-        await open_server("http://127.0.0.1:9/mcp", name="slife2-memory")
+        await open_server("http://127.0.0.1:9/mcp", name="slife2-db")
 
 
 @pytest.mark.asyncio
@@ -169,8 +169,8 @@ async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
     transport = StubTransport(name="someone-elses-server")
     stub(monkeypatch, transport)
 
-    with pytest.raises(ConnectionError, match="not slife2-memory"):
-        await open_server("http://test/mcp", name="slife2-memory")
+    with pytest.raises(ConnectionError, match="not slife2-db"):
+        await open_server("http://test/mcp", name="slife2-db")
 
     assert transport.closed, "a client we are not keeping has to be released"
 
@@ -178,10 +178,10 @@ async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
 @pytest.mark.asyncio
 async def test_a_server_we_recognise_is_handed_back_still_open(monkeypatch) -> None:
     """The other half: what comes back is the caller's to keep and to close."""
-    transport = StubTransport(name="slife2-memory")
+    transport = StubTransport(name="slife2-db")
     stub(monkeypatch, transport)
 
-    client = await open_server("http://test/mcp", name="slife2-memory")
+    client = await open_server("http://test/mcp", name="slife2-db")
 
     assert client is transport
     assert not transport.closed

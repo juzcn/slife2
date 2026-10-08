@@ -71,11 +71,10 @@ servers:
     host: 127.0.0.1
     port: 8003
     path: /mcp
-  # Keeps turns, one database per agent.  The databases themselves live in the
-  # platform's data directory (`%LOCALAPPDATA%\slife2\memory` on Windows), not
-  # here: they are data, and a data file inside a git working tree is one
-  # somebody eventually commits.
-  memory:
+  # slife2's persistence: it keeps turns, one database per agent.  The
+  # databases themselves live in the data directory's `slife2.db/`, not in this
+  # file — they are data, and this is the one file here that is checked in.
+  db:
     host: 127.0.0.1
     port: 8010
     path: /mcp

@@ -151,7 +151,7 @@ DEFAULT_AGENT = "slife2"
 #: agent loop in particular must never reach `openai_server`.  `tests/test_config.py`
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
-MEMORY_SERVER_NAME = "slife2-memory"
+DB_SERVER_NAME = "slife2-db"
 BUILTINS_SERVER_NAME = "slife2-builtins"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 
@@ -160,7 +160,7 @@ TOOLHUB_SERVER_NAME = "slife2-toolhub"
 #: launcher starts them in — see `slife2.config.Config.components` — which is why
 #: `builtins` comes before `toolhub`: the hub asks it for a tool list, and the
 #: answer to a first turn should not be "not connected yet".
-LOCAL_SERVERS = ("memory", "builtins", "toolhub", "agent")
+LOCAL_SERVERS = ("db", "builtins", "toolhub", "agent")
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -528,7 +528,7 @@ def default_config() -> Config:
             "agent": ServerSettings(port=8000),
             # A component of its own: keeping turns is one job, and it is not a
             # wire protocol like the model backends.
-            "memory": ServerSettings(port=8010),
+            "db": ServerSettings(port=8010),
             # The tools slife2 ships — `echo`, `now`, `calc` — served like
             # anybody else's, because the hub is the one place that decides what
             # the model may call; see `slife2.builtins` and DESIGN.md §8.  It is
@@ -910,9 +910,9 @@ __all__ = [
     "API_BACKENDS",
     "API_SERVER_NAMES",
     "BUILTINS_SERVER_NAME",
+    "DB_SERVER_NAME",
     "DEFAULT_AGENT",
     "LOCAL_SERVERS",
-    "MEMORY_SERVER_NAME",
     "TOOLHUB_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",

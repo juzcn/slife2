@@ -47,8 +47,8 @@ def test_there_is_one_component_per_job() -> None:
     processes, not four.  Note which way the list is ordered, too — it is
     `API_BACKENDS` order, because the servers start in the order they are
     needed and the model ones come before the agent that talks to them, with the
-    three peers the agent reaches out to — memory, the builtins, and the hub that
-    fronts them — coming after.
+    three peers the agent reaches out to — the db, the builtins, and the hub
+    that fronts them — coming after.
     """
     config = load(_config_with_every_protocol())
     names = [spec.name for spec in launcher.specs(config)]
@@ -56,7 +56,7 @@ def test_there_is_one_component_per_job() -> None:
         "llm:openai-completions",
         "llm:anthropic-messages",
         "llm:openai-responses",
-        "memory",
+        "db",
         "builtins",
         "toolhub",
         "agent",
@@ -66,7 +66,7 @@ def test_there_is_one_component_per_job() -> None:
         "slife2.llm.openai_server",
         "slife2.llm.anthropic_server",
         "slife2.llm.openai_responses_server",
-        "slife2.memory_server",
+        "slife2.db_server",
         "slife2.builtins",
         "slife2.toolhub",
         "slife2.server.server",
@@ -116,7 +116,7 @@ def test_one_server_per_wire_protocol() -> None:
         "llm:openai-completions",
         "llm:anthropic-messages",
         "llm:openai-responses",
-        "memory",
+        "db",
         "builtins",
         "toolhub",
         "agent",
@@ -159,7 +159,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         encoding="utf-8",
     )
     names = [spec.name for spec in launcher.specs(load(path))]
-    assert names == ["llm:openai-completions", "memory", "builtins", "toolhub", "agent"]
+    assert names == ["llm:openai-completions", "db", "builtins", "toolhub", "agent"]
 
 
 def test_the_agent_server_takes_no_provider() -> None:
@@ -172,8 +172,8 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
 
     Starting them together races, and the failure is confusing rather than
     obvious: the agent server comes up healthy and every turn fails.  The peers
-    are its model, and the three servers it calls during a turn — memory, and the
-    toolhub with the builtins behind it — all of which it now *needs*, since the
+    are its model, and the three servers it calls during a turn — the db, and
+    the toolhub with the builtins behind it — all of which it now *needs*, since the
     model's tool list comes from the hub.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
@@ -181,7 +181,7 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
     # Everything else is a dependency of it, whatever kind it is.
     assert set(names[:-1]) == {
         "llm:openai-completions",
-        "memory",
+        "db",
         "builtins",
         "toolhub",
     }

@@ -69,9 +69,9 @@ def answering(text: str) -> FakeBackend:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def memory():
-    """A memory server that actually answers, over the in-memory transport.
+    """A db server that actually answers, over the in-memory transport.
 
-    Sending **cannot happen without it**: a memory server that is not there is a
+    Sending **cannot happen without it**: a db server that is not there is a
     broken system rather than a degraded one, so `send_message` fails before
     anything is spent on a model call.  See
     `slife2.mcp_server.open_server`.
@@ -80,9 +80,9 @@ async def memory():
     component the agent server actually talks to — the one test that is *about*
     the failure passes its own config instead.
     """
-    from slife2.memory_server import build_server as build_memory
+    from slife2.db_server import build_server as build_db
 
-    async with Client(build_memory(default_config())) as client:
+    async with Client(build_db(default_config())) as client:
         yield client
 
 
@@ -499,12 +499,12 @@ async def test_an_interrupted_turn_is_still_recorded(
     message the user can see, the model will see, and the database has never
     heard of.
     """
-    from slife2.memory_server import build_server as build_memory
-    from slife2.paths import DATA_ENV_VAR, turns_dir
+    from slife2.db_server import build_server as build_db
+    from slife2.paths import DATA_ENV_VAR, db_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
-    async with Client(build_memory(config())) as memory_client:
+    async with Client(build_db(config())) as memory_client:
         server = build_server(
             config(), backend=backend, memory_client=memory_client, hub_client=hub
         )
@@ -521,7 +521,7 @@ async def test_an_interrupted_turn_is_still_recorded(
         await asyncio.sleep(0.5)
 
     rows = (
-        sqlite3.connect(turns_dir() / f"{DEFAULT_AGENT}.turn.db")
+        sqlite3.connect(db_dir() / f"{DEFAULT_AGENT}.turn.db")
         .execute("SELECT messages FROM turn ORDER BY rowid")
         .fetchall()
     )
@@ -548,8 +548,8 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch, hub) -> None:
     is empty because there was nothing to put in it, and only an assertion can
     tell those apart.
     """
-    from slife2.memory_server import build_server as build_memory
-    from slife2.paths import DATA_ENV_VAR, turns_dir
+    from slife2.db_server import build_server as build_db
+    from slife2.paths import DATA_ENV_VAR, db_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     cfg = config()
@@ -574,13 +574,13 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch, hub) -> None:
         ),
     )
 
-    async with Client(build_memory(cfg)) as memory_client:
+    async with Client(build_db(cfg)) as memory_client:
         server = build_server(
             cfg, backend=backend, memory_client=memory_client, hub_client=hub
         )
         await send(server, "what is 2+2?", agent="jack", channel="human")
 
-    jack = turns_dir() / "jack.turn.db"
+    jack = db_dir() / "jack.turn.db"
     assert jack.is_file(), "the turn was not recorded"
     row = (
         sqlite3.connect(jack)
@@ -630,12 +630,12 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch, hub) -> None:
     assert turns_messages[0]["content"] == "what is 2+2?"
 
     # ...and no other agent's database was created along the way.
-    assert [p.name for p in turns_dir().glob("*.db")] == ["jack.turn.db"]
+    assert [p.name for p in db_dir().glob("*.db")] == ["jack.turn.db"]
 
 
 @pytest.mark.asyncio
-async def test_opening_a_loop_fails_when_the_memory_server_is_gone(hub) -> None:
-    """A missing memory server is a broken system, not a degraded one.
+async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
+    """A missing db server is a broken system, not a degraded one.
 
     Asked before anything is spent rather than at the write: the point of the
     guard is to find out *before* a model call has been paid for, not once the
@@ -649,7 +649,7 @@ async def test_opening_a_loop_fails_when_the_memory_server_is_gone(hub) -> None:
     base = default_config()
     cfg = replace(
         base,
-        servers={**base.servers, "memory": replace(base.servers["memory"], port=9)},
+        servers={**base.servers, "db": replace(base.servers["db"], port=9)},
     )
     server = build_server(cfg, hub_client=hub, backend=answering("the answer"))
 

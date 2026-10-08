@@ -18,7 +18,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.tools import Tool
 
 from slife2.config import Config, ToolServerSettings, default_config
-from slife2.memory_server import build_server as build_memory
+from slife2.db_server import build_server as build_memory
 from slife2.messages import ToolCall
 from slife2.paths import DATA_ENV_VAR
 from slife2.toolclient import (
@@ -251,9 +251,9 @@ async def test_the_identity_reaches_memory_through_the_hub(
     """Two hops, and the conversation survives both.
 
     This is the whole point of the arrangement: the model is handed
-    `memory__turn_list` with no `agent` argument to fill in, the loop binds the
+    `db__turn_list` with no `agent` argument to fill in, the loop binds the
     conversation it was built for to the call, the hub forwards it without
-    reading it, and the memory server answers with *that* conversation's turns.
+    reading it, and the db server answers with *that* conversation's turns.
     Every hop would be individually plausible with the identity dropped — the
     call would still succeed — and the result would be a model reading a
     history that is not its own, or none at all.
@@ -278,7 +278,7 @@ async def test_the_identity_reaches_memory_through_the_hub(
     hub = build_hub(
         config,
         transports=component_transports(
-            config, {"memory": lambda settings: memory}
+            config, {"db": lambda settings: memory}
         ),
     )
 
@@ -286,10 +286,10 @@ async def test_the_identity_reaches_memory_through_the_hub(
         offered = await remote_tools(hub_client, ("jack", ""))
         by_name = {tool.spec.name: tool for tool in offered}
         # What memory has that the model may not call never left the hub.
-        assert "memory__turn_list" in by_name
-        assert "memory__turn_read" in by_name
-        assert "memory__remember" not in by_name
+        assert "db__turn_list" in by_name
+        assert "db__turn_read" in by_name
+        assert "db__remember" not in by_name
 
-        payload = json.loads(await by_name["memory__turn_list"].run({}))
+        payload = json.loads(await by_name["db__turn_list"].run({}))
 
     assert [entry["user_message"] for entry in payload["entries"]] == ["jack asked"]
