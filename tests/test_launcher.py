@@ -38,7 +38,7 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 
 def test_there_is_one_component_per_job() -> None:
-    """One agent loop, one memory store, one builtins server, one hub of tools,
+    """One agent loop, one db, one builtins server, one hub of tools,
     one process per wire protocol.
 
     The granularity is the point: a backend speaks one wire protocol and does

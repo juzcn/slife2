@@ -5,7 +5,7 @@ is exactly what a payload mismatch hides behind.  FastMCP validates the
 arguments it is handed, so the names the agent server sends and the names the
 tool accepts have to be checked against each other rather than assumed; when
 they drift, the failure is a refused request that the agent server logs as a
-memory problem and swallows.
+db problem and swallows.
 """
 
 from __future__ import annotations

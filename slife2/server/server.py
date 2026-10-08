@@ -18,8 +18,8 @@ is gone" path.  A name cannot go stale.  The idle sweep still runs, but it only
 reclaims memory; nothing a caller can observe depends on it.
 
 **The key travels with the call.**  Everything this server asks of a peer is
-asked on behalf of the same `(agent, subagent)` — the memory write and the model
-call both carry it — so a hop is never anonymous.  What the model servers do
+asked on behalf of the same `(agent, subagent)` — the write to the db and the
+model call both carry it — so a hop is never anonymous.  What the model servers do
 *not* do with it is keep the conversation: see DESIGN.md §3 for why the history
 has to live here, on the side of the hop that does not speak a wire protocol.
 
@@ -98,7 +98,7 @@ SERVER_NAME = "slife2-agent"
 #: answer already exists, and a slow store is not worth holding that answer for.
 #: A store that is *gone* is a different matter — that fails the turn outright;
 #: see `slife2.mcp_server.open_server`.
-MEMORY_TIMEOUT_SECONDS = 10.0
+DB_TIMEOUT_SECONDS = 10.0
 
 #: How long to wait on the toolhub.  Longer than the db server's, because
 #: this call is not a write after the fact: `list_tools` is what the turn's tool
@@ -189,7 +189,7 @@ class Loop:
 
     `subagent` is part of the identity rather than a label on it: two keys differ
     exactly when their pairs differ, and the pair is what the lock, the inbox and
-    the memory write are each scoped to.
+    the write to the db are each scoped to.
     """
 
     agent: str
@@ -202,7 +202,7 @@ class Loop:
 
     @property
     def records(self) -> bool:
-        """Whether this conversation's turns are written to memory.
+        """Whether this conversation's turns are written to the db.
 
         A worker's are not.  A subagent is a means to an end inside one turn of
         its parent's conversation, and recording its round trips would file them
@@ -217,13 +217,13 @@ def build_server(
     config: Config,
     *,
     backend: LLMBackend | None = None,
-    memory_client: Client | None = None,
+    db_client: Client | None = None,
     hub_client: Client | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
 
-    `backend`, `memory_client` and `hub_client` are injectable so the whole
-    server — model call, tools, memory write — can be exercised over the
+    `backend`, `db_client` and `hub_client` are injectable so the whole
+    server — model call, tools, the write — can be exercised over the
     in-memory transport with no network at all.
 
     Otherwise a connection is opened **per model server, on first use, and kept
@@ -244,11 +244,11 @@ def build_server(
     #: a test's, and has no model server to name a conversation to.
     model_backends: dict[str, MCPBackend] = {}
     clients: dict[str, Client] = {}
-    #: The memory client once we have one — injected, or opened on first use.
-    memory_conn: Client | None = memory_client
+    #: The db client once we have one — injected, or opened on first use.
+    db_conn: Client | None = db_client
     #: Whether *we* opened it, and so whether we should close it.  An injected
     #: client belongs to whoever made it.
-    memory_owned = memory_client is None
+    db_owned = db_client is None
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
@@ -269,7 +269,7 @@ def build_server(
     #: mid-flight, and drained on the way out.
     background: set[asyncio.Task[None]] = set()
 
-    async def memory() -> Client:
+    async def db() -> Client:
         """The client for the db server, opened on first use.
 
         Opened once and kept for the process, the same arrangement as the model
@@ -281,22 +281,22 @@ def build_server(
         and why; what matters here is that this component is not the exception
         to it.
         """
-        nonlocal memory_conn
+        nonlocal db_conn
         # Fast path outside the lock: once a loop has been opened there is no
         # await between the check and the use, and the event loop is
         # single-threaded, so reading it unlocked is sound.
-        if memory_conn is not None:
-            return memory_conn
+        if db_conn is not None:
+            return db_conn
         async with opening:
-            if memory_conn is None:
-                memory_conn = await open_server(
+            if db_conn is None:
+                db_conn = await open_server(
                     config.server("db").url,
                     name=DB_SERVER_NAME,
                     fallback_tool="remember",
-                    timeout=MEMORY_TIMEOUT_SECONDS,
+                    timeout=DB_TIMEOUT_SECONDS,
                 )
-            assert memory_conn is not None  # open_server returns one or raises
-            return memory_conn
+            assert db_conn is not None  # open_server returns one or raises
+            return db_conn
 
     async def hub() -> Client:
         """The client for the toolhub, opened on first use.
@@ -343,7 +343,7 @@ def build_server(
         is appended: a hub that is not there is a system that has come apart, and
         the moment to find that out is before the conversation has been touched.
 
-        **The tools come back bound to `client_id`**, so a tool that reads memory
+        **The tools come back bound to `client_id`**, so a tool that reads the db
         reads *this* conversation's.  That is the one thing this process knows
         and the model does not, and it is why the binding happens here rather
         than in an argument — see `slife2.toolclient`.
@@ -366,7 +366,7 @@ def build_server(
     ) -> None:
         """Persist a turn.
 
-        **This is called for every turn of a loop that has memory**, cancelled
+        **This is called for every turn of a loop that records**, cancelled
         ones included, and `result` is None exactly when the turn did not
         finish.  The rule is deliberately not "remember to record the cancel
         path": a write that is conditional on how a turn ended is a write
@@ -387,7 +387,7 @@ def build_server(
         existed when the turn ended: the number the *next* request would resend.
         A cancelled turn has neither, and reports zero rather than a guess.
         """
-        client = await memory()
+        client = await db()
 
         try:
             await client.call_tool(
@@ -413,7 +413,7 @@ def build_server(
             # request; everything else — the transport gone, a store that
             # stopped answering — is a system that has come apart and is meant
             # to fail here rather than be logged and stepped over.
-            logger.warning("memory refused the turn for %s: %s", agent, exc)
+            logger.warning("the db refused the turn for %s: %s", agent, exc)
 
     async def make_loop(active: LLMBackend, client_id: ClientId) -> AgentLoop:
         return AgentLoop(
@@ -498,7 +498,7 @@ def build_server(
     def reap() -> None:
         """Drop conversations nothing has asked anything of for a while.
 
-        Memory only.  Nothing a caller can observe depends on this — a key is
+        In-process state only.  Nothing a caller can observe depends on this — a key is
         recreated on the next message that uses it — which is the whole reason
         the sweep is allowed to be this casual.
 
@@ -571,13 +571,13 @@ def build_server(
         return backend.name if backend is not None else loop.model
 
     async def record(loop: Loop, item: Pending, outcome: Outcome) -> None:
-        """Write this turn to memory if this loop has any.
+        """Write this turn to the db if this loop has any.
 
         Called *after* the lock is released: it is a network call, and a queued
         turn waiting on the db server is a wait with no reason behind it.
         """
         if not loop.records or not outcome.messages:
-            # No memory, or a caller cancelled while queued — in which case its
+            # Nothing to record, or a caller cancelled while queued — in which case its
             # turn never started and there is nothing that happened to record.
             return
         await remember_turn(
@@ -638,8 +638,8 @@ def build_server(
                 await close_server(client)
             clients.clear()
             model_backends.clear()
-            if memory_owned and memory_conn is not None:
-                await close_server(memory_conn)
+            if db_owned and db_conn is not None:
+                await close_server(db_conn)
             if hub_owned and hub_conn is not None:
                 await close_server(hub_conn)
 
@@ -692,7 +692,7 @@ def build_server(
                 is the agent's own, the one a person is watching.  Anything else
                 is a worker the agent is running: a separate conversation, with
                 its own history and its own inbox, whose turns are **not** written
-                to memory.  A subagent is a means to an end inside one turn of its
+                to the db.  A subagent is a means to an end inside one turn of its
                 parent's conversation, and filing its round trips in the record
                 would file them under a conversation they were never part of.
             model: Which model this conversation runs on, as `provider/model`.
@@ -719,7 +719,7 @@ def build_server(
         # broken system rather than a degraded one, and the moment to find that
         # out is *before* the first model call has been paid for — not at the
         # write, when the answer exists and has nowhere to go.
-        await memory()
+        await db()
         reap()
         loop = conversation(agent, subagent, model)
 
@@ -778,7 +778,7 @@ def build_server(
         exactly the state it asked for.
 
         Only the *conversation* is forgotten.  The turns it produced are in
-        memory, which is storage rather than state, and clearing that is a
+        the db, which is storage rather than state, and clearing that is a
         different request with a different blast radius.
 
         Args:

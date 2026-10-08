@@ -68,7 +68,7 @@ def answering(text: str) -> FakeBackend:
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def memory():
+async def db():
     """A db server that actually answers, over the in-memory transport.
 
     Sending **cannot happen without it**: a db server that is not there is a
@@ -91,7 +91,7 @@ async def hub():
     """A toolhub that actually answers, over the in-memory transport.
 
     A turn cannot run without one, for the same reason it cannot run without
-    memory — the model's tool list comes from here, builtins included, so a
+    the db — the model's tool list comes from here, builtins included, so a
     missing hub is a broken system rather than a conversation with no tools.
 
     No upstreams: these tests are about the agent, and the tool servers behind a
@@ -159,7 +159,7 @@ def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_two_tools(memory, hub) -> None:
+async def test_the_server_exposes_two_tools(db, hub) -> None:
     """There is no `open_loop` because there is nothing to open.
 
     An id a server mints is an id a caller has to keep, and keeping it is where
@@ -169,7 +169,7 @@ async def test_the_server_exposes_two_tools(memory, hub) -> None:
     """
     async with Client(
         build_server(
-            config(), memory_client=memory, hub_client=hub, backend=FakeBackend()
+            config(), db_client=db, hub_client=hub, backend=FakeBackend()
         )
     ) as client:
         tools = await client.list_tools()
@@ -177,23 +177,23 @@ async def test_the_server_exposes_two_tools(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_returns_the_final_text(memory, hub) -> None:
+async def test_a_turn_returns_the_final_text(db, hub) -> None:
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "what is 6*7?")
     assert result.data["text"] == "It is 42."
 
 
 @pytest.mark.asyncio
-async def test_a_turn_reports_its_shape(memory, hub) -> None:
+async def test_a_turn_reports_its_shape(db, hub) -> None:
     """What a caller needs to render and to bill — and no history.
 
     `new_messages` is deliberately absent: it was the caller's half of owning
     the conversation, and the loop owns it now.
     """
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "what is 6*7?")
 
@@ -204,10 +204,10 @@ async def test_a_turn_reports_its_shape(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_says_what_answered(memory, hub) -> None:
+async def test_a_turn_says_what_answered(db, hub) -> None:
     """A bare provider or an empty reference does not reveal the model."""
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=answering("ok")
+        config(), db_client=db, hub_client=hub, backend=answering("ok")
     )
     result = await send(server, "hi", agent="jack")
     assert result.data["model"] == default_config().default
@@ -217,7 +217,7 @@ async def test_a_turn_says_what_answered(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_loop_remembers_what_was_said_to_it(memory, hub) -> None:
+async def test_a_loop_remembers_what_was_said_to_it(db, hub) -> None:
     """The inversion of the property this server used to be built on.
 
     Two messages on one loop, and the second model call sees the first exchange.
@@ -229,7 +229,7 @@ async def test_a_loop_remembers_what_was_said_to_it(memory, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     await send(server, "one")
@@ -244,7 +244,7 @@ async def test_a_loop_remembers_what_was_said_to_it(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_server_serves_two_loops_without_mixing_them(memory, hub) -> None:
+async def test_one_server_serves_two_loops_without_mixing_them(db, hub) -> None:
     """Two loops, two agents, one agent server, no cross-talk.
 
     Asserted concurrently on purpose — sequentially it would pass even if the
@@ -271,7 +271,7 @@ async def test_one_server_serves_two_loops_without_mixing_them(memory, hub) -> N
             return Stream(chunks=chunks(), result=result())
 
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=EchoBackend()
+        config(), db_client=db, hub_client=hub, backend=EchoBackend()
     )
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
@@ -287,7 +287,7 @@ async def test_one_server_serves_two_loops_without_mixing_them(memory, hub) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_subagent_is_a_conversation_of_its_own(memory, hub) -> None:
+async def test_a_subagent_is_a_conversation_of_its_own(db, hub) -> None:
     """The second half of the id separates conversations, not just agents.
 
     Two clients that differ only in `subagent` must not see each other.  That is
@@ -300,7 +300,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(memory, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="main again")),
     )
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     await send(server, "one", agent="jack")
@@ -321,7 +321,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_starts_the_conversation_over(memory, hub) -> None:
+async def test_reset_starts_the_conversation_over(db, hub) -> None:
     """The one lifecycle verb left, and it is the caller's to ask for.
 
     Idempotent, because a caller that had nothing to forget is already in the
@@ -332,7 +332,7 @@ async def test_reset_starts_the_conversation_over(memory, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     await send(server, "one")
@@ -347,7 +347,7 @@ async def test_reset_starts_the_conversation_over(memory, hub) -> None:
 
 @pytest.mark.asyncio
 async def test_an_idle_conversation_simply_starts_again(
-    memory, monkeypatch, hub
+    db, monkeypatch, hub
 ) -> None:
     """The idle sweep reclaims memory, and that is the whole of what it does.
 
@@ -362,7 +362,7 @@ async def test_an_idle_conversation_simply_starts_again(
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     await send(server, "one")
@@ -377,7 +377,7 @@ async def test_an_idle_conversation_simply_starts_again(
 
 
 @pytest.mark.asyncio
-async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(memory, hub) -> None:
+async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> None:
     """The core claim of the whole design, and the reason loops exist at all.
 
     A second message arrives while the first turn is still streaming.  Under the
@@ -395,7 +395,7 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(memory, hub) ->
         text_turn("second answer"),
     )
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     first = asyncio.create_task(send(server, "one"))
@@ -427,11 +427,11 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(memory, hub) ->
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_message_leaves_the_lock_free(memory, hub) -> None:
+async def test_a_cancelled_message_leaves_the_lock_free(db, hub) -> None:
     """A caller that goes away while queued is not a lock held forever."""
     backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     first = asyncio.create_task(send(server, "one"))
@@ -457,7 +457,7 @@ async def test_a_cancelled_message_leaves_the_lock_free(memory, hub) -> None:
 
 @pytest.mark.asyncio
 async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
-    memory, hub
+    db, hub
 ) -> None:
     """The sharpest edge in the system, and it is back because the state is.
 
@@ -472,7 +472,7 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     interrupted = asyncio.create_task(send(server, "one"))
@@ -490,7 +490,7 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
 
 @pytest.mark.asyncio
 async def test_an_interrupted_turn_is_still_recorded(
-    memory, hub, tmp_path, monkeypatch
+    db, hub, tmp_path, monkeypatch
 ) -> None:
     """Recording is unconditional, so the cancel path is not a special case.
 
@@ -504,9 +504,9 @@ async def test_an_interrupted_turn_is_still_recorded(
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
-    async with Client(build_db(config())) as memory_client:
+    async with Client(build_db(config())) as db_client:
         server = build_server(
-            config(), backend=backend, memory_client=memory_client, hub_client=hub
+            config(), backend=backend, db_client=db_client, hub_client=hub
         )
         interrupted = asyncio.create_task(send(server, "one"))
         for _ in range(200):
@@ -531,14 +531,14 @@ async def test_an_interrupted_turn_is_still_recorded(
     assert stored[0]["content"] == "one"
 
 
-# --- memory ------------------------------------------------------------------
+# --- persistence -------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch, hub) -> None:
+async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     """The turn lands in that agent's own database, and nowhere else.
 
-    Both halves matter.  Written at all, because a memory component that nothing
+    Both halves matter.  Written at all, because a db component that nothing
     calls is a component that does nothing; and written to *that agent's* file,
     because isolation between agents is the reason the file is per-agent in the
     first place.
@@ -574,9 +574,9 @@ async def test_a_turn_is_written_to_memory(tmp_path, monkeypatch, hub) -> None:
         ),
     )
 
-    async with Client(build_db(cfg)) as memory_client:
+    async with Client(build_db(cfg)) as db_client:
         server = build_server(
-            cfg, backend=backend, memory_client=memory_client, hub_client=hub
+            cfg, backend=backend, db_client=db_client, hub_client=hub
         )
         await send(server, "what is 2+2?", agent="jack", channel="human")
 
@@ -661,7 +661,7 @@ async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_reach_the_model_as_content_parts(memory, hub) -> None:
+async def test_images_reach_the_model_as_content_parts(db, hub) -> None:
     """A prompt with an image is a list of parts, not a string."""
     from slife2.config import ModelSettings, ProviderSettings
 
@@ -681,7 +681,7 @@ async def test_images_reach_the_model_as_content_parts(memory, hub) -> None:
             )
         },
     )
-    server = build_server(vision, memory_client=memory, hub_client=hub, backend=backend)
+    server = build_server(vision, db_client=db, hub_client=hub, backend=backend)
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
     sent = backend.calls[0][0][-1]
@@ -691,7 +691,7 @@ async def test_images_reach_the_model_as_content_parts(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_are_refused_by_a_model_that_cannot_read_them(memory, hub) -> None:
+async def test_images_are_refused_by_a_model_that_cannot_read_them(db, hub) -> None:
     """Dropping an attachment somebody made is worse than saying no.
 
     The config listing only `text` under `input` is the config saying so, and
@@ -715,7 +715,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(memory, hub) 
     with pytest.raises(Exception, match="cannot read images"):
         await send(
             build_server(
-                text_only, memory_client=memory, hub_client=hub, backend=answering("ok")
+                text_only, db_client=db, hub_client=hub, backend=answering("ok")
             ),
             "look",
             images=["data:image/png;base64,AAAA"],
@@ -733,11 +733,11 @@ def template(tmp_path, body: str):
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_a_template(tmp_path, memory, hub) -> None:
+async def test_the_system_prompt_is_a_template(tmp_path, db, hub) -> None:
     backend = answering("ok")
     server = build_server(
         config(system_prompt=template(tmp_path, "be terse")),
-        memory_client=memory,
+        db_client=db,
         hub_client=hub,
         backend=backend,
     )
@@ -750,7 +750,7 @@ async def test_the_system_prompt_is_a_template(tmp_path, memory, hub) -> None:
 
 @pytest.mark.asyncio
 async def test_the_template_is_rendered_with_the_loops_own_agent_name(
-    tmp_path, memory, hub
+    tmp_path, db, hub
 ) -> None:
     """One template, personalised by whoever the loop belongs to.
 
@@ -766,7 +766,7 @@ async def test_the_template_is_rendered_with_the_loops_own_agent_name(
     )
     server = build_server(
         config(system_prompt=template(tmp_path, "You are {{ agent_name }}.")),
-        memory_client=memory,
+        db_client=db,
         hub_client=hub,
         backend=backend,
     )
@@ -793,7 +793,7 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_max_steps_comes_from_the_config(memory, hub) -> None:
+async def test_max_steps_comes_from_the_config(db, hub) -> None:
     backend = FakeBackend(
         *[
             ScriptedTurn(
@@ -806,7 +806,7 @@ async def test_max_steps_comes_from_the_config(memory, hub) -> None:
         ]
     )
     server = build_server(
-        config(max_steps=2), memory_client=memory, hub_client=hub, backend=backend
+        config(max_steps=2), db_client=db, hub_client=hub, backend=backend
     )
     result = await send(server, "loop forever")
 
@@ -829,9 +829,9 @@ async def send_with_progress(
 
 
 @pytest.mark.asyncio
-async def test_events_arrive_as_progress_notifications(memory, hub) -> None:
+async def test_events_arrive_as_progress_notifications(db, hub) -> None:
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     seen: list[TurnEvent] = []
 
@@ -854,9 +854,9 @@ async def test_events_arrive_as_progress_notifications(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_progress_values_are_a_monotonic_counter(memory, hub) -> None:
+async def test_progress_values_are_a_monotonic_counter(db, hub) -> None:
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     values: list[float] = []
 
@@ -871,10 +871,10 @@ async def test_progress_values_are_a_monotonic_counter(memory, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_works_without_a_progress_handler(memory, hub) -> None:
+async def test_a_turn_works_without_a_progress_handler(db, hub) -> None:
     """A non-streaming client gets the same answer and the server does no extra work."""
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "x")
     assert result.data["text"] == "It is 42."
@@ -937,7 +937,7 @@ async def over_http(server: FastMCP) -> AsyncGenerator[str]:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_progress_streams_over_real_http(memory, hub) -> None:
+async def test_progress_streams_over_real_http(db, hub) -> None:
     """The one test that binds a port for the streaming contract.
 
     The in-memory transport cannot prove that progress notifications survive
@@ -946,7 +946,7 @@ async def test_progress_streams_over_real_http(memory, hub) -> None:
     with more than one of them, not as a single buffered dump at the end.
     """
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=tool_then_answer()
+        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
     )
     arrivals: list[tuple[float, str]] = []
 
@@ -970,7 +970,7 @@ async def test_progress_streams_over_real_http(memory, hub) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_a_cancelled_turn_is_repaired_over_real_http(memory, hub) -> None:
+async def test_a_cancelled_turn_is_repaired_over_real_http(db, hub) -> None:
     """The load-bearing assumption, measured rather than read.
 
     Everything the loop does on the way out depends on one property of the
@@ -989,7 +989,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(memory, hub) -> None:
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
     server = build_server(
-        config(), memory_client=memory, hub_client=hub, backend=backend
+        config(), db_client=db, hub_client=hub, backend=backend
     )
 
     async with over_http(server) as url:

@@ -91,7 +91,7 @@ class MCPAgentClient:
         self._agent = agent
         #: Which of that agent's conversations.  Empty for the one a person is
         #: watching; a name for a worker, which is a different conversation with
-        #: its own history whose turns are not written to memory.  A TUI is
+        #: its own history whose turns are not written to the db.  A TUI is
         #: always the former, which is why it does not expose this as a flag.
         self._subagent = subagent
         #: Which model to ask for, as `provider/model`.  The server reads it when

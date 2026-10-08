@@ -547,7 +547,7 @@ def test_responses_an_incomplete_response_keeps_its_reason() -> None:
 def test_responses_a_failed_response_raises_with_the_providers_words() -> None:
     """Not an empty result — that is indistinguishable from a working answer.
 
-    A blank reply would be recorded in memory as a turn that succeeded, and the
+    A blank reply would be recorded as a turn that succeeded, and the
     only symptom would be nothing at all.  Raising is what the rest of the
     system is built for: the backend re-raises and the TUI prints the message.
     """

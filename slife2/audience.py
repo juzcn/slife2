@@ -10,7 +10,7 @@ are the caller's.
 Who a tool is for, said on the tool itself.
 
 Every server in this system offers tools to one of two callers, and they are not
-interchangeable.  A **plugin** — memory, the agent, a model backend — is called
+interchangeable.  A **plugin** — the db, the agent, a model backend — is called
 by our own code at a moment the code already knows: `remember` after a turn,
 `stream_chat` when the loop wants an answer.  A **tool server** offers tools to a
 language model, which picks one by reading its description and calls it with
@@ -83,7 +83,7 @@ def for_the_model(meta: Mapping[str, Any] | None) -> bool:
     return MODEL in (declared or ())
 
 
-#: The `_meta` key a *call* carries to say whose behalf it is on.  V1's memory
+#: The `_meta` key a *call* carries to say whose behalf it is on.  V1's db
 #: server had no such key and needed none: it ran one process per agent, so the
 #: connection **was** the identity.  slife2's db server is shared — one
 #: process serves every client id, the way one model server serves every

@@ -1,7 +1,7 @@
 """The MCP layer every component shares: what it takes to be one of our servers.
 
-Four processes here are MCP servers — the agent loop, the memory store, and one
-process per wire protocol — and they agree about more than they disagree about.
+Four processes here are MCP servers — the agent loop, the db, and one process
+per wire protocol — and they agree about more than they disagree about.
 What they agree on lives here rather than in whichever server was written first:
 how a server is started, how it records that it is here, and the two options
 that are pinned because flipping either is *silent*.
@@ -11,7 +11,7 @@ It also holds the client half of the same question — :func:`identifies` and
 there at all", and "what does it mean to be one of our servers" are the same
 piece of protocol knowledge, and splitting them is how the halves drift.
 
-Nothing here is LLM-specific.  That is the point of the module: the memory
+Nothing here is LLM-specific.  That is the point of the module: the db
 server and the agent server used to reach into `slife2.llm` for this, which put
 the serving scaffold of a non-LLM component inside the LLM package.
 
@@ -165,7 +165,7 @@ async def open_server(
 
     That convention lives here, in one function, because it had four
     implementations and one of them was its own opposite.  The LLM backend and
-    the TUI each connected and probed and raised; the agent server's memory
+    the TUI each connected and probed and raised; the agent server's db
     client swallowed the failure and latched itself off, so that the same
     situation was fatal at startup and silent at runtime.
 

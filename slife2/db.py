@@ -1,4 +1,10 @@
-"""Persisted turns, one SQLite file per agent.
+"""The db's storage — the turns, one SQLite file per agent.
+
+The turns are what it holds today, and they are the whole of what slife2
+persists: a second thing worth keeping — a tool catalogue, a search index —
+belongs beside these rows or beside these files rather than in a component of
+its own, which is why this module is named for the component and not for the
+table.  Everything below the next paragraph is about turns.
 
 The schema is slife v1's, minus one column.  This module originally had a `turns`
 table of its own invention — `(id, agent, created_at, prompt, messages, model,

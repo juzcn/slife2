@@ -281,7 +281,7 @@ def translate(event: Any) -> list[ProviderEvent]:
     Two events here are errors rather than results, and both **raise**:
     `response.failed` and a bare `error`.  The alternative — returning an empty
     result with a stop reason — is indistinguishable from a successful empty
-    answer: the turn would be recorded in memory as if it had worked, and the
+    answer: the turn would be recorded as if it had worked, and the
     only symptom would be a blank reply.  Raising is the shape the rest of the
     system is built for; `MCPBackend` re-raises and the TUI prints the message.
     """

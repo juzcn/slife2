@@ -50,7 +50,7 @@ leaves them up instead.
 `--agent NAME` (default `slife2`) names the instance. It titles the window, it
 signs the assistant's messages, and it renders the system prompt — and it is
 **exclusive**, so two live instances may not share a name. Where it *does*
-partition is memory: each agent's turns go in their own database. The servers
+partition is the db: each agent's turns go in their own database. The servers
 themselves stay shared.
 
 That database is where the model can look back. `turn_list` browses it — newest
@@ -94,7 +94,7 @@ local files, and only when the model's config lists `image` under `input` — a
 model that cannot read images says so rather than quietly ignoring what you
 attached.
 
-The picture itself goes to the model and no further: what memory keeps is the
+The picture itself goes to the model and no further: what the db keeps is the
 marker, plus a note where the image was saying it was there and how big it was.
 Attaching it again is what sends it again — the file is named in the prompt, so
 a turn read back a month later still says which picture it was about.
@@ -180,7 +180,7 @@ A checkout therefore keeps generated state in the working tree, which is why
 that file is the point of the arrangement.
 
 The split that remains is the one that matters: deleting `runtime/` costs
-nothing, deleting `slife2.db/` costs the memory.
+nothing, deleting `slife2.db/` costs the record.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
@@ -214,7 +214,7 @@ slife2/
 ├─ toolhub.py         # slife2-toolhub: the model's tools, the servers behind
 │                     #   them, and the credentials they need
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
-├─ memory.py          # TurnStore: one SQLite file per agent
+├─ db.py              # the store: TurnStore, one SQLite file per agent
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached

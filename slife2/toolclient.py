@@ -146,7 +146,7 @@ def _proxy(
     """A tool body that calls `name` on the far side and reports what it said.
 
     **The conversation rides in `_meta`, not in the arguments.**  A tool that
-    reads memory runs on behalf of one conversation, and which conversation is a
+    reads the db runs on behalf of one conversation, and which conversation is a
     fact this process holds and the model does not get to assert.  Passing
     `agent` as an argument would turn "read my history" into "read anybody's",
     and make the system prompt's `You are jack` load-bearing in a way nothing

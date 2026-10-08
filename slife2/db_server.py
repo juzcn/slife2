@@ -1,11 +1,12 @@
-"""slife2-db — turns, persisted, one database per client id.
+"""slife2-db — persistence: what slife2 keeps, one database per client id.
 
-A component with one job: keep what was said.  It does not summarise, does not
-decide what mattered, does not put anything back into a conversation, and does
-not decide *whether* a turn is worth keeping — the caller does that, and the
-agent server is the caller that knows a worker's turns are not.  A turn is stored as it happened — with one
+The turns are what it keeps today.  Keeping is the whole of the job — it does
+not summarise, does not decide what mattered, does not put anything back into a
+conversation, and does not decide *whether* a turn is worth keeping: the caller
+does that, and the agent server is the caller that knows a worker's turns are
+not.  A turn is stored as it happened — with one
 deliberate exception, an oversized tool result, which is kept as an announced
-head-and-tail digest rather than in full (see `slife2.memory`) — so a question
+head-and-tail digest rather than in full (see `slife2.db`) — so a question
 this component cannot answer today can be asked of the same rows later without a
 migration: search, embedding and summarising are each a table the schema has a
 place for and nothing here builds yet.
@@ -38,7 +39,7 @@ from slife2.mcp_server import (
     parse_serve_args,
     serve,
 )
-from slife2.memory import PREVIEW_CHARS, store_for
+from slife2.db import PREVIEW_CHARS, store_for
 from slife2.paths import db_dir
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ INSTRUCTIONS = (
 
 
 def build_server(config: Config) -> FastMCP:
-    """Build the memory MCP server."""
+    """Build the db MCP server."""
 
     async def _on_thread(function, *args, **kwargs):
         """Run a blocking store call off the event loop.
@@ -95,7 +96,7 @@ def build_server(config: Config) -> FastMCP:
         interpretation.
 
         Args:
-            agent: Whose memory.  With `subagent` it names the database file, so
+            agent: Whose turns.  With `subagent` it names the database file, so
                 client ids are isolated from each other by construction.
             messages: The whole turn, as the agent loop returned it: the user's
                 message first, then every assistant message, tool call and
@@ -136,10 +137,10 @@ def build_server(config: Config) -> FastMCP:
         return {"turn_id": turn_id, "database": str(store.path)}
 
     def _caller(ctx: Context) -> tuple[str, str]:
-        """Whose memory a model's call is about — read from the request.
+        """Whose turns a model's call is about — read from the request.
 
         **There is no `agent` argument, and that is the whole point.**  A model
-        that could name a database could read somebody else's memory, and the
+        that could name a database could read somebody else's turns, and the
         only thing standing between it and that would be a sentence in its own
         system prompt — which is an instruction, not a boundary.  The
         conversation is a fact the caller's side holds (`slife2.toolclient`
@@ -156,7 +157,7 @@ def build_server(config: Config) -> FastMCP:
         found = request_client(ctx)
         if found is None:
             raise ValueError(
-                "this tool reads one conversation's memory and the call did not "
+                "this tool reads one conversation's turns and the call did not "
                 "say whose; it is called through the toolhub, which forwards the "
                 "caller's identity (`slife2.audience`)"
             )
@@ -184,7 +185,7 @@ def build_server(config: Config) -> FastMCP:
         they were hidden, which is the one thing a browse must not do.
 
         Your own history, and only your own: there is no argument naming whose
-        memory to read, because a model that could name one could read somebody
+        turns to read, because a model that could name one could read somebody
         else's.
 
         Args:

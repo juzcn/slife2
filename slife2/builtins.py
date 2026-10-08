@@ -28,7 +28,7 @@ arguments, say what it does and what each argument means, and it is a tool.
 
 `meta=FOR_THE_MODEL` is the other half, and it is not decoration.  The hub finds
 this server the way it finds every other plugin, and a plugin's tools are **not**
-the model's by default — memory's `remember` and the agent's `send_message` are
+the model's by default — the db's `remember` and the agent's `send_message` are
 served by the same mechanism, and those are exactly the tools a model must never
 pick by reading descriptions (`slife2.audience`).  So a tool here is invisible to
 the model until it says otherwise, and forgetting the mark costs a tool that is

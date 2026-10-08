@@ -205,7 +205,7 @@ avoided:
 - **A conversation store that can grow without bound**, which is now the
   server's problem rather than the caller's. See §9.
 
-**Every turn of a loop that has memory is recorded, cancelled ones included.**
+**Every turn of a loop that records is written, cancelled ones included.**
 The rule is deliberately not "remember to record the cancel path": a write that
 is conditional on how a turn ended is a write somebody can forget to make, and
 the failure it produces is a conversation in the transcript that the database has
@@ -224,7 +224,7 @@ cosmetic inversion in `recent`, and it is the cheaper half of the trade — the
 alternative is every queued turn waiting on the db server.
 
 **The id travels with the call, at every hop.** It is not only the agent server
-that receives it: the memory write and the model call are both made under the
+that receives it: the write to the db and the model call are both made under the
 same `(agent, subagent)`, so no hop in this system is anonymous. What the model
 servers do *not* do with it is keep a conversation — see §6, and the note there
 about why the history cannot live on the far side of a protocol-specific hop.
@@ -289,10 +289,11 @@ live instances may not share a name). It creates no port, no process, and no
 config section. Isolation, if it ever appears, belongs inside an MCP server —
 which is why the label reaches one.
 
-## 5. Memory
+## 5. Persistence
 
-A component with one job: keep what was said. It does not summarise, does not
-decide what mattered, and puts nothing back into a conversation. The schema is
+A component with one job: keep what is worth keeping, and the turns are what it
+keeps today. It does not summarise, does not decide what mattered, and puts
+nothing back into a conversation. The schema is
 v1's `turn` table, minus one column — one row per turn, columns for the two
 token counts, the two timestamps and the identity that v1 arrived at by using
 it. The missing column is `user_message`: v1 keeps the user's half beside the
@@ -331,7 +332,7 @@ recorded.
 That rule lives in one place, `slife2.mcp_server.open_server` — connect, prove the
 server is the one you meant, raise otherwise. It is there because it had four
 implementations and one of them was its own opposite: the LLM backend and the TUI
-each probed and raised, and the agent server's memory client swallowed the
+each probed and raised, and the agent server's db client swallowed the
 failure and latched itself off, which made the same situation fatal at startup
 and silent a minute later.
 
@@ -411,7 +412,7 @@ travels in the call's `_meta` rather than in its arguments (`slife2.audience`).
 The agent binds the conversation it is running for when it builds the loop, the
 hub forwards what it was given without reading it, and the db answers about the
 conversation the call came from. A model that could name an agent could read
-somebody else's memory, and the only thing standing in the way would be a
+somebody else's turns, and the only thing standing in the way would be a
 sentence in its own system prompt — which is an instruction, not a boundary.
 
 Recall in the other sense is still deliberately absent: nothing yet decides
@@ -521,7 +522,7 @@ writing it down. The default is the safe half on purpose: a forgotten mark costs
 a tool that is absent, not a tool that is dangerous.
 
 **A call can say who it is on behalf of, and the hub passes that on without
-reading it.** Memory is the case that needs it: the model may browse its own
+reading it.** The db is the case that needs it: the model may browse its own
 history and must not browse anybody else's, and one db server serves every
 conversation in the system. So the conversation rides in the call's `_meta`
 rather than in its arguments — off the schema the model reads, out of reach of a
@@ -641,7 +642,7 @@ Named so they are decisions rather than oversights:
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
-- **Recall.** Memory stores turns and returns them by time; nothing yet
+- **Recall.** The db stores turns and returns them by time; nothing yet
   decides which past turns are *relevant* to the one in hand.
 - **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
   does not have to answer it. A tool that writes a file reopens the question v1
@@ -665,12 +666,12 @@ Named so they are decisions rather than oversights:
   key passes through to the SDK's browser flow for the rest. The gap is the
   headless case, where the browser flow has no browser.
 - **Digesting an oversized tool result.** A tool can return more text than the
-  conversation can hold, and nothing here bounds it. Memory already has the
+  conversation can hold, and nothing here bounds it. The db already has the
   pattern for the turn record — an oversized result becomes an announced
   head-and-tail digest — and the same rule belongs on the way *into* the model,
   not only on the way into the database.
 - **Subagents.** The shape is decided and the seams are in: one agent has one
-  loop with memory, plus N worker loops that have none. `Loop.records` and
+  loop that records, plus N worker loops that do not. `Loop.records` and
   `Loop.children` exist for it, workers hang off their parent so a worker id is
   not addressable from outside, and a worker's answer arrives as a tool result
   because tools already return text. What is not decided: how a spawn tool

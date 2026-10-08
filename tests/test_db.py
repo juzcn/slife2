@@ -16,7 +16,7 @@ import sqlite3
 import pytest
 
 from slife2.clock import now
-from slife2.memory import (
+from slife2.db import (
     TOOL_RESULT_CHARS,
     TurnStore,
     compact_tool_results,
@@ -150,7 +150,7 @@ def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
         connection.execute("CREATE TABLE turns (id INTEGER PRIMARY KEY, prompt TEXT)")
         connection.execute("INSERT INTO turns (prompt) VALUES ('from before')")
 
-    with caplog.at_level(logging.ERROR, logger="slife2.memory"):
+    with caplog.at_level(logging.ERROR, logger="slife2.db"):
         first = TurnStore(path)
         TurnStore(path)
 

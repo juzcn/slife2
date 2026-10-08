@@ -18,7 +18,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.tools import Tool
 
 from slife2.config import Config, ToolServerSettings, default_config
-from slife2.db_server import build_server as build_memory
+from slife2.db_server import build_server as build_db
 from slife2.messages import ToolCall
 from slife2.paths import DATA_ENV_VAR
 from slife2.toolclient import (
@@ -245,7 +245,7 @@ def test_tool_failed_and_an_ordinary_raise_are_rendered_differently() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_identity_reaches_memory_through_the_hub(
+async def test_the_identity_reaches_the_db_through_the_hub(
     tmp_path, monkeypatch
 ) -> None:
     """Two hops, and the conversation survives both.
@@ -259,9 +259,9 @@ async def test_the_identity_reaches_memory_through_the_hub(
     history that is not its own, or none at all.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    memory = build_memory(default_config())
+    db = build_db(default_config())
 
-    async with Client(memory) as seed:
+    async with Client(db) as seed:
         for agent, said in (("jack", "jack asked"), ("jill", "jill asked")):
             await seed.call_tool(
                 "remember",
@@ -278,14 +278,14 @@ async def test_the_identity_reaches_memory_through_the_hub(
     hub = build_hub(
         config,
         transports=component_transports(
-            config, {"db": lambda settings: memory}
+            config, {"db": lambda settings: db}
         ),
     )
 
     async with Client(hub) as hub_client:
         offered = await remote_tools(hub_client, ("jack", ""))
         by_name = {tool.spec.name: tool for tool in offered}
-        # What memory has that the model may not call never left the hub.
+        # What the db has that the model may not call never left the hub.
         assert "db__turn_list" in by_name
         assert "db__turn_read" in by_name
         assert "db__remember" not in by_name
