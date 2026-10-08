@@ -39,11 +39,11 @@ Three tool names, one payload shape, and one rule about failure:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from slife2.audience import client_meta
+from slife2.mcp_server import tool_payload
 from slife2.messages import ToolSpec
 from slife2.tools import Tool, ToolFailed
 
@@ -127,7 +127,7 @@ async def remote_tools(
             short tool list — turns a version mismatch into a model that has
             quietly lost its abilities.  `slife2 down` is the answer.
     """
-    payload = _object(await client.call_tool(LIST_TOOLS, {}))
+    payload = tool_payload(await client.call_tool(LIST_TOOLS, {}))
     listed = payload.get("tools")
     if not isinstance(listed, list):
         raise ConnectionError(
@@ -155,7 +155,7 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
     meta = client_meta(*client_id) if client_id else None
 
     async def run(arguments: dict[str, Any]) -> str:
-        payload = _object(
+        payload = tool_payload(
             await client.call_tool(
                 CALL_TOOL, {"name": name, "arguments": arguments}, meta=meta
             )
@@ -169,28 +169,6 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
         return text
 
     return run
-
-
-def _object(result: Any) -> dict[str, Any]:
-    """The mapping a hub tool answered with.
-
-    Reads the structured payload the SDK has already deserialized, and falls
-    back to the text block — which is the same JSON, since a structured result
-    is also sent as text.  A hub reached over a transport that kept only the
-    text is still readable, and one that answered with neither is the mismatch
-    `remote_tools` refuses.
-    """
-    data = getattr(result, "data", None)
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, str) and data.strip():
-        try:
-            decoded = json.loads(data)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(decoded, dict):
-            return decoded
-    return {}
 
 
 __all__ = [

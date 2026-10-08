@@ -10,16 +10,27 @@ db problem and swallows.
 
 from __future__ import annotations
 
+import sqlite3
+from types import SimpleNamespace
+
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.audience import client_meta
 from slife2.config import default_config
-from slife2.db_server import build_server
-from slife2.paths import DATA_ENV_VAR
+from slife2.db import TurnStore
+from slife2.db_server import RemoteEmbedder, build_server
+from slife2.paths import DATA_ENV_VAR, db_dir
+from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
+
+#: The db server embeds every turn it stores, so driving it needs an embedder.
+#: A stub rather than an endpoint: what these tests are about is the server's
+#: own behaviour, and a real call would make them about somebody else's service
+#: being up.
+EMBEDDER = StubEmbedder()
 
 
 @pytest.mark.asyncio
@@ -31,7 +42,7 @@ async def test_a_turn_goes_in_and_comes_back(tmp_path, monkeypatch) -> None:
         {"role": "assistant", "content": "It is 42."},
     ]
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         stored = await client.call_tool(
             "remember",
             {
@@ -70,7 +81,7 @@ async def test_an_agent_name_that_cannot_be_a_file_is_refused(
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError):
             await client.call_tool(
                 "remember",
@@ -100,7 +111,7 @@ async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
     for name in ("turn_list", "turn_read"):
@@ -118,7 +129,7 @@ async def test_a_model_reads_the_history_it_is_calling_from(
     """Two conversations, one server, and neither sees the other's turns."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         for agent, question in (
             ("jack", "jack's question"),
             ("jill", "jill's question"),
@@ -160,7 +171,7 @@ async def test_a_call_that_says_nobody_is_refused(tmp_path, monkeypatch) -> None
     given, so a call arriving without one did not come through the hub."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="did not say whose"):
             await client.call_tool("turn_list", {})
 
@@ -170,7 +181,7 @@ async def test_browsing_pages_and_reports_a_total(tmp_path, monkeypatch) -> None
     """What the model gets back for a page: four fields a turn and the count."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         for number in range(3):
             await client.call_tool(
                 "remember",
@@ -194,7 +205,7 @@ async def test_a_bound_the_grammar_does_not_know_is_a_refusal(
     """A `ToolError` the model reads and corrects, not an empty page."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="invalid since bound"):
             await client.call_tool(
                 "turn_list", {"since": "whenever"}, meta=client_meta("jack")
@@ -207,8 +218,128 @@ async def test_reading_a_turn_that_is_not_there_says_which_one(
 ) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    async with Client(build_server(default_config())) as client:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="no turn 7"):
             await client.call_tool(
                 "turn_read", {"turn_id": 7}, meta=client_meta("jack")
             )
+
+
+# --- startup: the index is brought up to date with the model ------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_leaves_a_current_index_alone(tmp_path, monkeypatch) -> None:
+    """The ordinary start costs nothing: the identity matches, so no embedding.
+
+    Worth asserting because it is the difference between a server that starts in
+    milliseconds and one that re-embeds a history every time it is launched.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    store = TurnStore(db_dir() / "jack.turn.db")
+    for said in ("工具", "trump"):
+        await store.save_turn(
+            messages=[{"role": "user", "content": said}], embedder=EMBEDDER
+        )
+
+    again = StubEmbedder()
+    async with Client(build_server(default_config(), embedder=again)):
+        pass
+
+    assert again.calls == [], "a current index was rebuilt anyway"
+
+
+@pytest.mark.asyncio
+async def test_startup_reindexes_every_turn_when_the_model_changed(
+    tmp_path, monkeypatch
+) -> None:
+    """The cost of changing the embedding model, paid once at start.
+
+    Every turn has to be embedded again — vectors from two models cannot be
+    ranked against each other — and the thing that decides it is the identity
+    recorded in the file, not anything remembered across restarts.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    first = StubEmbedder()
+    store = TurnStore(db_dir() / "jack.turn.db")
+    for said in ("工具", "trump", "792"):
+        await store.save_turn(
+            messages=[{"role": "user", "content": said}], embedder=first
+        )
+
+    second = StubEmbedder(identity="stub:two")
+    async with Client(build_server(default_config(), embedder=second)):
+        pass
+
+    assert sum(len(call) for call in second.calls) == 3
+    assert store._turns_without_vectors() == []
+    assert store.index_status(second)["ready"]
+    with sqlite3.connect(store.path) as connection:
+        recorded = connection.execute(
+            "SELECT value FROM index_meta WHERE key = 'vector_identity'"
+        ).fetchone()[0]
+    assert recorded.startswith("1|stub:two|"), recorded
+
+
+# --- the far side of the hop --------------------------------------------------
+
+
+class _Peer:
+    """A stand-in for the client to the embeddings server."""
+
+    def __init__(self, **answers: object) -> None:
+        self._answers = answers
+
+    async def call_tool(self, name: str, arguments: dict | None = None):
+        return SimpleNamespace(data=self._answers[name])
+
+
+DESCRIBED = {
+    "provider": "local",
+    "model": "bge-m3",
+    "base_url": "http://127.0.0.1:17347/v1",
+    "dimension": 1024,
+    "max_chars": 8192,
+}
+
+
+@pytest.mark.asyncio
+async def test_the_identity_is_the_endpoint_the_model_and_nothing_else() -> None:
+    """A repointed base_url counts as a different model.
+
+    Two endpoints can serve one model id and mean different weights, and mixing
+    their vectors in one table is a ranking nobody could explain afterwards.
+    """
+    embedder = RemoteEmbedder(_Peer(), DESCRIBED)
+
+    assert embedder.identity == "local|bge-m3|http://127.0.0.1:17347/v1"
+    assert embedder.dimension == 1024
+    assert embedder.max_chars == 8192
+
+    moved = RemoteEmbedder(_Peer(), {**DESCRIBED, "base_url": "http://elsewhere/v1"})
+    assert moved.identity != embedder.identity
+
+
+def test_a_description_without_a_width_is_refused() -> None:
+    """No index can be built for it, and building one at the wrong width is the
+    silent failure this whole path exists to avoid."""
+    with pytest.raises(RuntimeError, match="width"):
+        RemoteEmbedder(_Peer(), {**DESCRIBED, "dimension": 0})
+
+
+@pytest.mark.asyncio
+async def test_a_short_answer_is_refused() -> None:
+    """Read as "these texts had nothing worth embedding", it would leave a hole
+    in the index that nothing could see."""
+    peer = _Peer(embed={"vectors": [[0.0, 1.0]]})
+    with pytest.raises(RuntimeError, match="1 vectors for 2 texts"):
+        await RemoteEmbedder(peer, DESCRIBED).embed(["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_the_vectors_come_back_as_floats() -> None:
+    peer = _Peer(embed={"vectors": [[1, 2], [3, 4]]})
+    assert await RemoteEmbedder(peer, DESCRIBED).embed(["a", "b"]) == [
+        [1.0, 2.0],
+        [3.0, 4.0],
+    ]

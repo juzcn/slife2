@@ -60,6 +60,14 @@ would write (`yesterday`, `last month`, `3 days ago`), paged with
 call carries the conversation it is on behalf of, so a model reads its own
 history and nothing else, and no argument of its can change that.
 
+Every turn is also **indexed twice as it is stored** — a keyword index over the
+text a turn is found by, and a vector index over what it was about — so a turn
+can later be found by relevance rather than only by time. Both indexes are
+derived from the turns and rebuilt from them, which is why changing the
+embedding model (under `embeddings:` in the config) costs a re-embedding of the
+whole history on the next start rather than a migration. The store can already
+answer such a search; no tool offers it to the model yet.
+
 Each component is also its own console script, so a process manager can run one
 without passing an argument:
 
@@ -67,10 +75,11 @@ without passing an argument:
 uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-toolhub          # the model's tools,          :8020
 uv run slife2-builtins         # echo, now, calc,            :8030
-uv run slife2-db           # turns, one db per agent,    :8010
+uv run slife2-db               # turns and their two indexes, :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
 uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
+uv run slife2-llm-embeddings   # vectors for the db's index, :8004
 ```
 
 In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
@@ -222,17 +231,22 @@ slife2/
 ├─ toolhub.py         # slife2-toolhub: the model's tools, the servers behind
 │                     #   them, and the credentials they need
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
-├─ db.py              # the store: TurnStore, one SQLite file per agent
+├─ textindex.py       # how a turn becomes searchable text, and how a query
+│                     #   becomes a MATCH (no I/O)
+├─ db.py              # the store: TurnStore, one SQLite file per agent, and
+│                     #   the two derived indexes over its turns
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
-├─ db_server.py       # slife2-db: `remember`, and the model's `turn_list`
-│                     #   and `turn_read`
+├─ db_server.py       # slife2-db: `remember`, the model's `turn_list` and
+│                     #   `turn_read`, and the startup pass that brings every
+│                     #   index up to date with the embedding model
 ├─ llm/
 │  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py         # Chunk <-> progress payload (no I/O)
 │  ├─ client.py       # MCPBackend: the agent loop's only backend
 │  ├─ server_common.py# what the model servers share, incl. tool-call assembly
+│  ├─ embeddings_server.py # slife2-llm-embeddings       <- imports openai
 │  ├─ openai_server.py    # slife2-llm-openai             <- imports openai
 │  ├─ openai_responses_server.py # slife2-llm-openai-responses <- imports openai
 │  └─ anthropic_server.py # slife2-llm-anthropic          <- imports anthropic
@@ -261,7 +275,9 @@ here, and the two conventions (`house_server`) that would otherwise be copied
 into each server. It is not LLM-specific, which is why it is not under
 `llm/`: the db server, the toolhub and the agent server are not LLM
 components, and the scaffold they serve on should not come out of the LLM
-package.
+package. The embeddings server is the one component under `llm/` that is not a
+chat backend — it speaks `/embeddings` and nothing else — and it is there
+because it is the other thing in this system that imports a provider SDK.
 
 ## Tests
 

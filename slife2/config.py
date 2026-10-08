@@ -154,13 +154,16 @@ AGENT_SERVER_NAME = "slife2-agent"
 DB_SERVER_NAME = "slife2-db"
 BUILTINS_SERVER_NAME = "slife2-builtins"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
+EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
 #: The components that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
-#: launcher starts them in — see `slife2.config.Config.components` — which is why
-#: `builtins` comes before `toolhub`: the hub asks it for a tool list, and the
-#: answer to a first turn should not be "not connected yet".
-LOCAL_SERVERS = ("db", "builtins", "toolhub", "agent")
+#: launcher starts them in — see `slife2.config.Config.components` — and two of
+#: these positions are load-bearing: `builtins` before `toolhub`, because the hub
+#: asks it for a tool list and the answer to a first turn should not be "not
+#: connected yet"; and `embeddings` before `db`, because the db's startup sync
+#: asks it for a dimension and then for every vector its index is missing.
+LOCAL_SERVERS = ("embeddings", "db", "builtins", "toolhub", "agent")
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -323,6 +326,68 @@ class ProviderSettings:
 
 
 @dataclass(frozen=True)
+class EmbeddingProviderSettings:
+    """One OpenAI-compatible endpoint that turns text into vectors.
+
+    **Not a `ProviderSettings`, and not one of the `providers:`.**  What arrives
+    here is `base_url`, one model id and a key: an embedding endpoint speaks no
+    chat protocol, has no reasoning to ask for and no sampling to control, and
+    is called at `{base_url}/embeddings` and nowhere else.  A provider entry
+    would be a row of fields none of which this uses, plus a chat backend
+    started for a model no conversation can call.
+
+    `api_key` is resolved lazily like `ProviderSettings.api_key`, so credstore is
+    only consulted when a call needs it.
+    """
+
+    name: str
+    base_url: str
+    model: str
+    api_key_ref: str = ""
+
+    @property
+    def api_key(self) -> str:
+        """The resolved key.  Touches credstore, so call it where it is needed."""
+        return resolve_secret(self.api_key_ref)
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}/{self.model}"
+
+
+@dataclass(frozen=True)
+class EmbeddingsSettings:
+    """Where vectors come from — and there is always somewhere.
+
+    **No `enabled` switch, on purpose.**  v1 had one, and its cost was a
+    misconfiguration that looked exactly like a working system with nothing to
+    recall: semantic search quietly off, every keyword search still answering.
+    The db component cannot be run without an embedding model, so the switch had
+    one useful setting, and a setting with one useful value is a way to be wrong.
+    """
+
+    #: name -> endpoint.  Never empty in a config that loaded; see `_embeddings`.
+    providers: dict[str, EmbeddingProviderSettings] = field(default_factory=dict)
+    #: Which of them is in use.  A provider id, not a `provider/model` ref: there
+    #: is one model per endpoint here, and the endpoint is the choice being made.
+    active: str = ""
+
+    def active_provider(self) -> EmbeddingProviderSettings:
+        """The provider in use, falling back to the first.
+
+        Raises:
+            ConfigError: If there are none, which `_embeddings` refuses at load
+                time — so reaching this means a `Config` assembled in code
+                rather than read from a file.
+        """
+        if not self.providers:
+            raise ConfigError("no embedding provider configured")
+        if self.active in self.providers:
+            return self.providers[self.active]
+        return next(iter(self.providers.values()))
+
+
+@dataclass(frozen=True)
 class AgentSettings:
     """How the agent loop behaves, and where it listens.  Not an identity."""
 
@@ -409,6 +474,10 @@ class Config:
     #: not what it becomes.  `ToolServerSettings.kind` keeps the provenance.
     tools: dict[str, ToolServerSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
+    #: The endpoints vectors come from, and which one is in use.  Its own
+    #: section rather than entries under `providers:`, for the reason
+    #: `EmbeddingProviderSettings` gives.
+    embeddings: EmbeddingsSettings = field(default_factory=EmbeddingsSettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -544,10 +613,32 @@ def default_config() -> Config:
             "openai-completions": ServerSettings(port=8001),
             "anthropic-messages": ServerSettings(port=8002),
             "openai-responses": ServerSettings(port=8003),
+            # Embeddings are an OpenAI-protocol endpoint and *not* one of the
+            # chat backends above, so they are served by a process of their own
+            # rather than borrowed from `openai-completions`: that process is
+            # built from the chat providers, and there is no chat provider here
+            # to attach an embedding model to.  See `EmbeddingsSettings`.
+            "embeddings": ServerSettings(port=8004),
         },
         providers={"deepseek": deepseek},
         tools={},
         agent=AgentSettings(),
+        embeddings=EmbeddingsSettings(
+            providers={
+                # The default points at a *local* embedder, which is the one
+                # endpoint that can be reached without a credential and the
+                # reason the shipped config can run at all.  `bge-m3` is
+                # multilingual, which is what a history mixing Chinese and
+                # English needs; its width is discovered, never configured.
+                "local": EmbeddingProviderSettings(
+                    name="local",
+                    base_url="http://127.0.0.1:17347/v1",
+                    model="bge-m3",
+                    api_key_ref="local",
+                )
+            },
+            active="local",
+        ),
         default="deepseek/deepseek-flash",
     )
 
@@ -643,7 +734,77 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         providers=providers,
         tools=_tools(raw),
         agent=agent,
+        embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         default=str(raw.get("default") or _first_reference(providers)),
+    )
+
+
+def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
+    """The `embeddings:` section, defaulted.
+
+    **Absent means the default, not an error.**  A config file written before
+    embeddings existed still loads, and a fresh checkout runs — the alternative
+    would be a migration in a different coat, which is the thing this project
+    does not have.  The requirement is enforced where it is real: a section that
+    *is* there may not be empty, because there is no configuration in which the
+    db component runs without an embedding model.
+
+    A stale `active_model` falls back to the first provider rather than
+    refusing, which is v1's rule and the useful one: the failure it prevents is
+    a config that stops loading because one word went stale, and the failure it
+    allows — vectors silently coming from a provider nobody chose — is visible
+    in `slife2 status` and in the index's recorded identity.
+    """
+    if raw is None:
+        return base
+
+    section = _mapping(raw, "embeddings")
+    providers_raw = _mapping(section.get("providers"), "embeddings.providers")
+    if not providers_raw:
+        raise ConfigError(
+            "embeddings.providers: needs at least one provider — there is no "
+            "mode in which slife2 stores turns it cannot search semantically"
+        )
+    providers = {
+        str(name): _embedding_provider(spec, str(name))
+        for name, spec in providers_raw.items()
+    }
+    active = str(section.get("active_model") or "")
+    return EmbeddingsSettings(
+        providers=providers,
+        active=active if active in providers else next(iter(providers)),
+    )
+
+
+def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
+    """One `embeddings.providers:` entry: an OpenAI-compatible endpoint.
+
+    Its address is required, and not only its key.  That is v1's rule and it
+    closes a real hole rather than a hypothetical one: an entry carrying a key
+    with nowhere to send it makes the OpenAI client fall back to its **own**
+    default host, which means the key and every document in the history are
+    posted to somebody else's server.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"embeddings.providers.{name}: expected a mapping")
+
+    base_url = str(raw.get("base_url") or "")
+    model = str(raw.get("model") or "")
+    if not base_url:
+        raise ConfigError(
+            f"embeddings.providers.{name}: needs `base_url` — without one the "
+            f"client would send this provider's key to its own default host"
+        )
+    if not model:
+        raise ConfigError(
+            f"embeddings.providers.{name}: needs `model` — the id sent as "
+            f"`model` on /embeddings"
+        )
+    return EmbeddingProviderSettings(
+        name=name,
+        base_url=base_url,
+        model=model,
+        api_key_ref=str(raw.get("api_key") or ""),
     )
 
 
@@ -912,6 +1073,9 @@ __all__ = [
     "BUILTINS_SERVER_NAME",
     "DB_SERVER_NAME",
     "DEFAULT_AGENT",
+    "EMBEDDINGS_SERVER_NAME",
+    "EmbeddingProviderSettings",
+    "EmbeddingsSettings",
     "LOCAL_SERVERS",
     "TOOLHUB_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",

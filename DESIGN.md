@@ -415,9 +415,53 @@ conversation the call came from. A model that could name an agent could read
 somebody else's turns, and the only thing standing in the way would be a
 sentence in its own system prompt — which is an instruction, not a boundary.
 
-Recall in the other sense is still deliberately absent: nothing yet decides
-which past turns are *relevant*. Adding an index is a change to this file rather
-than a change to what was kept.
+**Recall needs two indexes, and neither of them changes what was kept.** The
+store finds a turn by keyword and by meaning, and both indexes are *derived*:
+`turn_fts` holds the text a turn is found by and `turn_vec` the vectors of what
+it was about, with `index_meta` recording the identity each was built with. Not
+one column of `turn` changed to make room for them, which is why there is still
+no migration layer — the tables are additions, and `CREATE TABLE IF NOT EXISTS`
+is what additions need.
+
+An index whose recorded identity no longer matches the configuration is dropped
+and rebuilt rather than read, and that is one mechanism for all four things that
+can invalidate one: a different normalization rule, a different embedding model,
+a different vector width, a repointed endpoint. The cost is real and paid at
+startup — changing the embedding model re-embeds every turn in every file,
+because vectors from two models cannot be ranked against each other — and it is
+the reason the sync runs before anything is served. A file this build cannot
+bring up to date is *named*, with its reasons, rather than upgraded: the
+doctrine above is that an old database is deleted rather than migrated, and
+`TurnStore.index_status` is how that stays a decision instead of a surprise.
+
+**The keyword leg is not a `LIKE` fallback, and the difference is the whole
+reason `slife2.textindex` exists.** FTS5's tokenizer sees a contiguous run of
+Chinese as *one* token, so a two-character query is an exact-token lookup that
+misses the word wherever it sits inside a longer run — measured on this
+repository's own log, it matched only the turns where the word happened to sit
+beside punctuation or a digit. The fix is to separate the characters before
+indexing and to build the query the same way, which costs a normalization pass
+and buys a leg that ranks. Terms are `AND`ed and never `OR`ed, because with
+single-character tokens an `OR` matches any turn holding any one character.
+
+**What a turn's vector is a vector *of* is the conversation, not the turn.**
+The embedded text is what was asked, what was answered, and which tools were
+called with what arguments — and *not* what the tools answered. Measured on
+v1's live turn log, tool results were 56–99% of a turn's text, so an index built
+on them describes "an agent ran tools" rather than what the turn was about:
+every turn lands in one narrow cosine band and no threshold has anything left to
+separate. The keyword index keeps the whole of it, summaries and tags included,
+which is what those two columns are for.
+
+**Embeddings are a hard dependency, not a feature flag.** A turn is written with
+its vector in one transaction, so a save that cannot embed stores nothing rather
+than storing a turn that semantic search can never find — and the failure is
+visible where it happens instead of as a hole nobody can see. That is also why
+there is no degradation path, no gate and no background drainer: with the write
+path atomic and the model mandatory, "the index is not ready" is not a state the
+system can be in, so nothing has to manage it. v1's answer to the same problem
+was an embedder lifecycle, a binary gate and an event-driven drainer, and its
+write path was deliberately kept on the other side of all three.
 
 ## 6. Compatibility notes
 
@@ -642,8 +686,21 @@ Named so they are decisions rather than oversights:
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
-- **Recall.** The db stores turns and returns them by time; nothing yet
-  decides which past turns are *relevant* to the one in hand.
+- **Recall, offered.** The store now decides relevance — `TurnStore.search`
+  fuses a keyword leg with a semantic one — but **nothing yet offers it to a
+  model**: there is no `turn_search` tool, on purpose, so the two legs could
+  land and be measured before a tool made them part of a prompt. The store's API
+  is the whole of what exists today; the tool is the next change, and the
+  scoring it should expose (`similarity`, the per-leg ranks, a snippet) is a
+  question about that tool rather than about this one.
+- **Selective re-embedding.** A model change re-embeds every turn. Per-turn
+  content hashing would let unchanged rows keep their vectors across a rules
+  change, which is the one place the current answer is slower than it needs to
+  be.
+- **`grep`.** v1 had a third search mode — a real regex over the text, run in
+  Python over a bounded scan, unranked — for the queries neither index can
+  describe: a partial spelling, a path, a symbol. It is not here, and it is the
+  mode v1's notes say the model reached for most often.
 - **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
   does not have to answer it. A tool that writes a file reopens the question v1
   answered with a model-driven `_approve` parameter — and a tool that spawns a

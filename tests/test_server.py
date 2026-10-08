@@ -27,7 +27,7 @@ from dataclasses import replace
 
 import pytest
 import pytest_asyncio
-from fakes import FakeBackend, ScriptedTurn, text_turn
+from fakes import FakeBackend, ScriptedTurn, StubEmbedder, text_turn
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -82,7 +82,7 @@ async def db():
     """
     from slife2.db_server import build_server as build_db
 
-    async with Client(build_db(default_config())) as client:
+    async with Client(build_db(default_config(), embedder=StubEmbedder())) as client:
         yield client
 
 
@@ -482,7 +482,7 @@ async def test_an_interrupted_turn_is_still_recorded(
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
-    async with Client(build_db(config())) as db_client:
+    async with Client(build_db(config(), embedder=StubEmbedder())) as db_client:
         server = build_server(
             config(), backend=backend, db_client=db_client, hub_client=hub
         )
@@ -552,7 +552,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         ),
     )
 
-    async with Client(build_db(cfg)) as db_client:
+    async with Client(build_db(cfg, embedder=StubEmbedder())) as db_client:
         server = build_server(cfg, backend=backend, db_client=db_client, hub_client=hub)
         await send(server, "what is 2+2?", agent="jack", channel="human")
 

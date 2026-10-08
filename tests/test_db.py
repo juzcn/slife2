@@ -26,8 +26,15 @@ from slife2.db import (
 )
 from slife2.paths import DATA_ENV_VAR
 from slife2.timeutil import InvalidTimeBound
+from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
+
+#: Saving a turn now embeds it, and these tests are about what the store does
+#: with a turn rather than about the model that produced the vector — so they
+#: all save through the same stub.  It is deterministic, which is what lets a
+#: semantic assertion mean something; see `tests.fakes.StubEmbedder`.
+EMBEDDER = StubEmbedder()
 
 
 def test_the_table_is_v1s_schema(tmp_path) -> None:
@@ -60,7 +67,8 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
     ]
 
 
-def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     """Every value that went in comes out, unmangled."""
     store = TurnStore(tmp_path / "jack.turn.db")
     messages = [
@@ -68,7 +76,8 @@ def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
         {"role": "assistant", "content": "It is 42."},
     ]
 
-    turn_id = store.save_turn(
+    turn_id = await store.save_turn(
+        embedder=EMBEDDER,
         messages=messages,
         channel="human",
         who_helped="jack",
@@ -95,7 +104,8 @@ def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     assert (record.summary, record.tags) == ("", "")
 
 
-def test_turns_are_newest_first(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_turns_are_newest_first(tmp_path) -> None:
     """Retrieval is by time, and the order is the rowid's — not the clock's.
 
     Two turns written in the same second are the common case, so a tie has to
@@ -103,7 +113,9 @@ def test_turns_are_newest_first(tmp_path) -> None:
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     for text in ("first", "second", "third"):
-        store.save_turn(messages=[{"role": "user", "content": text}])
+        await store.save_turn(
+            embedder=EMBEDDER, messages=[{"role": "user", "content": text}]
+        )
 
     records, total = store.turns()
     assert [r.messages[0]["content"] for r in records] == [
@@ -117,7 +129,8 @@ def test_turns_are_newest_first(tmp_path) -> None:
     assert [r.messages[0]["content"] for r in records] == ["third", "second"]
 
 
-def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     """One unreadable turn is one turn, not a history that cannot be read.
 
     Refusing to return anything because one row's JSON is half-written turns a
@@ -125,8 +138,8 @@ def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     """
     path = tmp_path / "jack.turn.db"
     store = TurnStore(path)
-    store.save_turn(messages=[{"role": "assistant", "c": 1}])
-    store.save_turn(messages=[{"role": "assistant", "c": 2}])
+    await store.save_turn(embedder=EMBEDDER, messages=[{"role": "assistant", "c": 1}])
+    await store.save_turn(embedder=EMBEDDER, messages=[{"role": "assistant", "c": 2}])
 
     with sqlite3.connect(path) as connection:
         connection.execute("UPDATE turn SET messages = 'not json' WHERE rowid = 1")
@@ -162,7 +175,8 @@ def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
     assert first.count() == 0
 
 
-def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None:
     """Text SQLite cannot encode must not cost the whole record.
 
     Not exotic input: a provider's token stream is JSON, and CPython's `json`
@@ -174,7 +188,8 @@ def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None
     store = TurnStore(tmp_path / "jack.turn.db")
     emoji_as_escaped = json.loads('"\\ud83d\\ude00"')
 
-    turn_id = store.save_turn(
+    turn_id = await store.save_turn(
+        embedder=EMBEDDER,
         messages=[
             {"role": "user", "content": "an emoji: " + emoji_as_escaped},
             {"role": "assistant", "content": "half a character: \ud800"},
@@ -189,7 +204,8 @@ def test_surrogates_are_normalised_rather_than_losing_the_turn(tmp_path) -> None
     ]
 
 
-def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
     """Written to that agent's database, and reachable from no other.
 
     Isolation is a property of the filesystem here, not a `WHERE` clause, so
@@ -198,7 +214,9 @@ def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     jack, jill = store_for("jack"), store_for("jill")
 
-    jack.save_turn(messages=[{"role": "user", "content": "mine"}])
+    await jack.save_turn(
+        embedder=EMBEDDER, messages=[{"role": "user", "content": "mine"}]
+    )
 
     assert jack.path != jill.path
     assert jack.count() == 1
@@ -280,8 +298,11 @@ def test_a_name_that_cannot_name_a_file_is_refused(name: str) -> None:
 # --- browsing: the window, the page, and the two halves -----------------------
 
 
-def _turn(store: TurnStore, question: str, answer: str, *, at: str, tokens: int = 0):
-    return store.save_turn(
+async def _turn(
+    store: TurnStore, question: str, answer: str, *, at: str, tokens: int = 0
+):
+    return await store.save_turn(
+        embedder=EMBEDDER,
         messages=[
             {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
@@ -292,7 +313,8 @@ def _turn(store: TurnStore, question: str, answer: str, *, at: str, tokens: int 
     )
 
 
-def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -> None:
     """`total` is the window's, not the table's.
 
     That is the number that answers "is there another page", and a total over
@@ -300,9 +322,9 @@ def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -> None
     whole history.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    _turn(store, "old", "a", at="2026-01-01T10:00:00+08:00")
-    _turn(store, "middle", "b", at="2026-06-01T10:00:00+08:00")
-    _turn(store, "new", "c", at="2026-10-01T10:00:00+08:00")
+    await _turn(store, "old", "a", at="2026-01-01T10:00:00+08:00")
+    await _turn(store, "middle", "b", at="2026-06-01T10:00:00+08:00")
+    await _turn(store, "new", "c", at="2026-10-01T10:00:00+08:00")
 
     records, total = store.turns(since="2026-05-01", limit=5)
     assert [table(record) for record in records] == ["new", "middle"]
@@ -319,17 +341,19 @@ def table(record) -> str:
     return record.messages[0]["content"]
 
 
-def test_a_relative_bound_is_resolved_before_it_reaches_sql(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_relative_bound_is_resolved_before_it_reaches_sql(tmp_path) -> None:
     """A word a model wrote narrows the window like a date does."""
     store = TurnStore(tmp_path / "jack.turn.db")
-    _turn(store, "long ago", "a", at="2001-01-01T10:00:00+08:00")
-    _turn(store, "today", "b", at=now())
+    await _turn(store, "long ago", "a", at="2001-01-01T10:00:00+08:00")
+    await _turn(store, "today", "b", at=now())
 
     records, total = store.turns(since="today", limit=5)
     assert [table(r) for r in records] == ["today"] and total == 1
 
 
-def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
+@pytest.mark.asyncio
+async def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
     tmp_path,
 ) -> None:
     """The failure this window must never have: an answer that looks like one.
@@ -339,13 +363,14 @@ def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
     in it.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    _turn(store, "anything", "a", at=now())
+    await _turn(store, "anything", "a", at=now())
 
     with pytest.raises(InvalidTimeBound):
         store.turns(since="上个月", limit=5)
 
 
-def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
     """Ten turns, three pages, each turn exactly once.
 
     Paging on `offset` is only safe because the order is the rowid's: the
@@ -354,7 +379,7 @@ def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     for number in range(10):
-        _turn(store, f"turn {number}", "a", at="2026-10-07T10:00:00+08:00")
+        await _turn(store, f"turn {number}", "a", at="2026-10-07T10:00:00+08:00")
 
     seen: list[str] = []
     for offset in (0, 3, 6, 9):
@@ -366,7 +391,8 @@ def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
     assert len(set(seen)) == 10
 
 
-def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
     """What was asked and what was answered, which no column holds.
 
     v1 keeps the user's message in a column and lists rows straight out of SQL.
@@ -376,7 +402,8 @@ def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
     message with no text at all.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    store.save_turn(
+    await store.save_turn(
+        embedder=EMBEDDER,
         messages=[
             {"role": "user", "content": "what is 2+2?"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
@@ -396,14 +423,15 @@ def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
     assert listing["created_at"] and listing["turn_id"] == record.turn_id
 
 
-def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
     """`…`, because a silent cut is a short answer somebody acts on.
 
     The listing is what a caller decides from; it has no way to know the message
     continued except by being told.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    _turn(store, "x" * 5000, "y" * 5000, at=now())
+    await _turn(store, "x" * 5000, "y" * 5000, at=now())
 
     (record,), _ = store.turns(limit=1)
     listing = record.to_listing(chars=10)
@@ -412,7 +440,8 @@ def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
     assert listing["assistant_message"] == "y" * 10 + "…"
 
 
-def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
     """The bytes stop at the model; the record keeps a note saying they were
     there.
 
@@ -422,7 +451,8 @@ def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
     still in the text, because that is where the user put it.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    store.save_turn(
+    await store.save_turn(
+        embedder=EMBEDDER,
         messages=[
             {
                 "role": "user",
@@ -453,7 +483,8 @@ def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
     assert "A" * 100 not in raw
 
 
-def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> None:
     """What the live conversation holds is not what the database holds.
 
     `save_turn` is called while the model that just read the picture may still
@@ -473,15 +504,16 @@ def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> None:
         }
     ]
 
-    store.save_turn(messages=messages, created_at=now())
+    await store.save_turn(embedder=EMBEDDER, messages=messages, created_at=now())
 
     assert messages[0]["content"][1]["type"] == "image_url"
 
 
-def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
     store = TurnStore(tmp_path / "jack.turn.db")
-    first = _turn(store, "first", "a", at=now())
-    _turn(store, "second", "b", at=now())
+    first = await _turn(store, "first", "a", at=now())
+    await _turn(store, "second", "b", at=now())
 
     found = store.turn(first)
     assert found is not None and found.messages[0]["content"] == "first"

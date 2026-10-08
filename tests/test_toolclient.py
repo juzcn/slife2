@@ -29,7 +29,7 @@ from slife2.toolclient import (
 )
 from slife2.toolhub import build_server as build_hub
 from slife2.tools import ToolFailed, ToolRegistry
-from tests.fakes import component_transports
+from tests.fakes import StubEmbedder, component_transports
 
 pytestmark = pytest.mark.unit
 
@@ -259,7 +259,7 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     history that is not its own, or none at all.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    db = build_db(default_config())
+    db = build_db(default_config(), embedder=StubEmbedder())
 
     async with Client(db) as seed:
         for agent, said in (("jack", "jack asked"), ("jill", "jill asked")):

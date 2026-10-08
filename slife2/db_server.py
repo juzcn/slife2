@@ -20,25 +20,54 @@ backends, where one process speaks one wire format for every provider — and th
 
 It is shared infrastructure like the rest: started on demand, reused if already
 running, never per-agent.
+
+**A turn is stored with the two indexes over it, in one transaction.**  The
+keyword index is built here from the text; the vector index needs an embedding,
+so this process reaches the embeddings server (`slife2-llm-embeddings`) before
+it opens its transaction — and a save that cannot embed stores nothing, rather
+than storing a turn nothing can find.  That makes the embedding model a hard
+dependency of this component: it cannot be switched off, and an endpoint that
+cannot be reached fails the save and is reported, because there is no mode in
+which this server runs without semantic search.
+
+**Startup is where an index is brought up to date with the model.**  Every
+database in the data directory is opened, its recorded index identity compared
+with the configured embedder's, and — if they differ — the vectors are dropped
+and every turn embedded again.  The same pass fills in turns that have no
+vector for any other reason.  Nothing is served until it has finished, and a
+database that is still not ready afterwards fails the start with its reasons:
+`slife2.db.TurnStore.index_status` exists to be able to *say* that rather than
+assume it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastmcp import Context, FastMCP
+from fastmcp import Client, Context, FastMCP
 
 from slife2.audience import FOR_THE_MODEL, request_client
-from slife2.config import Config, find_config_path, load
-from slife2.db import PREVIEW_CHARS, store_for
+from slife2.config import (
+    EMBEDDINGS_SERVER_NAME,
+    Config,
+    find_config_path,
+    load,
+)
+from slife2.db import PREVIEW_CHARS, Embedder, TurnStore, store_for
 from slife2.mcp_server import (
+    close_server,
     configure_logging,
     describe,
     house_server,
+    open_server,
     parse_serve_args,
     serve,
+    tool_payload,
 )
 from slife2.paths import db_dir
 
@@ -48,6 +77,17 @@ SERVER_NAME = "slife2-db"
 
 #: This server's key in the config's `servers:` table.
 CONFIG_KEY = "db"
+
+#: The embeddings server's, which is one of `slife2.config.LOCAL_SERVERS`.  Not
+#: `CONFIG_KEY` — this process reads one section and hops to another.
+EMBEDDINGS_KEY = "embeddings"
+
+#: How long a hop to the embeddings server may take.  **Larger than that
+#: server's own request timeout on purpose** (`slife2.llm.embeddings_server.
+#: EMBED_TIMEOUT_SECONDS`): the inner deadline is the one that can name the
+#: endpoint that did not answer, and an outer one that fired first would replace
+#: that message with a timeout of its own.
+EMBEDDINGS_TIMEOUT_SECONDS = 60.0
 
 INSTRUCTIONS = (
     "Persisted turns, one database per client id. Call `remember` after a turn, "
@@ -60,8 +100,72 @@ INSTRUCTIONS = (
 )
 
 
-def build_server(config: Config) -> FastMCP:
-    """Build the db MCP server."""
+class RemoteEmbedder:
+    """The db's view of the embeddings server: three facts and one call.
+
+    Read once, because they cannot change while that server runs — it is what
+    would change them, and changing one means a restart, which is exactly when
+    an index asks whether it is still the right index.
+
+    `identity` is the endpoint and the model, and deliberately not the model
+    alone: two endpoints can serve one model id and mean different weights, so a
+    repointed `base_url` has to count as a different model.  The alternative is
+    a table holding two models' vectors, ranked against each other, with nothing
+    able to say why the numbers went strange.
+    """
+
+    def __init__(self, client: Client, described: dict[str, Any]) -> None:
+        self._client = client
+        self._identity = "|".join(
+            str(described.get(field) or "")
+            for field in ("provider", "model", "base_url")
+        )
+        self._dimension = int(described.get("dimension") or 0)
+        self._max_chars = int(described.get("max_chars") or 0)
+        if not self._dimension or not self._max_chars:
+            raise RuntimeError(
+                f"the embeddings server described itself without a width or an "
+                f"input limit ({described!r}), so no index can be built for it"
+            )
+
+    @property
+    def identity(self) -> str:
+        return self._identity
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def max_chars(self) -> int:
+        return self._max_chars
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """One request to the far side, with the shape of the answer checked.
+
+        Checked because a short answer would otherwise read as "these turns had
+        nothing worth embedding": they would keep no vector at all, and the hole
+        in the index would be silent.  The count is the part a caller cannot
+        recover from, so it is the part that fails.
+        """
+        payload = tool_payload(await self._client.call_tool("embed", {"texts": texts}))
+        vectors = payload.get("vectors")
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            answered = len(vectors) if isinstance(vectors, list) else "no"
+            raise RuntimeError(
+                f"the embeddings server answered {answered} vectors for "
+                f"{len(texts)} texts"
+            )
+        return [[float(value) for value in vector] for vector in vectors]
+
+
+def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP:
+    """Build the db MCP server.
+
+    `embedder` is injectable for tests, the same seam the model servers have: a
+    whole server can be driven over the in-memory transport with no embeddings
+    endpoint and no network behind it.
+    """
 
     async def _on_thread(function, *args, **kwargs):
         """Run a blocking store call off the event loop.
@@ -73,7 +177,85 @@ def build_server(config: Config) -> FastMCP:
         """
         return await asyncio.to_thread(function, *args, **kwargs)
 
-    mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
+    embedding = embedder
+    peers: dict[str, Client] = {}
+    opening = asyncio.Lock()
+    synced: set[Path] = set()
+
+    async def embeddings() -> Embedder:
+        """The embedding model, opened once for the process.
+
+        A peer that is not there **raises**, like every other peer in this
+        system: this server cannot store a turn it cannot index, so a missing
+        embeddings server is a system that has come apart rather than a
+        component working with fewer abilities.
+        """
+        nonlocal embedding
+        if embedding is not None:
+            return embedding
+        async with opening:
+            if embedding is None:
+                client = await open_server(
+                    config.server(EMBEDDINGS_KEY).url,
+                    name=EMBEDDINGS_SERVER_NAME,
+                    fallback_tool="embed",
+                    timeout=EMBEDDINGS_TIMEOUT_SECONDS,
+                )
+                peers[EMBEDDINGS_KEY] = client
+                described = tool_payload(await client.call_tool("describe", {}))
+                embedding = RemoteEmbedder(client, described)
+        return embedding
+
+    async def indexed(store: TurnStore, model: Embedder) -> None:
+        """Bring one file up to date with `model`, or say why it cannot be."""
+        await store.sync_indexes(model)
+        status = store.index_status(model)
+        if not status["ready"]:
+            raise RuntimeError(
+                f"the db at {store.path} cannot be searched semantically: "
+                + "; ".join(status["problems"])
+            )
+        synced.add(store.path)
+        logger.info("indexed %s (%s)", store.path, status)
+
+    async def store_of(agent: str, subagent: str) -> TurnStore:
+        """One conversation's store, with its indexes brought up to date.
+
+        Synced once per file per process.  A file created after the startup pass
+        is not re-synced by this: its own save writes the vector for the turn it
+        is saving, and the only thing a sync would add is re-embedding turns
+        that do not exist yet.
+        """
+        store = await _on_thread(store_for, agent, subagent)
+        if store.path not in synced:
+            await indexed(store, await embeddings())
+        return store
+
+    @asynccontextmanager
+    async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, Any]]:
+        """Bring every database up to date before answering anything at all.
+
+        **Nothing is served until this has finished**, because the alternative
+        is a window in which a search answers from an index that is not the one
+        it claims to be — and the thing that hides, a turn stored with no
+        vector, cannot be seen from outside.  A changed embedding model makes
+        this the expensive step: every turn in every file is embedded again, and
+        that is the price of changing the model rather than a fault to be
+        avoided.
+        """
+        model = await embeddings()
+        for path in sorted(db_dir().glob("*.turn.db")):
+            await indexed(await _on_thread(TurnStore, path), model)
+        try:
+            yield {}
+        finally:
+            client = peers.pop(EMBEDDINGS_KEY, None)
+            if client is not None:
+                await close_server(client)
+
+    mcp: FastMCP = house_server(
+        SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
+    )
 
     @mcp.tool
     async def remember(
@@ -121,10 +303,14 @@ def build_server(config: Config) -> FastMCP:
         Returns:
             `turn_id` of the stored turn, and the file it went into.
         """
-        store = store_for(agent, subagent)
-        turn_id = await _on_thread(
-            store.save_turn,
+        store = await store_of(agent, subagent)
+        # Awaited here, and off this server's loop inside the store: the store
+        # embeds on the loop, where a network call belongs, and does its three
+        # inserts on a thread, where blocking belongs.  A save that raises
+        # stored nothing, which is what the caller is told.
+        turn_id = await store.save_turn(
             messages=messages,
+            embedder=await embeddings(),
             token_count=token_count,
             context_tokens=context_tokens,
             who_helped=who_helped,
@@ -205,7 +391,13 @@ def build_server(config: Config) -> FastMCP:
             whether there is more — and the `limit` and `offset` that produced
             this page.
         """
-        store = store_for(*_caller(ctx))
+        # `store_for` and not `store_of`: reading history needs the turn table
+        # and nothing else, so it must not need an embedding model.  A browse
+        # that failed because the embeddings endpoint was down would be a read
+        # coupled to a write's dependency.  Building the store is still a
+        # blocking call — it opens the file and runs the schema — so it goes off
+        # the loop like every other one here.
+        store = await _on_thread(store_for, *_caller(ctx))
         records, total = await _on_thread(
             store.turns, since=since, until=until, limit=limit, offset=offset
         )
@@ -228,7 +420,9 @@ def build_server(config: Config) -> FastMCP:
             turn_id: The turn to read, as `turn_list` reported it.
         """
         agent, subagent = _caller(ctx)
-        store = store_for(agent, subagent)
+        # `store_for`, for the reason `turn_list` gives: a read of one turn does
+        # not need the embedding model, only the table the turn is in.
+        store = await _on_thread(store_for, agent, subagent)
         record = await _on_thread(store.turn, turn_id)
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")

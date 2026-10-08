@@ -31,6 +31,15 @@ dependencies = [
     "openai>=2.46.0",
     "anthropic>=1.2.0",
     "jinja2>=3.1.0",
+    # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
+    # per connection by `slife2.db`, which is why it is a dependency of the
+    # package rather than something a backend process holds.  A floor rather
+    # than a pin like everything else here, but note that it is still alpha —
+    # the DDL it accepts is probed at open time rather than assumed (see
+    # `slife2.db._vec_ddl`), and `distance_metric` and `float[N]` are the parts
+    # of that alpha this project depends on.  Wheels are `py3-none-*` for every
+    # platform CI builds on, so there is no interpreter-specific tag to match.
+    "sqlite-vec>=0.1.9",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -55,6 +64,7 @@ slife2-toolhub = "slife2.toolhub:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"
 slife2-llm-anthropic = "slife2.llm.anthropic_server:main"
 slife2-llm-openai-responses = "slife2.llm.openai_responses_server:main"
+slife2-llm-embeddings = "slife2.llm.embeddings_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["slife2"]

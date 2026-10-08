@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from slife2.timeutil import BOUND_GRAMMAR, InvalidTimeBound, normalize_bound
+from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
 
@@ -217,7 +218,9 @@ def _since_schema() -> dict:
     from slife2.db_server import build_server
 
     async def read() -> dict:
-        async with Client(build_server(default_config())) as client:
+        async with Client(
+            build_server(default_config(), embedder=StubEmbedder())
+        ) as client:
             (tool,) = [
                 one for one in await client.list_tools() if one.name == "turn_list"
             ]

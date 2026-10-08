@@ -38,25 +38,43 @@ again, and a migration path is a permanent cost paid to avoid a one-off
 annoyance.  `CREATE TABLE IF NOT EXISTS` covers *additions* — a new table, a new
 index — which is most of what tends to arrive.
 
-A *virtual* table is the addition that is not quite free, and it is the one
-v1's schema has three of.  An index built later holds only the rows that arrived
-after it, so landing one means filling it from `turn` in the same change — and
-an external-content FTS index (`content='turn'`) is only told about an `UPDATE`
-if a trigger says so, which is what makes `summary` searchable at all.  Both are
-one-time costs paid by whoever adds it; neither is a reason to add the columns
-now, which is all this module is holding open.
+**The search indexes are derived, not migrated.**  Finding a turn by what it was
+about needs a keyword index over its text and a vector index over what it was
+about, and both are built from rows that are already here — so neither is a
+thing this schema has to carry forward.  They are three tables added beside
+`turn` — `turn_fts`, `turn_vec`, `index_meta` — and not one column of `turn`
+changed, which is the addition `CREATE TABLE IF NOT EXISTS` already covers.
+`index_meta` records the identity each index was built with: the rules the text
+was normalized by (`slife2.textindex`), and the embedding provider, model,
+endpoint and width.  An index whose identity no longer matches the
+configuration is dropped and rebuilt rather than read, which is what makes a
+changed embedding model a rebuild instead of a migration — and it is one
+mechanism for all four things that can invalidate one.
+
+**A turn is written with its vector, in one transaction.**  `save_turn` is
+async because the embedding is a call to a model, and its three writes are
+atomic because the alternative is a turn that is half indexed — and because a
+save that raises has to be a save that stored nothing.  That is the one property
+that makes the failure honest, and it is why the embedding model is a hard
+dependency of this component rather than something that can be switched off: an
+endpoint that cannot be reached fails the save, where an endpoint that silently
+degraded would store turns nothing could ever find.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+import sqlite_vec
+
+from slife2 import textindex
 from slife2.clock import now
 from slife2.paths import db_dir
 from slife2.timeutil import normalize_bound
@@ -94,6 +112,18 @@ MAX_PAGE = 200
 #: paragraph: enough for a question and the shape of its answer, and twenty of
 #: them is a request, not a transcript.
 PREVIEW_CHARS = 400
+
+#: How many candidates each leg of a search brings to the fusion, as a multiple
+#: of what was asked for.  Fusion is a vote between ranked lists, so the lists
+#: want to be deeper than the answer — and one leg needs the slack for a second
+#: reason: `k` on a vector search counts *chunks*, and several of them can belong
+#: to one turn.
+_OVERFETCH = 4
+
+#: How many values one statement may bind.  SQLite's default limit is 999, and
+#: the fused id list costs a bound value per row, so a search over-fetching a
+#: full page would otherwise run past it.
+_MAX_SQL_VARS = 900
 
 
 def safe_agent_name(name: str) -> str:
@@ -206,6 +236,28 @@ class TurnRecord:
         }
 
 
+@dataclass(frozen=True)
+class _Stored:
+    """One turn, ready to be written — everything but its vectors.
+
+    Assembled before the transaction and before the embed, so that the two
+    halves of a save can run in different places: the embedding on the event
+    loop, where a network call belongs, and the inserts on a thread, where
+    blocking belongs.  A plain bundle rather than fifteen arguments across that
+    boundary.
+    """
+
+    document: str
+    search: str
+    created_at: str
+    completed_at: str
+    channel: str
+    who_helped: str
+    what_model: str
+    token_count: int
+    context_tokens: int
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turn (
     -- The whole turn as OpenAI-shaped message JSON, the user's message first.
@@ -233,6 +285,40 @@ CREATE TABLE IF NOT EXISTS turn (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turn_created ON turn(created_at);
+
+-- The keyword index: one row per turn, holding the derived text it is found by
+-- and carrying the turn's own rowid so a hit *is* a turn id.
+--
+-- It stores that text rather than reading it back out of `turn`
+-- (`content='turn'`), because the text here is not the text there: it carries a
+-- space between every pair of CJK characters, so there is no column of `turn`
+-- an external-content index could point at.  One copy of a normalized string
+-- per turn is what that costs, and what it buys is an index that can be
+-- UPDATEd when a summary is written later — which a contentless index cannot,
+-- having nothing to delete.
+CREATE VIRTUAL TABLE IF NOT EXISTS turn_fts USING fts5(
+    search,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Which chunks belong to which turn.  The vector table's rowid is a *chunk* and
+-- not a turn — a turn has as many rows there as it has chunks — so this is what
+-- turns a hit back into a turn, and what a rebuild deletes by.
+CREATE TABLE IF NOT EXISTS turn_chunk (
+    id          INTEGER PRIMARY KEY,
+    turn_id     INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_chunk_turn ON turn_chunk(turn_id);
+
+-- What each derived index was built with.  An index is only readable by the
+-- rules and the model that produced it, so its identity is kept beside it and
+-- compared before use: a mismatch is a rebuild, never a migration.
+CREATE TABLE IF NOT EXISTS index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -397,13 +483,180 @@ def _cut(text: str, chars: int) -> str:
     return text[:chars] + "…"
 
 
-def _time_window(since: str | None, until: str | None) -> tuple[str, list[str]]:
-    """`(where, params)` for a `created_at` window.
+# --- what a turn is found by, and what it is about ----------------------------
+#
+# Two different strings, and the difference is deliberate.  A turn is *found* by
+# everything a person would look for it with, and it is *about* what was said —
+# so the keyword index keeps the whole of it (summaries and tags included, which
+# is what those columns are for) while the vector index keeps only the
+# conversation, for the reason below.
 
-    Written once because there is one time axis and two readers of it: the
-    browse below, and whatever a recall selector becomes.  A second spelling of
-    `created_at >= ?` is a second place for the column name and the grammar to
-    drift apart.
+
+#: The version of both contracts above.  Recorded beside the indexes, so a
+#: change to either is what makes an index rebuild — the same lever as a changed
+#: embedding model, and deliberately not a second one.
+TEXT_VERSION = "1"
+
+#: How much of a tool call's arguments a vector keeps.  The call is part of what
+#: a turn was about — "the one where it used the calculator" is a real question —
+#: but the arguments are incidental and can be enormous.
+TOOL_ARG_CHARS = 400
+
+#: How much text one vector covers.  A turn is chunked rather than embedded in
+#: one piece because a vector is an average: a long turn embedded whole
+#: describes everything in it a little and nothing in it well.
+EMBED_CHUNK_CHARS = 2000
+
+#: How much of the last paragraph is repeated at the head of the next chunk.  A
+#: sentence cut in half at a chunk boundary is a sentence neither vector holds,
+#: and a paragraph is the least that puts it back together.
+EMBED_OVERLAP_PARAGRAPHS = 1
+
+_PARAGRAPH_RE = re.compile(r"\n\s*\n")
+
+
+def searchable_text(
+    messages: list[dict[str, Any]], summary: str = "", tags: str = ""
+) -> str:
+    """The text a turn is *found* by — everything worth looking for it with.
+
+    Both halves of the exchange, plus the two retrieval hooks for whoever
+    writes them later: a term that survives only in a summary is the keyword
+    leg's to find, and that is the whole reason `summary` is in this string.
+
+    Normalized here rather than at the index, because a query has to be
+    normalized by the same rule (`slife2.textindex`) and this is the one place
+    that rule is applied to stored text.
+
+    Through `_storable` like the turn itself, and for the same reason: this
+    string is bound to SQLite too, so a lone surrogate arriving in an answer
+    would fail the insert and take the turn with it.
+    """
+    parts = [
+        user_message(messages),
+        assistant_message(messages),
+        summary,
+        tags,
+    ]
+    return _storable(textindex.normalize("\n".join(part for part in parts if part)))
+
+
+def _tool_call_text(messages: list[dict[str, Any]]) -> list[str]:
+    """What each tool call was, as `name` and the head of its arguments."""
+    found: list[str] = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            function = function if isinstance(function, dict) else {}
+            name = str(function.get("name") or "")
+            arguments = str(function.get("arguments") or "")[:TOOL_ARG_CHARS]
+            line = f"{name} {arguments}".strip()
+            if line:
+                found.append(line)
+    return found
+
+
+def embed_text(messages: list[dict[str, Any]]) -> str:
+    """The text a turn is *about*, which is not the text it is found by.
+
+    What was asked, what was answered, and which tools were called — **and not
+    what the tools answered**.  Measured on v1's live turn log, tool results were
+    56–99% of a turn's text, so an index built on them describes "an agent ran
+    tools" rather than what the turn was about: every turn lands in one narrow
+    cosine band and a similarity floor has nothing left to separate.  Nothing is
+    lost to search by leaving them out — a result is still in the turn, which is
+    what the keyword leg and `turn_read` read.
+
+    Summaries and tags are out for a second reason: they are written *after* the
+    turn, and a vector index that depended on them would have to be rebuilt
+    every time one was added.
+
+    Through `_storable` for the reason `searchable_text` gives: this string goes
+    out as JSON on its way to a model, and a lone surrogate cannot be encoded.
+    """
+    parts = [
+        user_message(messages),
+        *_tool_call_text(messages),
+        assistant_message(messages),
+    ]
+    return _storable("\n\n".join(part for part in parts if part))
+
+
+def embed_chunks(
+    text: str, *, chars: int = EMBED_CHUNK_CHARS, limit: int = 0
+) -> list[str]:
+    """A turn's text cut into the pieces that each get their own vector.
+
+    Packed by paragraph, with the last paragraph of a chunk repeated at the head
+    of the next: a chunk boundary that falls inside a sentence leaves neither
+    vector holding it, and a paragraph of overlap is what puts it back.
+
+    `limit` is the most text the embedding model will take, in characters.  A
+    single paragraph longer than that is truncated rather than split — a
+    paragraph that long is machine output, and its tail is what the keyword leg
+    is for.
+    """
+    paragraphs = [found.strip() for found in _PARAGRAPH_RE.split(text) if found.strip()]
+    if not paragraphs:
+        return []
+
+    limit = limit or chars
+    chunks: list[str] = []
+    window: list[str] = []
+    size = 0
+    for paragraph in paragraphs:
+        if window and size + len(paragraph) > chars:
+            chunks.append("\n\n".join(window)[:limit])
+            window = (
+                window[-EMBED_OVERLAP_PARAGRAPHS:] if EMBED_OVERLAP_PARAGRAPHS else []
+            )
+            size = sum(len(kept) for kept in window)
+        window.append(paragraph)
+        size += len(paragraph)
+    chunks.append("\n\n".join(window)[:limit])
+    return chunks
+
+
+# --- fusing the two legs ------------------------------------------------------
+
+#: The fusion's constant: how quickly rank stops mattering.  Sixty is the value
+#: the literature uses and v1 shipped; nothing about this store is a reason to
+#: differ.
+RRF_K = 60
+
+
+def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, float]]:
+    """Reciprocal rank fusion of named ranked lists of turn ids.
+
+    Rank and not score, because the two legs do not share a scale: `bm25` is
+    unbounded and depends on the corpus, and a cosine distance is bounded and
+    depends on the model.  Normalizing one onto the other is the part that
+    breaks; a rank is comparable by construction.
+
+    Ties fall to the newer turn, which is the order the browse is in — a tie is
+    a real possibility when both legs put the same turns in the same order, and
+    an arbitrary but stable answer beats an unstable one.
+    """
+    scores: dict[int, float] = {}
+    for ranked in legs.values():
+        for rank, turn_id in enumerate(ranked, start=1):
+            scores[turn_id] = scores.get(turn_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
+
+
+def _time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
+    """`(clauses, params)` for a `created_at` window.
+
+    **Clauses and not a `WHERE`**, because there are three readers of this one
+    time axis now and they compose it differently: the browse puts it alone, and
+    both legs of a search put it beside a predicate of their own.  A second
+    spelling of `created_at >= ?` would be a second place for the column name
+    and the grammar to drift apart.
 
     Raises:
         InvalidTimeBound: If either bound is in no grammar `slife2.timeutil`
@@ -419,11 +672,72 @@ def _time_window(since: str | None, until: str | None) -> tuple[str, list[str]]:
     if until:
         clauses.append("created_at <= ?")
         params.append(normalize_bound(until, role="until"))
-    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
+    return clauses, params
+
+
+def _where(clauses: list[str]) -> str:
+    """Those clauses as the tail of a query that already has a `WHERE`."""
+    return f"AND {' AND '.join(clauses)}" if clauses else ""
+
+
+class VectorIndexUnavailable(RuntimeError):
+    """The vector extension could not be loaded, so nothing here can work.
+
+    Fatal rather than a degraded mode: an index that silently is not there
+    stores turns nothing can find, which is the one failure this component must
+    not have.  The message names both ways it happens — an interpreter built
+    without `enable_load_extension`, and a missing wheel.
+    """
+
+
+#: The identity of the text the *vector* index was built from, as opposed to the
+#: keyword one.  Composed by the caller (`slife2.db_server`) out of the provider,
+#: model and endpoint, because what makes two embeddings comparable is a
+#: question about the embedding service and not about this file.
+class Embedder(Protocol):
+    """What the store needs in order to place a turn in the vector index.
+
+    Three facts and one call.  The identity is opaque here — it is compared and
+    recorded, never interpreted — and a change to it is what makes the index
+    rebuild.  `dimension` has to be known *before* the first embedding, because
+    `vec0` fixes its width in the DDL and cannot be altered afterwards.
+    """
+
+    @property
+    def identity(self) -> str: ...
+
+    @property
+    def dimension(self) -> int: ...
+
+    @property
+    def max_chars(self) -> int:
+        """The most text one request may carry, in characters."""
+        ...
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def _vector_ddl(dimension: int) -> str:
+    """The vector index's DDL, for one width.
+
+    `distance_metric=cosine` is declared rather than left to the default, and
+    the reason is not preference.  It decides whether `1 - distance` is a
+    similarity at all: a backend does not have to return unit-norm vectors, so
+    on an L2 table that arithmetic yields numbers that are plausible and wrong
+    rather than visibly broken.  v1 shipped that bug — distances past 18, every
+    strong hit clamped to zero similarity — and the fix was this clause.
+
+    The accepted spelling was checked against the installed extension rather
+    than its documentation, which describes itself as a work in progress.
+    """
+    return (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec USING vec0("
+        f"embedding float[{int(dimension)}] distance_metric=cosine)"
+    )
 
 
 class TurnStore:
-    """Reads and writes one agent's turns.
+    """Reads and writes one agent's turns, and the two indexes over them.
 
     A connection per call rather than one held open.  SQLite connections are
     cheap and are not shareable across threads, and the caller — an MCP tool —
@@ -442,7 +756,39 @@ class TurnStore:
         # last committed state instead of waiting for the writer.
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        # The vector index arrives as a loadable extension, and an extension is
+        # loaded *into a connection* — so this store, which opens one per call,
+        # loads it every time.  Measured at about half a microsecond, which is
+        # why it happens here unconditionally: a second connection path used
+        # only where a vector is touched would be a second thing to keep in
+        # step, and would buy nothing.
+        self._load_vector_index(connection)
         return connection
+
+    @staticmethod
+    def _load_vector_index(connection: sqlite3.Connection) -> None:
+        """Load the extension, or say why the component cannot run at all.
+
+        Raises:
+            VectorIndexUnavailable: If this interpreter cannot load extensions
+                (Apple's and python.org's builds both ship that way) or the
+                wheel is not importable.  Named here rather than left to surface
+                as an `OperationalError` about a missing function, because the
+                two causes need different things done about them.
+        """
+        if not hasattr(connection, "enable_load_extension"):
+            raise VectorIndexUnavailable(
+                "this Python's sqlite3 cannot load extensions, so there is no "
+                "vector index: it was built without "
+                "--enable-loadable-sqlite-extensions"
+            )
+        try:
+            connection.enable_load_extension(True)
+            sqlite_vec.load(connection)
+        except Exception as exc:  # noqa: BLE001 — re-raised as the one cause
+            raise VectorIndexUnavailable(f"cannot load sqlite-vec: {exc}") from exc
+        finally:
+            connection.enable_load_extension(False)
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -478,10 +824,11 @@ class TurnStore:
             self.path,
         )
 
-    def save_turn(
+    async def save_turn(
         self,
         *,
         messages: list[dict[str, Any]],
+        embedder: Embedder,
         channel: str = "",
         who_helped: str = "",
         what_model: str = "",
@@ -490,7 +837,7 @@ class TurnStore:
         created_at: str | None = None,
         completed_at: str | None = None,
     ) -> int:
-        """Append one turn, returning its rowid.
+        """Append one turn with both of its indexes, in one transaction.
 
         What a turn keeps is decided here rather than by the caller: this is the
         boundary between the live conversation and the permanent record, and the
@@ -505,29 +852,77 @@ class TurnStore:
         every non-Latin character, and a Chinese conversation should not pay six
         bytes a character to sit in the database — because `_storable` handles
         the one thing the escaping would have protected against.
+
+        **The embedding is awaited before the transaction opens.**  A write
+        transaction held across a call to a model holds SQLite's write lock for
+        as long as the model takes and blocks every other writer, so "atomic"
+        covers the three writes and not the call.  What it buys is the property
+        worth having: a save that raises stored nothing.  v1 moved embedding off
+        the save path because a slow embed raised an alarm about a row that had
+        in fact been stored — the complaint was the ambiguity, and there is none
+        here.
         """
+        stored = strip_images(messages)
+        record = _Stored(
+            document=_storable(
+                json.dumps(compact_tool_results(stored), ensure_ascii=False)
+            ),
+            search=searchable_text(stored),
+            created_at=created_at or now(),
+            completed_at=completed_at or now(),
+            channel=channel,
+            who_helped=who_helped,
+            what_model=what_model,
+            token_count=int(token_count),
+            context_tokens=int(context_tokens),
+        )
+        chunks = embed_chunks(embed_text(stored), limit=embedder.max_chars)
+        # Awaited on the loop, because it is a call to a model and not a call to
+        # a disk: the one thing that must not happen here is a synchronous
+        # request blocking every other call this server is answering.
+        vectors = await embedder.embed(chunks) if chunks else []
+        # The writes are the other way round — blocking, and off the loop.
+        await self._off_loop(self.ensure_indexes, embedder)
+        return await self._off_loop(self._write_turn, record, vectors)
+
+    def _write_turn(self, record: _Stored, vectors: list[list[float]]) -> int:
+        """The three inserts, in one transaction, on a thread of their own."""
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO turn (messages, created_at, completed_at,"
                 " channel, who_helped, what_model, token_count, context_tokens)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    _storable(
-                        json.dumps(
-                            compact_tool_results(strip_images(messages)),
-                            ensure_ascii=False,
-                        )
-                    ),
-                    created_at or now(),
-                    completed_at or now(),
-                    channel,
-                    who_helped,
-                    what_model,
-                    int(token_count),
-                    int(context_tokens),
+                    record.document,
+                    record.created_at,
+                    record.completed_at,
+                    record.channel,
+                    record.who_helped,
+                    record.what_model,
+                    record.token_count,
+                    record.context_tokens,
                 ),
             )
-            return int(cursor.lastrowid or 0)
+            turn_id = int(cursor.lastrowid or 0)
+            connection.execute(
+                "INSERT INTO turn_fts (rowid, search) VALUES (?, ?)",
+                (turn_id, record.search),
+            )
+            _write_vectors(connection, turn_id, vectors)
+            return turn_id
+
+    @staticmethod
+    async def _off_loop(function, *args, **kwargs):
+        """Run one blocking store call on a worker thread.
+
+        **Being `async` is not what keeps the loop free.**  SQLite here is
+        blocking: a statement issued on the loop holds it for as long as the
+        disk takes, and this server answers every agent instance from one loop,
+        so one slow read would stall an unrelated conversation.  The thread hop
+        is what actually yields — and it is safe precisely because a connection
+        is never shared: every call opens its own (see the class docstring).
+        """
+        return await asyncio.to_thread(function, *args, **kwargs)
 
     def turns(
         self,
@@ -555,7 +950,8 @@ class TurnStore:
         """
         limit = max(1, min(int(limit), MAX_PAGE))
         offset = max(0, int(offset))
-        where, params = _time_window(since, until)
+        clauses, params = _time_window(since, until)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
             total = connection.execute(
                 f"SELECT COUNT(*) FROM turn {where}", params
@@ -584,6 +980,355 @@ class TurnStore:
     def count(self) -> int:
         with self._connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM turn").fetchone()[0])
+
+    # --- the derived indexes --------------------------------------------------
+
+    async def sync_indexes(self, embedder: Embedder) -> None:
+        """Make both indexes agree with `embedder`, rebuilding what does not.
+
+        The four things that can leave an index unreadable — text written by
+        other normalization rules, a different embedding model, a different
+        width, a different endpoint — all arrive here as "the recorded identity
+        is not the current one", and all take the same answer: build it again
+        from the turns.  That is what makes a changed model a rebuild rather
+        than a migration, and it is one mechanism for every one of them.
+
+        Run at startup.  It is the only thing that re-embeds turns which lost
+        their vectors, because a save embeds the turn it is saving and nothing
+        else.
+        """
+        await self._off_loop(self._sync_text_index)
+        await self._off_loop(self.ensure_indexes, embedder)
+        for turn_id, text in await self._off_loop(self._turns_without_vectors):
+            vectors = await embedder.embed(embed_chunks(text, limit=embedder.max_chars))
+            await self._off_loop(self._place_vectors, turn_id, vectors)
+
+    def _place_vectors(self, turn_id: int, vectors: list[list[float]]) -> None:
+        with self._connect() as connection:
+            _write_vectors(connection, turn_id, vectors)
+
+    def ensure_indexes(self, embedder: Embedder) -> None:
+        """Create the vector index, or rebuild it if its identity has changed.
+
+        Cheap when the index is current: one read of `index_meta`.  A rebuild
+        here **drops the vectors** without re-embedding anything, because the
+        caller is a save that is embedding one turn — putting the rest back is
+        `sync_indexes`, which startup runs before anything is served.
+        """
+        identity = _vector_identity(embedder)
+        with self._connect() as connection:
+            if self._meta(connection).get("vector_identity", "") == identity:
+                return
+            connection.execute("DROP TABLE IF EXISTS turn_vec")
+            connection.execute("DELETE FROM turn_chunk")
+            connection.execute(_vector_ddl(embedder.dimension))
+            self._set_meta(
+                connection,
+                vector_identity=identity,
+                vector_dim=str(embedder.dimension),
+            )
+
+    def _sync_text_index(self) -> None:
+        """Rebuild the keyword index when the rules that built it have changed.
+
+        **One condition, because the other case cannot happen.**  A row can only
+        be missing from this index if the version stamp says the rules match —
+        and then it cannot be, since the rows are written in the same
+        transaction as the turns they index.  A database with no stamp at all is
+        simply the version-mismatch case, and is rebuilt whole; that is why
+        there is nothing here for "an older file", and why there is no migration
+        to write: a file this build cannot read is named by `index_status`, not
+        quietly upgraded.
+        """
+        with self._connect() as connection:
+            if self._meta(connection).get("text_version", "") == TEXT_VERSION:
+                return
+            connection.execute("DELETE FROM turn_fts")
+            rows = connection.execute(
+                "SELECT rowid, messages, summary, tags FROM turn"
+            ).fetchall()
+            connection.executemany(
+                "INSERT INTO turn_fts (rowid, search) VALUES (?, ?)",
+                [
+                    (
+                        int(row["rowid"]),
+                        searchable_text(
+                            _loads(row["messages"], []), row["summary"], row["tags"]
+                        ),
+                    )
+                    for row in rows
+                ],
+            )
+            self._set_meta(connection, text_version=TEXT_VERSION)
+
+    def _turns_without_vectors(self) -> list[tuple[int, str]]:
+        """Every turn the vector index does not hold, oldest first.
+
+        The index is derived, so "has no vector" is the whole of the state a
+        pending turn has — there is no column to keep in step and nothing to
+        mark, and a turn whose embedding failed is simply found here.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT rowid, messages FROM turn "
+                "WHERE rowid NOT IN (SELECT DISTINCT turn_id FROM turn_chunk) "
+                "ORDER BY rowid"
+            ).fetchall()
+        return [
+            (int(row["rowid"]), embed_text(_loads(row["messages"], []))) for row in rows
+        ]
+
+    def index_status(self, embedder: Embedder) -> dict[str, Any]:
+        """Whether a search can actually run on both legs, and what is missing.
+
+        **Looked at rather than remembered.**  The question a caller needs
+        answered is not "did the sync run" but "is every turn in the index, and
+        is it the index this embedder built" — and only counting can answer
+        that, because a sync that died halfway leaves nothing to remember it by.
+        `slife2.db_server` asks this before it serves and refuses to if the
+        answer is not clean: there is no mode in which a turn is stored that
+        semantic search cannot find, so an index that is not ready is a system
+        that has come apart rather than a component working with less.
+
+        `problems` is written to be read by a person looking at a startup
+        failure, so each entry names what is wrong rather than which check ran.
+
+        **The keyword rules are deliberately not one of these facts.**  They can
+        only change when this code changes, and that means a restart, which runs
+        `sync_indexes` — so by the time anything asks, the rules have already
+        been reconciled.  Checking the version here would instead report a fresh
+        database, written entirely by the current rules, as unready.
+        """
+        with self._connect() as connection:
+            turns = int(connection.execute("SELECT COUNT(*) FROM turn").fetchone()[0])
+            vectors = int(
+                connection.execute("SELECT COUNT(*) FROM turn_chunk").fetchone()[0]
+            )
+            keyword = int(
+                connection.execute("SELECT COUNT(*) FROM turn_fts").fetchone()[0]
+            )
+            pending = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM turn WHERE rowid NOT IN"
+                    " (SELECT DISTINCT turn_id FROM turn_chunk)"
+                ).fetchone()[0]
+            )
+            meta = self._meta(connection)
+
+        problems: list[str] = []
+        if meta.get("vector_identity", "") != _vector_identity(embedder):
+            problems.append(
+                "the vector index was built by a different model or a different "
+                "text contract than the configured one"
+            )
+        if pending:
+            problems.append(f"{pending} of {turns} turns have no vector")
+        if keyword != turns:
+            # Said with the answer in it, because there is no migration to run:
+            # a file in this state is one this build will not upgrade, and the
+            # only thing to do about it is the thing `slife2.db`'s docstring
+            # already says about every schema change.
+            problems.append(
+                f"{turns - keyword} of {turns} turns are not in the keyword "
+                f"index and there is no migration — delete the file and let it "
+                f"be recorded afresh"
+            )
+
+        return {
+            "turns": turns,
+            "vectors": vectors,
+            "keyword": keyword,
+            "pending": pending,
+            "ready": not problems,
+            "problems": problems,
+        }
+
+    @staticmethod
+    def _meta(connection: sqlite3.Connection) -> dict[str, str]:
+        """What each index was built with, as recorded in the file itself."""
+        return {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute("SELECT key, value FROM index_meta")
+        }
+
+    @staticmethod
+    def _set_meta(connection: sqlite3.Connection, **values: str) -> None:
+        connection.executemany(
+            "INSERT INTO index_meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            list(values.items()),
+        )
+
+    # --- finding a turn by what it was about ----------------------------------
+
+    async def search(
+        self,
+        query: str,
+        *,
+        embedder: Embedder,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 20,
+    ) -> list[TurnRecord]:
+        """Turns matching `query`, best first — by keyword and by meaning.
+
+        Two legs and one fusion.  The keyword leg is FTS5's `bm25` over the text
+        a turn is found by (`searchable_text`); the semantic leg is a KNN over
+        the vectors of what it was about (`embed_text`).  They are fused by rank
+        because their scores are not on one scale at all — `bm25` is unbounded
+        and depends on the corpus, a cosine distance depends on the model — and
+        a turn both legs found outranks a turn only one did.
+
+        No `total`, deliberately: the two legs rank different numbers of
+        candidates and a fused top-k has no total that means anything.  A page
+        of best-first turns is what this answers.
+
+        Raises:
+            EmptyQuery: If the query holds no term — see `slife2.textindex`.
+            InvalidTimeBound: If a bound is in no grammar `slife2.timeutil`
+                speaks, for the reason `turns` gives.
+        """
+        expression = textindex.match_expression(query)
+        clauses, params = _time_window(since, until)
+        limit = max(1, min(int(limit), MAX_PAGE))
+        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
+
+        ranked = {
+            "keyword": await self._off_loop(
+                self._keyword_hits, expression, over, clauses, params
+            ),
+            "semantic": await self._semantic_hits(query, embedder, over),
+        }
+        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)]
+        return await self._off_loop(
+            self._records_in_order, fused, clauses, params, limit
+        )
+
+    def _keyword_hits(
+        self,
+        expression: str,
+        limit: int,
+        clauses: list[str],
+        params: list[str],
+    ) -> list[int]:
+        """Turn ids by `bm25`, best first.
+
+        The window is applied here in SQL rather than to the fused answer, which
+        is the one place it can be exact: `rank` orders *all* the matches, so
+        limiting after the window still returns the best turns inside it.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT f.rowid AS turn_id FROM turn_fts f"
+                " JOIN turn t ON t.rowid = f.rowid"
+                f" WHERE turn_fts MATCH ? {_where(clauses)}"
+                " ORDER BY rank LIMIT ?",
+                (expression, *params, limit),
+            ).fetchall()
+        return [int(row["turn_id"]) for row in rows]
+
+    async def _semantic_hits(self, query: str, embedder: Embedder, k: int) -> list[int]:
+        """Turn ids by vector distance, nearest first.
+
+        `k` counts **chunks**, not turns, which is why it is over-fetched: a
+        turn with four chunks can occupy four of the k places, and the answer
+        wants turns.  Deduplicated here rather than in SQL because a vec0 KNN
+        refuses `GROUP BY`.  The window is *not* applied — a KNN cannot be
+        constrained by a column it does not have — so `search` filters the fused
+        answer instead, and a window narrow enough to exclude the k nearest
+        chunks can return fewer turns than it asked for.
+        """
+        # The **raw** query, not `textindex.normalize(query)`.  Normalization is
+        # the keyword leg's rule and it inserts a space between every pair of
+        # CJK characters, which is what makes them tokens there — and is
+        # nonsense as text handed to a model, where it would ask for a vector of
+        # `工 具` rather than of `工具`.  Measured: the normalized query landed
+        # nearest the turns sharing *no* word with it.
+        vectors = await embedder.embed([query])
+        if len(vectors) != 1:
+            # Refused rather than answered without the semantic half: there is
+            # no degraded mode here, and a search that quietly lost one of its
+            # two legs would answer a different question than the one asked.
+            raise RuntimeError(
+                f"the embedding model answered {len(vectors)} vectors for one "
+                f"query, so this search cannot say what a turn was about"
+            )
+        return await self._off_loop(
+            self._nearest_turns, sqlite_vec.serialize_float32(vectors[0]), k
+        )
+
+    def _nearest_turns(self, query_vector: bytes, k: int) -> list[int]:
+        """The KNN, and the dedup it cannot do itself."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT c.turn_id AS turn_id, v.distance AS distance"
+                " FROM turn_vec v JOIN turn_chunk c ON c.id = v.rowid"
+                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+                (query_vector, k),
+            ).fetchall()
+        nearest: dict[int, float] = {}
+        for row in rows:
+            nearest.setdefault(int(row["turn_id"]), float(row["distance"]))
+        return list(nearest)
+
+    def _records_in_order(
+        self,
+        turn_ids: list[int],
+        clauses: list[str],
+        params: list[str],
+        limit: int,
+    ) -> list[TurnRecord]:
+        """Those turns, in the order they were ranked, windowed and cut.
+
+        One query rather than one per turn, because the order comes from the
+        fusion and the rows come from the table; a window can only remove turns
+        from the answer, never reorder it.
+        """
+        if not turn_ids:
+            return []
+        marks = ",".join("?" * len(turn_ids))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT rowid AS turn_id, * FROM turn WHERE rowid IN ({marks})"
+                f" {_where(clauses)}",
+                (*turn_ids, *params),
+            ).fetchall()
+        found = {int(row["turn_id"]): _row_to_record(row) for row in rows}
+        return [found[turn_id] for turn_id in turn_ids if turn_id in found][:limit]
+
+
+def _vector_identity(embedder: Embedder) -> str:
+    """What the vector index was built with, as one comparable string.
+
+    The text contract is part of it and not only the model, because a vector is
+    a function of the text it was made from: changing what goes into one makes
+    every stored vector the wrong vector for its turn, which is the same failure
+    as changing the model and takes the same rebuild.
+    """
+    return f"{TEXT_VERSION}|{embedder.identity}|{embedder.dimension}"
+
+
+def _write_vectors(
+    connection: sqlite3.Connection, turn_id: int, vectors: list[list[float]]
+) -> None:
+    """Place a turn's chunks, one vector each, under ids of their own.
+
+    A row in `turn_vec` is a *chunk*, not a turn: `vec0` has no way to hold
+    several vectors in one row, and a long turn averaged into one vector
+    describes all of it a little and none of it well.  `turn_chunk` is what
+    remembers which turn a chunk came from, and the two are written together —
+    a chunk row whose vector is missing would be a turn the index believes it
+    holds.
+    """
+    for index, vector in enumerate(vectors):
+        row = connection.execute(
+            "INSERT INTO turn_chunk (turn_id, chunk_index) VALUES (?, ?)",
+            (turn_id, index),
+        )
+        connection.execute(
+            "INSERT INTO turn_vec (rowid, embedding) VALUES (?, ?)",
+            (int(row.lastrowid or 0), sqlite_vec.serialize_float32(vector)),
+        )
 
 
 def _storable(text: str) -> str:

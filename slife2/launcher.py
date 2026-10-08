@@ -34,6 +34,7 @@ from slife2.config import (
     API_SERVER_NAMES,
     BUILTINS_SERVER_NAME,
     DB_SERVER_NAME,
+    EMBEDDINGS_SERVER_NAME,
     LOCAL_SERVERS,
     TOOLHUB_SERVER_NAME,
     Config,
@@ -83,8 +84,14 @@ AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 DB_SERVER = ("slife2.db_server", DB_SERVER_NAME, "remember")
 BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
 TOOLHUB_SERVER = ("slife2.toolhub", TOOLHUB_SERVER_NAME, "list_tools")
+#: Not a chat backend, though it lives beside them: it speaks the OpenAI
+#: protocol's `/embeddings` and nothing else, is configured under `embeddings:`
+#: rather than under `providers:`, and is identified by `describe` — the tool
+#: the db calls before it can build an index.  See `slife2.llm.embeddings_server`.
+EMBEDDINGS_SERVER = ("slife2.llm.embeddings_server", EMBEDDINGS_SERVER_NAME, "describe")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
+    "embeddings": EMBEDDINGS_SERVER,
     "db": DB_SERVER,
     "builtins": BUILTINS_SERVER,
     "toolhub": TOOLHUB_SERVER,

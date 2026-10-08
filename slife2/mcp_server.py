@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -215,6 +216,33 @@ async def close_server(client: Client) -> None:
     """
     with contextlib.suppress(Exception):
         await client.__aexit__(None, None, None)
+
+
+def tool_payload(result: Any) -> dict[str, Any]:
+    """The mapping one of our own tool calls answered with.
+
+    Reads the structured payload the SDK has already deserialized, and falls
+    back to the text block — which is the same JSON, since a structured result
+    is also sent as text.  A server reached over a transport that kept only the
+    text is still readable, and one that answered with neither is a caller that
+    gets an empty mapping and says so itself.
+
+    Here rather than in a caller, because it is about reading a *tool result*
+    and this is the module that owns what being one of our servers means.  Two
+    components hop to a peer now — the toolhub and the db — and a second copy of
+    this is how the two would come to disagree about the shape of an answer.
+    """
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str) and data.strip():
+        try:
+            decoded = json.loads(data)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
 
 
 def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:

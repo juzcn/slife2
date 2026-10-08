@@ -1,8 +1,9 @@
 """Test doubles.
 
-Three seams get faked, and each one exists because something real and slow sits
-behind it: the model (an HTTP call to a provider), the agent server (a socket),
-and the observer (nothing — but a recorder is how a test reads what happened).
+Four seams get faked, and each one exists because something real and slow sits
+behind it: the model (an HTTP call to a provider), the embedding model (another
+one), the agent server (a socket), and the observer (nothing — but a recorder is
+how a test reads what happened).
 
 Plus one that is not a seam but a *shape*: the set of components a toolhub will
 ask for tools.  It is here because three test modules need it and none of them
@@ -164,6 +165,61 @@ class FakeAgentClient:
         self.prompts.append(prompt)
         self.images.append(images or [])
         return self._respond(prompt, on_event)
+
+
+@dataclass
+class StubEmbedder:
+    """A deterministic stand-in for an embedding model.
+
+    A bag of words over a fixed vocabulary — one slot per word, and one more
+    slot for "none of them" — so that text sharing no word with the query is
+    *orthogonal* to it rather than merely small.  That distinction is the whole
+    point of the double: a nearly-zero vector points in almost the same
+    direction as any single-word vector, so a stub that fell back to one ranks
+    nonsense first and a test built on it passes for the wrong reason.
+
+    `identity` and `dimension` are the two facts a store reads before it can
+    build an index, and `calls` records every request so a test can prove a
+    rebuild re-embedded rather than only re-recorded.
+    """
+
+    vocab: tuple[str, ...] = ("工具", "trump", "计算", "测试")
+    identity: str = "stub:one"
+    max_chars: int = 8000
+    calls: list[list[str]] = field(default_factory=list)
+
+    @property
+    def dimension(self) -> int:
+        """One slot per word, plus the one that means "none of them"."""
+        return len(self.vocab) + 1
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        vectors: list[list[float]] = []
+        for text in texts:
+            lowered = text.lower()
+            counts = [float(lowered.count(word)) for word in self.vocab]
+            nowhere = not any(counts)
+            counts.append(1.0 if nowhere else 0.0)
+            vectors.append(counts)
+        return vectors
+
+
+@dataclass
+class FailingEmbedder:
+    """An embedding endpoint that is down.
+
+    What it exists to prove is the save path's contract: a save that raises has
+    to be a save that stored nothing.
+    """
+
+    identity: str = "stub:broken"
+    dimension: int = 5
+    max_chars: int = 8000
+    message: str = "the embedding endpoint is down"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError(self.message)
 
 
 def component_transports(

@@ -71,9 +71,19 @@ servers:
     host: 127.0.0.1
     port: 8003
     path: /mcp
-  # slife2's persistence: it keeps turns, one database per agent.  The
-  # databases themselves live in the data directory's `slife2.db/`, not in this
-  # file — they are data, and this is the one file here that is checked in.
+  # Embeddings, for the db's vector index.  A process of its own, and *not* one
+  # of the three above: those are chat protocols built from the `providers:`
+  # below, and an embedding endpoint speaks neither — it is configured under
+  # `embeddings:` at the bottom of this file.  It starts before `db`, which asks
+  # it for a dimension before it can build an index at all.
+  embeddings:
+    host: 127.0.0.1
+    port: 8004
+    path: /mcp
+  # slife2's persistence: it keeps turns, one database per agent, and the two
+  # indexes over them.  The databases themselves live in the data directory's
+  # `slife2.db/`, not in this file — they are data, and this is the one file
+  # here that is checked in.
   db:
     host: 127.0.0.1
     port: 8010
@@ -416,3 +426,43 @@ agent:
   #   system_prompt: "prompts/jack.j2"
   #
   # Inside it, `{{ agent_name }}` is the name the instance was started with.
+
+# ── Embeddings (semantic memory search) ─────────────────────────────────────
+# Where the db's vectors come from.  **A section of its own, holding only
+# OpenAI-compatible URLs**: each provider is a base_url, a key and the single
+# model id sent on `/v1/embeddings` — and none of them is one of the
+# `providers:` above, because an embedding endpoint speaks no chat protocol and
+# a chat backend built from those providers has no model to serve it with.
+#
+# The vector dimension is **never configured**.  It is discovered from the
+# endpoint at runtime — a table of known models first, then the endpoint's own
+# model listing, then a probe embedding whose length is the answer.  That is not
+# a convenience: the vector table fixes its width in its DDL and cannot be
+# altered afterwards, so the number has to be right before the table exists.
+#
+# There is deliberately **no `enabled` switch**.  A turn is stored with its
+# vector in one transaction, so an embedding model is not an extra the db can do
+# without — it is what lets the db record a turn at all.  Changing the model is
+# the supported change, and its cost is that the vector index is rebuilt whole
+# on the next start: every turn embedded again, because vectors from two models
+# cannot be ranked against each other.
+embeddings:
+  providers:
+    # A local embedding service: no credential and no network, and it outlives
+    # whatever vendor is current.  `bge-m3` is multilingual, which is what a
+    # history mixing Chinese and English needs.  It has to be running already —
+    # it is a separate installation, not a process slife2 starts.
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: bge-m3
+      api_key: local
+    # The same weights served by somebody else, for a machine without the local
+    # service.  Needs SILICONFLOW_API_KEY.
+    siliconflow:
+      base_url: https://api.siliconflow.cn/v1
+      model: BAAI/bge-m3
+      api_key: ${SILICONFLOW_API_KEY}
+  # A provider id, not a "provider/model" reference: there is one model per
+  # endpoint here, so the endpoint is the choice being made.  A value naming
+  # nothing falls back to the first provider.
+  active_model: siliconflow
