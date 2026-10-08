@@ -96,7 +96,7 @@ def build_server(config: Config) -> FastMCP:
         interpretation.
 
         Args:
-            agent: Whose turns.  With `subagent` it names the database file, so
+            agent: Whose memory.  With `subagent` it names the database file, so
                 client ids are isolated from each other by construction.
             messages: The whole turn, as the agent loop returned it: the user's
                 message first, then every assistant message, tool call and
@@ -137,10 +137,10 @@ def build_server(config: Config) -> FastMCP:
         return {"turn_id": turn_id, "database": str(store.path)}
 
     def _caller(ctx: Context) -> tuple[str, str]:
-        """Whose turns a model's call is about — read from the request.
+        """Whose memory a model's call is about — read from the request.
 
         **There is no `agent` argument, and that is the whole point.**  A model
-        that could name a database could read somebody else's turns, and the
+        that could name a database could read somebody else's memory, and the
         only thing standing between it and that would be a sentence in its own
         system prompt — which is an instruction, not a boundary.  The
         conversation is a fact the caller's side holds (`slife2.toolclient`
@@ -157,7 +157,7 @@ def build_server(config: Config) -> FastMCP:
         found = request_client(ctx)
         if found is None:
             raise ValueError(
-                "this tool reads one conversation's turns and the call did not "
+                "this tool reads one conversation's memory and the call did not "
                 "say whose; it is called through the toolhub, which forwards the "
                 "caller's identity (`slife2.audience`)"
             )
@@ -185,7 +185,7 @@ def build_server(config: Config) -> FastMCP:
         they were hidden, which is the one thing a browse must not do.
 
         Your own history, and only your own: there is no argument naming whose
-        turns to read, because a model that could name one could read somebody
+        memory to read, because a model that could name one could read somebody
         else's.
 
         Args:
