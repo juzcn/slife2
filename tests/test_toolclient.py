@@ -277,9 +277,7 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     config = default_config()
     hub = build_hub(
         config,
-        transports=component_transports(
-            config, {"db": lambda settings: db}
-        ),
+        transports=component_transports(config, {"db": lambda settings: db}),
     )
 
     async with Client(hub) as hub_client:

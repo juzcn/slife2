@@ -153,9 +153,7 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
 
     # Found by name, not by position: the hub asks every component, so the
     # builtins are one row among several and are not first.
-    row = next(
-        one for one in reported.data["servers"] if one["name"] == "builtins"
-    )
+    row = next(one for one in reported.data["servers"] if one["name"] == "builtins")
     assert row["kind"] == "component"
     assert row["required"] is True
     assert row["state"] == "ready"
@@ -361,9 +359,7 @@ async def test_a_component_that_is_not_answering_fails_the_list() -> None:
         # The report still works, and says which one and why.
         reported = await hub.call_tool("servers", {})
 
-    row = next(
-        one for one in reported.data["servers"] if one["name"] == "builtins"
-    )
+    row = next(one for one in reported.data["servers"] if one["name"] == "builtins")
     assert row["state"] == "failed"
     assert "no such program" in row["error"]
 

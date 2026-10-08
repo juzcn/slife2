@@ -32,6 +32,7 @@ from fastmcp import Context, FastMCP
 
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import Config, find_config_path, load
+from slife2.db import PREVIEW_CHARS, store_for
 from slife2.mcp_server import (
     configure_logging,
     describe,
@@ -39,7 +40,6 @@ from slife2.mcp_server import (
     parse_serve_args,
     serve,
 )
-from slife2.db import PREVIEW_CHARS, store_for
 from slife2.paths import db_dir
 
 logger = logging.getLogger(__name__)
@@ -231,9 +231,7 @@ def build_server(config: Config) -> FastMCP:
         store = store_for(agent, subagent)
         record = await _on_thread(store.turn, turn_id)
         if record is None:
-            raise ValueError(
-                f"no turn {turn_id} in {describe((agent, subagent))}"
-            )
+            raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         return record.to_wire()
 
     return mcp

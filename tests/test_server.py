@@ -108,9 +108,7 @@ async def hub():
     # answer, so all of them need something behind them.  In-memory, which keeps
     # `calc` and `now` real without a port.
     async with Client(
-        build_hub(
-            default_config(), transports=component_transports(default_config())
-        )
+        build_hub(default_config(), transports=component_transports(default_config()))
     ) as client:
         yield client
 
@@ -168,9 +166,7 @@ async def test_the_server_exposes_two_tools(db, hub) -> None:
     and one way to start over.
     """
     async with Client(
-        build_server(
-            config(), db_client=db, hub_client=hub, backend=FakeBackend()
-        )
+        build_server(config(), db_client=db, hub_client=hub, backend=FakeBackend())
     ) as client:
         tools = await client.list_tools()
     assert [t.name for t in tools] == ["send_message", "reset"]
@@ -228,9 +224,7 @@ async def test_a_loop_remembers_what_was_said_to_it(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     await send(server, "one")
     await send(server, "two")
@@ -270,9 +264,7 @@ async def test_one_server_serves_two_loops_without_mixing_them(db, hub) -> None:
 
             return Stream(chunks=chunks(), result=result())
 
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=EchoBackend()
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=EchoBackend())
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
             first.call_tool("send_message", {"agent": "jack", "prompt": "alpha"}),
@@ -299,9 +291,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="worker")),
         ScriptedTurn(result=StreamChatResult(text="main again")),
     )
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     await send(server, "one", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
@@ -331,9 +321,7 @@ async def test_reset_starts_the_conversation_over(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     await send(server, "one")
     assert (await reset(server)).data["reset"]
@@ -346,9 +334,7 @@ async def test_reset_starts_the_conversation_over(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_idle_conversation_simply_starts_again(
-    db, monkeypatch, hub
-) -> None:
+async def test_an_idle_conversation_simply_starts_again(db, monkeypatch, hub) -> None:
     """The idle sweep reclaims memory, and that is the whole of what it does.
 
     It used to be what made an id go stale, which meant every caller needed a
@@ -361,9 +347,7 @@ async def test_an_idle_conversation_simply_starts_again(
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     await send(server, "one")
     await send(server, "two")
@@ -394,9 +378,7 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> Non
         text_turn("slow answer", delay=0.15),
         text_turn("second answer"),
     )
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     first = asyncio.create_task(send(server, "one"))
     # The first turn has begun only once the backend has been asked for a
@@ -430,9 +412,7 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> Non
 async def test_a_cancelled_message_leaves_the_lock_free(db, hub) -> None:
     """A caller that goes away while queued is not a lock held forever."""
     backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     first = asyncio.create_task(send(server, "one"))
     for _ in range(200):
@@ -471,9 +451,7 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     model is sent is the only thing that actually matters.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     interrupted = asyncio.create_task(send(server, "one"))
     for _ in range(200):
@@ -575,9 +553,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     )
 
     async with Client(build_db(cfg)) as db_client:
-        server = build_server(
-            cfg, backend=backend, db_client=db_client, hub_client=hub
-        )
+        server = build_server(cfg, backend=backend, db_client=db_client, hub_client=hub)
         await send(server, "what is 2+2?", agent="jack", channel="human")
 
     jack = db_dir() / "jack.turn.db"
@@ -988,9 +964,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(db, hub) -> None:
     from every provider, and nothing inside the process can show that.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(
-        config(), db_client=db, hub_client=hub, backend=backend
-    )
+    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
 
     async with over_http(server) as url:
         async with Client(url) as client:

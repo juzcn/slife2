@@ -469,9 +469,7 @@ def build_server(
                 logger.info(
                     "model %s via %s", reference, config.server(provider.api).url
                 )
-        return await make_loop(
-            model_backends[name].with_key(*client_id), client_id
-        )
+        return await make_loop(model_backends[name].with_key(*client_id), client_id)
 
     # --- the registry --------------------------------------------------------
 

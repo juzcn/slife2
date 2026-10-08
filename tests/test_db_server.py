@@ -112,12 +112,17 @@ async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_model_reads_the_history_it_is_calling_from(tmp_path, monkeypatch) -> None:
+async def test_a_model_reads_the_history_it_is_calling_from(
+    tmp_path, monkeypatch
+) -> None:
     """Two conversations, one server, and neither sees the other's turns."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config())) as client:
-        for agent, question in (("jack", "jack's question"), ("jill", "jill's question")):
+        for agent, question in (
+            ("jack", "jack's question"),
+            ("jill", "jill's question"),
+        ):
             await client.call_tool(
                 "remember", {"agent": agent, "messages": _exchange(question, "…")}
             )
@@ -204,4 +209,6 @@ async def test_reading_a_turn_that_is_not_there_says_which_one(
 
     async with Client(build_server(default_config())) as client:
         with pytest.raises(ToolError, match="no turn 7"):
-            await client.call_tool("turn_read", {"turn_id": 7}, meta=client_meta("jack"))
+            await client.call_tool(
+                "turn_read", {"turn_id": 7}, meta=client_meta("jack")
+            )

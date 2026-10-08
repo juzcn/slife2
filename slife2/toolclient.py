@@ -140,9 +140,7 @@ async def remote_tools(
     ]
 
 
-def _proxy(
-    client: Client, name: str, client_id: tuple[str, str] | None = None
-):
+def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
     """A tool body that calls `name` on the far side and reports what it said.
 
     **The conversation rides in `_meta`, not in the arguments.**  A tool that
