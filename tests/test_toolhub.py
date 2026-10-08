@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import types
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -148,8 +149,15 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
-    assert names(listed.data) == {"builtins__echo", "builtins__now", "builtins__calc"}
-    assert {tool["server"] for tool in listed.data["tools"]} == {"builtins"}
+    # Named rather than compared against the whole list: the hub also serves
+    # tools of its own (below), and this test is about where the builtins come
+    # from, not about the list being exactly this.
+    assert {name for name in names(listed.data) if name.startswith("builtins__")} == {
+        "builtins__echo",
+        "builtins__now",
+        "builtins__calc",
+    }
+    assert {tool["server"] for tool in listed.data["tools"]} == {"builtins", "skills"}
 
     # Found by name, not by position: the hub asks every component, so the
     # builtins are one row among several and are not first.
@@ -157,6 +165,65 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
     assert row["kind"] == "component"
     assert row["required"] is True
     assert row["state"] == "ready"
+
+
+def write_skill(data_dir: Path, name: str = "one") -> Path:
+    """One skill on disk, in the `skills/` a bare `scan()` looks in."""
+    folder = data_dir / "skills" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\n---\n\nThe body.\n", encoding="utf-8"
+    )
+    return folder
+
+
+@pytest.mark.asyncio
+async def test_a_local_tool_is_served_by_the_hub_itself(isolated_runtime: Path) -> None:
+    """No server behind it, so no connection and no row in `servers()`.
+
+    A skill is a document on this machine: there is nothing for the hub to
+    connect to, nothing a hop could reach, and the directory is one the hub is
+    already holding.  The name says as much — `skill_use`, not
+    `{server}__{tool}` — and the answer is the file, read at the moment of the
+    call rather than snapshotted when the hub started.
+    """
+    write_skill(isolated_runtime)
+    async with Client(hub_for()) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        answer = await call(hub, "skill_use", {"name": "one"})
+        reported = await hub.call_tool("servers", {})
+        # Found on every call rather than at startup: a skill dropped into the
+        # folder is there for the next call, with no restart to ask for and no
+        # listing to keep in step.
+        write_skill(isolated_runtime, "two")
+        later = await call(hub, "skill_use", {"name": "two"})
+
+    assert "skill_use" in names(listed.data)
+    tool = next(one for one in listed.data["tools"] if one["name"] == "skill_use")
+    assert tool["server"] == "skills"
+    assert tool["tool"] == "skill_use"
+    assert "name" in tool["parameters"]["properties"]
+
+    assert answer["ok"] is True
+    assert answer["text"].rstrip().endswith("The body.")
+    assert later["ok"] is True
+
+    # It is a source of tools and not a tool server, and `servers()` is about
+    # what has a connection — there is none here to report on.
+    assert "skills" not in {row["name"] for row in reported.data["servers"]}
+
+
+@pytest.mark.asyncio
+async def test_a_local_tool_that_says_no_is_a_refusal(isolated_runtime: Path) -> None:
+    """`ok` false and text the model can act on — the same contract an upstream
+    that refused gets, because the model cannot tell the two apart and should
+    not have to."""
+    write_skill(isolated_runtime)
+    async with Client(hub_for()) as hub:
+        answer = await call(hub, "skill_use", {"name": "nothing"})
+
+    assert answer["ok"] is False
+    assert "one" in answer["text"], "the answer names what does exist"
 
 
 def component_with_two_kinds_of_tool() -> FastMCP:
@@ -311,8 +378,11 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
-    # The builtins are still there, and the model simply has fewer tools.
-    assert names(listed.data) == {"builtins__echo", "builtins__now", "builtins__calc"}
+    # The builtins are still there, and the model simply has fewer tools.  So
+    # is the hub's own tool, which never depended on anybody connecting.
+    assert {name for name in names(listed.data) if "__" not in name} == {"skill_use"}
+    assert "builtins__now" in names(listed.data)
+    assert "broken__anything" not in names(listed.data)
 
     rows = {row["name"]: row for row in reported.data["servers"]}
     assert rows["broken"]["state"] == "failed"
@@ -679,6 +749,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
             "builtins__now",
             "builtins__calc",
             "spawned__greet",
+            "skill_use",
         }
 
         result = await call(client, "spawned__greet", {"name": "ada"})

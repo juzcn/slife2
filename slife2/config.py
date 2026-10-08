@@ -41,6 +41,28 @@ other people's, which the toolhub connects to as a client.  They are different
 things with different failure rules (`slife2.toolhub`), and this is the only
 place both are configured.
 
+And one section for a program that is neither, because it is already here:
+
+    cli:
+      yt-dlp:
+        command: yt-dlp                 # what runs
+        description: Download video from 1000+ sites, subtitles and playlists.
+        install: uv pip install yt-dlp  # what a person is told when it is absent
+
+An entry names a command on this machine rather than a server to connect to:
+there is no process for slife2 to start, no URL, and nothing to keep alive — so
+it is not a `tools:` entry, and it is not a component either, because slife2 did
+not write it.  What it shares with both is the thing that matters here: **an
+entry is the operator's opt-in**, and this file is where the operator says it.
+That is v1's `cli:` section, ported as configuration.
+
+**Nothing reads this yet.**  The tools that serve these entries — and the
+`skills/` directory beside this file, which is the same family written as
+playbooks rather than commands — arrive through the toolhub like every other
+tool, and are the next change rather than this one (DESIGN.md §9).  What is
+settled here is where an entry is written down and what it may say, so a config
+copied from v1 keeps working when the tools land.
+
 Three things are worth stating outright.
 
 **A provider holds its own credentials; a wire protocol holds the process.**  A
@@ -462,6 +484,74 @@ class ToolServerSettings:
 
 
 @dataclass(frozen=True)
+class CliToolSettings:
+    """One external command the model may run, as its `cli:` entry describes it.
+
+    Not a `ToolServerSettings`, and the difference is the whole of what this
+    class is for.  There is no `url`, no `args`, no `env` and no `cwd`, because
+    there is nothing to connect to: a CLI entry is a program already installed
+    on this machine, named so that the model can be told it exists.
+
+    **`command` is one string, and it may be more than one word.**  v1 allowed
+    `python -m mytool` as readily as `gh`, and a port that quietly narrowed that
+    to a single binary would refuse an entry the file it was copied from
+    accepted.  How a caller turns it into a process is the caller's business —
+    this class records what the operator wrote and nothing more.
+
+    `install` and `source` are for a person rather than for a call.  The first
+    is what to say when the command turns out not to be on `PATH`, which is the
+    one failure this family is certain to meet; the second is where the entry
+    came from, so that the answer to "why is this here" is written down beside
+    it instead of remembered.  Nothing reads `source`.
+    """
+
+    #: The name it is configured under — what a person types, and what the tool
+    #: built from this entry is called.
+    name: str
+    #: The invocation, resolved on `PATH`.  Required: an entry that names no
+    #: program is a CLI nobody can run, and that is a config mistake rather than
+    #: an entry that does nothing.
+    command: str
+    #: What it is for, in the operator's words.  This is the description the
+    #: model reads, which is the one place in the config where that is true —
+    #: a tool server's description is the operator's too, but its *tools'*
+    #: descriptions come from the server itself.
+    description: str = ""
+    #: How to install it, shown when it is missing.
+    install: str = ""
+    #: Where it came from — `url`, `type`, `version`, and whatever else whoever
+    #: wrote the entry thought worth noting.
+    source: dict[str, str] = field(default_factory=dict)
+    #: `false` keeps the entry written down and out of the model's hands.  The
+    #: same switch, and the same meaning, as on a tool server.
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class SkillSettings:
+    """What one skill is given, as its `skills:` entry says.
+
+    **A skill has no process and can still have a credential.**  A playbook that
+    says *run `scripts/search.py`* is worth nothing if the script dies on a
+    missing `BAIDU_API_KEY`, and the skill's own header declares which names it
+    needs (`slife2.skills`).  This is the other half: where the value comes
+    from.
+
+    `env` resolves through the same chain as a provider key — shell, then
+    credstore — and that is the whole point of having the section at all.  A
+    daemon started days ago never saw the key somebody exported this morning,
+    and `keyring:…` is not an environment variable in the first place; an entry
+    here is what turns either into what a skill's script is handed.
+
+    A skill with no entry is not misconfigured: the environment alone is a real
+    answer, and a playbook that needs nothing is the common case.
+    """
+
+    name: str
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
 
@@ -473,6 +563,14 @@ class Config:
     #: and the difference between the two sections is how an entry is written,
     #: not what it becomes.  `ToolServerSettings.kind` keeps the provenance.
     tools: dict[str, ToolServerSettings] = field(default_factory=dict)
+    #: The programs already on this machine that the model may be told about,
+    #: from `cli:`.  A third kind of source beside the components and the tool
+    #: servers, and the only one with no connection in it at all.
+    cli: dict[str, CliToolSettings] = field(default_factory=dict)
+    #: The playbooks in `<data>/skills/` that need something supplied to them,
+    #: from `skills:`.  Keyed by the skill's name; an absent entry means the
+    #: ambient environment is the whole of what that skill is given.
+    skills: dict[str, SkillSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
     #: section rather than entries under `providers:`, for the reason
@@ -566,6 +664,17 @@ class Config:
         by one and skipped by the other.
         """
         return [server for server in self.tools.values() if server.enabled]
+
+    def cli_tools(self) -> list[CliToolSettings]:
+        """The `cli:` entries the model may be given, in file order.
+
+        The same accessor shape as :meth:`tool_servers`, and for the same
+        reason: `enabled` is one rule, and two spellings of it is how an entry
+        ends up written down by one reader and skipped by another.  A disabled
+        entry stays in the file — which is the point of the switch, and the
+        reason this returns a filtered list rather than the mapping.
+        """
+        return [tool for tool in self.cli.values() if tool.enabled]
 
 
 def default_config() -> Config:
@@ -733,6 +842,8 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         servers=servers,
         providers=providers,
         tools=_tools(raw),
+        cli=_cli_tools(raw),
+        skills=_skills(raw),
         agent=agent,
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         default=str(raw.get("default") or _first_reference(providers)),
@@ -935,6 +1046,81 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     )
 
 
+def _cli_tools(raw: dict[str, Any]) -> dict[str, CliToolSettings]:
+    """The `cli:` section — programs already on this machine, by name.
+
+    Absent means empty rather than an error, like every other section here: a
+    config written before this existed still loads, and there is a configuration
+    in which slife2 runs with no external command at all — which is the one it
+    ships with.
+    """
+    return {
+        str(name): _cli_tool(spec, str(name))
+        for name, spec in _mapping(raw.get("cli"), "cli").items()
+    }
+
+
+def _cli_tool(raw: Any, name: str) -> CliToolSettings:
+    """One `cli:` entry: a command, and what a person needs to know about it.
+
+    Only `command` is required, and it is required loudly.  An entry naming no
+    program is not a disabled entry — it is one that can never work, and saying
+    so at load names the entry once instead of failing at every call.
+
+    Unlike `tools:`, there is no second transport to choose between and so
+    nothing to refuse for naming both.  The strictness that survives is the
+    strictness that has something to be strict about.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"cli.{name}: expected a mapping")
+
+    command = str(raw.get("command") or "")
+    if not command:
+        raise ConfigError(
+            f"cli.{name}: needs `command` — the program the model may run "
+            f"(e.g. `gh`, or `python -m mytool`)"
+        )
+
+    return CliToolSettings(
+        name=name,
+        command=command,
+        description=str(raw.get("description") or ""),
+        install=str(raw.get("install") or ""),
+        source=_provenance(raw.get("source"), f"cli.{name}.source"),
+        enabled=bool(raw.get("enabled", True)),
+    )
+
+
+def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
+    """The `skills:` section — what each playbook in `<data>/skills/` is given.
+
+    Absent means empty, like every other section, and there is no requirement
+    that a name here exist on disk: the directory is the truth about what is
+    installed (`slife2.skills`), and an entry for a skill somebody has not put
+    in the folder yet is a key waiting for its lock rather than a mistake.
+    """
+    return {
+        str(name): SkillSettings(
+            name=str(name),
+            env=_secrets(spec.get("env"), f"skills.{name}.env")
+            if isinstance(spec, dict)
+            else {},
+        )
+        for name, spec in _mapping(raw.get("skills"), "skills").items()
+    }
+
+
+def _provenance(raw: Any, where: str) -> dict[str, str]:
+    """An entry's `source:`, as strings.
+
+    Not `_secrets`: nothing here is a credential, and resolving `${VAR}` in a
+    note about where an entry came from would invent a lookup the operator did
+    not write.  Values are stringified for the same reason a provider's are —
+    a version written bare is a YAML float more often than anybody expects.
+    """
+    return {str(key): str(value) for key, value in _mapping(raw, where).items()}
+
+
 def _string_list(raw: Any, where: str) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -1080,11 +1266,13 @@ __all__ = [
     "TOOLHUB_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",
+    "CliToolSettings",
     "Config",
     "ConfigError",
     "ModelSettings",
     "ProviderSettings",
     "ServerSettings",
+    "SkillSettings",
     "ToolServerSettings",
     "default_config",
     "find_config_path",

@@ -327,6 +327,66 @@ rest-api:
     base_url: https://registry.modelcontextprotocol.io
     description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
 
+# ── Commands already on this machine ────────────────────────────────────────
+# Neither of the two above, because there is nothing here for slife2 to start or
+# connect to: a `cli:` entry is a program that is already installed, written
+# down so the model can be told it exists.  No process, no URL, no credential.
+#
+#   command       the invocation, resolved on PATH.  One string, and it may be
+#                 more than one word (`python -m mytool`).  Required.
+#   description   what it is for, in your words — this is the description the
+#                 model reads, so say what it does and how it is called
+#   install       how to get it; what is shown when the command is missing
+#   source        where the entry came from (url / type / version).  For you,
+#                 a year from now; nothing reads it
+#   enabled       false keeps the entry written down and out of the model's
+#                 hands — the same switch, with the same meaning, as on a server
+#
+# The entry is the opt-in, exactly as an entry under `tools:` is: what is here
+# is what the model may be given, and there is no registry a model writes.
+#
+# The matching shape for a *playbook* rather than a command is the `skills/`
+# directory beside this file — one directory per skill, each with a SKILL.md.
+# Same family, written to be read instead of run.
+# ── What a skill is given ───────────────────────────────────────────────────
+# The playbooks in `skills/` are read, not run — but a playbook that says
+# "run scripts/search.py" is worth nothing if that script dies on a missing API
+# key, and the skill's own header says which names it needs:
+#
+#   metadata: {"openclaw": {"requires": {"env": ["BAIDU_API_KEY"]}}}
+#
+# This section is the other half: where the value comes from.  It is the same
+# chain as a provider key — shell env -> credstore -> literal — which is the
+# point of writing it down.  A daemon started days ago never saw the key you
+# exported this morning, and a `keyring:...` value is not an environment
+# variable in the first place; an entry here is what turns either into what the
+# skill's script gets handed.
+#
+# A skill with no entry here is not misconfigured — the ambient environment is
+# a real answer, and a playbook that needs nothing is the common case.  Nothing
+# runs these scripts yet (DESIGN.md §9), so today this is what `skill_use`
+# reads to tell the model whether the skill it just read can actually work.
+skills:
+  baidu-search:
+    env:
+      # `credstore set BAIDU_API_KEY`, or export it — both resolve here.
+      BAIDU_API_KEY: ${BAIDU_API_KEY}
+
+cli:
+  yt-dlp:
+    command: yt-dlp
+    description: 'yt-dlp is a powerful command-line video downloader supporting 1000+ sites including YouTube, Twitter/X, Bilibili, TikTok, etc. Common usage: yt-dlp <URL> to download best quality; yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 <URL> for best quality merged MP4; yt-dlp --list-formats <URL> to list available formats; yt-dlp -f <format_id> <URL> for specific format. Supports cookies, subtitles, playlists, and more.'
+    install: uv pip install yt-dlp
+  browser-harness:
+    command: browser-harness
+    description: "Direct browser control via CDP — automation, scraping, testing, screenshots. Subcommands: browser-harness <<'PY' ... PY (run Python helpers like new_tab, page_info, capture_screenshot, click_at_xy, js, etc.), browser-harness --doctor (diagnose connection), browser-harness skill (print SKILL.md), browser-harness auth login (cloud auth), browser-harness telemetry disable."
+    install: uv tool install --python 3.12 --upgrade --force browser-harness
+    source:
+      type: pypi
+      url: https://pypi.org/project/browser-harness/
+      version: 0.1.5
+      description: Official browser-harness package
+
 providers:
   deepseek:
     api: openai-completions

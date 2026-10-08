@@ -575,24 +575,55 @@ and could not use it, forwards exactly that key and nothing else of `_meta` (the
 protocol's own keys name *this* request's progress stream, and a proxy has no
 business passing those on). §5 has the rest.
 
-**The hub's own tools are the agent's API and never the model's.** Like the
-db server's `remember` and `recent`, the model never sees `list_tools`,
-`call_tool` or `servers`; it sees the *proxied* tools, under `{server}__{tool}`
-names. That indirection is what keeps the hub's surface constant: a server
-coming and going changes what the model may call without changing anything about
-the hub's own protocol.
+**The hub's API is the agent's and never the model's.** Like the db server's
+`remember` and `recent`, the model never sees `list_tools`, `call_tool` or
+`servers`; it sees the *proxied* tools, under `{server}__{tool}` names. That
+indirection is what keeps the hub's surface constant: a server coming and going
+changes what the model may call without changing anything about the hub's own
+protocol. `skill_use` is the one tool this process serves *to a model*, and it
+is not part of that API — it is a source of tools like any other, which is why
+it appears in the list and not in the protocol.
 
-**Nothing is served by the hub process itself, and the builtins are why that is
-worth saying.** `echo`, `now` and `calc` have no credential, no config and no
-network, so a hop to reach them buys nothing — and they are behind one anyway,
-served by `slife2-builtins` and reached through exactly the code path that
-reaches arxiv. The alternative, a hub that serves a few tools itself, is the
+**Nothing with a server behind it is served by the hub process, and the builtins
+are why that is worth saying.** `echo`, `now` and `calc` have no credential, no
+config and no network, so a hop to reach them buys nothing — and they are behind
+one anyway, served by `slife2-builtins` and reached through exactly the code path
+that reaches arxiv. The alternative, a hub that served `calc` itself, is the
 second mechanism this whole arrangement exists to avoid: those tools would not be
 in `servers()`, they would not have a connection that can fail, they would not be
 in whatever a tool search is eventually built on, and the first thing to drift
 would be the one place the tool table has a branch in it. What the hop costs is
 one loopback call per model call; what it buys is that "where the tools come
 from" has one answer and no exceptions.
+
+**One kind of tool has no server behind it, and the hub serves those.** A skill
+is a document in `<data>/skills/` and `skill_use` reads it: no process, no
+protocol, no address, nothing a hop could reach — and the folder is one the hub
+is already holding. A server invented to wrap one `read_text` is not uniformity,
+it is a process that exists to be connected to. So the rule is stated by what it
+excludes: **everything with a server behind it goes through the one code path**
+— the builtins included, which is why they stay where they are — and the tools
+the hub serves itself are the other path, named as themselves (`skill_use`,
+`list_tools` before it) rather than `{server}__{tool}`, because there is no
+server to name. The list is still one list, assembled in one place, with one
+naming rule; what varies is only whether a name resolves to a connection or to a
+function in this process.
+
+**A credential is not a server, and skills have them.** baidu-search's header
+declares `BAIDU_API_KEY`, and the playbook's first instruction runs a script that
+dies without it — so a skill that "needs nothing" was the wrong thing to say,
+and the first version of this paragraph said it. What makes a source local is
+that there is no *process* to connect to, and that is still true: the key is
+resolved by the config's own secret chain (`skills:` in `slife2.yaml`, shell then
+credstore), held by this process, and handed to whatever runs the skill's
+commands — which is the same arrangement the tool servers have, where the hub is
+also the only process holding the key. What a skill cannot be is a reason to
+start a server: nothing about a declared key needs an address, a protocol or a
+connection that can fail. So the boundary is drawn where it can be tested — *is
+there something to connect to* — rather than where it cannot — *does this need a
+secret*. `skill_use` reads the declaration rather than ignoring it: a model told
+which key is missing, before it acts, is the difference between a skill that
+does not work and a skill that does not work silently.
 
 **A tool list is one thing and it has one owner.** Provenance (whose tool is
 this), the naming rule that keeps two servers' `search` apart, and — the first
@@ -708,6 +739,33 @@ Named so they are decisions rather than oversights:
   the hub is where the answer goes: it is the one place that knows the whole set,
   and the only one that could hold a per-tool policy without the agent learning
   what a tool server is.
+- **Skills, and the CLI registry.** v1 had two families that were never quite
+  tools, and slife2 has neither. A **skill** is a playbook: a directory with a
+  `SKILL.md` that the model reads on demand (`skill_list` → `skill_use`) instead
+  of calling, which is progressive disclosure and worked. The **`cli:` section**
+  is a registry of programs already on the machine — `yt-dlp`, a browser
+  harness — that v1 recorded in `tools.yaml` and then ran with `execute_shell`,
+  a third family that was never ported either. **The reading half has landed**:
+  `cli:` in `slife2.yaml`, parsed and refused when an entry names no command;
+  `<data>/skills/` becoming the folder a skill is installed by dropping in; and
+  `skill_use`, which the hub serves itself (§8) and which reads one playbook by
+  name — its header for the name and the description, and its whole body after
+  one line saying what the paths in it are relative to. With it, the credential
+  half: a skill declares in its own header what it needs (`requires.env`,
+  `requires.bins` — the block these skills already carry for other hosts, read
+  out of whichever namespace it is filed under), `skills:` in `slife2.yaml` says
+  where the value comes from, and `skill_use` reports the difference before the
+  model acts on instructions that would fail. **Nothing writes**, and that is
+  not an oversight: v1's `skill_set`, `skill_remove` and `cli_set` were a model
+  editing its own configuration, which is `mcp_set` wearing a different hat, and
+  a skill is installed by putting a directory in a folder. What is next is the
+  rest of the reading family — `skill_list`, the half a model uses to find the
+  name it then reads, and one tool per `cli:` entry. That last one is
+  the family's real decision and it is made: an entry becomes **a tool the
+  operator's own config gave the model**, run as an argv rather than through a
+  shell so that the arguments a model invents cannot become commands it
+  invented. It is also what opens the approval question above — `yt-dlp` writes
+  files — and §8 already says where that answer goes.
 - **A tool list that is too long.** Everything enabled in `tools:` is in every
   model call's list, and the working config enables twenty servers — hundreds of
   tools, which is a large request, a large bill, and a model choosing worse.

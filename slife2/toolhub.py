@@ -18,16 +18,19 @@ agent loop cannot leak a token it never had, and `grep` for a provider SDK in
 the agent's tree still finds nothing. Switching what tools the model has is
 editing a URL or a command in `slife2.yaml`, exactly as switching models is.
 
-Two sources, one list
----------------------
-The tools come from two places and this is the only thing that knows both.
+Three sources, one list
+-----------------------
+The tools come from three places, and this is the only thing that knows all of
+them.
 
 **Plugins** are the servers slife2 starts — builtins, the db, the agent, a model
 backend — and each offers its tools to one of two callers.  `now` and `calc` are
 for the model; `remember` and `send_message` are for our own code, called at a
 moment the code already knows.  **Tool servers** are everybody else's, under
 `tools:` and `rest-api:`, and they are for the model by the simple fact that an
-operator wrote them down.
+operator wrote them down.  **Local tools** are neither: they are the ones with
+nothing behind them at all — a skill, which is a document in `<data>/skills/` —
+and the hub serves those itself, for the reason given below.
 
 Which source a tool came from is not what decides who may call it — which
 *caller* it is for does, and that is said on the tool itself (`slife2.audience`)
@@ -51,11 +54,23 @@ in two places is a set that will disagree with itself.
 
 That is why `now` and `calc` are not served by this process but by
 `slife2-builtins`, which the hub reaches exactly as it reaches somebody else's
-arxiv server.  **Nothing here is served by this process.**  A builtin that took a
-shortcut would be the second mechanism this whole arrangement exists to avoid,
-and the first thing to drift: it would not be in `servers()`, it would not have a
-connection to fail, and it would not appear in the list a tool search would one
-day be built on.
+arxiv server.  **Nothing that has a server behind it is served by this
+process.**  A builtin that took a shortcut would be the second mechanism this
+whole arrangement exists to avoid, and the first thing to drift: it would not be
+in `servers()`, it would not have a connection to fail, and it would not appear
+in the list a tool search would one day be built on.
+
+One kind of tool has no server behind it, and is served here.  A **skill** is a
+document on this machine and `skill_use` reads it: no process, no credential, no
+protocol, no address — nothing a hop could reach, plus the fact that the hub
+already holds the directory it would be reading.  A server invented to hold one
+function whose whole body is a `read_text` is not uniformity, it is a second
+process that exists to be connected to.  The rule that survives is the one worth
+having, and it is the same rule: **everything with a server behind it is reached
+by exactly one code path** — the builtins included, which is why they stay where
+they are.  The hub's own tools are the other path, and they are named as
+themselves (`skill_use`) rather than `{server}__{tool}`, because there is no
+server to name.  See DESIGN.md §8.
 
 REST APIs are not a second mechanism
 ------------------------------------
@@ -98,14 +113,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.client.messages import MessageHandler
 
+from slife2 import skills
 from slife2.audience import for_the_model, forwarded_client, request_meta
 from slife2.config import Config, ToolServerSettings, find_config_path, load
 from slife2.mcp_server import (
@@ -127,6 +144,11 @@ SERVER_NAME = "slife2-toolhub"
 #: its own API and drop all three, which is a loopback nobody should have to
 #: reason about.
 CONFIG_KEY = "toolhub"
+
+#: Where the hub's own tools came from, in the `server` field of what it
+#: advertises.  Not a server and never dialled: the field is provenance, and a
+#: tool whose provenance is a folder should say so rather than leave it blank.
+SKILLS_SOURCE = "skills"
 
 INSTRUCTIONS = (
     "The tools the agent may run. Call `list_tools` for the whole set, "
@@ -591,6 +613,67 @@ class Upstream:
         await self.disconnect()
 
 
+@dataclass(frozen=True)
+class LocalTool:
+    """A tool the hub serves itself, because there is nothing else that could.
+
+    A skill is the case.  It is a document in `<data>/skills/`, read when the
+    model asks for it: there is no process to start, no credential to hold and
+    no address to configure, so the two things an `Upstream` exists for — a
+    connection, and a snapshot of what it last listed — have nothing to
+    describe.  What is left is a name, the schema the model reads, and the body
+    that answers a call.
+
+    **A local tool keeps its own name**, `skill_use` rather than
+    `{server}__{tool}`, and it is routed before the proxied names are looked
+    at.  So a collision is possible in principle — somebody else's server may
+    offer a tool of the same name — and local wins, which is the direction that
+    keeps a tool this system guarantees from being shadowed by somebody else's
+    configuration.
+    """
+
+    tool: UpstreamTool
+    run: Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]
+
+
+def skills_tools(config: Config) -> list[LocalTool]:
+    """The skills source — what the hub reads out of `<data>/skills/`.
+
+    One tool today, and a list because the family is not one tool wide in v1
+    either: `skill_list` is the half a model uses to find out what to read.
+
+    **The directory is read on every call, not snapshotted here.**  There is no
+    connection to keep and nothing to keep in step, so dropping a skill into the
+    folder is the whole of installing one — no restart, and no listing to go
+    stale in a running process.  That is the same shape as `servers()`: what a
+    caller gets is the truth as of the ask.
+
+    The config is read *here* and once, because that is the one thing that is
+    not the folder's: what a skill is given is the operator's answer, resolved
+    when the hub started, and a `skills:` entry edited afterwards is a change
+    the next start picks up like every other config change.
+    """
+    environments = {
+        name: dict(settings.env) for name, settings in config.skills.items()
+    }
+
+    async def run(arguments: dict[str, Any]) -> tuple[str, bool]:
+        return await skills.use(arguments, environments=environments)
+
+    return [
+        LocalTool(
+            tool=UpstreamTool(
+                name=skills.USE_TOOL,
+                server=SKILLS_SOURCE,
+                tool=skills.USE_TOOL,
+                description=skills.USE_DESCRIPTION,
+                parameters=dict(skills.USE_PARAMETERS),
+            ),
+            run=run,
+        )
+    ]
+
+
 def _advertise(server: str, tool: Any) -> UpstreamTool:
     """One listed tool, named for the model.
 
@@ -696,8 +779,22 @@ def build_server(
             tool.name: upstream for upstream in upstreams for tool in upstream.tools
         }
 
+    #: The tools that have no server behind them.  Built once, unlike the
+    #: upstreams' snapshots: a local tool's *schema* is a constant, and only the
+    #: data its body reads can change — which it re-reads on every call.
+    local = skills_tools(config)
+
+    def local_route(name: str) -> LocalTool | None:
+        for one in local:
+            if one.tool.name == name:
+                return one
+        return None
+
     def advertised() -> list[UpstreamTool]:
-        return [tool for upstream in upstreams for tool in upstream.tools]
+        return [
+            *(tool for upstream in upstreams for tool in upstream.tools),
+            *(one.tool for one in local),
+        ]
 
     def begin_connecting() -> None:
         for upstream in upstreams:
@@ -758,7 +855,9 @@ def build_server(
         model's (`slife2.audience`); a tool server's are all here, because the
         operator put the server in the config.  Nothing in this answer says
         which is which — by the time a tool is listed, the question has been
-        answered.
+        answered.  Neither rule has anything to ask of a tool the hub serves
+        itself: there is no audience but the model's when the tool exists to be
+        read by one, and no config entry to opt in with.
 
         Raises:
             ConnectionError: If a component is not answering.  Deliberately not
@@ -806,6 +905,13 @@ def build_server(
         server that is down all come back as `ok` false with text saying so,
         which is what lets the model read the problem and correct itself.
 
+        Most names are an upstream's, and reach it through the connection this
+        process keeps to it.  A tool the hub serves itself — one with no server
+        behind it, `skill_use` today — is answered here without leaving the
+        process, and a call to one is the only kind that goes nowhere: there is
+        no far end to be told whose behalf it is on, so nothing is forwarded and
+        nothing is lost.
+
         A call that is made on behalf of one conversation carries that
         conversation in its `_meta`, and it is forwarded unchanged to whichever
         server ends up running the tool.  Nothing here reads it — one hub serves
@@ -820,6 +926,13 @@ def build_server(
         Returns:
             `text` — the result, or why there is none — and `ok`.
         """
+        # Local first: a tool with no server behind it is answered here, and
+        # this is the only branch in the hub that does not end in a connection.
+        one = local_route(name)
+        if one is not None:
+            text, ok = await one.run(arguments)
+            return {"text": text, "ok": ok}
+
         forwarded = forwarded_client(request_meta(ctx))
         upstream = routes().get(name)
         if upstream is None:
@@ -833,7 +946,8 @@ def build_server(
             await settle()
             upstream = routes().get(name)
         if upstream is None:
-            known = ", ".join(sorted(routes())) or "(none)"
+            everything = sorted({*routes(), *(one.tool.name for one in local)})
+            known = ", ".join(everything) or "(none)"
             return {
                 "text": f"unknown tool {name!r}. Available tools: {known}",
                 "ok": False,

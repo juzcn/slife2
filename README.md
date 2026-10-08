@@ -120,8 +120,9 @@ a turn read back a month later still says which picture it was about.
 
 The model's tool list — the ones slife2 ships and the ones other people run —
 comes from **`slife2-toolhub`**, which is also the only process that holds a tool
-server's credentials. It draws from two kinds of place — our own components, and
-the two sections below — and never from a list written down beside it:
+server's credentials. It draws from three kinds of place — our own components,
+the sections below, and the one thing that has no server behind it at all — and
+never from a list written down beside it:
 
 ```yaml
 # The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
@@ -143,6 +144,12 @@ rest-api:                               # OpenAPI documents, one tool per endpoi
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
     base_url: https://api.github.com
     api_key: ${GITHUB_TOKEN}
+
+cli:                                    # programs already on this machine
+  yt-dlp:
+    command: yt-dlp
+    description: Download video from 1000+ sites, subtitles and playlists.
+    install: uv pip install yt-dlp
 ```
 
 `command` starts a process and talks over its standard input; `url` connects to
@@ -151,17 +158,58 @@ shorter — it is expanded into the `uvx mcp-openapi-proxy` invocation that serv
 it, so the hub has one mechanism rather than two. `${VAR}` resolves through the
 same chain as a provider key.
 
-Every tool reaches the model as `{name}__{tool}` — `builtins__calc`,
-`arxiv__arxiv_search_papers` — and the list is re-read from the hub **before
-every model call**, so a server that started a moment ago, or grew a tool, is in
-the next call's list.
+A `cli` entry is the odd one out: there is no process to start and no URL to
+connect to, because the program is already installed. It is written down so the
+model can be told it exists — and written *here*, in the operator's file,
+because an entry is the opt-in, exactly as an entry under `tools:` is. `install`
+is what a person is told when the command turns out not to be on `PATH`.
+**Nothing serves these entries yet**: the tool that does is the next change
+(DESIGN.md §9). The playbooks in `skills/` already have theirs — `skill_use`,
+above.
 
-The hub has two sources: the components above, which it asks for a tool list the
-way it asks anybody, and everything under `tools:`. Which of a component's tools
-the model may call is said on the tool — `@mcp.tool(meta=FOR_THE_MODEL)`, which
-`now`, `calc` and `echo` carry and the db's `remember` does not. A component's
-tools are its own code's until one of them says otherwise, so a tool you forget
-to mark is invisible rather than dangerous.
+A tool that came from a server reaches the model as `{name}__{tool}` —
+`builtins__calc`, `arxiv__arxiv_search_papers` — and the list is re-read from the
+hub **before every model call**, so a server that started a moment ago, or grew a
+tool, is in the next call's list.
+
+Which of a component's tools the model may call is said on the tool —
+`@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
+db's `remember` does not. A component's tools are its own code's until one of
+them says otherwise, so a tool you forget to mark is invisible rather than
+dangerous.
+
+The hub has three sources: the components, which it asks for a tool list the way
+it asks anybody; everything under `tools:`; and the tools it serves itself.
+
+That third one is an exception, and it is narrow. **`skill_use`** is served by
+the hub itself, because a skill has no server behind it: it is a document in
+`<data>/skills/`, and the tool reads it — `skill_use(name="browser-harness")`
+returns that skill's `SKILL.md`, with the folder it lives in in front of it so
+the paths in the body mean something. No process, no credential, no address, and
+nothing a connection could tell you about it; a server wrapping one `read_text`
+would exist only to be connected to. Its name says as much: it is `skill_use` and
+not `{server}__{tool}`, because there is no server to name. Skills are installed
+by putting a directory in that folder — the tool reads the disk on every call, so
+there is nothing to restart.
+
+A skill is a document, and it can still need a key: `baidu-search` declares
+`BAIDU_API_KEY` in its own header, and its first instruction runs a script that
+dies without it. `skills:` is where the value comes from — the same chain as
+every other secret, which is the point of writing it down, because a daemon
+started days ago never saw the key you exported this morning.
+
+```yaml
+skills:
+  baidu-search:
+    env:
+      BAIDU_API_KEY: ${BAIDU_API_KEY}   # shell env → credstore
+```
+
+`skill_use` reports the difference: read a skill whose key is not configured and
+the answer says so, up front, instead of leaving the model to find out when the
+command it was told to run fails. A skill that declares nothing says nothing.
+Nothing runs those scripts yet (DESIGN.md §9) — which is exactly why the check
+belongs in the reader.
 
 `enabled: false` keeps an entry configured but never connects it, which is the
 lever worth knowing: everything enabled is a process at startup and its tools in
@@ -184,6 +232,7 @@ runtime state of what is running, and the turns they produced:
   slife2.yaml                      the config; absent means the defaults
   runtime/                         records, locks, logs — reconstructible
   slife2.db/                       <agent>.turn.db — not reconstructible
+  skills/                          <name>/SKILL.md — playbooks, written by you
 ```
 
 **Where that folder is depends on what you are running.** In a checkout it is
@@ -193,8 +242,9 @@ wherever the command happened to be started. `--data-dir DIR` (or
 `$SLIFE2_DATA_DIR`) overrides both.
 
 A checkout therefore keeps generated state in the working tree, which is why
-`.gitignore` covers `runtime/` and `slife2.db/`. It does *not* cover `slife2.yaml`:
-that file is the point of the arrangement.
+`.gitignore` covers `runtime/` and `slife2.db/`. It does *not* cover `slife2.yaml`
+or `skills/`: those are written by a person rather than produced by a run, and
+they are the point of the arrangement.
 
 The split that remains is the one that matters: deleting `runtime/` costs
 nothing, deleting `slife2.db/` costs the record.

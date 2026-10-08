@@ -1,0 +1,9 @@
+{
+  "source": {
+    "type": "pypi",
+    "url": "https://pypi.org/project/browser-harness/",
+    "version": "0.1.5",
+    "description": "Official browser-harness package",
+    "fetched_at": "2026-07-13T00:44:43.891352+00:00"
+  }
+}

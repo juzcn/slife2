@@ -209,6 +209,9 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
             "builtins__now",
             "builtins__calc",
             "fake__echo",
+            # The hub's own, crossing this hop like everything else — a tool
+            # with no server behind it arrives through the same list.
+            "skill_use",
         ]
         text, ok = await registry.execute(
             ToolCall(id="c1", name="fake__echo", arguments={"text": "through"})

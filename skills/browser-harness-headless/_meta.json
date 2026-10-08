@@ -1,0 +1,8 @@
+{
+  "source": {
+    "type": "local",
+    "description": "由实际测试经验整理：Windows 无头 Chrome + browser-harness 配置流程",
+    "version": "1.0",
+    "fetched_at": "2026-08-03T01:20:49.197547+00:00"
+  }
+}

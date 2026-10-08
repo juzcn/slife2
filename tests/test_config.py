@@ -515,3 +515,122 @@ def test_the_hub_is_a_component_the_config_knows(tmp_path) -> None:
     assert default_config().server("toolhub").port == 8020
     with pytest.raises(ConfigError, match="not a server this system runs"):
         load(write(tmp_path, "servers:\n  nonsense: {port: 9}\n"))
+
+
+# --- cli: commands already on this machine ------------------------------------
+#
+# The third source of tools, and the only one with no connection in it: a
+# `cli:` entry names a program that is already installed.  Nothing serves these
+# yet (DESIGN.md §9) — what these tests hold is the shape the tools will read.
+
+CLI = """
+cli:
+  yt-dlp:
+    command: yt-dlp
+    description: Download video.
+    install: uv pip install yt-dlp
+    source:
+      type: pypi
+      version: 2026.1
+  harness:
+    command: python -m harness
+    description: More than one word is one command.
+  off:
+    command: slow-thing
+    enabled: false
+"""
+
+
+def test_a_cli_entry_is_a_command_and_what_it_is_for(tmp_path) -> None:
+    tool = load(write(tmp_path, CLI)).cli["yt-dlp"]
+    assert tool.command == "yt-dlp"
+    assert tool.description == "Download video."
+    assert tool.install == "uv pip install yt-dlp"
+
+
+def test_a_cli_command_may_be_more_than_one_word(tmp_path) -> None:
+    """v1 allowed `python -m mytool`, and a port that narrowed it to a single
+    binary would refuse an entry the file it was copied from accepted."""
+    assert load(write(tmp_path, CLI)).cli["harness"].command == "python -m harness"
+
+
+def test_a_cli_source_is_notes_rather_than_secrets(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`${VAR}` is not resolved here, and a bare version is a string.
+
+    Nothing reads `source`, so resolving a reference in it would invent a
+    lookup the operator did not write — and a version written bare is a YAML
+    float more often than anybody expects.
+    """
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
+    text = "cli:\n  gh:\n    command: gh\n    source: {version: 1, url: '${SLIFE2_TEST_KEY}'}\n"
+    source = load(write(tmp_path, text)).cli["gh"].source
+    assert source == {"version": "1", "url": "${SLIFE2_TEST_KEY}"}
+
+
+def test_a_cli_entry_with_no_command_is_refused(tmp_path) -> None:
+    """Not a disabled entry — one that can never work, said once at load rather
+    than at every call."""
+    with pytest.raises(ConfigError, match="cli.nothing: needs `command`"):
+        load(write(tmp_path, "cli:\n  nothing:\n    description: does nothing\n"))
+
+
+def test_a_disabled_cli_entry_is_written_down_but_not_offered(tmp_path) -> None:
+    config = load(write(tmp_path, CLI))
+    assert "off" in config.cli, "still in the file, and still readable"
+    assert [tool.name for tool in config.cli_tools()] == ["yt-dlp", "harness"]
+
+
+# --- skills: what a playbook is given -----------------------------------------
+#
+# A skill is a document, so this is not configuration for a process — it is the
+# credential a skill's own script will need, resolved here because a daemon
+# started days ago never saw the key somebody exported this morning.
+
+SKILLS = """
+skills:
+  baidu-search:
+    env:
+      BAIDU_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+  quiet: {}
+"""
+
+
+def test_a_skills_entry_resolves_through_the_same_chain(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
+    config = load(write(tmp_path, SKILLS))
+    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "resolved"
+
+
+def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
+    """The ambient environment is a real answer, and a playbook that needs
+    nothing is the common case."""
+    config = load(write(tmp_path, SKILLS))
+    assert config.skills["quiet"].env == {}
+
+
+def test_an_unresolved_skill_secret_stays_a_reference(tmp_path) -> None:
+    """Which is what `slife2.skills` reads to tell "configured" from "named".
+
+    The load does not fail — a missing key is not a config error — so the fact
+    has to survive to where somebody can act on it.
+    """
+    config = load(write(tmp_path, SKILLS))
+    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "unset"
+
+
+def test_no_skills_section_is_no_skills(tmp_path) -> None:
+    assert load(write(tmp_path, A_PROVIDER)).skills == {}
+    assert default_config().skills == {}
+
+
+def test_no_cli_section_is_no_cli_tools(tmp_path) -> None:
+    """Absent means empty, like every other section: a config written before
+    this existed still loads."""
+    config = load(write(tmp_path, A_PROVIDER))
+    assert config.cli == {}
+    assert config.cli_tools() == []
+    assert default_config().cli_tools() == []

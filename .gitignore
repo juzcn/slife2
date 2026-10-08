@@ -193,7 +193,8 @@ __marimo__/
 # one in use and slife2.db/ is a directory you can open.  That puts generated
 # state in the working tree, which is exactly what this keeps out of it:
 # runtime/ is a daemon's bookkeeping and slife2.db/ is a database, and neither
-# belongs in a commit.  slife2.yaml itself is deliberately NOT ignored — it
-# holds no secrets, and it is the file the whole arrangement exists to read.
+# belongs in a commit.  slife2.yaml and skills/ are deliberately NOT ignored —
+# both are written by a person rather than produced by a run, and neither holds
+# a secret, so both are the file the whole arrangement exists to read.
 runtime/
 slife2.db/
