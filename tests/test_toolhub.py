@@ -418,7 +418,14 @@ async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
     assert served_here == {"tool_search", "func_tool_load", "_func_tool_unload"}
     search = next(one for one in listed.data["tools"] if one["name"] == "tool_search")
     assert search["tool"] == "tool_search"
-    assert "query" in search["parameters"]["properties"]
+    # The two inputs, and not the single `query` that preceded them: the keyword
+    # leg cannot read a sentence and the semantic leg was never given the words,
+    # so the split is the whole point of this schema — and both being `required`
+    # is what stops one of the two legs from silently never running
+    # (`TOOL_SEARCH_PARAMETERS`).  This assertion named `query` for a while after
+    # that field was gone.
+    assert set(search["parameters"]["properties"]) == {"keywords", "sentences"}
+    assert search["parameters"]["required"] == ["keywords", "sentences"]
     # It is a source of tools and not a tool server: there is no connection
     # here for `servers()` to report on.
     assert "toolhub" not in {row["name"] for row in reported.data["servers"]}
@@ -942,8 +949,13 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
     An empty query used to be a *browse* — the answer to "what is installed" —
     and that made this one tool do two jobs: finding a thing by what it does,
     which ranks, and listing everything, which cannot.  The listing is a
-    different question with a different shape, so the search declines it and
-    says so, in a sentence that names the way back.
+    different question with a different shape, so the search declines it.
+
+    **And it names nothing else.**  The refusal used to end "ask for the list",
+    pointing at a tool it cannot see; a real turn's log has the model following
+    that pointer into `skill_use` with an invented name, and getting "no skill
+    called '__list__'".  What is asserted here is that the refusal says which of
+    the two inputs would have been a search, and that it promises no other tool.
 
     Both fields empty is the case the schema's `required` invites — a model can
     fill one with `[]` — and it is refused rather than answered with a page,
@@ -961,7 +973,12 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
     for answer in (omitted, empty, blank):
         assert answer["ok"] is False, "nothing to look for is not a search"
         assert "not a search" in answer["text"], "and it says why"
-        assert "ask for the list" in answer["text"], "and what to do instead"
+        assert "keywords" in answer["text"] and "sentences" in answer["text"], (
+            "and it names the two inputs that would have been one"
+        )
+        assert "list" not in answer["text"].lower(), (
+            "and it sends the model to no other tool"
+        )
 
 
 @pytest.mark.asyncio
@@ -998,6 +1015,31 @@ async def test_the_two_inputs_go_to_the_two_legs() -> None:
     assert "cli:yt-dlp" in word["text"] and word["ok"]
     assert "cli:yt-dlp" in meaning["text"] and meaning["ok"]
     assert "cli:yt-dlp" in both["text"] and both["ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_keywords_only_search_reaches_the_leg_that_can_answer_it() -> None:
+    """The words are a sentence when they are all there is.
+
+    A keywords-only call used to be answered by the keyword leg alone — and that
+    leg asks for *every* term it is handed, so two words that no single row holds
+    together return nothing even where one of them names the row.  Measured
+    against a real catalogue that was 23 of 36 tools found against the semantic
+    leg's 36, which is why the call is handed to both (`local_tools.search`).
+
+    The pair here is chosen so the AND cannot be satisfied: `trump` is the stub's
+    word for one the row does *not* hold and `工具` is one it does, so nothing
+    answers this except the second leg reading the same two words as text.
+    """
+    hub = hub_with_documents(
+        {"papers": {"command": "papers", "description": "Find papers. 工具"}}
+    )
+    async with Client(hub) as client:
+        words = await call(
+            client, "tool_search", {"keywords": ["工具", "trump"], "sentences": []}
+        )
+
+    assert "cli:papers" in words["text"], "found by meaning, from words alone"
 
 
 @pytest.mark.asyncio

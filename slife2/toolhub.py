@@ -1081,42 +1081,52 @@ SEARCH_LIMIT = 10
 #: answer shape (a list, with no ranking), and §9 of DESIGN says so.
 #:
 #: The single `query` that replaced them is gone too, and this is the reason:
-#: one string went to *both* legs, and the legs want opposite things from it.
+#: one string went to *both* legs, and one of the two cannot read a sentence.
 #: The keyword leg asks for every term it is handed, so a sentence — "take a
-#: screenshot of a web page" — demands six words at once and matches nothing;
-#: the semantic leg takes a phrase and is wasted on three loose words.  Measured
-#: on the live catalogue, splitting them is 20/20 against 18/20, and the two
-#: queries the single string missed are found by the two halves of the split
-#: (`work out 17 times 23` by a second sentence, `读一下这个网页的内容` by one
-#: written in English).  Both fields are `required` and either may be an empty
-#: array: a model made to answer both has said which one it means, and a field
-#: that may go unfilled is a leg that silently never runs.
+#: screenshot of a web page" — demands six words at once and matches nothing.
+#:
+#: **What is *not* the reason is that the semantic leg wants a phrase over
+#: words.**  An earlier version of this comment said that, and it was measured
+#: and is false: a compact word list embeds as well as the sentence it was taken
+#: from — 36 of 36 either way on this catalogue — which is what makes the
+#: fallback in `local_tools.search` sound.  The two inputs are one call apart,
+#: not one being the other's poor relation.
+#:
+#: Measured on the live catalogue, splitting them is 20/20 against 18/20, and
+#: the two queries the single string missed are found by the two halves of the
+#: split (`work out 17 times 23` by a second sentence, `读一下这个网页的内容` by
+#: one written in English).  Both fields are `required` and either may be an
+#: empty array: a model made to answer both has said which one it means, and a
+#: field that may go unfilled is a leg that silently never runs.
 TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
         "keywords": {
             "type": "array",
             "items": {"type": "string"},
+            # Three short sentences, and each one is a fact about this search
+            # rather than advice about how to use it: what the words must be
+            # true of, which words are worth giving, and what empty means.  The
+            # warning this used to carry ("guessing at words makes it find
+            # nothing") was true while a keywords-only call was answered by the
+            # keyword leg alone; with the fallback in `local_tools.search` a
+            # guess costs nothing, so the sentence had become false and would
+            # only talk a model out of the words it was sure of.
             "description": (
-                "Words the tool's own text has to contain, one per entry — "
-                "'screenshot', 'pdf', 'sqlite'. Every one of them must be "
-                "there, so list few and make them count. Pass an empty array if "
-                "you have no words in mind: this is the exact-match half, and "
-                "guessing at words makes it find nothing."
+                "Words a tool's own text has to contain, every one of them — "
+                "'screenshot', 'pdf'. A word you are confident is in that text "
+                "is the sharpest thing you can give this search. Empty if you "
+                "have none."
             ),
         },
         "sentences": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "What you want to do, in your own words — one short sentence or "
-                "phrase per idea ('take a screenshot of a web page'). Matched by "
-                "meaning, not by wording, so this half works when you do not "
-                "know what anything is called. A second entry is a second "
-                "chance, not a longer query: 'calculate 17 * 23' beside "
-                "'arithmetic' finds the calculator that either one alone might "
-                "miss. Pass an empty array if you have no need described in "
-                "words."
+                "What you want to do, in your own words, one phrase per idea — "
+                "'take a screenshot of a web page'. Matched by meaning, not by "
+                "wording. A second entry is a second chance, not a longer "
+                "query. Empty if you have none."
             ),
         },
     },
@@ -1128,12 +1138,17 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
     "required": ["keywords", "sentences"],
 }
 
+#: No sentence here names another tool.  The one that did — "Load what you need
+#: with func_tool_load" — was a reference this text cannot keep true: what a
+#: model's list holds is decided elsewhere, so the wording was a promise about
+#: somebody else's state made by a description that cannot see it.  What a model
+#: needs from here is what this search is and what its two inputs mean.
 TOOL_SEARCH_DESCRIPTION = (
-    "Find a tool by what it does. `keywords` matches the catalogue's own words "
-    "exactly, `sentences` matches by meaning — give both, either may be an empty "
-    "array. Your tool list holds only the tools you have loaded; this searches "
-    "the whole catalogue of everything installed, including tools whose server "
-    "is switched off or is not answering. Load what you need with func_tool_load."
+    "Find a tool by what it does, across the whole catalogue — including tools "
+    "whose server is off or is not answering, not only the tools you have "
+    "loaded. `keywords` are words a tool's own text must contain, all of them; "
+    "`sentences` is what you want to do, matched by meaning. Give both, either "
+    "may be empty."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
@@ -1143,25 +1158,27 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "The tool names, as tool_search reports them — bare for "
-                "slife2's own tools ('now', 'tool_search'), "
-                "'{server}__{tool}' for a tool server's ('arxiv__search'). "
-                "One name or several: ['arxiv__search'] and "
-                "['now', 'serper__search'] are the same kind of request. A "
-                "single name given as a bare string is understood too."
+                "The tool names, as `tool_search` reports them: bare for "
+                "slife2's own tools ('now'), '{server}__{tool}' for a tool "
+                "server's ('arxiv__search'). One or several — a single name as "
+                "a bare string works too."
             ),
         }
     },
     "required": ["names"],
 }
 
+#: What loading is *for*, which is not what it used to say.  "into your tool
+#: list so you can call them" contradicted the sentence three lines later — a
+#: name can be called without being loaded, because routing looks the name up
+#: in the catalogue and never asks `load_status` (`Catalogue.route`).  Loading
+#: is what puts a tool in the list the model is *shown*, so the accurate
+#: version is what the text below says.
 FUNC_TOOL_LOAD_DESCRIPTION = (
-    "Load one tool, or several at once, into your tool list so you can call "
-    "them. Find them with tool_search first. They are there from your next step "
-    "— the tool list is rebuilt before every request. Loading is about seeing "
-    "them: a name you found with tool_search can be called without loading, and "
-    "the least recently used tools are unloaded again when the list grows past "
-    "its cap. Each name gets its own line in the answer."
+    "Put tools into the list you are shown before each request. A name from "
+    "`tool_search` can be called without loading; loading is what keeps it in "
+    "the list, there to be chosen next step. The list is rebuilt before every "
+    "request, and when it grows past its cap the least recently used go."
 )
 
 FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
@@ -1171,10 +1188,10 @@ FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "The tools to take out of your list, as tool_search reports "
-                "them. Leave it empty to leave the budget to the harness, which "
-                "calls this that way at a turn boundary. One name or several, "
-                "and a single bare string is understood too."
+                "The tools to take out of your list, as `tool_search` reports "
+                "them. Empty leaves the budget to the harness, which calls this "
+                "that way at a turn boundary. One or several — a single bare "
+                "string works too."
             ),
         }
     },
@@ -1186,10 +1203,9 @@ FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
 #: pair that appears in its history with no names in it.  `_func_tool_unload`'s
 #: own docstring is where the double life is argued.
 FUNC_TOOL_UNLOAD_DESCRIPTION = (
-    "Take tools out of your list. Name the ones you are done with — or leave it "
-    "empty to leave the budget to the harness: it calls this with no names at a "
-    "turn boundary, and the answer names what went, so a trim you did not ask "
-    "for is something you read rather than something you notice later."
+    "Take tools out of your list. Name the ones you are done with, or leave it "
+    "empty to leave the budget to the harness, which calls this with no names "
+    "at a turn boundary. Either way the answer names what went."
 )
 
 
@@ -1254,16 +1270,35 @@ def local_tools(
             # A list is not a search — it has no ranking, it is as long as the
             # catalogue, and a model that wanted one tool has to read all of
             # them — so the tool that finds things by meaning declines to be the
-            # tool that enumerates, and there will be one that enumerates.
+            # tool that enumerates.
+            #
+            # **And it does not say where else to look.**  It used to end "ask
+            # for the list" — a pointer at a tool this one cannot see, and in
+            # the log of a real turn a model followed it: it called `skill_use`
+            # with an invented name and got "no skill called '__list__'".  A
+            # tool's own answer promising that somebody else can do the job is a
+            # promise it cannot keep; when there is a tool that enumerates, the
+            # sentence can name it and be true.
             return (
                 "tool_search needs something to look for: `sentences` is what you "
-                "want to do ('take a screenshot of a page') and `keywords` is the "
+                "want to do ('take a screenshot of a page') and `keywords` are "
                 "words a tool's own text would carry ('screenshot'). Give one of "
-                "them — both empty is not a search. To see everything that is "
-                "installed, ask for the list: no argument enumerates the "
-                "catalogue.",
+                "them — both empty is not a search.",
                 False,
             )
+        if keywords and not sentences:
+            # **The words are a sentence when they are all there is.**  A
+            # keywords-only call used to be answered by the keyword leg alone,
+            # and measured on this catalogue that leg found 23 of the 36 tools a
+            # caller asks for — the same 23 whether the catalogue held 130 of
+            # them or 253, because what it misses is word forms and not choice.
+            # Routing the same words through both legs finds 34 to 36.
+            #
+            # The loss was never that words embed badly: a word list embeds as
+            # well as the sentence it was taken from.  It was that they never
+            # reached the leg that could answer them.  The cost of closing that
+            # is one embedding call on a call that used to make none.
+            sentences = [" ".join(keywords)]
         found = await catalogue.search(
             keywords=keywords, sentences=sentences, limit=SEARCH_LIMIT
         )
