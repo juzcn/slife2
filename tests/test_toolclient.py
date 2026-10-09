@@ -211,19 +211,23 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
     """
     async with Client(hub_with_upstream()) as hub:
         registry = ToolRegistry(await remote_tools(hub))
+        # In the catalogue's order, which is the name's.  **Ours are bare** —
+        # the builtins' and the db's read the same as the hub's own, because
+        # there is one set of tools here — and `fake__echo`, an entry under
+        # `tools:`, is the one name that says whose it is.  The hub's four cross
+        # this hop like everything else, `_func_tool_unload` included: it is the
+        # one `_`-prefixed name a model sees, and the reason is in its own test.
         assert [spec.name for spec in registry.specs] == [
-            "builtins__calc",
-            "builtins__echo",
-            "builtins__now",
-            "db__turn_list",
-            "db__turn_read",
+            "_func_tool_unload",
+            "calc",
+            "echo",
             "fake__echo",
-            # The hub's own three, crossing this hop like everything else — a
-            # tool with no server behind it arrives through the same list, and
-            # `_func_tool_unload` does *not*, because the harness calls it.
             "func_tool_load",
+            "now",
             "skill_use",
             "tool_search",
+            "turn_list",
+            "turn_read",
         ]
         text, ok = await registry.execute(
             ToolCall(id="c1", name="fake__echo", arguments={"text": "through"})
@@ -233,7 +237,7 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         # A builtin, through the hub, through the builtins server: two hops and
         # the same answer, which is what makes them not a special case.
         text, ok = await registry.execute(
-            ToolCall(id="c2", name="builtins__calc", arguments={"e": "2+2"})
+            ToolCall(id="c2", name="calc", arguments={"e": "2+2"})
         )
         assert (text, ok) == ("4", True)
 
@@ -266,7 +270,7 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     """Two hops, and the conversation survives both.
 
     This is the whole point of the arrangement: the model is handed
-    `db__turn_list` with no `agent` argument to fill in, the loop binds the
+    `turn_list` with no `agent` argument to fill in, the loop binds the
     conversation it was built for to the call, the hub forwards it without
     reading it, and the db server answers with *that* conversation's turns.
     Every hop would be individually plausible with the identity dropped — the
@@ -298,30 +302,45 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     async with Client(hub) as hub_client:
         offered = await remote_tools(hub_client, ("jack", ""))
         by_name = {tool.spec.name: tool for tool in offered}
-        # What the db has that the model may not call never left the hub.
-        assert "db__turn_list" in by_name
-        assert "db__turn_read" in by_name
-        assert "db__remember" not in by_name
+        # What the db has that the model may not call never left the hub, and
+        # what it may call arrived under the name the db's own code gives it.
+        assert "turn_list" in by_name
+        assert "turn_read" in by_name
+        assert "remember" not in by_name
 
-        payload = json.loads(await by_name["db__turn_list"].run({}))
+        payload = json.loads(await by_name["turn_list"].run({}))
 
     assert [entry["user_message"] for entry in payload["entries"]] == ["jack asked"]
 
 
 @pytest.mark.asyncio
-async def test_the_trim_is_a_call_the_harness_makes_and_a_model_cannot() -> None:
-    """`_func_tool_unload` is on the hub's API, which is the agent's.
+async def test_the_trim_is_one_tool_with_two_callers() -> None:
+    """`_func_tool_unload` is on the hub's API *and* in the model's list.
 
-    The agent server calls it before it saves a turn, and what it gets back is
-    the point: the names of the tools the model has just lost.  A model never
-    sees it — the underscore is the system's mark for a tool the machinery
-    calls — so it is not in the list this hop returns.
+    Both halves are deliberate.  The agent server calls it before it saves a
+    turn — on the API, not through `call_tool`, so a trim never depends on the
+    catalogue or the routing being in some particular state — and what it gets
+    back is the point: the names of the tools the model has just lost.
+
+    The model has it too, and that is what makes the trim *recordable*: the pair
+    the harness writes into the conversation names this tool, and a name the
+    request does not declare is a 400 from the Responses and Messages backends.
+    So this is the one `_`-prefixed name in the list this hop returns, and the
+    model can call it with the names it is done with.
     """
     async with Client(hub_with_upstream()) as hub:
         registry = ToolRegistry(await remote_tools(hub))
-        assert "_func_tool_unload" not in [spec.name for spec in registry.specs]
+        assert "_func_tool_unload" in [spec.name for spec in registry.specs]
 
         trimmed = await unload_tools(hub)
+
+        # The model's own call, through the registry, like any other tool.
+        text, ok = await registry.execute(
+            ToolCall(id="c1", name="_func_tool_unload", arguments={})
+        )
+
+    assert ok is True, "the budget is within its limit, so nothing was refused"
+    assert "within its budget" in text
 
     assert trimmed["unloaded"] == [], "a hundred is room for everything here"
     assert "within its budget" in trimmed["text"]

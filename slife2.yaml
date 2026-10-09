@@ -119,8 +119,12 @@ servers:
 # is slow, paid or down, the hub says so through its `servers` tool and the
 # model simply has fewer tools, while the conversation keeps working.
 #
-# Every tool arrives as `{name}__{tool}` — so `filesystem` below offers
-# `filesystem__read_file` — and the name is what the model calls.
+# Every tool here arrives as `{name}__{tool}` — so `filesystem` below offers
+# `filesystem__read_file` — and the name is what the model calls.  The prefix is
+# what keeps two servers' tools apart, and it is for entries *here*: a plugin's
+# tools are the model's under their own names (`now`, `turn_read`), because
+# there is one set of tools in this system and the plugin serving one is not
+# something the model needs to reason about.
 #
 #   command + args + env     stdio: a process slife2 starts
 #   url + headers            http: an endpoint somebody else runs

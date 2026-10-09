@@ -626,14 +626,30 @@ business passing those on). §5 has the rest.
 
 **The hub's API is the agent's and never the model's.** Like the db server's
 `remember`, the model never sees `list_tools`, `call_tool` or
-`servers`; it sees the *proxied* tools, under `{server}__{tool}` names. That
+`servers`; it sees the tools themselves, by the names below. That
 indirection is what keeps the hub's surface constant: a server coming and going
 changes what the model may call without changing anything about the hub's own
-protocol. `skill_use`, `tool_search` and `func_tool_load` are the three tools
-this process serves *to a model*, and they are not part of that API — they are a
-source of tools like any other, which is why they appear in the list and not in
-the protocol. `_func_tool_unload` goes the other way: it is on the API, called by
-the harness, and in no model's list at all.
+protocol. `skill_use`, `tool_search`, `func_tool_load` and `_func_tool_unload`
+are the four tools this process serves *to a model*, and they are not part of
+that API — they are a source of tools like any other, which is why they appear
+in the list and not in the protocol. The fourth is the odd one and has both: the
+model gets it as a tool, and the harness gets it on the API, because the trim is
+the one thing here that is *recorded* — see the budget, below.
+
+**A name carries a server only where it has to, and for ours it never does.**
+`now`, `calc`, `turn_read` and `tool_search` are slife2's tools, and
+`builtins__now` was the system's own arrangement leaking into the one thing the
+model reads on every request: a plugin is a process slife2 starts, which is a
+fact about us and not about the tool — the model choosing `calc` has no use for
+it, and `servers()` reports it to the person who does. What the prefix is *for*
+is somebody else's tools, where the operator may write down four servers that
+each offer a `search`: `arxiv__search` against `serper__search` is the
+difference between reaching the tool the model read about and reaching a
+stranger. So the rule is `model_name`'s — the bare name for ours,
+`{server}__{tool}` for the rest — and it is stated once, for the row and the
+listing both. Its cost is that ours are one namespace: two plugins cannot offer
+one name between them, and the catalogue refuses the second loudly (`merge`)
+rather than letting a name mean two things.
 
 **Nothing with a server behind it is served by the hub process, and the builtins
 are why that is worth saying.** `echo`, `now` and `calc` have no credential, no
@@ -654,11 +670,12 @@ is already holding. A server invented to wrap one `read_text` is not uniformity,
 it is a process that exists to be connected to. So the rule is stated by what it
 excludes: **everything with a server behind it goes through the one code path**
 — the builtins included, which is why they stay where they are — and the tools
-the hub serves itself are the other path, named as themselves (`skill_use`,
-`list_tools` before it) rather than `{server}__{tool}`, because there is no
-server to name. The list is still one list, assembled in one place, with one
-naming rule; what varies is only whether a name resolves to a connection or to a
-function in this process.
+the hub serves itself are the other path. They are named as themselves
+(`skill_use`), which is the rule above reached from the other side: what a name
+can carry is a *server*, and the hub's own tools have none to name while a
+plugin's would name slife2 itself. The list is still one list, assembled in one
+place, with one naming rule; what varies is only whether a name resolves to a
+connection or to a function in this process.
 
 **A credential is not a server, and skills have them.** baidu-search's header
 declares `BAIDU_API_KEY`, and the playbook's first instruction runs a script that
@@ -738,16 +755,25 @@ unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
 
 **The budget is enforced by the harness, at a turn boundary, and it says what it
-took.** Over `tool_load.threshold` (a hundred, v1's number), the least recently
-*called* function tools are unloaded — never a plugin's, never an `autoload`
-one — and the trim is a call rather than a rule inside the gate: `_func_tool_unload`
-is on the hub's API, the agent server runs it before it saves a turn, and the
-answer names the tools the model has just lost. That is the whole reason it is a
-call. Trimming inside the gate would be taking a tool away underneath a model
-that is still using it, and trimming silently would leave a model looking for a
-tool it believes it still has. The leading underscore is the system's mark for a
-tool the *machinery* calls rather than one a model chooses, and it is what keeps
-that name out of every model's tool list.
+took — in the conversation, not only in a log.** Over `tool_load.threshold` (a
+hundred, v1's number), the least recently *called* function tools are unloaded —
+never a plugin's, never an `autoload` one — and the trim is a call rather than a
+rule inside the gate: `_func_tool_unload` is on the hub's API, the agent server
+runs it before it saves a turn, and the answer names the tools the model has
+just lost. Trimming inside the gate would be taking a tool away underneath a
+model that is still using it; trimming *silently* would leave it looking for a
+tool it believes it has.
+
+So the trim is written back as a **harness tool-pair** — v1's mechanism, and the
+reason it works is v1's rule: the pair names a tool, and a request whose history
+calls a tool its `tools` array does not declare is a 400 from the Responses and
+Messages backends. A pair invented in the history layer would be exactly that,
+which is why `_func_tool_unload` is the **one `_`-prefixed name a model sees**
+(v1's single exception to its own convention, kept as its own): the name is
+declared, the model can call it with the names it is done with, and the pair the
+harness writes is a call the tool could genuinely have made. Nothing is written
+when nothing moved — an empty pair every turn is a record of something that did
+not happen.
 
 **Recency is a call, and the hub is where it is learned.** The row carries two
 stamps — `last_loaded`, written when it entered the list, and `last_used`,
@@ -809,7 +835,12 @@ about: the model's tool list is what its next request carries, so a list that
 quietly lost three tools between two turns is a model looking for a tool it
 believes it has, and the harness is the only party that can say otherwise. What
 the trim needed was not to be *removed* but to be *answered*: one call at a turn
-boundary, naming what it took.
+boundary, naming what it took. **Who reads that answer is what changed next**,
+and it is v1's arrangement rather than this port's first one: the harness was the
+only reader, so the model still learned about the trim only by reaching for a
+tool that was gone. The trim is now a pair in the conversation, which puts it in
+front of both readers — and puts the tool in the model's list, because a pair
+whose name is not declared is a request the backends refuse.
 
 ## 9. Deferred
 

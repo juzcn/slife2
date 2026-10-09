@@ -463,8 +463,11 @@ class ToolServerSettings:
     running system stops matching the file it was started from.
     """
 
-    #: The name it is configured under.  It prefixes every tool this server
-    #: offers, so it is also the name a person reads in a tool call.
+    #: The name it is configured under.  For an entry under `tools:` it prefixes
+    #: every tool that entry offers, so it is also the name a person reads in a
+    #: tool call; for one of ours (`kind="plugin"`) it prefixes nothing — a
+    #: plugin's tools are the model's under their own names, and this is the
+    #: name `servers()` reports them by.  See `slife2.toolhub.model_name`.
     name: str
     #: Which kind of entry this is: `"mcp"` or `"rest"` for one somebody wrote
     #: under `tools:`, and `"plugin"` for one of ours, which has no section of

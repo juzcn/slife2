@@ -1548,6 +1548,17 @@ UNLOADED = "unloaded"
 #: and a forgotten one cannot silently return an empty set.
 NA = "n/a"
 
+#: The `_`-prefixed names the model *does* get, and there is exactly one.
+#:
+#: A name in this set is injected, callable, and evictable only in the sense
+#: that nothing of ours ever is — see `_injectable_sql` for the argument and
+#: `slife2.toolhub.FUNC_TOOL_UNLOAD` for the tool.  Spelled here rather than
+#: imported for the reason `PLUGIN` is spelled in two modules: the hub must not
+#: be importable from the catalogue's half, and the db must not import a server.
+#: The two spellings are the same fact — the name of one tool — which is why
+#: this set has one member and is not a pattern.
+MODEL_VISIBLE_HARNESS_TOOLS = frozenset({"_func_tool_unload"})
+
 #: The columns the code reads or writes on `tool`, checked at open in BOTH
 #: directions: a missing column cannot answer a query, and an unknown one is a
 #: leftover from a schema this code no longer writes.
@@ -1608,7 +1619,7 @@ def _check_values(ddl: str, column: str) -> set[str] | None:
 #:
 #: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
 #: its name far more often than by anything else about it — "the calculator" and
-#: `builtins__calc` have to meet — so the name dominates and the schema, which is
+#: `calc` have to meet — so the name dominates and the schema, which is
 #: long and full of punctuation, counts for least.  v1's weights.
 BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5)
 
@@ -2877,20 +2888,26 @@ def _injectable_sql(sources: Sequence[str]) -> str:
     Built from the constants rather than spelled out, so the SQL cannot drift
     from `FUNCTION_CATEGORIES` — the same reason `_CATEGORY_CHECK` is.
 
-    **A name beginning with `_` is a harness tool and is never injected.**  v1's
-    convention, and it is a name and not a column for v1's reason: what makes a
-    tool the harness's is that the *machinery* calls it — `_func_tool_unload` is
-    run by the agent server at a turn boundary, with nobody choosing it — and a
-    fact about who calls a thing belongs on the thing, where both sides can read
-    it without a second register to keep in step.  It is in the catalogue like
-    everything else, with its state, and the gate is what keeps it out of the
-    model's list.
+    **A name beginning with `_` is a harness tool and is not injected** — with
+    one exception, below.  v1's convention, and it is a name and not a column
+    for v1's reason: what makes a tool the harness's is that the *machinery*
+    calls it, and a fact about who calls a thing belongs on the thing, where
+    both sides can read it without a second register to keep in step.
+
+    **The exception is `_func_tool_unload`**, and it is the only one.  The
+    harness's trim is written into the conversation as a tool pair, a pair names
+    a tool, and a request whose history calls a tool its `tools` array does not
+    declare is a 400 from the Responses and Messages backends (v1's rule, and
+    v1's single exception: one `_` tool the model sees).  A tool the model reads
+    in its own history but cannot call would be inconsistent with itself, so it
+    is injected, callable, and named the same way it is named here.
     """
+    visible = _in_list(MODEL_VISIBLE_HARNESS_TOOLS) or "''"
     return (
         f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
         f" AND load_status = '{LOADED}'"
         f" AND source_id IN ({_marks(sources)})"
-        f" AND name NOT LIKE '\\_%' ESCAPE '\\'"
+        f" AND (name NOT LIKE '\\_%' ESCAPE '\\' OR name IN ({visible}))"
     )
 
 

@@ -55,7 +55,7 @@ def test_normalize_does_not_cut_a_term() -> None:
 
     It spaces CJK and collapses whitespace and does nothing else, so an
     underscore survives it.  Measured against the pinned SQLite, the tokenizer
-    *does* split one (`calc` matches `builtins__calc`) and `terms` splits it
+    *does* split one (`search` matches `serper__search`) and `terms` splits it
     too — that agreement is what has to hold, and this pins the half that is
     easy to "fix" into disagreement.
     """

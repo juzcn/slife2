@@ -402,19 +402,33 @@ def test_the_gate_answers_with_loaded_tools_of_live_sources(tmp_path) -> None:
     assert store.injectable(["builtins"])["tools"] == []
 
 
-def test_a_harness_tool_is_never_injected(tmp_path) -> None:
-    """A name beginning with `_` is the machinery's, and a model never sees it.
+def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
+    """A name beginning with `_` is the machinery's, and the gate keeps it back.
 
-    The catalogue holds its row — it is a tool like everything else, with a
-    state and a source — so the *gate* is what keeps it out, and the convention
-    is a name rather than a column for v1's reason: what makes a tool the
-    harness's is who calls it, and that belongs on the thing itself.
+    The catalogue holds its row either way — it is a tool like everything else,
+    with a state and a source — so the *gate* is what decides, and the
+    convention is a name rather than a column for v1's reason: what makes a tool
+    the harness's is who calls it, and that belongs on the thing itself.
+
+    **`_func_tool_unload` is the one exception, and it is by name and not by
+    shape.**  The harness's trim is recorded in the conversation as a tool pair,
+    so the model reads this name in its own history; a tool the model can read
+    there but not call would be inconsistent with itself, and v1's rule is that
+    the name has to be declared for the backends to take the pair at all.  Any
+    other underscore name stays out — which is what the second half of this
+    asserts, and it is the half that keeps the convention from eroding into
+    "names the hub happens to like".
     """
     store = store_at(tmp_path)
-    merge(store, "toolhub", "plugin", [tool("_func_tool_unload"), tool("tool_search")])
+    merge(
+        store,
+        "toolhub",
+        "plugin",
+        [tool("_func_tool_unload"), tool("_func_something_new"), tool("tool_search")],
+    )
 
     injected = [row["name"] for row in store.injectable(["toolhub"])["tools"]]
-    assert injected == ["tool_search"], "the harness's own is not the model's"
+    assert injected == ["_func_tool_unload", "tool_search"]
 
 
 def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
@@ -425,13 +439,13 @@ def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
     because somebody asked for it must not be evicted by the count either.
     """
     store = store_at(tmp_path, autoload={"serper"})
-    merge(store, "builtins", "plugin", [tool("builtins__calc")])
+    merge(store, "builtins", "plugin", [tool("calc")])
     merge(store, "serper", "mcp", [tool("serper__search")])
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
 
     assert rows_in(store) == [
         ("arxiv__search", "enabled", "unloaded"),
-        ("builtins__calc", "enabled", LOADED),
+        ("calc", "enabled", LOADED),
         ("serper__search", "enabled", LOADED),
     ]
 
@@ -528,7 +542,7 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
     `now` and `calc` is the failure DESIGN.md §8 is built around.
     """
     store = store_at(tmp_path, threshold=4, autoload={"serper"})
-    merge(store, "builtins", "plugin", [tool("builtins__calc")])
+    merge(store, "builtins", "plugin", [tool("calc")])
     merge(store, "serper", "mcp", [tool("serper__search")])
     merge(
         store,
@@ -546,7 +560,7 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
 
     assert taken == ["arxiv__old"], "the oldest of the three, and only it"
     loaded = {row[0]: row[2] for row in rows_in(store)}
-    assert loaded["builtins__calc"] == LOADED
+    assert loaded["calc"] == LOADED
     assert loaded["serper__search"] == LOADED
 
 

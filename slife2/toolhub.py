@@ -67,9 +67,11 @@ restart — the two things a snapshot in this process could never do.
 
 The budget that bounds it is enforced by the *harness*, not by the gate:
 `_func_tool_unload` is called by the agent server before it saves a turn, and the
-names it unloaded come back to the caller.  The leading underscore is the
-system's mark for a tool the machinery calls rather than one a model chooses, and
-it is why that name is never in a model's tool list — see `_func_tool_unload`.
+names it unloaded come back — to the harness's log, and to the model, as the
+tool pair the trim is recorded as.  The leading underscore is the system's mark
+for a tool the machinery calls rather than one a model chooses, and this is the
+one name that carries it *and* is in the model's list: the pair has to name a
+declared tool, so the model has it too — see `_func_tool_unload`.
 
 Why the tools are *here* and not in the agent
 ---------------------------------------------
@@ -99,7 +101,9 @@ having, and it is the same rule: **everything with a server behind it is reached
 by exactly one code path** — the builtins included, which is why they stay where
 they are.  The hub's own tools are the other path, and they are named as
 themselves (`skill_use`) rather than `{server}__{tool}`, because there is no
-server to name.  See DESIGN.md §8.
+server to name — and neither are ours, for the neighbouring reason that the
+server is slife2: `now`, not `builtins__now`.  `model_name` is that rule and
+DESIGN.md §8 is the argument for it.
 
 They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
@@ -191,9 +195,9 @@ SERVER_NAME = "slife2-toolhub"
 
 #: This server's key in the config's `servers:` table — and therefore the one
 #: name in `Config.plugins()` that is not a source of tools.  The hub asks
-#: every plugin but itself; a connection to itself would list the three tools of
-#: its own API and drop all three, which is a loopback nobody should have to
-#: reason about.
+#: every plugin but itself; a connection to itself would list the tools of its
+#: own API and drop them, which is a loopback nobody should have to reason
+#: about.
 #:
 #: It is also the name the hub's **own** tools are catalogued under.  They are
 #: this plugin's tools, served by this process: `tool_search`, the two
@@ -202,24 +206,39 @@ SERVER_NAME = "slife2-toolhub"
 #: has to remember a list of its own.
 CONFIG_KEY = "toolhub"
 
+#: The category — and the config `kind` — of a tool that is *ours*, which is
+#: what `slife2.db.PLUGIN` spells for the catalogue's own `category` column.
+#: One word in two modules rather than one import: the hub must not import a
+#: server (see `slife2.config`), and the db is one.  It is written down twice
+#: because it is a fact about the *system* — a plugin is a server slife2 starts
+#: — and it is what `model_name` reads to decide whether a name carries its
+#: server or is the whole of what the model says.
+PLUGIN = "plugin"
+
 #: The two tools this process serves a *model* to manage its own tool list.
 #: Named here because they are also what the hub will not let go of: see
 #: `ALWAYS_LOADED`.
 TOOL_SEARCH = "tool_search"
 FUNC_TOOL_LOAD = "func_tool_load"
 
-#: The harness's own trim, and the one tool it calls on this server's *API*
-#: rather than through `call_tool`.  The leading underscore is the convention:
-#: **a name beginning with `_` is a harness tool** — the machinery calls it, not
-#: the model — and this one is not in the catalogue at all, for the reason the
-#: hub's other API tools are not: what the catalogue holds is the model's tools,
-#: and this is not one of them.  See `build_server`'s `_func_tool_unload`.
+#: The trim, and the only name here with **two callers**.  The leading
+#: underscore is the convention — **a name beginning with `_` is a harness
+#: tool**, one the machinery drives rather than one the model chooses — and this
+#: is the single exception to it: the model has it too, because the harness's
+#: trim is recorded in the conversation as a tool pair, and a pair names a tool
+#: the request declares (v1's rule, and the reason its `_func_tool_unload` is
+#: the one `_` tool a model sees).  So the model may call it with the names it
+#: is done with, while the *harness* calls it with none — on this server's API
+#: rather than through `call_tool`, so the trim does not depend on the
+#: catalogue, the routing or the model's list being in any state.  See
+#: `build_server`'s `_func_tool_unload`.
 FUNC_TOOL_UNLOAD = "_func_tool_unload"
 
-#: What this process guarantees: the three tools it serves a model and the one
-#: the harness drives.  Always available, never evicted, and never unloaded —
-#: the first three are how a tool is found and loaded, so a budget that could
-#: take them away would leave the model holding a set it cannot change.
+#: What this process guarantees: **the four tools it serves a model**.  Always
+#: available, never evicted, and never unloaded — the three that find, load and
+#: trim are how a tool list is managed at all, so a budget that could take them
+#: away would leave the model holding a set it cannot change, and `skill_use`
+#: reads the playbooks every session is meant to reach for.
 ALWAYS_LOADED = frozenset(
     {
         TOOL_SEARCH,
@@ -291,8 +310,35 @@ def sanitise(part: str) -> str:
 
 
 def proxied_name(server: str, tool: str) -> str:
-    """What the model calls an upstream's tool: `server__tool`."""
+    """What the model calls somebody else's tool: `server__tool`."""
     return f"{sanitise(server)}{SEPARATOR}{sanitise(tool)}"
+
+
+def model_name(server: str, tool: str, category: str) -> str:
+    """What the model calls one tool: **the bare name for ours**, `server__tool`
+    for everybody else's.
+
+    `builtins__now` was a name telling the model about a division it has no
+    business reasoning about: there is one set of tools here, slife2's, and
+    `now` is the name of one of them.  A server in front of a name earns its
+    place by keeping two of *somebody else's* tools apart — the operator may
+    write down four servers that each offer a `search`, and `arxiv__search`
+    against `serper__search` is the difference between a call reaching the tool
+    the model read about and one reaching a stranger.
+
+    `category` is the row's own word for where a tool came from
+    (`slife2.db.PLUGIN` for ours, `mcp`/`rest` for the rest), so the rule reads
+    the same on both paths: this one names a tool on the way *in*, and the row
+    keeps the name for the way back out.  Nothing else has to agree about it —
+    a name is opaque to the catalogue, which is what lets a stored row mean the
+    same thing to a build that names differently (`_from_row`).
+
+    The sanitising is not optional for ours: a plugin is our code, and our code
+    can still name a tool something a provider rejects.
+    """
+    if category == PLUGIN:
+        return sanitise(tool)
+    return proxied_name(server, tool)
 
 
 def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
@@ -808,9 +854,9 @@ class Upstream:
         ours to decide about — which is why nothing under `tools:` sets it.
         """
         if not self.required:
-            return [_advertise(self.settings.name, tool) for tool in listed]
+            return [_advertise(self.settings, tool) for tool in listed]
         return [
-            _advertise(self.settings.name, tool)
+            _advertise(self.settings, tool)
             for tool in listed
             if for_the_model(getattr(tool, "meta", None))
         ]
@@ -979,11 +1025,12 @@ class LocalTool:
     describe.  What is left is a name, the schema the model reads, and the body
     that answers a call.
 
-    **A local tool keeps its own name**, `skill_use` rather than
-    `{server}__{tool}`, and it is routed before the catalogue is asked.  So a
-    collision is possible in principle — somebody else's server may offer a tool
-    of the same name — and local wins, which is the direction that keeps a tool
-    this system guarantees from being shadowed by somebody else's configuration.
+    **A local tool's name is its own**, `skill_use`, the way every tool of ours
+    is (`model_name`) — and it is routed *before* the catalogue is asked, which
+    is the part that is local to this class.  Being first is what makes a
+    collision safe: somebody else's server may offer a tool of the same name,
+    and local wins, which is the direction that keeps a tool this system
+    guarantees from being shadowed by somebody else's configuration.
 
     Its *row*, though, is an ordinary one, owned by this plugin: that is what
     makes the catalogue the single answer to "what may the model call", instead
@@ -1050,11 +1097,12 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "The tool names, as tool_search reports them — "
-                "'{server}__{tool}' for a server's, bare for one of the hub's. "
+                "The tool names, as tool_search reports them — bare for "
+                "slife2's own tools ('now', 'tool_search'), "
+                "'{server}__{tool}' for a tool server's ('arxiv__search'). "
                 "One name or several: ['arxiv__search'] and "
-                "['now', 'browser__open'] are the same kind of request. A single "
-                "name given as a bare string is understood too."
+                "['now', 'serper__search'] are the same kind of request. A "
+                "single name given as a bare string is understood too."
             ),
         }
     },
@@ -1070,9 +1118,41 @@ FUNC_TOOL_LOAD_DESCRIPTION = (
     "its cap. Each name gets its own line in the answer."
 )
 
+FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "The tools to take out of your list, as tool_search reports "
+                "them. Leave it empty to leave the budget to the harness, which "
+                "calls this that way at a turn boundary. One name or several, "
+                "and a single bare string is understood too."
+            ),
+        }
+    },
+}
 
-def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
-    """What this process serves a model itself: the three it can manage tools with.
+#: The description is written for **both** readers of this tool, because it has
+#: two callers and the model is the one that has to be able to tell them apart:
+#: a call it makes itself, and one the harness makes at a turn boundary — the
+#: pair that appears in its history with no names in it.  `_func_tool_unload`'s
+#: own docstring is where the double life is argued.
+FUNC_TOOL_UNLOAD_DESCRIPTION = (
+    "Take tools out of your list. Name the ones you are done with — or leave it "
+    "empty to leave the budget to the harness: it calls this with no names at a "
+    "turn boundary, and the answer names what went, so a trim you did not ask "
+    "for is something you read rather than something you notice later."
+)
+
+
+def local_tools(
+    config: Config,
+    catalogue: Catalogue,
+    live_sources: Callable[[], list[str]],
+) -> list[LocalTool]:
+    """What this process serves a model itself: the four it can manage tools with.
 
     **Read a skill** — `skill_use`, which is v1's pinned reader and the read
     half of that family.  The directory it reads is `<data>/skills/`, and it is
@@ -1083,19 +1163,23 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
     **Find a tool** — `tool_search`, the hybrid search over the catalogue.  The
     hub serves it rather than the db for the reason it serves `skill_use`: the
     model's tool list is this process's surface, and a name the model calls is
-    either `{server}__{tool}` or one of these.  What the tool *does* is the db's:
+    one of ours — these, or a plugin's — or `{server}__{tool}` for somebody
+    else's.  What the tool *does* is the db's:
     the two legs, the fusion and the filters all happen there, and this half
     only turns rows into text a model reads.
 
     **Load one** — `func_tool_load`, whose answer is likewise the db's verdict
     phrased for a model.
 
-    **Trim the list** — `_func_tool_unload`, which is the harness's and not the
-    model's (the underscore says so, and the gate agrees).  The agent server
-    calls it before it saves a turn: over the configured threshold, the least
-    recently used tools go, and **the caller is told which ones** — that is the
-    point of the trim being a call rather than something the gate does quietly,
-    because the harness is the party that has to know what the model just lost.
+    **Trim the list** — `_func_tool_unload`, the fourth, and the one of the four
+    with a second caller.  With no names it is the *budget*: the agent server
+    calls it that way at a turn boundary, the least recently used tools over
+    `tool_load.threshold` go, and the answer names them.  With names it is the
+    model saying what it is done with, which is v1's meta tool.  Being a tool
+    the *model* has is also what makes the harness's trim recordable: it is
+    written into the conversation as a pair under this name, so the name has to
+    be one the model's tool list declares — `_func_tool_unload` argues that, and
+    it is the one caller that made this the fourth rather than the third.
 
     The config is read *here* and once, because that is the one thing that is
     not the folder's: what a skill is given is the operator's answer, resolved
@@ -1160,6 +1244,25 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
             ok = ok and loaded
         return "\n".join(lines), ok
 
+    async def unload(arguments: dict[str, Any]) -> tuple[str, bool]:
+        """Take tools out of the model's list, by name or by budget.
+
+        Both callers of `_func_tool_unload` arrive here — the model with the
+        names it is done with, and the harness with none — because a tool has
+        one body however many ways it is called.  What the *harness* uses
+        instead is the hub's own API tool of the same name: the trim must not
+        depend on this list, this catalogue or this routing being in any
+        particular state, and `_func_tool_unload` is where that is argued.
+        """
+        found = await unload_tools(catalogue, live_sources(), _names_of(arguments))
+        # Nothing it could not do is a success.  A refused name (one the system
+        # works by) and an unknown one are both the model asking for something
+        # that did not happen, which is what `ok` is for — the trim the harness
+        # asks for has neither, and comes back true.
+        return _unload_as_text(found), not (
+            found.get("refused") or found.get("unknown")
+        )
+
     return [
         LocalTool(
             tool=UpstreamTool(
@@ -1190,6 +1293,16 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
                 parameters=FUNC_TOOL_LOAD_PARAMETERS,
             ),
             run=load,
+        ),
+        LocalTool(
+            tool=UpstreamTool(
+                name=FUNC_TOOL_UNLOAD,
+                server=CONFIG_KEY,
+                tool=FUNC_TOOL_UNLOAD,
+                description=FUNC_TOOL_UNLOAD_DESCRIPTION,
+                parameters=FUNC_TOOL_UNLOAD_PARAMETERS,
+            ),
+            run=unload,
         ),
     ]
 
@@ -1375,20 +1488,21 @@ def _load_as_text(name: str, answer: Mapping[str, Any]) -> tuple[str, bool]:
     return f"{name!r} could not be loaded ({outcome or 'no answer'})", False
 
 
-def _advertise(server: str, tool: Any) -> UpstreamTool:
+def _advertise(settings: ToolServerSettings, tool: Any) -> UpstreamTool:
     """One listed tool, named for the model.
 
-    The description carries the server's name because the tool name cannot carry
-    everything: `github__search` says where it came from to someone who knows,
-    and a model choosing between four tools called `search` needs to be told in
-    words.
+    **The name is the whole of what this decides**; the description is kept
+    exactly as the server wrote it.  What the model reads is assembled on the
+    way out of the catalogue (`_from_row`), which is the one place that knows
+    the row is ours to label — and the one place it can be done once, which is
+    the bug this pairing had while both ends did it.
     """
-    description = (tool.description or "").strip()
+    server = settings.name
     return UpstreamTool(
-        name=proxied_name(server, tool.name),
+        name=model_name(server, tool.name, settings.kind),
         server=server,
         tool=tool.name,
-        description=f"[{server}] {description}".strip(),
+        description=(tool.description or "").strip(),
         parameters=dict(tool.input_schema or {}),
     )
 
@@ -1415,9 +1529,18 @@ def _row_of(server: str, tool: UpstreamTool) -> dict[str, Any]:
 def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
     """One catalogue row, as the model's tool list wants it.
 
-    The inverse of `_row_of`, and where the `[server]` prefix comes back — so
-    what the model reads is what it always read, whether the row was written by
-    this hub, by another one, or by a build from last week.
+    The inverse of `_row_of`, and **the one place the `[server]` label is put
+    on** — the name is whatever the row says (so a row written by another hub,
+    or by a build from last week, reads as it always read), and the description
+    is the server's own with the server in front of it.  A model choosing
+    between four tools called `search` cannot do it from the name alone, and the
+    name is not allowed to carry a sentence; where a name *can* carry it — ours,
+    which have no server in front of them — the label keeps saying where it came
+    from anyway, because a label costs nothing and nothing else would.
+
+    Doing it here rather than in `_advertise` is what makes it happen once: the
+    two ends both doing it is how the model came to read `[builtins]
+    [builtins] Evaluate an arithmetic expression`.
     """
     server = str(row.get("source_id") or "")
     description = str(row.get("description") or "")
@@ -1462,7 +1585,7 @@ def plugin_settings(config: Config, name: str) -> ToolServerSettings:
     """
     return ToolServerSettings(
         name=name,
-        kind="plugin",
+        kind=PLUGIN,
         url=config.server(name).url,
         description="",
     )
@@ -1601,7 +1724,7 @@ def build_server(
     #: which it re-reads on every call.  `live_sources` is handed in because the
     #: trim asks the catalogue for what the model is *holding*, and only this
     #: process knows which sources are answering.
-    local: list[LocalTool] = local_tools(config, catalogue)
+    local: list[LocalTool] = local_tools(config, catalogue, live_sources)
 
     def local_route(name: str) -> LocalTool | None:
         for one in local:
@@ -1649,14 +1772,14 @@ def build_server(
 
         **The plugins are asked for their tools, and the hub's own tools are
         written down.**  Both are merges into the catalogue: the upstreams find
-        theirs by connecting, and this process's three are known without
+        theirs by connecting, and this process's own four are known without
         connecting to anything — so they are recorded here, once, and are rows
         like every other tool from then on.
 
         Order matters once: this has to happen before the first `list_tools`, or
         the model's first answer would be missing the tool that finds tools.
         """
-        category = "plugin"
+        category = PLUGIN
         await catalogue.merge(
             CONFIG_KEY, category, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
@@ -1693,9 +1816,9 @@ def build_server(
         loaded is not in this answer, and it is found with `tool_search` and put
         here with `func_tool_load` — which is what keeps the list that goes out
         with every request from growing to the size of everything installed.
-        The three tools that do the finding and the loading are always in it:
-        they are the mechanism, and a budget that could take them away would
-        leave the model holding a set it cannot change.
+        The four tools that find, load and trim are always in it: they are the
+        mechanism, and a budget that could take them away would leave the model
+        holding a set it cannot change.
 
         A plugin's tools are left out unless they declare themselves the
         model's (`slife2.audience`); a tool server's are all offered, because the
@@ -1771,7 +1894,8 @@ def build_server(
         what the far end is told.
 
         Args:
-            name: The tool's advertised name, `server__tool` for an upstream's.
+            name: The tool's advertised name — its own for ours, `server__tool`
+                for somebody else's (`model_name`).
             arguments: Its arguments, as the tool's schema describes them.
 
         Returns:
@@ -1861,23 +1985,37 @@ def build_server(
 
     @mcp.tool
     async def _func_tool_unload(names: list[str] | None = None) -> dict[str, Any]:
-        """Trim the model's tool list — called by the harness, never by a model.
+        """Trim the model's tool list — the harness's call, and the model's too.
 
-        The name carries a leading underscore, which is this system's mark for a
-        tool the *machinery* calls rather than one a model chooses, and this is
-        the only one there is: the agent server runs it before it saves a turn.
+        **Two callers, and the same name, deliberately.**  The agent server runs
+        this at a turn boundary (no names: enforce the budget), and the model
+        may run it too (names: the tools it is done with).  The second caller is
+        what makes the *first* one visible: the harness writes its trim into the
+        conversation as a tool pair, a pair names the tool it calls, and v1's
+        rule is the one to port — a pair whose name is not in the request's
+        declared tool list is a call the Responses and Messages backends reject.
+        So this is the single `_`-prefixed name a model sees (v1's exception,
+        and the reason `slife2.toolhub.model_name` does not filter it), and the
+        harness's own trim is a call this tool could genuinely have made.
 
-        **Why a call at all, rather than the gate just dropping the excess.**
-        Because the harness is the party that has to *know*: the tools the model
-        has loaded are what its next request carries, and a list that quietly
-        lost three of them between two turns is a model that will look for a
-        tool it still believes it has.  So the names come back, and the caller
-        says so in its log and to whoever is watching.
+        **Why the trim is a call at all, rather than the gate dropping the
+        excess.**  Because somebody has to *know*: the tools the model has
+        loaded are what its next request carries, and a list that quietly lost
+        three of them between two turns is a model that looks for a tool it
+        still believes it has.  The harness reads the names back for its log,
+        and the model reads them in the pair — the two halves of that sentence
+        are why the answer is names and text rather than a boolean.
 
-        A turn boundary is also the right moment and the reason it is not the
+        A turn boundary is also the right moment, and the reason it is not the
         gate: the list is rebuilt before every model call, so trimming it
         mid-turn would take away a tool the model had just loaded and was about
         to use.
+
+        **This is the hub's API, not the model's route.**  The model reaches the
+        same body through `call_tool` — it is a `LocalTool` like `tool_search` —
+        but the harness calls *this*, so a trim cannot be blocked by the
+        catalogue, the routing or the model's list being in some other state
+        than the harness expects.
 
         Args:
             names: The tools to take out — one or several.  **Empty means

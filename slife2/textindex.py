@@ -88,7 +88,7 @@ _CJK_RUN_RE = re.compile(f"[{_CJK_CLASS}]+")
 #: down — and the reverse leaves a term the index holds unreachable.
 #:
 #: The underscore is in the class, and measured to be on both sides:
-#: `unicode61` splits `builtins__calc` at its underscores (`calc` matches it),
+#: `unicode61` splits `arxiv__search` at its underscores (`search` matches it),
 #: and this cuts `foo_bar` into `foo` and `bar` the same way.  `normalize` does
 #: **not** cut it, which is not a disagreement — `normalize` spaces CJK and
 #: collapses whitespace, and cutting terms is this expression's job, not its.

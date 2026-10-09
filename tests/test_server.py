@@ -734,6 +734,106 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
+    tmp_path, monkeypatch
+) -> None:
+    """Over the budget, the harness takes tools away **and says so in the turn**.
+
+    The failure this exists for is a model whose next request carries fewer
+    tools than it believes it has: it reaches for one that is gone, and nothing
+    in the conversation explains why.  So the trim is written as a tool pair —
+    `_func_tool_unload`, called with no names — and the model reads which tools
+    left, in the turn that took them.
+
+    **Only when something actually moved.**  The pair is written from the
+    *answer*, not from the attempt: a turn under the budget gets no pair at all,
+    because an empty one every turn is a record of something that did not happen
+    and a model reading those learns to distrust the mechanism.
+
+    The evictable tools have to be somebody else's: everything slife2 ships is
+    protected from the budget, so the only way to be over it is to have loaded a
+    tool server's — which is the case the budget was built for.
+    """
+    from test_toolhub import upstream_server
+
+    from slife2.config import ToolLoadSettings, ToolServerSettings
+    from slife2.db_server import build_server as build_db
+    from slife2.paths import DATA_ENV_VAR, db_dir
+    from slife2.toolhub import build_server as build_hub
+    from tests.fakes import plugin_transports
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    # A cap of three, so the nine slife2 ships are already over it and the two
+    # the model loads are the only victims there are.
+    base = default_config()
+    cfg = replace(
+        base,
+        tool_load=ToolLoadSettings(threshold=3),
+        tools={
+            "fake": ToolServerSettings(name="fake", command="in-memory"),
+        },
+        agent=base.agent,
+    )
+
+    # The model loads a tool server's two tools, then answers.
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="loading",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="func_tool_load",
+                        arguments={"names": ["fake__echo", "fake__boom"]},
+                    ),
+                ),
+                stop_reason="tool_calls",
+            ),
+        ),
+        ScriptedTurn(result=StreamChatResult(text="done", stop_reason="stop")),
+    )
+
+    async with (
+        Client(
+            build_hub(
+                cfg,
+                transports=plugin_transports(
+                    cfg, {"fake": lambda settings: upstream_server()}
+                ),
+            )
+        ) as hub_client,
+        Client(build_db(cfg, embedder=StubEmbedder())) as db_client,
+    ):
+        server = build_server(
+            cfg, backend=backend, db_client=db_client, hub_client=hub_client
+        )
+        await send(server, "look something up", agent="jack", channel="human")
+
+    stored = json.loads(
+        sqlite3.connect(db_dir() / "jack.turn.db")
+        .execute("SELECT messages FROM turn")
+        .fetchone()[0]
+    )
+
+    # On the wire a call is `{id, type, function: {name, arguments}}`, and the
+    # arguments are a JSON *string* there — the one place the format's
+    # awkwardness is dealt with.
+    trims = [
+        (message["tool_calls"][0], stored[index + 1])
+        for index, message in enumerate(stored)
+        if message.get("tool_calls")
+        and message["tool_calls"][0]["function"]["name"] == "_func_tool_unload"
+    ]
+    assert len(trims) == 1, "one trim, one pair — and it is in the saved turn"
+    call, result = trims[0]
+    assert call["function"]["arguments"] == "{}", "no names: the budget, not a choice"
+    assert call["id"] == result["tool_call_id"], "answered, as the wire requires"
+    assert result["role"] == "tool"
+    assert result["content"].startswith("2 tool(s) unloaded")
+    assert "fake__echo" in result["content"] and "fake__boom" in result["content"]
+
+
+@pytest.mark.asyncio
 async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
     """A missing db server is a broken system, not a degraded one.
 

@@ -85,9 +85,9 @@ from slife2.mcp_server import (
     parse_serve_args,
     serve,
 )
-from slife2.messages import Message
+from slife2.messages import Message, ToolCall
 from slife2.prompt import render as render_system_prompt
-from slife2.toolclient import remote_tools, unload_tools
+from slife2.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
 from slife2.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -586,7 +586,6 @@ def build_server(
             # Nothing to record, or a caller cancelled while queued — in which case its
             # turn never started and there is nothing that happened to record.
             return
-        await trim_tools(loop)
         await remember_turn(
             loop.agent,
             loop.subagent,
@@ -599,7 +598,8 @@ def build_server(
         )
 
     async def trim_tools(loop: Loop) -> None:
-        """Bring the model's tool list back within its budget, before saving.
+        """Bring the model's tool list back within its budget — and say so in the
+        turn, rather than doing it behind the model's back.
 
         **A turn boundary, and the harness's own call.**  The tools a model has
         loaded go out with every request, so a turn that loaded several has left
@@ -607,28 +607,67 @@ def build_server(
         than by the gate because this is the moment nothing is in flight: the
         list is rebuilt before every *model call*, so dropping the excess
         mid-turn would take away a tool the model had just loaded and was about
-        to use.
+        to use.  The count and the threshold are the catalogue's (`evict`); what
+        this side decides is *when* to ask, which is the half a provider cannot
+        do for us.
 
-        It is also the moment the harness can *say* what happened.  The answer
-        names the tools that went, and they are logged — a model whose next
-        request carries three fewer tools than it thinks it has is a model that
-        will look for one of them.
+        **What went is written into the conversation.**  The trim is recorded as
+        a tool pair — `_func_tool_unload` called with no names — so the model
+        reads that its list shrank and which tools left, instead of reaching for
+        a tool it still believes it has.  That is v1's *harness tool-pair*
+        (DESIGN.md §2.5 there), and it is why the tool is in the model's list at
+        all: v1's rule is that such a pair has to name a **declared** tool,
+        because the Responses and Messages backends reject a tool call in
+        history that is not in the request's tool list.  A pair invented in the
+        history layer would be exactly that.
 
-        Best-effort by construction (`slife2.toolclient.unload_tools` swallows a
-        hub that will not answer): the turn is over and has been answered, and
+        Nothing is written when nothing moved: no tools unloaded, no pair.  An
+        empty pair every turn would be a record of something that did not
+        happen, and a model reading it would learn to distrust the mechanism.
+
+        Best-effort by construction: the turn is over and has been answered, and
         bookkeeping that runs after it must not turn a good turn into a failed
         one.  A hub that is really gone makes itself heard on the next turn's
         tool list, which is asked for before the conversation is touched.
         """
-        found = await unload_tools(await hub())
-        unloaded = [str(name) for name in found.get("unloaded") or []]
-        if unloaded:
-            logger.info(
-                "%s: %d tool(s) unloaded to stay within the budget: %s",
+        try:
+            found = await unload_tools(await hub())
+        except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
+            logger.warning(
+                "%s: the tool list was not trimmed: %s",
                 describe((loop.agent, loop.subagent)),
-                len(unloaded),
-                ", ".join(unloaded),
+                exc,
             )
+            return
+        unloaded = [str(name) for name in found.get("unloaded") or []]
+        if not unloaded:
+            return
+        logger.info(
+            "%s: %d tool(s) unloaded to stay within the budget: %s",
+            describe((loop.agent, loop.subagent)),
+            len(unloaded),
+            ", ".join(unloaded),
+        )
+        call_id = f"_harness_func_tool_unload_{time.time_ns():x}"
+        # **Both halves with nothing awaited between them.**  An interruption in
+        # that gap leaves an assistant message whose call is never answered, and
+        # that is the one history state every provider rejects — the same reason
+        # the caller refuses to start a trim on a cancelled turn.  Two appends
+        # with no suspension point between them cannot be split.
+        loop.messages.append(
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id=call_id, name=FUNC_TOOL_UNLOAD, arguments={})],
+            )
+        )
+        loop.messages.append(
+            Message(
+                role="tool",
+                content=str(found.get("text") or ""),
+                tool_call_id=call_id,
+            )
+        )
 
     async def run_turn_into(
         loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
@@ -638,11 +677,21 @@ def build_server(
         `outcome` is filled in a `finally`, *after* the repair, so it always
         holds what this turn is answerable for: the whole exchange, or the
         user's message alone when the turn was cut off.
+
+        **The trim happens here, inside the lock, and no longer after it.**  The
+        pair it records has to be part of *this* turn — the saved record and the
+        live history are one list until the snapshot is taken — and it has to be
+        written before the next queued turn can append anything after it.  The
+        price is that a queued turn waits for one loopback to the hub; the thing
+        it buys is a transcript in which a tool the model lost is something it
+        read in the turn that took it away, rather than a gap somebody has to
+        explain.
         """
         snapshot = len(loop.messages)
         outcome.started_at = now()
         user = _with_images(item.prompt, item.images, config, loop.model)
         agent_loop = await loop_for(loop.model, (loop.agent, loop.subagent))
+        cancelled = False
         try:
             outcome.result = await agent_loop.run_turn(loop.messages, user, observer)
         except asyncio.CancelledError:
@@ -657,8 +706,17 @@ def build_server(
             # itself, so truncating to the snapshot would delete the message
             # this whole arrangement exists to not lose.
             del loop.messages[snapshot + 1 :]
+            cancelled = True
             raise
         finally:
+            # Not on the cancelled path, and not merely to save a call: this is
+            # a `finally` running *during* a cancellation, where the next await
+            # is cancelled at its first checkpoint — so a pair could be started
+            # and never finished, which is the one history state that is a 400
+            # from every provider.  v1's `_auto_invoke` refuses to start for the
+            # same reason.  The turn is over; the budget can wait a turn.
+            if not cancelled:
+                await trim_tools(loop)
             outcome.messages = list(loop.messages[snapshot:])
             outcome.completed_at = now()
 

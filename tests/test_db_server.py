@@ -405,7 +405,10 @@ async def test_the_catalogue_is_a_capability_of_this_plugin(
                 "category": "plugin",
                 "tools": [
                     {
-                        "name": "builtins__calc",
+                        # A plugin's tool, under the name the model calls it:
+                        # bare, because the plugin serving it is slife2 itself
+                        # (`slife2.toolhub.model_name`).
+                        "name": "calc",
                         "description": "Evaluate an arithmetic expression.",
                         "remote_name": "calc",
                         "schema": '{"e": "expression"}',
@@ -413,15 +416,15 @@ async def test_the_catalogue_is_a_capability_of_this_plugin(
                 ],
             },
         )
-        assert merged.data["inserted"] == ["builtins__calc"]
+        assert merged.data["inserted"] == ["calc"]
 
         injected = await client.call_tool("tool_injectable", {"sources": ["builtins"]})
-        assert [row["name"] for row in injected.data["tools"]] == ["builtins__calc"]
+        assert [row["name"] for row in injected.data["tools"]] == ["calc"]
 
         found = await client.call_tool("tool_search", {"query": "arithmetic"})
-        assert [row["name"] for row in found.data["results"]] == ["builtins__calc"]
+        assert [row["name"] for row in found.data["results"]] == ["calc"]
 
-        routed = await client.call_tool("tool_route", {"name": "builtins__calc"})
+        routed = await client.call_tool("tool_route", {"name": "calc"})
         assert routed.data["tool"]["remote_name"] == "calc"
 
 
@@ -446,7 +449,7 @@ async def test_the_catalogue_is_indexed_before_anything_is_served(
                 "category": "plugin",
                 "tools": [
                     {
-                        "name": "builtins__calc",
+                        "name": "calc",
                         "description": "Evaluate an arithmetic expression.",
                         "remote_name": "calc",
                         "schema": "",
@@ -461,5 +464,5 @@ async def test_the_catalogue_is_indexed_before_anything_is_served(
     second = StubEmbedder(identity="stub:two")
     async with Client(build_server(default_config(), embedder=second)) as client:
         found = await client.call_tool("tool_search", {"query": "arithmetic"})
-        assert [row["name"] for row in found.data["results"]] == ["builtins__calc"]
+        assert [row["name"] for row in found.data["results"]] == ["calc"]
     assert second.calls, "rebuilt for the model that is in use now"

@@ -175,8 +175,14 @@ is what a person is told when the command turns out not to be on `PATH`.
 (DESIGN.md §9). The playbooks in `skills/` already have theirs — `skill_use`,
 above.
 
-A tool that came from a server reaches the model as `{name}__{tool}` —
-`builtins__calc`, `arxiv__arxiv_search_papers`.
+A tool's name carries the server it came from when there is one to carry: an
+entry under `tools:` reaches the model as `{name}__{tool}` —
+`arxiv__arxiv_search_papers`. **Ours do not.** `now`, `calc` and `turn_read` are
+slife2's tools, and `builtins__now` was this system's own arrangement leaking
+into the one thing the model reads on every request: which plugin serves a tool
+is a fact about us, and `servers()` reports it to whoever is debugging. So our
+tools are bare, and they are one namespace — two plugins cannot offer one name
+between them — which the catalogue refuses loudly rather than resolving.
 
 **What the model is handed is the tools it has loaded, not the tools that
 exist.** The list is re-read from the hub before *every model call*, and it
@@ -202,8 +208,11 @@ just brought in — and a tool never called since it was loaded is ordered by wh
 it was loaded. That trim happens at a turn
 boundary — the harness calls `_func_tool_unload` before it saves the turn, and
 the names come back, so what the model just lost is something the log can say
-rather than something nothing notices. Being evicted costs a search and a load,
-not a capability.
+rather than something nothing notices. **And the model reads it too**: the trim
+is written into the conversation as a tool call and its result, so a model whose
+list shrank learns that from the transcript rather than by reaching for a tool
+that is no longer there. Nothing is written when nothing was taken. Being
+evicted costs a search and a load, not a capability.
 
 Which of a plugin's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
@@ -220,15 +229,16 @@ the hub itself, because a skill has no server behind it: it is a document in
 returns that skill's `SKILL.md`, with the folder it lives in in front of it so
 the paths in the body mean something. No process, no credential, no address, and
 nothing a connection could tell you about it; a server wrapping one `read_text`
-would exist only to be connected to. Its name says as much: it is `skill_use` and
-not `{server}__{tool}`, because there is no server to name. Skills are installed
-by putting a directory in that folder — the tool reads the disk on every call, so
-there is nothing to restart. `tool_search` and `func_tool_load` are the same kind
-of thing, and are the other two names without a server in front of them.
+would exist only to be connected to. Its name says as much: `skill_use`, with no
+server in front of it — which is how every one of our tools is named, and not a
+privilege of this one. Skills are installed by putting a directory in that
+folder — the tool reads the disk on every call, so there is nothing to restart.
+`tool_search` and `func_tool_load` are the same kind of thing: the other two the
+hub serves itself.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
-three included. The hub decides what tools *are* — which servers, the
-`{server}__{tool}` naming, who may call one — and `slife2-db` keeps the record
+three included. The hub decides what tools *are* — which sources, the naming
+rule above, who may call one — and `slife2-db` keeps the record
 and answers the questions: which rows are loaded, what one is called at the far
 end, and the two search legs. Nothing in the hub opens a database, and nothing in
 the catalogue knows what a proxy name is.

@@ -67,20 +67,23 @@ SERVERS = "servers"
 #: what the model lost, and the harness is the party that has to know.
 FUNC_TOOL_UNLOAD = "_func_tool_unload"
 
-#: What separates a server from a tool in a proxied name.  Double, not single:
-#: FastMCP's own multi-server client prefixes with one underscore, and one
-#: underscore is a character an upstream tool name can contain — `read_file`
-#: would then be a name nobody could split back apart.  Two of them, and the
-#: convention is v1's, which used it for the same reason.
+#: What separates a server from a tool in a proxied name — which is only ever
+#: somebody else's tool: ours are the model's under their own names, because the
+#: server behind one is slife2 itself (`slife2.toolhub.model_name`).  Double,
+#: not single: FastMCP's own multi-server client prefixes with one underscore,
+#: and one underscore is a character an upstream tool name can contain —
+#: `read_file` would then be a name nobody could split back apart.  Two of them,
+#: and the convention is v1's, which used it for the same reason.
 SEPARATOR = "__"
 
 
 @dataclass(frozen=True)
 class UpstreamTool:
-    """One tool an external server offers, as the hub advertises it.
+    """One tool a server offers, as the hub advertises it.
 
-    `name` is what the model sees and calls: the upstream's own tool name with
-    its server in front, already made legal for a provider by the hub.  `tool`
+    `name` is what the model sees and calls: the upstream's own tool name, with
+    its server in front when the tool is somebody else's and bare when it is one
+    of ours, already made legal for a provider by the hub.  `tool`
     keeps the name the upstream knows, because the two are no longer the same
     string once either has been sanitised and only the hub can address the far
     end — which is why `call_tool` takes `name` and not a pair.
