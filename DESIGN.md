@@ -21,6 +21,8 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
   ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-db                     (one SQLite file per agent)
+  │                                 └── HTTP 127.0.0.1:8004/mcp ──▶ slife2-llm-embeddings
+  │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub
   │                                 ├── :8030/mcp ──▶ slife2-builtins   (`echo`, `now`, `calc`)
   │                                 └── MCP ──▶    external tool servers, and REST via a proxy
@@ -28,6 +30,11 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
   └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
 ```
+
+The embeddings server hangs off the **db** rather than the agent, because the
+thing that needs a vector is the store's index and not the turn: a turn is
+written with its vector in one transaction, so the writer is the party that
+holds the connection.
 
 **One component, one job, and the granularity is deliberate.**  A model backend
 speaks one wire protocol; the db keeps turns; the hub is where the tools come
@@ -60,8 +67,12 @@ Two properties fall out of this and are the reason for it:
   of a child process, and the agent that asks for the tool never sees either.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
   switching providers is changing a URL. `grep -r "import openai\|import anthropic"
-  slife2/` matches only files under `llm/` that are model servers — one per wire
-  protocol, so three of them now, and nothing else in the tree.
+  slife2/` matches four files, all under `llm/` and all servers, each importing
+  inside the function that builds the client: three model servers, one per wire
+  protocol, plus the embeddings server. Nothing else in the tree imports either
+  — and the fourth is the one worth checking, because it is not a *model*
+  backend: the db reaches it for the index, and it holds a key for the same
+  reason the others do rather than for any reason of its own.
 
 The cost is one JSON-RPC hop per token on loopback. That is small and it is the
 price of the architecture; `ProgressObserver` is where a coalescing fix goes if
@@ -83,7 +94,7 @@ server:    ← notifications/progress   {text: "你"}
 **The result is authoritative; the notifications are display.** This is not a
 nicety. Progress notifications can be dropped, delayed, or coalesced by the
 transport without the caller noticing, because the caller builds its state from
-the returned value. It is also why `slife2.tui.widgets.Transcript` *discards*
+the returned value. It is also why `slife2.tui.widgets.ChatView` *discards*
 deltas that arrive after a turn's result: they are late fragments of something
 already replaced.
 
@@ -220,7 +231,7 @@ real transport, not assumed — so a record written that way is simply lost. A t
 created outside the cancelled scope does land, so the cancel path detaches the
 write and logs its failure instead of dropping it. What that gives up is
 ordering: if a queued turn follows immediately, it may write first. That is a
-cosmetic inversion in `recent`, and it is the cheaper half of the trade — the
+cosmetic inversion in `turn_list`, and it is the cheaper half of the trade — the
 alternative is every queued turn waiting on the db server.
 
 **The id travels with the call, at every hop.** It is not only the agent server
@@ -252,10 +263,14 @@ appears.
 
 Four decisions carry that:
 
-**A probe decides whether a server is alive.** Only `tools/list` answering with
-the tool we expect proves that *our* server is up; a listening port proves
-something is there, and a record file proves something was there once. So the
-record is never consulted for liveness, and a stale one cannot wedge a start.
+**A probe decides whether a server is alive**, and what it compares is the
+server's *identity* — `Client.server_info`'s name, which the handshake carries
+for free, falling back to a `tools/list` membership check only when a server
+reports no name. §6 has the measurement and why the fallback is load-bearing.
+What the probe rules out either way is being pointed at a *different* MCP
+server, which a bare connection test waves through. A listening port proves
+something is there and a record file proves something was there once, so the
+record is never consulted for liveness and a stale one cannot wedge a start.
 
 **A lock is a kernel object.** A Windows named mutex, a POSIX `flock`. The
 operating system releases both when the holder dies, however it dies — so there
@@ -599,7 +614,7 @@ protocol's own keys name *this* request's progress stream, and a proxy has no
 business passing those on). §5 has the rest.
 
 **The hub's API is the agent's and never the model's.** Like the db server's
-`remember` and `recent`, the model never sees `list_tools`, `call_tool` or
+`remember`, the model never sees `list_tools`, `call_tool` or
 `servers`; it sees the *proxied* tools, under `{server}__{tool}` names. That
 indirection is what keeps the hub's surface constant: a server coming and going
 changes what the model may call without changing anything about the hub's own
@@ -790,9 +805,13 @@ boundary, naming what it took.
 Named so they are decisions rather than oversights:
 
 - **Markdown rendering.** The transcript shows model output as plain text.
-- **`thinking` deltas.** Both SDKs expose them cheaply; rendering a model's
-  private reasoning as its answer would be worse than not showing it, so they
-  are dropped until there is a display decision.
+- **`thinking` deltas, and the display decision has since been made.** Both SDKs
+  expose them cheaply, and rendering a model's private reasoning as its *answer*
+  would be worse than not showing it — so the rule that landed is neither
+  "drop" nor "print": they cross as their own event kind (`ThinkingDelta`),
+  never merged into the text, and the transcript folds them away behind a
+  toggle. This bullet used to read "dropped until there is a display decision",
+  and the code moved past it.
 - **Delta coalescing.** One notification per token. The seam is
   `ProgressObserver`.
 - **History trimming, and now it is the server's problem.** A long conversation
@@ -891,14 +910,18 @@ Named so they are decisions rather than oversights:
   pattern for the turn record — an oversized result becomes an announced
   head-and-tail digest — and the same rule belongs on the way *into* the model,
   not only on the way into the database.
-- **Subagents.** The shape is decided and the seams are in: one agent has one
-  loop that records, plus N worker loops that do not. `Loop.records` and
-  `Loop.children` exist for it, workers hang off their parent so a worker id is
-  not addressable from outside, and a worker's answer arrives as a tool result
-  because tools already return text. What is not decided: how a spawn tool
-  collects results, whether a worker can be multi-turn, how deep nesting may go,
-  and whether cancelling a parent cancels its children (it depends on
-  `children`, which is why that link had to be in from the start).
+- **Subagents.** One seam of the two this paragraph used to claim is actually
+  in: `Loop.records` exists (`slife2.server.server.Loop`), so a worker's round
+  trips are the ones not written to the db, and `send_message` already takes a
+  `subagent` — a worker's conversation is a separate key with its own history,
+  its own inbox and its own lock, in the same process. **`Loop.children` does
+  not exist**, and neither does anything that hangs a worker off its parent, so
+  a worker id *is* addressable from outside today: any caller may name any
+  `(agent, subagent)`. That is the first thing a spawn tool has to decide, and
+  it is the reason this bullet is a shape and not a seam list. What is not
+  decided beyond it: how a spawn tool collects results, whether a worker can be
+  multi-turn, how deep nesting may go, and whether cancelling a parent cancels
+  its children.
 - **Server-initiated push.** Not available at this revision through FastMCP:
   `subscriptions/listen` is the only push channel, it carries four
   change-notification types, and FastMCP 4.0.11 registers no handler for it at

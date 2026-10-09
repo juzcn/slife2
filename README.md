@@ -333,6 +333,11 @@ slife2/
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
+├─ audience.py        # who a tool is for, and whose behalf a call is on: the
+│                     #   two `_meta` facts that keep `remember` out of a
+│                     #   model's hands and one conversation out of another's
+├─ skills.py          # the `skills/` folder: a playbook's header, its
+│                     #   `requires` block, and what `skill_use` answers with
 ├─ db_server.py       # slife2-db: `remember`, the model's `turn_list` and
 │                     #   `turn_read`, the `tool_*` catalogue API the hub calls,
 │                     #   and the startup pass that brings every index up to date
@@ -352,7 +357,7 @@ slife2/
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation
-   ├─ widgets.py      # Transcript, PromptInput, StatusBar
+   ├─ widgets.py      # ChatView, HistoryInput, StatusBar
    ├─ attachments.py  # reading `@path` images out of a prompt
    ├─ theme.py        # the palette and glyphs, defined once
    └─ app.tcss
