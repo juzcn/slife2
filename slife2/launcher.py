@@ -24,8 +24,9 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Generator
-from dataclasses import dataclass
+from collections.abc import Callable, Generator, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from fastmcp import Client
@@ -213,6 +214,13 @@ class Outcome:
     status: Status
     record: ServerRecord | None = None
     detail: str = ""
+    #: How long making this server usable took, when anybody measured.  Zero
+    #: everywhere else, and zero is not a claim that it was instant — `status`
+    #: and `stop` read what a server *is* rather than making it anything, and
+    #: there is no wait there to report.  `ensure` is the one that times itself,
+    #: and it times the whole call: reusing a server is a way of making it
+    #: usable too, and a probe that took 4 seconds is worth seeing.
+    seconds: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -391,7 +399,21 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
 
 
 def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
-    """Make sure a server is up, reusing one that already is.
+    """Make sure a server is up, reusing one that already is — and time it.
+
+    The bracket is the whole call, one level above every path in `_bring_up`,
+    because every path is a way of making the server usable and the question the
+    number answers is how long *this* line cost.  Reusing is one of those paths:
+    almost every launch finds everything already running, and a warm start that
+    says `12ms` per server is the honest report of a start that did nothing.
+    """
+    started = time.monotonic()
+    outcome = _bring_up(spec, config_path=config_path)
+    return replace(outcome, seconds=time.monotonic() - started)
+
+
+def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
+    """`ensure`'s body, untimed — and the reason it is a function.
 
     Probed before the lock as well as inside it.  The unlocked probe is the fast
     path — almost every launch finds everything already running and never
@@ -521,43 +543,165 @@ def others_running() -> list[ClientRecord]:
     ]
 
 
-def ensure_all(config: Config, *, config_path: Path | None = None) -> list[Outcome]:
-    """Bring up everything this config needs, LLM servers first."""
-    return [ensure(spec, config_path=config_path) for spec in specs(config)]
+#: What a server needs up before it can come up itself.
+#:
+#: **These are edges, and everything not named here is a preference.**  The rest
+#: of `slife2.config.LOCAL_SERVERS`' order says only that a model server
+#: answering first is what keeps a first turn from failing and retrying, and a
+#: preference is not a reason to serialise a launcher — so servers with no entry
+#: here all start at once.
+#:
+#: `context` needs `embeddings` and that one is hard: its lifespan opens the
+#: embedder *before it serves anything at all*, and `open_server` refuses a peer
+#: that is not listening — so a context started in the same breath as an
+#: embeddings is a context that fails to start, not one that starts slowly.
+#:
+#: `toolhub` needs every plugin it asks for tools — including `context`, whose
+#: `turn_list` and `turn_read` are the model's.  That edge is soft, and it is
+#: kept anyway: `settle`'s bounded wait means a late plugin costs the hub
+#: catalogue *rows* rather than a crash, which is exactly the failure that would
+#: go unnoticed — a first turn answered with tools missing.
+#:
+#: `tests/test_launcher.py` holds this table together: every name is one of ours
+#: and nothing here points at itself in a circle.
+NEEDS: dict[str, tuple[str, ...]] = {
+    "context": ("embeddings",),
+    "toolhub": (
+        "embeddings",
+        "context",
+        "builtins",
+        "skills-server",
+        "cli-server",
+        "mcp-tools",
+        "restapi-tools",
+    ),
+}
 
 
-def statuses(config: Config) -> list[Outcome]:
-    """What each server this config needs is doing right now."""
-    results = []
-    for spec in specs(config):
-        if probe(spec):
-            # The same reading `stop` makes, and it has to be the same one: a
-            # server answering with no record of ours was started by hand, so
-            # `status` calling it merely "running" while `down` refuses to stop
-            # it is two commands disagreeing about one process.  The
-            # `UNMANAGED` branch in `slife2 status`'s output — "(not started by
-            # slife2)" — existed and could never be reached without this.
-            record = read_record(spec.url)
-            if record is None:
-                results.append(
-                    Outcome(
-                        spec,
-                        Status.UNMANAGED,
-                        detail="no record; not started by slife2",
-                    )
+def _concurrently(
+    work: Callable[[ServerSpec], Outcome], batch: Sequence[ServerSpec]
+) -> Iterator[Outcome]:
+    """Run one blocking call per server, and yield each as it finishes.
+
+    **Threads, not tasks.**  Every call this is handed blocks: `probe` builds an
+    MCP client and runs its own event loop — it refuses to be called on one that
+    is already running — `ensure` spawns a subprocess and waits on it, and
+    `terminate` sleeps out a grace period.  There is nothing to await, and a
+    thread each is the only way to have them in flight together.
+
+    **Completion order, not `batch` order.**  The caller prints as it goes, so
+    what it wants is the slow one appearing while it is still slow; and once
+    several are in flight at once, "who finished first" is the only ordering that
+    is true.
+    """
+    with ThreadPoolExecutor(max_workers=max(len(batch), 1)) as pool:
+        futures = [pool.submit(work, spec) for spec in batch]
+        for future in as_completed(futures):
+            yield future.result()
+
+
+def ensure_all(config: Config, *, config_path: Path | None = None) -> Iterator[Outcome]:
+    """Bring up everything this config needs, a wave at a time.
+
+    **A generator, and that is the point.**  Each `ensure` blocks until its
+    server answers or gives up, which is a second or two per server and tens of
+    seconds together; a caller handed the list at the end has nothing to show
+    while it waits, and no way to tell a slow start from one that is stuck on the
+    server it is waiting for.  Yielded, the last outcome a caller has *is* the
+    answer to "which one is it on" — and it is the one that took the time.
+
+    **The waves come from `NEEDS`.**  Everything a wave does not have to wait for
+    starts at once, which for this system is nine of the ten; the one thing worth
+    serialising is the two real edges, and a table is how they stop being prose.
+    A server whose dependency *failed* is not attempted at all — reported, with
+    the name of what it was waiting for, because a second failure describing the
+    first one is noise and a start that could not work is a process to clean up.
+
+    **Consuming it is what starts the servers**: nothing here runs until the
+    first `next`, so a caller that drops the iterator has started nothing at all.
+    That is the price of the streaming, and it is why this is not a lazy
+    convenience around an eager function — there is no eager function.
+    """
+    pending = list(specs(config))
+    present = {spec.name for spec in pending}
+    done: dict[str, Outcome] = {}
+
+    while pending:
+        batch: list[ServerSpec] = []
+        for spec in list(pending):
+            needs = [dep for dep in NEEDS.get(spec.name, ()) if dep in present]
+            failed = [dep for dep in needs if dep in done and not done[dep].ok]
+            if failed:
+                pending.remove(spec)
+                outcome = Outcome(
+                    spec,
+                    Status.FAILED,
+                    detail=f"not attempted: {', '.join(failed)} did not come up",
                 )
-            else:
-                results.append(_reuse(spec))
-        elif tcp_listening(spec.host, spec.port):
-            results.append(
-                Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
+                done[spec.name] = outcome
+                yield outcome
+            elif all(dep in done for dep in needs):
+                pending.remove(spec)
+                batch.append(spec)
+        # `pending` and not `batch` being empty is the question: a wave in which
+        # every server was *skipped* for a failed dependency has nothing to start
+        # and nothing left over, and that is the loop ending rather than a
+        # failure.  What cannot happen is work left that nothing will ever
+        # release — a name waiting on itself, directly or through others.
+        if pending and not batch:
+            # The table is asserted acyclic in the tests, so this is a bug rather
+            # than a state, and starting them anyway would mean `context` racing
+            # the embedder it cannot start without: that fails worse and says
+            # less than naming the servers involved.
+            raise RuntimeError(
+                "the startup graph has a cycle: " + ", ".join(s.name for s in pending)
             )
-        else:
-            results.append(Outcome(spec, Status.NOT_RUNNING))
-    return results
+        for outcome in _concurrently(
+            lambda spec: ensure(spec, config_path=config_path), batch
+        ):
+            done[outcome.spec.name] = outcome
+            yield outcome
 
 
-def stop(config: Config) -> list[Outcome]:
+def statuses(config: Config) -> Iterator[Outcome]:
+    """What each server this config needs is doing right now.
+
+    One probe each, all at once.  There is no ordering to keep — a status reads
+    what a server *is* and changes nothing — and the cost of a probe is a whole
+    MCP handshake, so a server that is hung spends its timeout here: serial, ten
+    of those add up, and at once the slowest one sets the wall clock.
+
+    Which makes the rows come out in the order they *answered* rather than the
+    config's.  That is the price of the same trade the startup report makes, and
+    it is the one worth paying: a hung server is invisible in a listing that
+    waits for it, and the ten that answered are already known.
+    """
+    yield from _concurrently(_status_of, specs(config))
+
+
+def _status_of(spec: ServerSpec) -> Outcome:
+    """One server's status, which is the record's reading and the port's.
+
+    The record is read exactly the way `stop` reads it, and it has to be: a
+    server answering with no record of ours was started by hand, so `status`
+    calling it merely "running" while `down` refuses to stop it is two commands
+    disagreeing about one process.  The `UNMANAGED` branch in `slife2 status`'s
+    output — "(not started by slife2)" — existed and could never be reached
+    without this.
+    """
+    if probe(spec):
+        record = read_record(spec.url)
+        if record is None:
+            return Outcome(
+                spec, Status.UNMANAGED, detail="no record; not started by slife2"
+            )
+        return _reuse(spec)
+    if tcp_listening(spec.host, spec.port):
+        return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
+    return Outcome(spec, Status.NOT_RUNNING)
+
+
+def stop(config: Config) -> Iterator[Outcome]:
     """Stop the servers this config names, and only ones we can prove are ours.
 
     "Prove" is doing real work in that sentence.  A record holds a pid, and
@@ -566,38 +710,45 @@ def stop(config: Config) -> list[Outcome]:
     them; without a match the process is left alone and reported, because
     killing an innocent process is a much worse failure than leaving a daemon
     running.
+
+    All at once, and it is the cleanest case of the three: a stop has no
+    ordering to keep at all.  Yielded as each lands for `ensure_all`'s reason —
+    the one that is stuck in `terminate` for five seconds should appear while it
+    is stuck, which is the opposite of what a list assembled in silence shows.
     """
-    results = []
-    for spec in specs(config):
-        record = read_record(spec.url)
-        if record is None:
-            status = Status.UNMANAGED if probe(spec) else Status.NOT_RUNNING
-            results.append(
-                Outcome(spec, status, detail="no record; not started by slife2")
-            )
-            continue
+    yield from _concurrently(_stop_one, specs(config))
 
-        if not same_process(record):
-            clear_record(spec.url)
-            results.append(
-                Outcome(
-                    spec,
-                    Status.STOPPED,
-                    detail=(
-                        f"record points at pid {record.pid}, which is no longer "
-                        f"{spec.name} (pid reused); left alone"
-                    ),
-                )
-            )
-            continue
 
-        gone = terminate(record.pid)
+def _stop_one(spec: ServerSpec) -> Outcome:
+    """One server's stop — and there is nothing here to order.
+
+    Nothing to flush (see `terminate`: these processes are stateless by design
+    and are not asked to shut down kindly) and nothing shared between two of
+    them: each was spawned into its own process group, so killing one cannot
+    reach another, and each record is its own file.  What is *slow* here is
+    `terminate`'s grace period, five seconds of it when a process will not go —
+    which is why this is worth doing ten at a time rather than ten in a row.
+    """
+    record = read_record(spec.url)
+    if record is None:
+        status = Status.UNMANAGED if probe(spec) else Status.NOT_RUNNING
+        return Outcome(spec, status, detail="no record; not started by slife2")
+
+    if not same_process(record):
         clear_record(spec.url)
-        results.append(
-            Outcome(
-                spec,
-                Status.STOPPED if gone else Status.FAILED,
-                detail="" if gone else f"pid {record.pid} did not exit",
-            )
+        return Outcome(
+            spec,
+            Status.STOPPED,
+            detail=(
+                f"record points at pid {record.pid}, which is no longer "
+                f"{spec.name} (pid reused); left alone"
+            ),
         )
-    return results
+
+    gone = terminate(record.pid)
+    clear_record(spec.url)
+    return Outcome(
+        spec,
+        Status.STOPPED if gone else Status.FAILED,
+        detail="" if gone else f"pid {record.pid} did not exit",
+    )

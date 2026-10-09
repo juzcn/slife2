@@ -12,12 +12,14 @@ import contextlib
 import os
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from slife2 import launcher, runtime
+from slife2 import _ensure, launcher, runtime
 from slife2.config import (
     LOCAL_SERVERS,
     Config,
@@ -45,11 +47,10 @@ def test_there_is_one_plugin_per_job() -> None:
     nothing else, and a provider is a row in that backend's config rather than a
     process of its own.  Four providers on three protocols is three model
     processes, not four.  Note which way the list is ordered, too — it is
-    `API_BACKENDS` order, because the servers start in the order they are
-    needed and the model ones come before the agent that talks to them, with the
-    local plugins after: `embeddings` first among them, because the
-    context store's startup sync asks it for a dimension before it can build an
-    index at all.
+    `API_BACKENDS` order, then the local plugins.  That order is what a *reader*
+    gets and what anything sequential would fall back on; it is no longer the
+    order they start in, which comes from `launcher.NEEDS` — the two edges are
+    asserted just below.
     """
     config = load(_config_with_every_protocol())
     names = [spec.name for spec in launcher.specs(config)]
@@ -82,6 +83,141 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.toolhub",
         "slife2.server.server",
     }
+
+
+def test_the_startup_graph_names_our_servers_and_has_no_cycles() -> None:
+    """The table is what makes the waves, so it has to be a graph.
+
+    A name that is not one of ours is a wait that never ends, and a cycle is the
+    same thing said twice — which is why `ensure_all` raises rather than starting
+    what it cannot order.  Asserted here rather than left to that raise, because
+    a launcher that discovers this at run time has already refused to start.
+    """
+    known = {spec.name for spec in launcher.specs(default_config())}
+    assert set(launcher.NEEDS) <= known, "a dependency nobody can be waiting for"
+    for needs in launcher.NEEDS.values():
+        assert set(needs) <= known
+
+    on_path: set[str] = set()
+    settled: set[str] = set()
+
+    def walk(name: str) -> None:
+        assert name not in on_path, f"{name} waits on itself"
+        if name in settled:
+            return
+        on_path.add(name)
+        for dependency in launcher.NEEDS.get(name, ()):
+            walk(dependency)
+        on_path.discard(name)
+        settled.add(name)
+
+    for name in launcher.NEEDS:
+        walk(name)
+
+
+def test_a_server_is_asked_for_only_once_what_it_needs_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The edge, watched as the order the attempts are *made* in.
+
+    `context` opens the embedder before it serves anything, and `open_server`
+    refuses a peer that is not listening — so a context attempted in the same
+    wave as an embeddings is a context that fails to start.  Watched on the
+    attempt rather than on the outcome, because with `ensure` stubbed every
+    outcome is the same.
+    """
+    attempted: list[str] = []
+
+    def fake_ensure(spec, *, config_path=None):
+        attempted.append(spec.name)
+        return launcher.Outcome(spec, Status.STARTED)
+
+    monkeypatch.setattr(launcher, "ensure", fake_ensure)
+
+    started = list(launcher.ensure_all(default_config()))
+
+    assert len(started) == len(launcher.specs(default_config()))
+    assert attempted.index("embeddings") < attempted.index("context")
+    assert attempted.index("context") < attempted.index("toolhub")
+    # Everything the table says nothing about was in the first wave — which is
+    # the whole reason for having a table rather than a sequence.
+    first_wave = attempted[: attempted.index("context")]
+    assert "agent" in first_wave and "builtins" in first_wave
+
+
+def test_a_server_whose_dependency_failed_is_reported_and_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second failure describing the first one is noise.
+
+    And it is worse than noise: a start that could not work spends its wait and
+    leaves a process to clean up, to say nothing of the line it prints.  What the
+    reader needs is the server that actually failed, plus a note of who was
+    waiting on it.
+    """
+    attempted: list[str] = []
+
+    def fake_ensure(spec, *, config_path=None):
+        attempted.append(spec.name)
+        if spec.name == "embeddings":
+            return launcher.Outcome(spec, Status.FAILED, detail="no key")
+        return launcher.Outcome(spec, Status.STARTED)
+
+    monkeypatch.setattr(launcher, "ensure", fake_ensure)
+
+    outcomes = {o.spec.name: o for o in launcher.ensure_all(default_config())}
+
+    assert outcomes["context"].status is Status.FAILED
+    assert "embeddings" in outcomes["context"].detail
+    assert "context" in outcomes["toolhub"].detail, "the transitive edge is an edge"
+    assert "context" not in attempted
+    assert "toolhub" not in attempted
+    # ...while a server that needed none of it is untouched.
+    assert outcomes["agent"].ok
+
+
+def test_the_servers_are_worked_on_at_once() -> None:
+    """A barrier of exactly N: only overlapping calls can all pass it.
+
+    Timed, because a serial implementation does not fail this test — it hangs on
+    the first wait, and a hang is a worse failure than an assertion.  The barrier
+    turns that into an error with a message.
+    """
+    batch = [
+        replace(SPEC, name=f"server{n}", url=f"http://127.0.0.1:810{n}/mcp")
+        for n in range(3)
+    ]
+    gate = threading.Barrier(len(batch), timeout=10)
+
+    def work(spec: ServerSpec) -> launcher.Outcome:
+        gate.wait()
+        return launcher.Outcome(spec, Status.RUNNING)
+
+    outcomes = list(launcher._concurrently(work, batch))
+
+    assert [o.spec.name for o in outcomes] != []
+    assert len(outcomes) == len(batch)
+
+
+def test_the_work_is_reported_in_the_order_it_finishes() -> None:
+    """Which is the only order that is true once several are in flight.
+
+    It is also what a caller printing as it goes is watching for: the line that
+    appears last is the one that took the time.
+    """
+    batch = [
+        replace(SPEC, name="slow", url="http://127.0.0.1:8201/mcp"),
+        replace(SPEC, name="fast", url="http://127.0.0.1:8202/mcp"),
+    ]
+
+    def work(spec: ServerSpec) -> launcher.Outcome:
+        time.sleep(0.3 if spec.name == "slow" else 0.0)
+        return launcher.Outcome(spec, Status.RUNNING)
+
+    assert [o.spec.name for o in launcher._concurrently(work, batch)] == [
+        "fast",
+        "slow",
+    ]
 
 
 def test_every_plugin_has_a_module_and_every_module_a_plugin() -> None:
@@ -307,6 +443,47 @@ def test_a_registered_server_is_reused_and_nothing_is_spawned(
     outcome = launcher.ensure(SPEC)
     assert outcome.status is Status.RUNNING
     assert outcome.ok
+
+
+def test_each_server_is_reported_before_the_next_one_is_asked_for(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The startup report must not wait for the last server.
+
+    `ensure` blocks until its server answers or gives up, which is a second or
+    two each and ten of them — so a report held back to the end is a blank screen
+    for the whole start, and, when one is stuck, no way at all to see *which* is
+    what it exists to answer.  Asserted from *inside* the generator, because that
+    is the only place the question can be asked: by the time the second server is
+    asked for, the first line has to be on the screen.
+
+    The line carries how long that server took and the summary how long they all
+    did — and a failure says *which* status it failed with, in the words the
+    config and `status` use rather than the name of an enum member.
+    """
+    printed_before_the_second: list[str] = []
+    second = replace(SPEC, name="second", url="http://127.0.0.1:8002/mcp")
+    third = replace(SPEC, name="third", url="http://127.0.0.1:8003/mcp")
+
+    def fake_ensure_all(config, *, config_path=None):
+        yield launcher.Outcome(SPEC, Status.STARTED, seconds=1.5)
+        printed_before_the_second.append(capsys.readouterr().out)
+        yield launcher.Outcome(second, Status.RUNNING, seconds=0.01)
+        yield launcher.Outcome(third, Status.CONFLICT, seconds=0.3)
+
+    monkeypatch.setattr(launcher, "ensure_all", fake_ensure_all)
+
+    assert _ensure(default_config(), None) == 2, "a failed server is an exit code"
+
+    (first_line,) = printed_before_the_second
+    assert "starting -> " in first_line, "the first server was not reported"
+    assert "1.5s" in first_line
+
+    out = capsys.readouterr().out
+    assert "running  -> " in out
+    assert "10ms" in out, "a warm reuse is timed too, and 10ms is what it took"
+    assert "port held by something else" in out, "not `Status.CONFLICT`"
+    assert "3 servers in" in out
 
 
 def test_status_reads_the_record_the_way_down_does(

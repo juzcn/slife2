@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from slife2.config import (
     DEFAULT_AGENT,
@@ -106,12 +107,47 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
-def _report(prefix: str, name: str, url: str, detail: str) -> None:
-    print(f"  {name:<14} {url:<28} {prefix}{detail}".rstrip())
+def _duration(seconds: float) -> str:
+    """How long something took, in the unit a person reads it in.
+
+    The same rule the transcript uses for a tool call (`slife2.tui.widgets`),
+    and deliberately not the same code: that one is handed milliseconds and
+    lives in a module that imports Textual, which this one must not — the CLI
+    keeps `slife2.config` and the servers importable without pulling in a UI.
+    """
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    return f"{seconds:.1f}s"
+
+
+def _report(
+    prefix: str, name: str, url: str, detail: str, seconds: float = 0.0
+) -> None:
+    """One line of the startup report — and the time, when there is one.
+
+    `seconds` is zero for the readings that are not a wait: `status` and `down`
+    look at what a server is rather than making it anything, and a `0ms` on
+    every line of those two would be a column of numbers about nothing.
+
+    The time is right-aligned in a field of its own so the *numbers* line up on
+    a start where every line is `started` or every line is `reusing` — which is
+    all of them, on the two paths anyone reads this on.  That is what makes the
+    outlier visible: the one that took twelve seconds is the one whose column
+    does not match the other nine.
+    """
+    time_column = f"  {_duration(seconds):>6}" if seconds else ""
+    print(f"  {name:<14} {url:<28} {prefix}{detail}{time_column}".rstrip())
 
 
 def _ensure(config: Config, config_path) -> int:
-    """Bring up what is missing, and report what is already there.
+    """Bring up what is missing, and report each server as it lands.
+
+    **Printed per server, not at the end.**  `ensure_all` is a generator, and
+    what that buys is not decoration: bringing one up blocks for a second or two
+    and there are ten of them, so a report held back to the end is ten to twenty
+    seconds of blank screen — and, when something is stuck, no way at all to see
+    *which* server it is stuck on.  Printed as they land, the last line is that
+    answer.
 
     Returns 0 when every server is usable, 2 otherwise — 2 rather than a
     traceback or a degraded TUI, because at this point nothing has been drawn
@@ -120,19 +156,46 @@ def _ensure(config: Config, config_path) -> int:
     """
     from slife2.launcher import Status, ensure_all
 
-    outcomes = ensure_all(config, config_path=config_path)
-
+    started = time.monotonic()
     failed = []
-    for outcome in outcomes:
+    count = 0
+    for outcome in ensure_all(config, config_path=config_path):
+        count += 1
         if outcome.status is Status.STARTED:
-            _report("starting -> ", outcome.spec.name, outcome.spec.url, "started")
+            _report(
+                "starting -> ",
+                outcome.spec.name,
+                outcome.spec.url,
+                "started",
+                outcome.seconds,
+            )
         elif outcome.ok:
-            _report("running  -> ", outcome.spec.name, outcome.spec.url, "reusing")
+            _report(
+                "running  -> ",
+                outcome.spec.name,
+                outcome.spec.url,
+                "reusing",
+                outcome.seconds,
+            )
         else:
             _report(
-                "FAILED   -> ", outcome.spec.name, outcome.spec.url, str(outcome.status)
+                "FAILED   -> ",
+                outcome.spec.name,
+                outcome.spec.url,
+                # `.value` and not the member: `Status` is a plain `Enum`, so
+                # `str` of it is `Status.CONFLICT` — which is what this line
+                # said until the timing work put a reader next to it.  Its two
+                # siblings below and in `_status` have always used the value.
+                outcome.status.value,
+                outcome.seconds,
             )
             failed.append(outcome)
+
+    # The sum is not the same number as the parts: it includes the walking
+    # between the servers and the locks, which is what a person waiting is
+    # actually waiting for.
+    plural = "" if count == 1 else "s"
+    print(f"  {count} server{plural} in {_duration(time.monotonic() - started)}")
 
     if failed:
         print("\nslife2: could not start:", file=sys.stderr)

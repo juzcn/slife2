@@ -185,13 +185,19 @@ TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
 #: The plugins that are not model backends, and so have a name of their own
-#: rather than one derived from a wire protocol.  The order is the order the
-#: launcher starts them in — see `slife2.config.Config.plugins` — and two of
-#: these positions are load-bearing: every server the hub asks for tools comes
-#: before `toolhub`, because the answer to a first turn should not be "not
-#: connected yet"; and `embeddings` before `context`, because the context
-#: plugin's startup sync asks it for a dimension and then for every vector its
-#: indexes are missing.
+#: rather than one derived from a wire protocol.  This is the *set* of ours, in
+#: the order `slife2.config.Config.plugins` reads them out in.
+#:
+#: **The two edges between them are not here any more.**  They were prose in this
+#: comment — `embeddings` before `context`, because the context plugin opens the
+#: embedder before it serves anything; and every plugin the hub asks for tools
+#: before `toolhub` — and prose is not something a launcher can act on, so it
+#: serialised all ten for the sake of two.  They are a table now,
+#: `slife2.launcher.NEEDS`, and everything not named there starts at once.
+#:
+#: What is left in this order is a preference rather than a dependency, and it is
+#: the one `plugins()` states: a model server answering first is what keeps a
+#: first turn from failing and retrying.
 #:
 #: **There is no `db` here any more**, and its absence is the design rather than
 #: a gap.  It served the turns and the tool catalogue, and neither needed a
