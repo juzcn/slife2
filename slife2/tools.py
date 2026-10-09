@@ -85,7 +85,7 @@ class ToolRegistry:
         except ToolFailed as exc:
             logger.warning("tool %s failed: %s", call.name, exc)
             return f"Error: {exc}", False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a tool failure is a message, never an exception
             # Includes the exception type: "KeyError: 'e'" tells the model which
             # argument it got wrong, where "tool failed" does not.
             logger.warning("tool %s raised: %s", call.name, exc)

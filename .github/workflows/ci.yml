@@ -36,5 +36,22 @@ jobs:
         shell: bash
         run: uv pip install dist/slife2-*.whl pytest pytest-asyncio
 
+      # Before the tests, because it is seconds and it fails with a file and a
+      # line rather than a traceback.  The rules live in pyproject.toml and were
+      # clean for a long time while nothing checked them — a lint step that
+      # never runs is a convention rather than a constraint.
+      - name: Lint and format
+        run: |
+          uv run --with ruff ruff check .
+          uv run --with ruff ruff format --check .
+
+      # `slife2` only — `[tool.pyright]` excludes the tests, which use doubles
+      # that are deliberately not the types they stand in for.  In the project
+      # environment rather than standalone, so the checker can resolve the
+      # dependencies; a runner without them reports forty import errors and
+      # none of the real ones.
+      - name: Type check
+        run: uv run --with pyright pyright
+
       - name: Run tests
         run: uv run pytest -v --tb=short --no-header --maxfail=5

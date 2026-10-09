@@ -96,6 +96,12 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.16.10",
+    # The type checker `[tool.pyright]` below configures.  It was configured and
+    # never installed, which is how a settings block becomes a comment: the
+    # rules were there, nothing ran them, and the first run after wiring it up
+    # found two live bugs — an attribute read off a union member in the middle
+    # of a stream.  CI runs it beside ruff.
+    "pyright>=1.1.414",
 ]
 
 [tool.uv.workspace]
@@ -136,7 +142,12 @@ target-version = "py313"
 extend-exclude = ["skills"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4"]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "BLE"]
+# BLE001 is the one rule here that is a *convention* rather than a style: this
+# codebase catches broadly in the places where a peer's failure is data, and
+# every one of those says why on the line — which is what the rule enforces.
+# The annotations were already written before the rule was switched on, so
+# several of them named a check that never ran.
 # The formatter owns line width: it wraps what it can and leaves long strings
 # and URLs alone, so E501 would only ever fire on lines it cannot fix.
 ignore = ["E501"]
