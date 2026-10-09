@@ -22,7 +22,6 @@ PALETTE: dict[str, str] = {
     # Surfaces, darkest first.
     "bg": "#0d1117",
     "panel": "#161b22",
-    "panel-focus": "#1c2128",
     # Lines.
     "border": "#30363d",
     "border-dim": "#484f58",
@@ -37,10 +36,8 @@ PALETTE: dict[str, str] = {
     # Accents.
     "amber": "#d29922",
     "amber-bold": "#d97706",
-    "amber-focus": "#f0c040",
     "green": "#3fb950",
     "red": "#f85149",
-    "blue": "#58a6ff",
 }
 
 

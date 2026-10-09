@@ -14,6 +14,7 @@ one made it harder to test than it needed to be.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -172,6 +173,12 @@ class AgentLoop:
                 await self._emit(
                     observer, ToolCallStarted(call.id, call.name, call.arguments)
                 )
+                # Timed here because this is the only place that knows when the
+                # call ran: the event carried a duration from the beginning —
+                # short key, codec, two tests — and the producer filled it with
+                # a zero, so the transcript could not have shown one whatever it
+                # did with it.
+                started = time.monotonic()
                 text, ok = await self._tools.execute(call)
                 await self._emit(
                     observer,
@@ -181,7 +188,7 @@ class AgentLoop:
                         ok=ok,
                         result_preview=preview(text),
                         result_chars=len(text),
-                        elapsed_ms=0,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
                     ),
                 )
                 messages.append(

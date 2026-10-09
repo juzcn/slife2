@@ -23,6 +23,7 @@ from slife2.events import (
 )
 from slife2.messages import Usage
 from slife2.tui.app import SlifeApp
+from slife2.tui.client import MCPAgentClient
 from slife2.tui.theme import GLYPHS, PALETTE
 from slife2.tui.widgets import (
     AssistantMessage,
@@ -396,6 +397,25 @@ async def test_toggling_a_tool_panel_expands_it() -> None:
         assert "42" in text
 
 
+async def test_a_collapsed_tool_says_how_long_it_took() -> None:
+    """The event has carried a duration from the beginning.
+
+    Short key, codec, and two tests — and the loop filled it with a zero, so
+    the header could not have shown one whatever it did with it.  A tool that
+    hung is worth seeing without expanding anything: it is the one thing about
+    a finished call that the result text does not say.
+    """
+    app = make_app(tool_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        panel = app.query_one(ToolCallWidget)
+
+        collapsed = panel.plain_text()
+
+    assert panel.collapsed is True, "the header is the whole point of collapsing"
+    assert "3ms" in collapsed, "the duration is on the row that is always visible"
+
+
 async def test_a_failed_tool_says_error() -> None:
     app = make_app(tool_turn(ok=False))
     async with app.run_test(size=SIZE) as pilot:
@@ -468,6 +488,62 @@ async def test_a_dead_server_does_not_kill_the_app() -> None:
         assert "disconnected" in status(app)
         await submit(pilot, "hi")
         assert "not connected" in shown(app)
+
+
+async def test_a_dropped_connection_is_retried_by_the_next_prompt() -> None:
+    """One lost stream must not cost the session.
+
+    A turn that fails at the transport drops the connection inside the client,
+    so the window has to ask the client rather than trust a flag of its own:
+    with a latch it stays "connected" to a server nothing is talking to and
+    every later turn fails the same way — and ctrl+n does not help, because
+    reset goes down the same path.
+    """
+    calls = {"n": 0}
+
+    def respond(prompt: str, on_event):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("the stream dropped")
+        on_event(TextDelta("second"))
+        return "second"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "one")
+        assert "the stream dropped" in shown(app)
+
+        await submit(pilot, "two")
+        assert "second" in shown(app), "the window never reconnected"
+
+
+async def test_ctrl_n_survives_a_reset_that_fails() -> None:
+    """A key binding that raises takes the whole app down with it.
+
+    Textual's message pump turns an exception out of an action into a fatal
+    error, so Ctrl+N against a server that has just died would close the
+    window — the one outcome a window built to survive a dead server must not
+    have, and half-applied at that (the queue cleared, the transcript not).
+    """
+    client = FakeAgentClient(answering("ok"))
+
+    async def refuse() -> None:
+        raise ConnectionError("the server died")
+
+    client.reset = refuse  # type: ignore[method-assign]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model_label="deepseek/deepseek-flash",
+        agent="jack",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+
+        assert app.is_running, "the window closed on a failed reset"
+        assert "disconnected" in status(app), "and it says why"
 
 
 async def test_a_failing_turn_is_reported() -> None:
@@ -588,6 +664,66 @@ async def test_a_missing_attachment_is_reported_and_the_prompt_still_goes() -> N
 
     assert client.prompts == ["look at @nope.png"]
     assert client.images == [[]]
+
+
+async def test_a_complaint_lands_under_the_prompt_not_inside_the_answer() -> None:
+    """A note closes the block it is given, so *when* it is written matters.
+
+    `add_note` closes the assistant block, so a complaint emitted after
+    `begin_assistant` closed the block that had just been opened and left it
+    empty in the transcript — one orphaned block before every answer that had
+    anything to complain about.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "look at @nope.png")
+        blocks = [widget.classes for widget in app.query_one(ChatView).children]
+
+    assert "user-message" in blocks[0]
+    assert "system-message" in blocks[1], "the complaint goes under the prompt"
+    assert "assistant-message" in blocks[2], "and the answer opens after it"
+    assert len(blocks) == 3, "no empty block is left behind"
+
+
+async def test_only_one_connection_is_opened_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connect` has an await between its check and its use.
+
+    A prompt typed while the mount-time connect worker is still handshaking
+    overlaps in that gap — the ordinary case on a slow start — and both callers
+    used to enter a client, leaving whichever finished last to be the only one
+    that `close` could reach.
+    """
+    from slife2.tui import client as client_module
+
+    opened = 0
+
+    async def slow_open(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        await asyncio.sleep(0.05)
+        return _Opened()
+
+    monkeypatch.setattr(client_module, "open_server", slow_open)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await asyncio.gather(client.connect(), client.connect(), client.connect())
+
+    assert opened == 1, "three callers, three connections"
+    await client.close()
+
+
+class _Opened:
+    """The smallest thing `MCPAgentClient` treats as a connection."""
+
+    async def __aenter__(self) -> _Opened:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
 
 
 async def test_the_status_bar_stops_saying_working_when_the_turn_ends() -> None:

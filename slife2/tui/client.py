@@ -7,6 +7,7 @@ built and verified without a server running.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Protocol
@@ -32,6 +33,17 @@ TURN_TIMEOUT_SECONDS = 900.0
 
 class AgentClient(Protocol):
     """The TUI's view of the agent."""
+
+    @property
+    def connected(self) -> bool:
+        """Whether a live connection is held right now.
+
+        Asked rather than remembered by the caller.  A turn that fails at the
+        transport drops the connection here, and a window keeping its own latch
+        would go on believing it was connected — every later turn failing the
+        same way, against a server nothing is talking to.
+        """
+        ...
 
     async def connect(self) -> None: ...
 
@@ -101,11 +113,19 @@ class MCPAgentClient:
         self._model = model
         self._timeout = timeout
         self._client: Client | None = None
+        #: Serialises `connect`, which has an await between its check and its
+        #: use.  See the comment there.
+        self._connecting = asyncio.Lock()
 
     @property
     def client_id(self) -> tuple[str, str]:
         """Who this client is, as every server in this system spells it."""
         return (self._agent, self._subagent)
+
+    @property
+    def connected(self) -> bool:
+        """Whether a live connection is held.  See `AgentClient.connected`."""
+        return self._client is not None
 
     async def connect(self) -> None:
         """Open the connection, or raise with a message worth showing.
@@ -118,12 +138,22 @@ class MCPAgentClient:
         """
         if self._client is not None:
             return
-        self._client = await open_server(
-            self._url,
-            name=AGENT_SERVER_NAME,
-            fallback_tool="send_message",
-            timeout=self._timeout,
-        )
+        # Under a lock, because the check above and the connection below are
+        # separated by an await and two callers overlap in that gap: a prompt
+        # typed while `on_mount`'s connect worker is still handshaking is the
+        # ordinary case on a slow start.  Without this both calls enter a client
+        # and `self._client` keeps whichever finished last — the other is
+        # unreachable, so `close` never closes it and its task group and
+        # connection live on for the session.
+        async with self._connecting:
+            if self._client is not None:
+                return
+            self._client = await open_server(
+                self._url,
+                name=AGENT_SERVER_NAME,
+                fallback_tool="send_message",
+                timeout=self._timeout,
+            )
 
     async def close(self) -> None:
         client, self._client = self._client, None

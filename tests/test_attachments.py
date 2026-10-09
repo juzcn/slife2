@@ -43,6 +43,31 @@ def test_the_media_type_comes_from_the_suffix(tmp_path, name: str) -> None:
     assert ";base64," in urls[0]
 
 
+@pytest.mark.parametrize("tail", [".", ",", ";", '"', ")", "。", "、", "！", "”"])
+def test_an_image_inside_a_sentence_is_still_an_attachment(tmp_path, tail) -> None:
+    """The marker is written inside sentences, and the punctuation is theirs.
+
+    `看看这个 @截图.png。` is how somebody writes it.  Read literally the suffix
+    is `.png。`, which is not a media type — so the attachment was passed over
+    in the silence this module keeps for a mention that was never a file, which
+    is neither of the two things it promises: honoured, or refused out loud.
+    """
+    path = image(tmp_path)
+    urls, complaints = extract(f"看看这个 @{path.as_posix()}{tail}")
+
+    assert complaints == []
+    assert len(urls) == 1
+
+
+def test_the_same_image_named_twice_is_sent_once(tmp_path) -> None:
+    """A second copy is the same megabytes for the same answer."""
+    path = image(tmp_path)
+    urls, complaints = extract(f"@{path.as_posix()} and @{path.as_posix()}")
+
+    assert complaints == []
+    assert len(urls) == 1
+
+
 def test_a_missing_file_is_reported_not_skipped(tmp_path) -> None:
     urls, complaints = extract("look at @nope.png")
     assert urls == []

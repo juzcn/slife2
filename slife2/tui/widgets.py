@@ -42,12 +42,6 @@ PRIMARY_ARG_CHARS = 72
 #: is reading it, they are skimming for the shape of it.
 THINKING_PREVIEW_CHARS = 500
 
-#: How many result lines the expanded panel renders before summarising.  The
-#: panel also caps at 60% of the viewport in CSS and scrolls; this is the guard
-#: for pathological output, which would otherwise be parsed and laid out in
-#: full before anything could stop it.
-MAX_RESULT_LINES = 500
-
 
 def _timestamp(moment: datetime | None = None) -> str:
     """`HH:MM`, or a longer form once the day is no longer today."""
@@ -58,6 +52,18 @@ def _timestamp(moment: datetime | None = None) -> str:
     if moment.year == now.year:
         return moment.strftime("%m-%d %H:%M")
     return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _duration(ms: int) -> str:
+    """How long a tool took, in the unit a person reads it in.
+
+    `ms` under a second and seconds above it, because the number that matters
+    changes with the magnitude: 800ms is a fact worth having, 12.4s is, and
+    12,400ms is the same fact spelled in a way nobody converts in their head.
+    """
+    if ms < 1000:
+        return f"{ms}ms"
+    return f"{ms / 1000:.1f}s"
 
 
 def plain(text: str, style: str = "") -> Text:
@@ -214,7 +220,11 @@ class ChatView(VerticalScroll):
         self._streaming_text = text
         self._streaming.set_text(text)
         self._close_block()
-        self.jump_to_tail()
+        # `follow_tail`, not `jump_to_tail`: ending a turn is not a reason to
+        # yank the viewport off somebody who scrolled up to read — which is the
+        # whole case the `_at_tail` machinery exists for.  It follows when the
+        # view is at the tail, and leaves it alone when it is not.
+        self.follow_tail()
 
     def set_usage(self, tokens: int) -> None:
         """Put a token count under the answer it belongs to.
@@ -246,7 +256,12 @@ class ChatView(VerticalScroll):
         self.follow_tail()
 
     def add_tool_end(
-        self, call_id: str, ok: bool, result_preview: str, result_chars: int
+        self,
+        call_id: str,
+        ok: bool,
+        result_preview: str,
+        result_chars: int,
+        elapsed_ms: int,
     ) -> None:
         widget = self._tools.get(call_id)
         if widget is None:  # pragma: no cover - a result without a start
@@ -254,7 +269,12 @@ class ChatView(VerticalScroll):
         # `ok` is the positive phrasing and `set_complete` wants the negative
         # one.  Naming both ends after the same thing is how these get swapped;
         # a test that asserts a success says "done" is what keeps them honest.
-        widget.set_complete(result_preview, is_error=not ok, result_chars=result_chars)
+        widget.set_complete(
+            result_preview,
+            is_error=not ok,
+            result_chars=result_chars,
+            elapsed_ms=elapsed_ms,
+        )
         self.follow_tail()
 
     def clear_all(self) -> None:
@@ -316,6 +336,11 @@ class AssistantMessage(Static):
         #: does to the block it closes.
         self._thinking_open = True
         self._tokens = 0
+        # Painted once at construction, so an empty block shows the agent's
+        # signature while the first delta is still in flight.  Without this the
+        # block renders nothing at all until text arrives, and the signature
+        # that says who is answering is the only affordance there is.
+        self._refresh()
 
     @property
     def thinking(self) -> str:
@@ -422,6 +447,9 @@ class ToolCallWidget(VerticalScroll):
         self._result_chars = 0
         self._is_error = False
         self._done = False
+        #: Wall time the call took, from the event.  Zero while it is running,
+        #: and zero for a call whose duration nobody reported.
+        self._elapsed_ms = 0
         self.add_class("tool-call")
         self._body = Static(classes="tool-content")
         self._refresh_display()
@@ -461,6 +489,15 @@ class ToolCallWidget(VerticalScroll):
             line.append(short, PALETTE["muted"])
         line.append("  ")
         line.append(word, colour)
+        if self._elapsed_ms:
+            # How long it took, in the collapsed header rather than in the
+            # detail: a tool that hung for four seconds is worth seeing without
+            # expanding anything, and the duration is the one thing about a
+            # finished call that the result text does not say.
+            line.append(
+                f" {GLYPHS['ellipsis']} {_duration(self._elapsed_ms)}",
+                PALETTE["dimmest"],
+            )
         return line
 
     def _content(self) -> Text:
@@ -486,25 +523,30 @@ class ToolCallWidget(VerticalScroll):
                 line.append("\n" + self._result, PALETTE["red"])
             else:
                 line.append("\n\nResult", f"bold {PALETTE['muted']}")
-                rows = self._result.split("\n")
-                if len(rows) > MAX_RESULT_LINES:
+                line.append("\n" + self._result, PALETTE["text-secondary"])
+                # What the tool actually returned, when that is more than the
+                # preview shows.  A line-count guard used to stand here,
+                # trimming to `MAX_RESULT_LINES` and saying how many were left
+                # — and it could never fire: the result on the wire is capped at
+                # `events.PREVIEW_CHARS` (two hundred), which cannot make five
+                # hundred lines however it is spelled.  What is worth saying is
+                # the size, which is the number carried beside the preview for
+                # exactly this and was read by nothing else.
+                if self._result_chars > len(self._result):
                     line.append(
-                        "\n" + "\n".join(rows[:MAX_RESULT_LINES]),
-                        PALETTE["text-secondary"],
-                    )
-                    line.append(
-                        f"\n{GLYPHS['ellipsis']} {len(rows) - MAX_RESULT_LINES} more lines "
-                        f"of {self._result_chars:,} characters",
+                        f"\n{GLYPHS['ellipsis']} {self._result_chars:,} characters "
+                        f"in all",
                         PALETTE["dimmest"],
                     )
-                else:
-                    line.append("\n" + self._result, PALETTE["text-secondary"])
         return line
 
-    def set_complete(self, result: str, is_error: bool, result_chars: int) -> None:
+    def set_complete(
+        self, result: str, is_error: bool, result_chars: int, elapsed_ms: int
+    ) -> None:
         self._result = result
         self._is_error = is_error
         self._result_chars = result_chars
+        self._elapsed_ms = elapsed_ms
         self._done = True
         self._refresh_display()
 

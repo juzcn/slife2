@@ -31,6 +31,17 @@ logger = logging.getLogger(__name__)
 #: not supported, because guessing where it ends is worse than saying so.
 _MENTION = re.compile(r"@(\S+)")
 
+#: What a mention may carry on its end that is not part of the name.  The marker
+#: is written inside sentences — `看看这个 @截图.png。` is how somebody writes it —
+#: and the punctuation belongs to the sentence.  Without this the suffix is
+#: `.png。`, which is not a media type, so the attachment was passed over in the
+#: very silence kept for a mention that was never a file: a refusal is reported
+#: here, and this was the one case that was neither reported nor honoured.
+#:
+#: "Not alphanumeric" rather than a list of punctuation, so every closing quote,
+#: bracket and full-width mark is covered by the one rule.
+_TRAILING = re.compile(r"[^0-9A-Za-z]+$")
+
 #: Suffix -> media type.  A closed set on purpose: the media type has to be
 #: right, and guessing it from content is a dependency this does not need.
 MEDIA_TYPES: dict[str, str] = {
@@ -55,13 +66,23 @@ def extract(text: str) -> tuple[list[str], list[str]]:
     """
     urls: list[str] = []
     complaints: list[str] = []
+    sent: set[Path] = set()
 
     for mention in _MENTION.findall(text):
+        mention = _TRAILING.sub("", mention)
+        if not mention:
+            # Nothing but punctuation — a sentence's `@...`, not a file.
+            continue
         if "://" in mention:
             complaints.append(f"@{mention}: only local files can be attached")
             continue
 
         path = Path(mention)
+        if path in sent:
+            # Named twice, sent once.  The second copy would be the same bytes
+            # again in the same request — a screenshot is megabytes, and the
+            # model reads no more for it.
+            continue
         media_type = MEDIA_TYPES.get(path.suffix.lower())
         if media_type is None:
             # Not every `@mention` is an attachment — `@channel` in a sentence
@@ -87,5 +108,6 @@ def extract(text: str) -> tuple[list[str], list[str]]:
 
         encoded = base64.b64encode(data).decode("ascii")
         urls.append(f"data:{media_type};base64,{encoded}")
+        sent.add(path)
 
     return urls, complaints

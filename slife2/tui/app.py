@@ -200,7 +200,7 @@ class SlifeApp(App[None]):
         assert self._client is not None
         try:
             await self._client.connect()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a dead server is operational, not fatal
             self._connected = False
             self._connection_text = f"disconnected: {exc}"
             logger.warning("agent server connection failed: %s", exc)
@@ -245,11 +245,22 @@ class SlifeApp(App[None]):
                 self._ticket += 1
                 ticket = self._ticket
                 self._transcript.add_user(prompt)
+                # Read before the answer's block is opened, so a complaint about
+                # an attachment lands under the prompt rather than *inside* the
+                # answer: `add_note` closes the block it is given, so a note
+                # emitted after `begin_assistant` would close the block just
+                # opened and leave an empty one behind it in the transcript.
+                images, complaints = attachments.extract(prompt)
+                for complaint in complaints:
+                    # Complaints do not stop the prompt.  Losing what somebody
+                    # typed because one attachment was wrong is a worse outcome
+                    # than sending it without.
+                    self._transcript.add_note(complaint)
                 self._transcript.begin_assistant()
                 self._steps = 0
                 self._refresh_status()
 
-                self._turn = asyncio.create_task(self._send(prompt, ticket))
+                self._turn = asyncio.create_task(self._send(prompt, ticket, images))
                 try:
                     final = await self._turn
                 except asyncio.CancelledError:
@@ -268,26 +279,28 @@ class SlifeApp(App[None]):
         finally:
             self._draining = False
 
-    async def _send(self, prompt: str, ticket: int) -> str:
+    async def _send(self, prompt: str, ticket: int, images: list[str]) -> str:
         """Run one turn and return its authoritative answer.
 
         The answer is returned rather than posted so the queue can apply it
         before the next turn opens a block.  Ordering against the deltas is the
         ticket's job, not the message queue's.
+
+        `images` are the `data:` URLs the prompt's `@path` markers named, read
+        by the caller: the transcript should show what was sent, so the markers
+        stay in the `prompt` — and reading them before the answer's block opens
+        is what keeps a complaint about one out of that block.
         """
         assert self._client is not None
-        # The `@path` markers stay in the prompt: the transcript should show
-        # what was sent, and taking them out would leave a sentence with a
-        # hole where the attachment was named.
-        images, complaints = attachments.extract(prompt)
-        for complaint in complaints:
-            # Complaints do not stop the prompt.  Losing what somebody typed
-            # because one attachment was wrong is a worse outcome than
-            # sending it without.
-            self._transcript.add_note(complaint)
 
-        if not self._connected:
-            # Lazy retry: the server may have started since we launched.
+        if not self._connected or not self._client.connected:
+            # Lazy retry: the server may have started since we launched.  The
+            # second half is what makes it work *again* — a turn that failed at
+            # the transport closes the connection inside `run_turn`, so a window
+            # consulting only its own flag would stay "connected" to a server
+            # nothing is talking to and fail every later turn the same way.
+            # Asking the client is also what keeps one drop from costing a
+            # restart, and ctrl+n does not help: reset goes down the same path.
             await self._connect()
         if not self._connected:
             raise ConnectionError(
@@ -323,8 +336,9 @@ class SlifeApp(App[None]):
                 ok=ok,
                 result_preview=preview_text,
                 result_chars=chars,
+                elapsed_ms=elapsed,
             ):
-                self._transcript.add_tool_end(call_id, ok, preview_text, chars)
+                self._transcript.add_tool_end(call_id, ok, preview_text, chars, elapsed)
             case TurnFinished(usage=usage, last_usage=last_usage, steps=steps):
                 # Two numbers, two questions.  `last_usage` is how large the
                 # conversation had become by the end — the only thing a context
@@ -386,12 +400,36 @@ class SlifeApp(App[None]):
         clear and the drain adds no `[cancelled]` note — this window is about to
         be emptied, and a note about the turn nobody is watching is not worth
         saying.
+
+        The ticket moves on for the reason `_drain` moves it: the turn just
+        cancelled is still delivering events for a moment, and a window that
+        kept the old number would mount them into the conversation that replaced
+        it — a tool panel in an emptied transcript, and a status bar reading the
+        abandoned turn's numbers.
         """
         if self._turn is not None and not self._turn.done():
             self._turn.cancel()
         self._queue.clear()
+        self._ticket += 1
         if self._client is not None:
-            await self._client.reset()
+            # Connected first, because forgetting a conversation is something
+            # only the server can do: with the connection down `reset` returns
+            # having done nothing, and the next message would carry on the
+            # history this keystroke was meant to end.
+            if not self._connected:
+                await self._connect()
+            try:
+                await self._client.reset()
+            except Exception as exc:  # noqa: BLE001 - a key binding that raises takes the app down
+                # Guarded because this is a key binding: Textual's message pump
+                # turns a raise here into a fatal error and takes the whole app
+                # down — which is the outcome a window built to survive a dead
+                # server must not have, half-applied at that.  The window is
+                # being emptied either way, so the failure is said and the
+                # emptying goes ahead.
+                logger.warning("the conversation was not reset: %s", exc)
+                self._connected = False
+                self._connection_text = f"disconnected: {exc}"
         self._transcript.clear_all()
         self._context_tokens = 0
         self._steps = 0
