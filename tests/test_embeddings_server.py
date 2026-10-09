@@ -170,18 +170,18 @@ async def test_the_two_tools_are_not_offered_to_the_model() -> None:
     half the test would pass just as well if the marker never survived the
     transport at all.
     """
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from tests.fakes import StubEmbedder
 
     embeddings = build_server(default_config(), client=_client("bge-m3", _FakeOpenAI()))
-    db = build_db(default_config(), embedder=StubEmbedder())
+    store = build_context(default_config(), embedder=StubEmbedder())
 
     async with Client(embeddings) as client:
         offered = {
             tool.name: for_the_model(getattr(tool, "meta", None))
             for tool in await client.list_tools()
         }
-    async with Client(db) as client:
+    async with Client(store) as client:
         offered |= {
             tool.name: for_the_model(getattr(tool, "meta", None))
             for tool in await client.list_tools()

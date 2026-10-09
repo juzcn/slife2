@@ -70,21 +70,21 @@ def answering(text: str) -> FakeBackend:
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def db():
-    """A db server that actually answers, over the in-memory transport.
+async def context():
+    """A context store that actually answers, over the in-memory transport.
 
-    Sending **cannot happen without it**: a db server that is not there is a
-    broken system rather than a degraded one, so `send_message` fails before
-    anything is spent on a model call.  See
+    Sending **cannot happen without it**: a store that is not there is a broken
+    system rather than a degraded one, so `send_message` fails before anything is
+    spent on a model call.  See
     `slife2.mcp_server.open_server`.
 
     The real server rather than a stub, so what these tests exercise is the
     plugin the agent server actually talks to — the one test that is *about*
     the failure passes its own config instead.
     """
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
 
-    async with Client(build_db(default_config(), embedder=StubEmbedder())) as client:
+    async with Client(build_context(default_config(), embedder=StubEmbedder())) as client:
         yield client
 
 
@@ -93,7 +93,7 @@ async def hub():
     """A toolhub that actually answers, over the in-memory transport.
 
     A turn cannot run without one, for the same reason it cannot run without
-    the db — the model's tool list comes from here, builtins included, so a
+    the store — the model's tool list comes from here, builtins included, so a
     missing hub is a broken system rather than a conversation with no tools.
 
     No upstreams: these tests are about the agent, and the tool servers behind a
@@ -110,7 +110,11 @@ async def hub():
     # answer, so all of them need something behind them.  In-memory, which keeps
     # `calc` and `now` real without a port.
     async with Client(
-        build_hub(default_config(), transports=plugin_transports(default_config()))
+        build_hub(
+            default_config(),
+            transports=plugin_transports(default_config()),
+            embedder=StubEmbedder(),
+        )
     ) as client:
         yield client
 
@@ -143,6 +147,26 @@ async def reset(server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = 
         return await client.call_tool("reset", {"agent": agent, "subagent": subagent})
 
 
+async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
+    """Block until the backend has been asked for that many model streams.
+
+    **Generous, and asserted rather than bounded-and-ignored.**  A turn reaches
+    the model only after the context has been restored and rebuilt, so a budget
+    that was ample when the first thing a turn did was call the model is no
+    longer: a loop that merely gave up would cancel a turn that had not begun,
+    the cancel would be a no-op, and the failure would surface somewhere else
+    entirely — `prompts_seen(backend, 1)` against a list with one entry, which
+    says nothing about what actually went wrong.
+    """
+    for _ in range(1000):
+        if len(backend.calls) >= wanted:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"the model was asked for {len(backend.calls)} stream(s), not {wanted}"
+    )
+
+
 def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
     """What the model was sent on one of its calls, as role-tagged text.
 
@@ -159,7 +183,7 @@ def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_two_tools(db, hub) -> None:
+async def test_the_server_exposes_two_tools(context, hub) -> None:
     """There is no `open_loop` because there is nothing to open.
 
     An id a server mints is an id a caller has to keep, and keeping it is where
@@ -168,30 +192,30 @@ async def test_the_server_exposes_two_tools(db, hub) -> None:
     and one way to start over.
     """
     async with Client(
-        build_server(config(), db_client=db, hub_client=hub, backend=FakeBackend())
+        build_server(config(), context_client=context, hub_client=hub, backend=FakeBackend())
     ) as client:
         tools = await client.list_tools()
     assert [t.name for t in tools] == ["send_message", "reset"]
 
 
 @pytest.mark.asyncio
-async def test_a_turn_returns_the_final_text(db, hub) -> None:
+async def test_a_turn_returns_the_final_text(context, hub) -> None:
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "what is 6*7?")
     assert result.data["text"] == "It is 42."
 
 
 @pytest.mark.asyncio
-async def test_a_turn_reports_its_shape(db, hub) -> None:
+async def test_a_turn_reports_its_shape(context, hub) -> None:
     """What a caller needs to render and to bill — and no history.
 
     `new_messages` is deliberately absent: it was the caller's half of owning
     the conversation, and the loop owns it now.
     """
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "what is 6*7?")
 
@@ -202,10 +226,10 @@ async def test_a_turn_reports_its_shape(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_says_what_answered(db, hub) -> None:
+async def test_a_turn_says_what_answered(context, hub) -> None:
     """A bare provider or an empty reference does not reveal the model."""
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=answering("ok")
+        config(), context_client=context, hub_client=hub, backend=answering("ok")
     )
     result = await send(server, "hi", agent="jack")
     assert result.data["model"] == default_config().default
@@ -215,7 +239,7 @@ async def test_a_turn_says_what_answered(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_loop_remembers_what_was_said_to_it(db, hub) -> None:
+async def test_a_loop_remembers_what_was_said_to_it(context, hub) -> None:
     """The inversion of the property this server used to be built on.
 
     Two messages on one loop, and the second model call sees the first exchange.
@@ -226,7 +250,7 @@ async def test_a_loop_remembers_what_was_said_to_it(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     await send(server, "one")
     await send(server, "two")
@@ -240,7 +264,7 @@ async def test_a_loop_remembers_what_was_said_to_it(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_server_serves_two_loops_without_mixing_them(db, hub) -> None:
+async def test_one_server_serves_two_loops_without_mixing_them(context, hub) -> None:
     """Two loops, two agents, one agent server, no cross-talk.
 
     Asserted concurrently on purpose — sequentially it would pass even if the
@@ -266,7 +290,7 @@ async def test_one_server_serves_two_loops_without_mixing_them(db, hub) -> None:
 
             return Stream(chunks=chunks(), result=result())
 
-    server = build_server(config(), db_client=db, hub_client=hub, backend=EchoBackend())
+    server = build_server(config(), context_client=context, hub_client=hub, backend=EchoBackend())
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
             first.call_tool("send_message", {"agent": "jack", "prompt": "alpha"}),
@@ -281,7 +305,7 @@ async def test_one_server_serves_two_loops_without_mixing_them(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_subagent_is_a_conversation_of_its_own(db, hub) -> None:
+async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
     """The second half of the id separates conversations, not just agents.
 
     Two clients that differ only in `subagent` must not see each other.  That is
@@ -293,7 +317,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="worker")),
         ScriptedTurn(result=StreamChatResult(text="main again")),
     )
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     await send(server, "one", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
@@ -313,7 +337,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_starts_the_conversation_over(db, hub) -> None:
+async def test_reset_starts_the_conversation_over(context, hub) -> None:
     """The one lifecycle verb left, and it is the caller's to ask for.
 
     Idempotent, because a caller that had nothing to forget is already in the
@@ -323,7 +347,7 @@ async def test_reset_starts_the_conversation_over(db, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     await send(server, "one")
     assert (await reset(server)).data["reset"]
@@ -336,34 +360,46 @@ async def test_reset_starts_the_conversation_over(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_idle_conversation_simply_starts_again(db, monkeypatch, hub) -> None:
-    """The idle sweep reclaims memory, and that is the whole of what it does.
+async def test_an_idle_conversation_simply_starts_again(
+    context, monkeypatch, hub
+) -> None:
+    """The idle sweep reclaims memory, and the conversation comes back whole.
 
     It used to be what made an id go stale, which meant every caller needed a
     path for "your conversation is gone".  A key cannot go stale, so the sweep is
-    invisible: the next message starts a conversation under the same name, and
-    nothing has to be told that it happened.
+    invisible — and since the context is *stored* rather than only held, the
+    second call restoring what the first one recorded is what makes "the sweep
+    only reclaims memory" true rather than merely reassuring.  The turn that was
+    reaped is in the prompt the next one sends, which is the observable form of
+    that.
     """
     monkeypatch.setattr("slife2.server.server.LOOP_IDLE_SECONDS", 0.0)
     backend = FakeBackend(
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     await send(server, "one")
     await send(server, "two")
 
     # Swept in between, so the second call began a conversation rather than
-    # continuing one — and nothing raised either way.
-    assert prompts_seen(backend, 1) == ["user:two"]
+    # continuing one — and what it began with is what the first one recorded:
+    # the reaped turn is in the prompt, which is the whole claim that the sweep
+    # only ever reclaimed memory.
+    seen = prompts_seen(backend, 1)
+    assert seen[0].startswith("user:one"), seen
+    assert seen[1] == "assistant:first"
+    assert seen[-1] == "user:two"
 
 
 # --- the inbox ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> None:
+async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -> None:
     """The core claim of the whole design, and the reason loops exist at all.
 
     A second message arrives while the first turn is still streaming.  Under the
@@ -380,17 +416,13 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> Non
         text_turn("slow answer", delay=0.15),
         text_turn("second answer"),
     )
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     first = asyncio.create_task(send(server, "one"))
     # The first turn has begun only once the backend has been asked for a
     # stream; anything earlier and the second message might win the race for
     # the lock and this would assert nothing.
-    for _ in range(200):
-        if backend.calls:
-            break
-        await asyncio.sleep(0.01)
-    assert backend.calls, "the first turn never reached the model"
+    await wait_for_streams(backend)
 
     second = asyncio.create_task(send(server, "two"))
     await asyncio.sleep(0.05)
@@ -411,16 +443,13 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(db, hub) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_message_leaves_the_lock_free(db, hub) -> None:
+async def test_a_cancelled_message_leaves_the_lock_free(context, hub) -> None:
     """A caller that goes away while queued is not a lock held forever."""
     backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     first = asyncio.create_task(send(server, "one"))
-    for _ in range(200):
-        if backend.calls:
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_streams(backend)
 
     queued = asyncio.create_task(send(server, "doomed"))
     await asyncio.sleep(0.02)
@@ -439,7 +468,7 @@ async def test_a_cancelled_message_leaves_the_lock_free(db, hub) -> None:
 
 @pytest.mark.asyncio
 async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
-    db, hub
+    context, hub
 ) -> None:
     """The sharpest edge in the system, and it is back because the state is.
 
@@ -453,13 +482,10 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     model is sent is the only thing that actually matters.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     interrupted = asyncio.create_task(send(server, "one"))
-    for _ in range(200):
-        if backend.calls:
-            break
-        await asyncio.sleep(0.01)
+    await wait_for_streams(backend)
     interrupted.cancel()
     with pytest.raises((asyncio.CancelledError, Exception)):
         await interrupted
@@ -470,7 +496,7 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
 
 @pytest.mark.asyncio
 async def test_an_interrupted_turn_is_still_recorded(
-    db, hub, tmp_path, monkeypatch
+    context, hub, tmp_path, monkeypatch
 ) -> None:
     """Recording is unconditional, so the cancel path is not a special case.
 
@@ -479,20 +505,17 @@ async def test_an_interrupted_turn_is_still_recorded(
     message the user can see, the model will see, and the database has never
     heard of.
     """
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from slife2.paths import DATA_ENV_VAR, db_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
-    async with Client(build_db(config(), embedder=StubEmbedder())) as db_client:
+    async with Client(build_context(config(), embedder=StubEmbedder())) as context_client:
         server = build_server(
-            config(), backend=backend, db_client=db_client, hub_client=hub
+            config(), backend=backend, context_client=context_client, hub_client=hub
         )
         interrupted = asyncio.create_task(send(server, "one"))
-        for _ in range(200):
-            if backend.calls:
-                break
-            await asyncio.sleep(0.01)
+        await wait_for_streams(backend)
         interrupted.cancel()
         with pytest.raises((asyncio.CancelledError, Exception)):
             await interrupted
@@ -524,7 +547,7 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     has never heard of" the rule exists to prevent.  Recording is therefore
     keyed on the turn having happened, not on how it ended.
     """
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from slife2.paths import DATA_ENV_VAR, db_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
@@ -536,9 +559,9 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
             self.calls.append((list(messages), list(tools)))
             raise RuntimeError("the provider answered 500")
 
-    async with Client(build_db(config(), embedder=StubEmbedder())) as db_client:
+    async with Client(build_context(config(), embedder=StubEmbedder())) as context_client:
         server = build_server(
-            config(), backend=Refusing(), db_client=db_client, hub_client=hub
+            config(), backend=Refusing(), context_client=context_client, hub_client=hub
         )
         with pytest.raises(Exception, match="500"):
             await send(server, "one")
@@ -592,8 +615,8 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     fails at its first hop.  No other test here notices, because every other
     one injects its clients rather than letting the server own them.
     """
-    from slife2.config import DB_SERVER_NAME, TOOLHUB_SERVER_NAME
-    from slife2.db_server import build_server as build_db
+    from slife2.config import CONTEXT_SERVER_NAME, TOOLHUB_SERVER_NAME
+    from slife2.context_server import build_server as build_context
     from slife2.paths import DATA_ENV_VAR
     from slife2.server import server as server_module
     from slife2.toolhub import build_server as build_hub
@@ -605,14 +628,15 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     async def open_ours(_url, **kwargs):
         name = kwargs.get("name", "")
         opened.append(name)
-        if name == DB_SERVER_NAME:
-            client = Client(build_db(default_config(), embedder=StubEmbedder()))
+        if name == CONTEXT_SERVER_NAME:
+            client = Client(build_context(default_config(), embedder=StubEmbedder()))
         else:
             assert name == TOOLHUB_SERVER_NAME
             client = Client(
                 build_hub(
                     default_config(),
                     transports=plugin_transports(default_config()),
+                    embedder=StubEmbedder(),
                 )
             )
         await client.__aenter__()
@@ -625,7 +649,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
 
     assert (await send(server, "one")).data["text"] == "the answer"
     assert (await send(server, "two")).data["text"] == "the answer"
-    assert opened.count(DB_SERVER_NAME) == 2, "a session reused a closed client"
+    assert opened.count(CONTEXT_SERVER_NAME) == 2, "a session reused a closed client"
 
 
 # --- persistence -------------------------------------------------------------
@@ -635,7 +659,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
 async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     """The turn lands in that agent's own database, and nowhere else.
 
-    Both halves matter.  Written at all, because a db plugin that nothing
+    Both halves matter.  Written at all, because a store that nothing
     calls is a plugin that does nothing; and written to *that agent's* file,
     because isolation between agents is the reason the file is per-agent in the
     first place.
@@ -645,7 +669,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     is empty because there was nothing to put in it, and only an assertion can
     tell those apart.
     """
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from slife2.paths import DATA_ENV_VAR, db_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
@@ -671,8 +695,8 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         ),
     )
 
-    async with Client(build_db(cfg, embedder=StubEmbedder())) as db_client:
-        server = build_server(cfg, backend=backend, db_client=db_client, hub_client=hub)
+    async with Client(build_context(cfg, embedder=StubEmbedder())) as context_client:
+        server = build_server(cfg, backend=backend, context_client=context_client, hub_client=hub)
         await send(server, "what is 2+2?", agent="jack", channel="human")
 
     jack = db_dir() / "jack.turn.db"
@@ -724,13 +748,10 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     ]
     assert turns_messages[0]["content"] == "what is 2+2?"
 
-    # ...and no other agent's database was created along the way.  The tool
-    # catalogue is the one other file the directory holds, and it is one file
-    # for the whole data directory rather than one per agent.
-    assert sorted(p.name for p in db_dir().glob("*.db")) == [
-        "jack.turn.db",
-        "tools.db",
-    ]
+    # ...and no other agent's database was created along the way.  Only the
+    # context store's files are here: the tool catalogue is the hub's own now,
+    # and the hub in this test is injected, so nothing opened that file.
+    assert sorted(p.name for p in db_dir().glob("*.db")) == ["jack.turn.db"]
 
 
 @pytest.mark.asyncio
@@ -757,7 +778,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     from test_toolhub import upstream_server
 
     from slife2.config import ToolLoadSettings, ToolServerSettings
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from slife2.paths import DATA_ENV_VAR, db_dir
     from slife2.toolhub import build_server as build_hub
     from tests.fakes import plugin_transports
@@ -800,12 +821,13 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
                 transports=plugin_transports(
                     cfg, {"fake": lambda settings: upstream_server()}
                 ),
+                embedder=StubEmbedder(),
             )
         ) as hub_client,
-        Client(build_db(cfg, embedder=StubEmbedder())) as db_client,
+        Client(build_context(cfg, embedder=StubEmbedder())) as context_client,
     ):
         server = build_server(
-            cfg, backend=backend, db_client=db_client, hub_client=hub_client
+            cfg, backend=backend, context_client=context_client, hub_client=hub_client
         )
         await send(server, "look something up", agent="jack", channel="human")
 
@@ -834,8 +856,8 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
 
 
 @pytest.mark.asyncio
-async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
-    """A missing db server is a broken system, not a degraded one.
+async def test_opening_a_loop_fails_when_the_context_store_is_gone(hub) -> None:
+    """A missing context store is a broken system, not a degraded one.
 
     Asked before anything is spent rather than at the write: the point of the
     guard is to find out *before* a model call has been paid for, not once the
@@ -849,7 +871,7 @@ async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
     base = default_config()
     cfg = replace(
         base,
-        servers={**base.servers, "db": replace(base.servers["db"], port=9)},
+        servers={**base.servers, "context": replace(base.servers["context"], port=9)},
     )
     server = build_server(cfg, hub_client=hub, backend=answering("the answer"))
 
@@ -861,7 +883,7 @@ async def test_opening_a_loop_fails_when_the_db_server_is_gone(hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_reach_the_model_as_content_parts(db, hub) -> None:
+async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
     """A prompt with an image is a list of parts, not a string."""
     from slife2.config import ModelSettings, ProviderSettings
 
@@ -881,7 +903,7 @@ async def test_images_reach_the_model_as_content_parts(db, hub) -> None:
             )
         },
     )
-    server = build_server(vision, db_client=db, hub_client=hub, backend=backend)
+    server = build_server(vision, context_client=context, hub_client=hub, backend=backend)
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
     sent = backend.calls[0][0][-1]
@@ -891,7 +913,7 @@ async def test_images_reach_the_model_as_content_parts(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_are_refused_by_a_model_that_cannot_read_them(db, hub) -> None:
+async def test_images_are_refused_by_a_model_that_cannot_read_them(context, hub) -> None:
     """Dropping an attachment somebody made is worse than saying no.
 
     The config listing only `text` under `input` is the config saying so, and
@@ -915,7 +937,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(db, hub) -> N
     with pytest.raises(Exception, match="cannot read images"):
         await send(
             build_server(
-                text_only, db_client=db, hub_client=hub, backend=answering("ok")
+                text_only, context_client=context, hub_client=hub, backend=answering("ok")
             ),
             "look",
             images=["data:image/png;base64,AAAA"],
@@ -933,11 +955,11 @@ def template(tmp_path, body: str):
 
 
 @pytest.mark.asyncio
-async def test_the_system_prompt_is_a_template(tmp_path, db, hub) -> None:
+async def test_the_system_prompt_is_a_template(tmp_path, context, hub) -> None:
     backend = answering("ok")
     server = build_server(
         config(system_prompt=template(tmp_path, "be terse")),
-        db_client=db,
+        context_client=context,
         hub_client=hub,
         backend=backend,
     )
@@ -950,7 +972,7 @@ async def test_the_system_prompt_is_a_template(tmp_path, db, hub) -> None:
 
 @pytest.mark.asyncio
 async def test_the_template_is_rendered_with_the_loops_own_agent_name(
-    tmp_path, db, hub
+    tmp_path, context, hub
 ) -> None:
     """One template, personalised by whoever the loop belongs to.
 
@@ -966,7 +988,7 @@ async def test_the_template_is_rendered_with_the_loops_own_agent_name(
     )
     server = build_server(
         config(system_prompt=template(tmp_path, "You are {{ agent_name }}.")),
-        db_client=db,
+        context_client=context,
         hub_client=hub,
         backend=backend,
     )
@@ -993,7 +1015,7 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_max_steps_comes_from_the_config(db, hub) -> None:
+async def test_max_steps_comes_from_the_config(context, hub) -> None:
     backend = FakeBackend(
         *[
             ScriptedTurn(
@@ -1006,7 +1028,7 @@ async def test_max_steps_comes_from_the_config(db, hub) -> None:
         ]
     )
     server = build_server(
-        config(max_steps=2), db_client=db, hub_client=hub, backend=backend
+        config(max_steps=2), context_client=context, hub_client=hub, backend=backend
     )
     result = await send(server, "loop forever")
 
@@ -1029,9 +1051,9 @@ async def send_with_progress(
 
 
 @pytest.mark.asyncio
-async def test_events_arrive_as_progress_notifications(db, hub) -> None:
+async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     seen: list[TurnEvent] = []
 
@@ -1054,9 +1076,9 @@ async def test_events_arrive_as_progress_notifications(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_progress_values_are_a_monotonic_counter(db, hub) -> None:
+async def test_progress_values_are_a_monotonic_counter(context, hub) -> None:
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     values: list[float] = []
 
@@ -1071,10 +1093,10 @@ async def test_progress_values_are_a_monotonic_counter(db, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_works_without_a_progress_handler(db, hub) -> None:
+async def test_a_turn_works_without_a_progress_handler(context, hub) -> None:
     """A non-streaming client gets the same answer and the server does no extra work."""
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     result = await send(server, "x")
     assert result.data["text"] == "It is 42."
@@ -1137,7 +1159,7 @@ async def over_http(server: FastMCP) -> AsyncGenerator[str]:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_progress_streams_over_real_http(db, hub) -> None:
+async def test_progress_streams_over_real_http(context, hub) -> None:
     """The one test that binds a port for the streaming contract.
 
     The in-memory transport cannot prove that progress notifications survive
@@ -1146,7 +1168,7 @@ async def test_progress_streams_over_real_http(db, hub) -> None:
     with more than one of them, not as a single buffered dump at the end.
     """
     server = build_server(
-        config(), db_client=db, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
     arrivals: list[tuple[float, str]] = []
 
@@ -1170,7 +1192,7 @@ async def test_progress_streams_over_real_http(db, hub) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_a_cancelled_turn_is_repaired_over_real_http(db, hub) -> None:
+async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None:
     """The load-bearing assumption, measured rather than read.
 
     Everything the loop does on the way out depends on one property of the
@@ -1188,7 +1210,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(db, hub) -> None:
     from every provider, and nothing inside the process can show that.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(config(), db_client=db, hub_client=hub, backend=backend)
+    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
 
     async with over_http(server) as url:
         async with Client(url) as client:
@@ -1197,11 +1219,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(db, hub) -> None:
                     "send_message", {"agent": DEFAULT_AGENT, "prompt": "one"}
                 )
             )
-            for _ in range(200):
-                if backend.calls:
-                    break
-                await asyncio.sleep(0.01)
-            assert backend.calls, "the turn never reached the model"
+            await wait_for_streams(backend)
 
             interrupted.cancel()
             with pytest.raises((asyncio.CancelledError, Exception)):

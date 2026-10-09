@@ -1,0 +1,104 @@
+▸ Context recall
+
+This call decides the context the turn runs on: what to keep of the turns in
+hand, plus what to recall from the turn log. The turn then runs on the two
+together, in time order.
+
+Current user input:
+{{ user_input }}
+
+{{ recall_reply }}
+
+Reply with ONE JSON object holding the fields above, and nothing else. An empty
+object means the turns in hand are enough for this turn.
+
+Part 1 — the decision
+
+What to keep of the turns in hand — "context": the turns this input is answered
+from. Leave it out (or "keep") for all of them, set it to the turn_ids in the
+current context worth keeping for some, or to "clear" for none — an input none
+of them carries is answered from memory or from nothing, and every turn kept is
+spent from the same window the recall is.
+
+What to recall from the turn log — "recall": leave it out for nothing, or fill it
+in for one condition — a period (since / until), a query, or a query within a
+period.
+
+The "query" holds what turn recall needs — keywords, short phrases, or the full
+user input, in any combination — matched against the stored turns by a hybrid
+of full-text and semantic search.
+
+"since" and "until" take a date, or any of: today, yesterday, this week, last
+week, this month, last month, this year, last year, "N days ago", "N weeks ago",
+"N months ago", "N years ago".
+
+The context is bounded, so a recall might return a truncated selection. Use
+"anchor" to guide the drop for a period recall, and bound a query recall with
+a narrower period.
+
+Part 2 — the cases
+
+The two fields are decided independently, and each case below takes one value
+of each.
+
+1. Keep the turns in hand, recall nothing — the input is answered from what is
+in hand.
+
+  input What did we decide about the retries?
+    → {}
+
+2. Keep part of them, recall nothing — the plan is in hand, the tool output
+around it is not.
+
+  input Let's go with the plan we just settled on
+    → {"context": [31, 33]}
+
+3. Keep none of them, recall nothing — the input uses nothing in hand, or says
+to drop it.
+
+  input Translate this paragraph into French
+    → {"context": "clear"}
+
+4. Keep them and recall a period — a range of time, and no topic.
+
+  input What have I been doing these past two days?
+    → {"recall": {"since": "yesterday"}}
+
+5. Keep them and recall a period from its beginning — the oldest turns in it.
+
+  input Where did we start last month?
+    → {"recall": {"since": "last month", "anchor": "oldest"}}
+
+6. Keep them and recall the earliest turns of all — no bound to name.
+
+  input Let's look at our earliest conversations
+    → {"recall": {"anchor": "oldest"}}
+
+7. Keep part and recall a query — the turn that answered this has left the
+context, and the tool dumps around it are dead weight.
+
+  input Who did you say was the dean of the management school?
+    → {"context": [27, 28], "recall": {"query": "management school dean"}}
+
+8. Keep none and recall a query within a period — a topic, and when.
+
+  input What did we say about the anniversary last week?
+    → {"context": "clear", "recall": {"query": "anniversary", "since": "last week"}}
+
+9. Keep them and recall a query in a period that has passed — a topic, and both
+ends of it.
+
+  input What did we say about the anniversary last month?
+    → {"recall": {"query": "anniversary", "since": "last month", "until": "this month"}}
+
+10. Keep them and recall a query for a follow-up — its subject is in the
+conversation above, so carry it into the query.
+
+  input What about the other one?
+    → {"recall": {"query": "the other school"}}
+
+11. Keep none and recall a query — nothing in hand carries this input, and the
+subject is one the turn log may.
+
+  input What about the alumni fund?
+    → {"context": "clear", "recall": {"query": "alumni fund"}}

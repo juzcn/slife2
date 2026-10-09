@@ -277,7 +277,7 @@ def plugin_transports(
     """
     from slife2.builtins import build_server as build_builtins
     from slife2.cli_server import build_server as build_cli
-    from slife2.db_server import build_server as build_db
+    from slife2.context_server import build_server as build_context
     from slife2.mcp_tools import build_server as build_mcp_tools
     from slife2.restapi_tools import build_server as build_restapi_tools
     from slife2.skills_server import build_server as build_skills
@@ -285,8 +285,8 @@ def plugin_transports(
     def for_plugin(name: str) -> Any:
         if name == "builtins":
             return lambda settings: build_builtins(config)
-        if name == "db":
-            return lambda settings: build_db(config, embedder=StubEmbedder())
+        if name == "context":
+            return lambda settings: build_context(config, embedder=StubEmbedder())
         if name == "skills-server":
             return lambda settings: build_skills(config)
         if name == "cli-server":

@@ -38,7 +38,7 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 
 def test_there_is_one_plugin_per_job() -> None:
-    """One agent loop, one db, one builtins server, one hub of tools,
+    """One agent loop, one context store, one builtins server, one hub,
     one process per wire protocol.
 
     The granularity is the point: a backend speaks one wire protocol and does
@@ -47,8 +47,9 @@ def test_there_is_one_plugin_per_job() -> None:
     processes, not four.  Note which way the list is ordered, too — it is
     `API_BACKENDS` order, because the servers start in the order they are
     needed and the model ones come before the agent that talks to them, with the
-    local plugins after: `embeddings` first among them, because the db's
-    startup sync asks it for a dimension before it can build an index at all.
+    local plugins after: `embeddings` first among them, because the
+    context store's startup sync asks it for a dimension before it can build an
+    index at all.
     """
     config = load(_config_with_every_protocol())
     names = [spec.name for spec in launcher.specs(config)]
@@ -57,7 +58,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "llm:anthropic-messages",
         "llm:openai-responses",
         "embeddings",
-        "db",
+        "context",
         "builtins",
         "skills-server",
         "cli-server",
@@ -72,7 +73,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.llm.anthropic_server",
         "slife2.llm.openai_responses_server",
         "slife2.llm.embeddings_server",
-        "slife2.db_server",
+        "slife2.context_server",
         "slife2.builtins",
         "slife2.skills_server",
         "slife2.cli_server",
@@ -127,7 +128,7 @@ def test_one_server_per_wire_protocol() -> None:
         "llm:anthropic-messages",
         "llm:openai-responses",
         "embeddings",
-        "db",
+        "context",
         "builtins",
         "skills-server",
         "cli-server",
@@ -177,7 +178,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
     assert names == [
         "llm:openai-completions",
         "embeddings",
-        "db",
+        "context",
         "builtins",
         "skills-server",
         "cli-server",
@@ -198,9 +199,9 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
 
     Starting them together races, and the failure is confusing rather than
     obvious: the agent server comes up healthy and every turn fails.  The peers
-    are its model, the db (which needs `embeddings` in turn, which is why that
-    one starts first), and the toolhub with the builtins behind it — all of
-    which it now *needs*, since the model's tool list comes from the hub.
+    are its model, the context store (which needs `embeddings` in turn, which
+    is why that one starts first), and the toolhub with the builtins behind it —
+    all of which it now *needs*, since the model's tool list comes from the hub.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-1] == "agent"
@@ -208,7 +209,7 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
     assert set(names[:-1]) == {
         "llm:openai-completions",
         "embeddings",
-        "db",
+        "context",
         "builtins",
         "skills-server",
         "cli-server",

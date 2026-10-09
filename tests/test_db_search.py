@@ -292,7 +292,12 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
 
     nearest = await store._semantic_hits("工具", embedder, 3)
 
-    assert nearest[0] == 1
+    # A mapping, in nearest-first order: the *order* is what the fusion reads and
+    # the value is the similarity a recall gates on, so the assertion is about
+    # both — `list()` is the ranking it always was.
+    assert list(nearest) == [1, *list(nearest)[1:]]
+    assert next(iter(nearest)) == 1
+    assert nearest[1] > 0.0
 
 
 @pytest.mark.asyncio

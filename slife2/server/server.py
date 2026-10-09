@@ -65,7 +65,7 @@ from fastmcp.exceptions import ToolError
 from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
-    DB_SERVER_NAME,
+    CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
     find_config_path,
@@ -84,6 +84,7 @@ from slife2.mcp_server import (
     open_server,
     parse_serve_args,
     serve,
+    tool_payload,
 )
 from slife2.messages import Message, ToolCall
 from slife2.prompt import render as render_system_prompt
@@ -94,11 +95,14 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-agent"
 
-#: How long to wait on the db server.  Short: the write happens once the
-#: answer already exists, and a slow store is not worth holding that answer for.
-#: A store that is *gone* is a different matter — that fails the turn outright;
-#: see `slife2.mcp_server.open_server`.
-DB_TIMEOUT_SECONDS = 10.0
+#: How long to wait on the context plugin.  Short for the `remember` it was
+#: written for — that write happens once the answer already exists, and a slow
+#: store is not worth holding the answer for — and long enough for the two calls
+#: that are not writes at all: `restore` replays a whole context, and `rebuild`
+#: makes a model call the plugin has already bounded by `context.timeout` plus a
+#: recall that may embed a query.  A peer that is *gone* is a different matter
+#: again — that fails the turn outright; see `slife2.mcp_server.open_server`.
+CONTEXT_TIMEOUT_SECONDS = 120.0
 
 #: How long to wait on the toolhub.  Longer than the db server's, because
 #: this call is not a write after the fact: `list_tools` is what the turn's tool
@@ -207,6 +211,20 @@ class Loop:
     lock: asyncio.Lock
     last_used: float
     inbox: deque[Pending] = field(default_factory=deque)
+    #: Which turns of the log `messages` is made of, in order — the agent's copy
+    #: of the live-context list the store persists.  Held here rather than read
+    #: per turn because it *is* the in-memory state: `rebuild` is handed it and
+    #: answers with its replacement, and the two must be the same list or a
+    #: keep-list would name turns the messages do not have.
+    turn_ids: list[int] = field(default_factory=list)
+    #: How many of `messages` those ids account for — the system prompt, then
+    #: each turn in the list, in order.  What follows is the **carried tail**:
+    #: messages this conversation holds that no turn in the list covers, which is
+    #: a cancelled turn's repair and nothing else.  v1 re-derives the same run by
+    #: grouping messages into turns; a count is enough here because nothing else
+    #: can leave a message unbacked, and it is what lets a rebuild replace the
+    #: turns without destroying a message that has no turn to be replaced by.
+    covered: int = 0
 
     @property
     def records(self) -> bool:
@@ -225,14 +243,14 @@ def build_server(
     config: Config,
     *,
     backend: LLMBackend | None = None,
-    db_client: Client | None = None,
+    context_client: Client | None = None,
     hub_client: Client | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
 
-    `backend`, `db_client` and `hub_client` are injectable so the whole
-    server — model call, tools, the write — can be exercised over the
-    in-memory transport with no network at all.
+    `backend`, `context_client` and `hub_client` are injectable so the whole
+    server — model call, tools, the restore, the rebuild, the write — can be
+    exercised over the in-memory transport with no network at all.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -252,11 +270,11 @@ def build_server(
     #: a test's, and has no model server to name a conversation to.
     model_backends: dict[str, MCPBackend] = {}
     clients: dict[str, Client] = {}
-    #: The db client once we have one — injected, or opened on first use.
-    db_conn: Client | None = db_client
+    #: The context client once we have one — injected, or opened on first use.
+    context_conn: Client | None = context_client
     #: Whether *we* opened it, and so whether we should close it.  An injected
     #: client belongs to whoever made it.
-    db_owned = db_client is None
+    context_owned = context_client is None
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
@@ -277,34 +295,35 @@ def build_server(
     #: mid-flight, and drained on the way out.
     background: set[asyncio.Task[None]] = set()
 
-    async def db() -> Client:
-        """The client for the db server, opened on first use.
+    async def memory() -> Client:
+        """The client for the context plugin, opened on first use.
 
         Opened once and kept for the process, the same arrangement as the model
         backends and for the same reason: a handshake per turn is a handshake
         per turn.
 
-        A db server that is not there **raises**, like every other peer in
+        A context plugin that is not there **raises**, like every other peer in
         this system.  `slife2.mcp_server.open_server` is where that rule lives
         and why; what matters here is that this plugin is not the exception
-        to it.
+        to it — and it is the peer whose absence is felt soonest, since a turn
+        whose context cannot be restored is a turn that should not be run.
         """
-        nonlocal db_conn
+        nonlocal context_conn
         # Fast path outside the lock: once a loop has been opened there is no
         # await between the check and the use, and the event loop is
         # single-threaded, so reading it unlocked is sound.
-        if db_conn is not None:
-            return db_conn
+        if context_conn is not None:
+            return context_conn
         async with opening:
-            if db_conn is None:
-                db_conn = await open_server(
-                    config.server("db").url,
-                    name=DB_SERVER_NAME,
+            if context_conn is None:
+                context_conn = await open_server(
+                    config.server("context").url,
+                    name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
-                    timeout=DB_TIMEOUT_SECONDS,
+                    timeout=CONTEXT_TIMEOUT_SECONDS,
                 )
-            assert db_conn is not None  # open_server returns one or raises
-            return db_conn
+            assert context_conn is not None  # open_server returns one or raises
+            return context_conn
 
     async def hub() -> Client:
         """The client for the toolhub, opened on first use.
@@ -371,8 +390,8 @@ def build_server(
         channel: str,
         created_at: str,
         completed_at: str,
-    ) -> None:
-        """Persist a turn.
+    ) -> int | None:
+        """Persist a turn, and answer with the id it was given.
 
         **This is called for every turn of a loop that records**, cancelled
         ones included, and `result` is None exactly when the turn did not
@@ -395,33 +414,40 @@ def build_server(
         existed when the turn ended: the number the *next* request would resend.
         A cancelled turn has neither, and reports zero rather than a guess.
         """
-        client = await db()
+        client = await memory()
 
         try:
-            await client.call_tool(
-                "remember",
-                {
-                    "agent": agent,
-                    "subagent": subagent,
-                    "messages": messages,
-                    "token_count": result.usage.total_tokens if result else 0,
-                    "context_tokens": result.last_usage.total_tokens if result else 0,
-                    "who_helped": agent,
-                    # What the loop was opened on, not the reference as typed: a
-                    # caller may name a bare provider or nothing at all, and
-                    # neither says which model wrote the answer.
-                    "what_model": model,
-                    "channel": channel,
-                    "created_at": created_at,
-                    "completed_at": completed_at,
-                },
+            payload = tool_payload(
+                await client.call_tool(
+                    "remember",
+                    {
+                        "agent": agent,
+                        "subagent": subagent,
+                        "messages": messages,
+                        "token_count": result.usage.total_tokens if result else 0,
+                        "context_tokens": result.last_usage.total_tokens
+                        if result
+                        else 0,
+                        "who_helped": agent,
+                        # What the loop was opened on, not the reference as typed:
+                        # a caller may name a bare provider or nothing at all, and
+                        # neither says which model wrote the answer.
+                        "what_model": model,
+                        "channel": channel,
+                        "created_at": created_at,
+                        "completed_at": completed_at,
+                    },
+                )
             )
         except ToolError as exc:
             # Caught, and only this. The server answered and refused one
             # request; everything else — the transport gone, a store that
             # stopped answering — is a system that has come apart and is meant
             # to fail here rather than be logged and stepped over.
-            logger.warning("the db refused the turn for %s: %s", agent, exc)
+            logger.warning("the store refused the turn for %s: %s", agent, exc)
+            return None
+        turn_id = payload.get("turn_id")
+        return int(turn_id) if isinstance(turn_id, int) else None
 
     async def make_loop(active: LLMBackend, client_id: ClientId) -> AgentLoop:
         return AgentLoop(
@@ -519,34 +545,46 @@ def build_server(
                 logger.info("reaping idle conversation %s", describe(client))
                 loops.pop(client, None)
 
-    def conversation(agent: str, subagent: str, model: str) -> Loop:
-        """The conversation for this key, started if it is not running.
+    def conversation(agent: str, subagent: str, model: str) -> tuple[Loop, bool]:
+        """The conversation for this key, and whether this call started it.
 
         Created on demand rather than opened by a separate call, because a key
         that cannot go stale is worth more than the round trip it costs: there is
         no handle to carry, no lifetime to observe, and no "not found" for a
         caller to handle.  The idle sweep may have dropped the state; the caller
         cannot tell, and does not have to.
+
+        **`started` is the restore's trigger, and it is why this answers a pair.**
+        A loop that already exists is one whose context is in hand; a loop that
+        has just been built holds the system prompt and nothing else, and that is
+        exactly the moment to ask the store what this conversation was made of —
+        which is the same event as "a process restarted" and "a reaped
+        conversation came back", at the only level this server can see.
         """
         client = (agent, subagent)
         loop = loops.get(client)
+        started = loop is None
         if loop is None:
+            messages = opening_messages(agent)
             loop = Loop(
                 agent=agent,
                 subagent=subagent,
                 model=resolved_model(model),
-                messages=opening_messages(agent),
+                messages=messages,
                 lock=asyncio.Lock(),
                 last_used=time.monotonic(),
+                # The head is what an empty list covers, so a conversation that
+                # restores nothing carries nothing either.
+                covered=len(messages),
             )
             loops[client] = loop
             logger.debug(
                 "started %s on %s", describe(client), model or "the default model"
             )
         loop.last_used = time.monotonic()
-        return loop
+        return loop, started
 
-    def detach(coro: Coroutine[Any, Any, None]) -> None:
+    def detach(coro: Coroutine[Any, Any, Any]) -> None:
         """Run a write that must outlive the cancellation that prompted it.
 
         Measured against the real Streamable HTTP transport: from a cancelled
@@ -576,17 +614,24 @@ def build_server(
         """
         return backend.name if backend is not None else loop.model
 
-    async def record(loop: Loop, item: Pending, outcome: Outcome) -> None:
-        """Write this turn to the db if this loop has any.
+    async def record(loop: Loop, item: Pending, outcome: Outcome) -> int | None:
+        """Write this turn to the log if this loop has any, and answer with its id.
 
-        Called *after* the lock is released: it is a network call, and a queued
-        turn waiting on the db server is a wait with no reason behind it.
+        **Called inside the lock, which reverses an earlier decision.**  It used
+        to run after the lock was released, on the argument that a queued turn
+        waiting on a network call is a wait with no reason behind it — and that
+        argument held while the write was a store's alone.  It does not hold now
+        that the *live-context list* is what the write maintains: a rebuild reads
+        that list, so a queued turn that started before the write landed would be
+        handed a context missing the turn it is following up on, and would drop
+        it.  The price is one loopback before a queued turn starts; the thing it
+        buys is that `turn_ids` and `messages` are never out of step.
         """
         if not loop.records or not outcome.messages:
-            # Nothing to record, or a caller cancelled while queued — in which case its
-            # turn never started and there is nothing that happened to record.
-            return
-        await remember_turn(
+            # Nothing to record, or a caller cancelled while queued — in which
+            # case its turn never started and there is nothing to record.
+            return None
+        return await remember_turn(
             loop.agent,
             loop.subagent,
             [message.to_wire() for message in outcome.messages],
@@ -595,6 +640,102 @@ def build_server(
             channel=item.channel,
             created_at=outcome.started_at or outcome.completed_at,
             completed_at=outcome.completed_at,
+        )
+
+    # --- the two decisions, and the one place they are asked for -------------
+    #
+    #  Both are the context plugin's, and this server is the caller — it is the
+    #  party that owns the conversation, so it is the party that knows when one
+    #  has started and when a turn is about to run.  What it does with each
+    #  answer is the same: adopt it wholesale, because a context that is half
+    #  this server's and half the store's is not a context either of them knows.
+
+    def _adopt(loop: Loop, payload: dict[str, Any], *, carried: int) -> None:
+        """Take a rebuilt context as this conversation's, or refuse the answer.
+
+        Refused rather than ignored, and that is the load-bearing half: a peer
+        that answers with a shape this build cannot read is a system that has
+        come apart — the same rule `slife2.toolclient.remote_tools` applies to a
+        tool list — and quietly keeping the context we had would make an
+        unreadable answer indistinguishable from a decision to keep it.
+        """
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ConnectionError(
+                f"the context store did not return a message list (it said "
+                f"{payload!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        loop.messages = [Message.from_wire(raw) for raw in messages]
+        loop.turn_ids = [int(turn_id) for turn_id in payload.get("turn_ids") or []]
+        loop.covered = len(loop.messages) - carried
+
+    async def restore_into(loop: Loop) -> None:
+        """Put a conversation back on the context it had when it last stopped.
+
+        Called when a loop is *built* — a process that restarted, a conversation
+        the idle sweep let go — which is why `reset` clears the stored list
+        rather than only dropping the loop: forgetting a conversation and then
+        having it restore itself is not forgetting it.
+        """
+        payload = tool_payload(
+            await (await memory()).call_tool(
+                "restore",
+                {
+                    "agent": loop.agent,
+                    "subagent": loop.subagent,
+                    "messages": [message.to_wire() for message in loop.messages],
+                },
+            )
+        )
+        _adopt(loop, payload, carried=0)
+        if loop.turn_ids:
+            logger.info(
+                "restored %d turn(s) for %s",
+                len(loop.turn_ids),
+                describe((loop.agent, loop.subagent)),
+            )
+
+    async def rebuild_into(loop: Loop, prompt: str) -> None:
+        """Ask what this turn runs on, and take the answer.
+
+        **Before the user's message is appended**, because the answer replaces
+        the list and an appended message would be destroyed by it — and the
+        message therefore travels as `prompt` rather than being read back out of
+        the list, where it is not yet.
+
+        `carried` is what the message list holds beyond the turns in `turn_ids`:
+        a cancelled turn's repair, and nothing else.  The store puts those
+        messages back verbatim, so a rebuild replaces the *turns* without
+        destroying something that has no turn to be replaced by.
+        """
+        carried = max(len(loop.messages) - loop.covered, 0)
+        payload = tool_payload(
+            await (await memory()).call_tool(
+                "rebuild",
+                {
+                    "agent": loop.agent,
+                    "subagent": loop.subagent,
+                    "messages": [message.to_wire() for message in loop.messages],
+                    "turn_ids": list(loop.turn_ids),
+                    "prompt": prompt,
+                    "model": loop.model,
+                    "carried": carried,
+                },
+            )
+        )
+        _adopt(loop, payload, carried=carried)
+
+    async def forget_context(agent: str, subagent: str) -> None:
+        """Clear a conversation's stored live context.
+
+        A store that is gone **fails the reset**, which is this system's rule and
+        not an exception made for tidiness: a reset that quietly did not happen
+        is a conversation that comes back on the next message, which is the one
+        outcome the caller was trying to prevent.
+        """
+        await (await memory()).call_tool(
+            "forget", {"agent": agent, "subagent": subagent}
         )
 
     async def trim_tools(loop: Loop) -> None:
@@ -722,7 +863,7 @@ def build_server(
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        nonlocal db_conn, hub_conn
+        nonlocal context_conn, hub_conn
         try:
             yield {}
         finally:
@@ -740,11 +881,11 @@ def build_server(
             # for as well: this hook is not the process's lifetime over the
             # in-memory transport, so a client left in place here is one the
             # next session is handed already shut — every turn of it failing at
-            # its first hop.  Clearing is what lets `db()` and `hub()` open
+            # its first hop.  Clearing is what lets `memory()` and `hub()` open
             # again.
-            if db_owned and db_conn is not None:
-                await close_server(db_conn)
-                db_conn = None
+            if context_owned and context_conn is not None:
+                await close_server(context_conn)
+                context_conn = None
             if hub_owned and hub_conn is not None:
                 await close_server(hub_conn)
                 hub_conn = None
@@ -821,13 +962,19 @@ def build_server(
             `model` that answered — which a bare provider or an empty reference
             does not otherwise reveal.
         """
-        # Asked before anything is spent.  A db server that is not there is a
-        # broken system rather than a degraded one, and the moment to find that
+        # Asked before anything is spent.  A context plugin that is not there is
+        # a broken system rather than a degraded one, and the moment to find that
         # out is *before* the first model call has been paid for — not at the
         # write, when the answer exists and has nowhere to go.
-        await db()
+        await memory()
         reap()
-        loop = conversation(agent, subagent, model)
+        loop, started = conversation(agent, subagent, model)
+        if started:
+            # A conversation that has just been built is one that has no context
+            # in hand, and this is the only moment that is true.  Done here and
+            # not under the lock because nothing else can be holding one: the
+            # loop was created by *this* call and no other caller has its key.
+            await restore_into(loop)
 
         if len(loop.inbox) >= MAX_QUEUED:
             raise ToolError(
@@ -840,41 +987,65 @@ def build_server(
         loop.inbox.append(item)
         outcome = Outcome()
         try:
-            try:
-                async with loop.lock:
-                    # Ours, and its turn is starting now.  A message waiting in
-                    # the inbox is *not* in `messages`: `AgentLoop.run_turn`
-                    # re-reads the list every step, so an early append would be
-                    # seen by the running turn as steering nobody asked for.
-                    with contextlib.suppress(ValueError):
-                        loop.inbox.remove(item)
+            async with loop.lock:
+                # Ours, and its turn is starting now.  A message waiting in
+                # the inbox is *not* in `messages`: `AgentLoop.run_turn`
+                # re-reads the list every step, so an early append would be
+                # seen by the running turn as steering nobody asked for.
+                with contextlib.suppress(ValueError):
+                    loop.inbox.remove(item)
+                # **Before the turn, and inside the lock.**  It replaces the
+                # message list wholesale — anything appended first, which
+                # includes this very prompt, would be destroyed by it — and it
+                # reads the list the previous turn's write maintains, so it has
+                # to wait for that write the way the next turn does.
+                await rebuild_into(loop, item.prompt)
+                try:
                     await run_turn_into(loop, item, ProgressObserver(ctx), outcome)
-            except BaseException:
-                # A turn that happened is recorded however it ended, and this
-                # is deliberately one clause rather than a handler per ending —
-                # see `remember_turn` for why the rule is written that way.  A
-                # provider that answered with a 500 is the case that made it
-                # matter: the same turn that leaves the user's message in the
-                # transcript must not leave it missing from the record, which
-                # is the failure a write conditional on *how* a turn ended
-                # produces.
-                #
-                # Detached for two reasons.  From a cancelled handler a plain
-                # await is cancelled again, which is the measurement `detach`
-                # records.  And on any other failure the store may be the very
-                # thing that is gone, where waiting on it would replace the
-                # error the caller needs to see with the one it caused.
-                if outcome.messages:
-                    detach(record(loop, item, outcome))
-                raise
-            else:
-                await record(loop, item, outcome)
+                except BaseException:
+                    # A turn that happened is recorded however it ended, and this
+                    # is deliberately one clause rather than a handler per ending
+                    # — see `remember_turn` for why the rule is written that way.
+                    # A provider that answered with a 500 is the case that made it
+                    # matter: the same turn that leaves the user's message in the
+                    # transcript must not leave it missing from the record, which
+                    # is the failure a write conditional on *how* a turn ended
+                    # produces.
+                    #
+                    # Detached for two reasons.  From a cancelled handler a plain
+                    # await is cancelled again, which is the measurement `detach`
+                    # records.  And on any other failure the store may be the very
+                    # thing that is gone, where waiting on it would replace the
+                    # error the caller needs to see with the one it caused.
+                    #
+                    # Its id is deliberately dropped: this turn's messages are left
+                    # **unbacked**, so the next rebuild carries them verbatim
+                    # rather than fetching a turn whose id the list on disk may or
+                    # may not have by then.  Appending here would race that write
+                    # and could count the same messages twice.
+                    if outcome.messages:
+                        detach(record(loop, item, outcome))
+                    raise
+                else:
+                    turn_id = await record(loop, item, outcome)
+                    if turn_id is not None:
+                        loop.turn_ids.append(turn_id)
+                        # The turn's own messages are covered now, so what was
+                        # carried stays carried and nothing else does.
+                        loop.covered = len(loop.messages)
         finally:
-            # Cancelled while queued: the turn never started, so there is
-            # nothing to record, but the inbox entry must not be left behind.
+            # On every path, including a cancellation while queued: the turn
+            # never started, so there is nothing to record, but the inbox entry
+            # must not be left behind.
             loop.last_used = time.monotonic()
             with contextlib.suppress(ValueError):
                 loop.inbox.remove(item)
+                # On every path, including a cancellation while queued: the turn
+                # never started, so there is nothing to record, but the inbox
+                # entry must not be left behind.
+                loop.last_used = time.monotonic()
+                with contextlib.suppress(ValueError):
+                    loop.inbox.remove(item)
 
         result = outcome.result
         return {
@@ -887,16 +1058,23 @@ def build_server(
 
     @mcp.tool
     async def reset(agent: str, subagent: str = "") -> dict[str, Any]:
-        """Forget a conversation, and its history with it.
+        """Forget a conversation, and its context with it.
 
         Idempotent, and deliberately not an error when there was nothing there:
         the caller's intent — that this conversation should not continue — is
         satisfied either way, and a caller that had nothing to forget is in
         exactly the state it asked for.
 
-        Only the *conversation* is forgotten.  The turns it produced are in
-        the db, which is storage rather than state, and clearing that is a
-        different request with a different blast radius.
+        **The stored live-context list is cleared too**, and that is a change:
+        dropping the in-memory loop used to be the whole of it, and it cannot be
+        any more, because a key that has just been dropped is a key whose next
+        message *restores*.  Forgetting a conversation and having it come back on
+        the next prompt is not forgetting it.
+
+        Only the *conversation* is forgotten.  The turns it produced are in the
+        log — storage rather than state — and clearing those is a different
+        request with a different blast radius: `turn_list` still finds every one
+        of them, they are simply no longer what this conversation is made of.
 
         Args:
             agent: Whose conversation.
@@ -905,6 +1083,7 @@ def build_server(
         Returns:
             `reset`: whether there was a conversation there to forget.
         """
+        await forget_context(agent, subagent)
         forgotten = loops.pop((agent, subagent), None) is not None
         logger.debug(
             "reset: %s %s",

@@ -175,7 +175,7 @@ DEFAULT_AGENT = "slife2"
 #: agent loop in particular must never reach `openai_server`.  `tests/test_config.py`
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
-DB_SERVER_NAME = "slife2-db"
+CONTEXT_SERVER_NAME = "slife2-context"
 BUILTINS_SERVER_NAME = "slife2-builtins"
 MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
 RESTAPI_TOOLS_SERVER_NAME = "slife2-restapi-tools"
@@ -184,20 +184,23 @@ CLI_SERVER_NAME = "slife2-cli"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
-#: The db plugin's key in the `servers:` table, where a *client* of it needs
-#: to look it up: the toolhub asks the db for the tool catalogue by this name.
-#: Here rather than only in `slife2.db_server`, because a client that imported
-#: the server to read one string would pull a server into a process that must
-#: not have one.
-DB_KEY = "db"
-
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
 #: launcher starts them in — see `slife2.config.Config.plugins` — and two of
 #: these positions are load-bearing: every server the hub asks for tools comes
 #: before `toolhub`, because the answer to a first turn should not be "not
-#: connected yet"; and `embeddings` before `db`, because the db's startup sync
-#: asks it for a dimension and then for every vector its index is missing.
+#: connected yet"; and `embeddings` before `context`, because the context
+#: plugin's startup sync asks it for a dimension and then for every vector its
+#: indexes are missing.
+#:
+#: **There is no `db` here any more**, and its absence is the design rather than
+#: a gap.  It served the turns and the tool catalogue, and neither needed a
+#: process: a store has one writer, and "one writer" is a property of a SQLite
+#: file, not of a server.  The turns are `context`'s now and the catalogue is the
+#: hub's, both out of the same library (`slife2.db`), and v1's own answer was the
+#: same — `memdb` ships as a plugin *and* is imported, and the headless host
+#: restores its session straight from `SessionStore` with no transport in the
+#: path.
 #:
 #: `skills-server` and `cli-server` are the two families with nothing to connect
 #: to — a folder of playbooks and a list of programs already installed.  They are
@@ -209,7 +212,7 @@ DB_KEY = "db"
 #: share an id with the tools of the server that declares them.
 LOCAL_SERVERS = (
     "embeddings",
-    "db",
+    "context",
     "builtins",
     "skills-server",
     "cli-server",
@@ -466,6 +469,44 @@ class AgentSettings:
 
 
 @dataclass(frozen=True)
+class ContextSettings:
+    """How a conversation's context is decided.  Read by `slife2-context`.
+
+    Its own section rather than more keys under `agent:`, because the section a
+    key lives in is the plugin that reads it: `agent:` is what the agent server
+    reads, and every number here is the context plugin's.  Two readers of one
+    section is how a setting comes to mean two things.
+    """
+
+    #: Whether the context is *chosen* before each turn.  On, one model call per
+    #: turn decides what to keep and what to recall; off, the context grows
+    #: append-only and nothing bounds it (§9 still owes the trim).  Kept as a
+    #: switch because the discriminator call is about as expensive as the turn it
+    #: precedes, and an operator on a metered endpoint should be able to say no.
+    rebuild: bool = True
+    #: Both are **fractions of the model's own context window**, and both are
+    #: therefore only meaningful where the model's config declares one.  The
+    #: ceiling is what a kept context is measured against — a recall's budget is
+    #: the headroom below it — and the floor is the size a recall may spend when
+    #: nothing was kept.
+    ceiling: float = 0.8
+    floor: float = 0.2
+    #: Most turns one recall may select.  A cap rather than a preference, for the
+    #: reason `MAX_PAGE` is one: the count is what is left to bound a context by
+    #: when the model's window is undeclared.
+    recall_limit: int = 40
+    #: The similarity a *measured* candidate must reach to be recalled.  The
+    #: keyword leg is exempt — it has no similarity to measure, and an exact
+    #: match is a stronger signal than a cosine neighbourhood (`slife2.context`).
+    min_similarity: float = 0.45
+    #: How long the discriminator call may take before the turn runs on the
+    #: context it already has.  Generous for a remote model, tight for the
+    #: reason `slife2.context_server` gives: the answer is optional by design, so
+    #: a slow one is only making the *turn* late.
+    timeout: float = 20.0
+
+
+@dataclass(frozen=True)
 class ToolServerSettings:
     """One external MCP server, as the plugin that holds it needs to reach it.
 
@@ -670,9 +711,12 @@ class Config:
     #: ambient environment is the whole of what that skill is given.
     skills: dict[str, SkillSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
-    #: How many function tools the model's list may hold.  Read by the db
-    #: plugin, which owns the catalogue and therefore the budget: the count it
-    #: bounds is a `SELECT COUNT(*)` over its own rows.
+    #: How a conversation's context is decided, from `context:`.  Read by
+    #: `slife2-context`, which is the plugin that owns the turn log.
+    context: ContextSettings = field(default_factory=ContextSettings)
+    #: How many function tools the model's list may hold.  Read by the toolhub,
+    #: which owns the catalogue and therefore the budget: the count it bounds is
+    #: a `SELECT COUNT(*)` over its own rows.
     tool_load: ToolLoadSettings = field(default_factory=ToolLoadSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
     #: section rather than entries under `providers:`, for the reason
@@ -792,9 +836,11 @@ def default_config() -> Config:
     return Config(
         servers={
             "agent": ServerSettings(port=8000),
-            # A plugin of its own: keeping turns is one job, and it is not a
-            # wire protocol like the model backends.
-            "db": ServerSettings(port=8010),
+            # A plugin of its own: keeping a conversation's turns — and deciding
+            # which of them it runs on — is one job, and it is not a wire
+            # protocol like the model backends.  This is v1's `memdb`, and it
+            # took the port the db plugin had.
+            "context": ServerSettings(port=8010),
             # The tools slife2 ships — `echo`, `now`, `calc` — served like
             # anybody else's, because the hub is the one place that decides what
             # the model may call; see `slife2.builtins` and DESIGN.md §8.  It is
@@ -965,6 +1011,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         cli=_cli_tools(raw),
         skills=_skills(raw),
         agent=agent,
+        context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         default=str(raw.get("default") or _first_reference(providers)),
@@ -990,6 +1037,65 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
             f"loads, leaving it a search it cannot keep"
         )
     return ToolLoadSettings(threshold=threshold)
+
+
+def _context(raw: Any, base: ContextSettings) -> ContextSettings:
+    """The `context:` section, defaulted and bounded.
+
+    **Ceiling above floor, and both within (0, 1].**  The pair is a window's
+    ends, so a ceiling below the floor is a selection with a negative budget —
+    which would recall nothing, forever, without anything saying why — and a
+    fraction above one is a budget larger than the window it is a fraction of.
+    An absent section is the default, as everywhere else; an *explicit* zero is
+    refused rather than read as absent, which is `_int_or`'s rule one type over.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "context")
+    ceiling = _optional_float(section.get("ceiling"))
+    floor = _optional_float(section.get("floor"))
+    ceiling = base.ceiling if ceiling is None else ceiling
+    floor = base.floor if floor is None else floor
+    if not 0 < floor < ceiling <= 1:
+        raise ConfigError(
+            f"context: floor={floor} and ceiling={ceiling} are not a window "
+            f"(0 < floor < ceiling <= 1)"
+        )
+    limit = _int_or(section.get("recall_limit"), base.recall_limit)
+    if limit < 1:
+        raise ConfigError(f"context.recall_limit: {limit} recalls nothing")
+    timeout = _optional_float(section.get("timeout"))
+    if timeout is not None and timeout <= 0:
+        raise ConfigError(
+            f"context.timeout: {timeout} would abandon every discriminator call "
+            f"before it was made; set `rebuild: false` to turn the step off"
+        )
+    similarity = _optional_float(section.get("min_similarity"))
+    return ContextSettings(
+        rebuild=_bool_or(section.get("rebuild"), base.rebuild),
+        ceiling=ceiling,
+        floor=floor,
+        recall_limit=limit,
+        min_similarity=base.min_similarity if similarity is None else similarity,
+        timeout=base.timeout if timeout is None else timeout,
+    )
+
+
+def _bool_or(value: Any, default: bool) -> bool:
+    """`value` as a bool, or `default` when the key is absent.
+
+    `bool(value)` is the tempting one-liner and is wrong on the value most likely
+    to be written by hand: `rebuild: "false"` — quoted, which YAML permits — is a
+    non-empty string and would read as *on*, silently doing the opposite of what
+    the file says.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no"):
+        return value.strip().lower() in ("true", "yes")
+    raise ConfigError(f"expected true or false, got {value!r}")
 
 
 def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
@@ -1438,8 +1544,7 @@ __all__ = [
     "API_SERVER_NAMES",
     "BUILTINS_SERVER_NAME",
     "CLI_SERVER_NAME",
-    "DB_SERVER_NAME",
-    "DB_KEY",
+    "CONTEXT_SERVER_NAME",
     "DEFAULT_AGENT",
     "EMBEDDINGS_SERVER_NAME",
     "EmbeddingProviderSettings",
@@ -1454,6 +1559,7 @@ __all__ = [
     "CliToolSettings",
     "Config",
     "ConfigError",
+    "ContextSettings",
     "ModelSettings",
     "ProviderSettings",
     "ServerSettings",

@@ -25,12 +25,13 @@ streams different events, so it gets its own process like any other wire format.
 The embeddings server is the one that is not a *model* backend and is still
 here, because the rule the package is organized by is the wire format and not
 the caller: it speaks the OpenAI-compatible API, so it is the same adapter, and
-the fact that `slife2-db` rather than the agent loop reaches it changes nothing
+the fact that two other plugins rather than the agent loop reach it changes
+nothing
 about what it has to do.
 
 Serving a server at all — the flags, the HTTP transport, the record that says a
 daemon is here — is deliberately *not* in this package.  It is not an LLM
-concern, and the db server and the agent server need it too, so it lives in
+concern, and every other server needs it too, so it lives in
 :mod:`slife2.mcp_server`.  Neither of those two should have to import
 `slife2.llm` to be a server.
 

@@ -88,7 +88,7 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
         API_SERVER_NAMES,
         BUILTINS_SERVER_NAME,
         CLI_SERVER_NAME,
-        DB_SERVER_NAME,
+        CONTEXT_SERVER_NAME,
         EMBEDDINGS_SERVER_NAME,
         MCP_TOOLS_SERVER_NAME,
         RESTAPI_TOOLS_SERVER_NAME,
@@ -99,7 +99,9 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     assert importlib.import_module("slife2.server.server").SERVER_NAME == (
         AGENT_SERVER_NAME
     )
-    assert importlib.import_module("slife2.db_server").SERVER_NAME == DB_SERVER_NAME
+    assert importlib.import_module("slife2.context_server").SERVER_NAME == (
+        CONTEXT_SERVER_NAME
+    )
     assert importlib.import_module("slife2.builtins").SERVER_NAME == (
         BUILTINS_SERVER_NAME
     )
@@ -296,7 +298,7 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     path = write(tmp_path, "agent:\n  max_steps: 0\n")
     assert load(path).agent.max_steps == 0, "a written zero is a written zero"
 
-    path = write(tmp_path, "servers:\n  db:\n    port: 0\n")
+    path = write(tmp_path, "servers:\n  context:\n    port: 0\n")
     with pytest.raises(ConfigError, match="is not a port"):
         load(path)
 

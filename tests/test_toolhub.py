@@ -31,13 +31,12 @@ from slife2.toolhub import (
     LIST_SETTLE_SECONDS,
     MAX_LOAD_NAMES,
     PLUGIN,
-    Catalogue,
     model_name,
 )
 from slife2.toolhub import (
     build_server as build_hub,
 )
-from tests.fakes import plugin_transports
+from tests.fakes import StubEmbedder, plugin_transports
 
 pytestmark = pytest.mark.unit
 
@@ -125,6 +124,11 @@ def hub_for(
         # outside, and the order is only visible when something is over the cap.
         config = replace(config, tool_load=ToolLoadSettings(threshold=threshold))
     wired = plugin_transports(config, connected, kwargs.get("client_factory"))
+    # The embedder is the hub's own now: the catalogue is a file this process
+    # opens, and its vectors come from the *same* embedding plugin the context
+    # store's do — one hop, one model, or the two indexes would be built by
+    # different things and could not be ranked against each other.
+    kwargs.setdefault("embedder", StubEmbedder())
     return build_hub(config, transports=wired, **kwargs)
 
 
@@ -178,7 +182,9 @@ def hub_with_documents(cli: Mapping[str, Any] | None = None) -> FastMCP:
             for name, entry in (cli or {}).items()
         },
     )
-    return build_hub(config, transports=plugin_transports(config))
+    return build_hub(
+        config, transports=plugin_transports(config), embedder=StubEmbedder()
+    )
 
 
 @pytest.mark.asyncio
@@ -334,13 +340,13 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "builtins"
     }
     assert ours == {"echo", "now", "calc"}
-    # Four sources, and each is a real one: the builtins are a plugin, the db
-    # offers the model its two history tools (they carry the mark), the skills
-    # server offers `skill_use`, and the last is this process's own —
-    # `tool_search`, `func_tool_load` and `_func_tool_unload`.
+    # Four sources, and each is a real one: the builtins are a plugin, the
+    # context store offers the model its two history tools (they carry the
+    # mark), the skills server offers `skill_use`, and the last is this
+    # process's own — `tool_search`, `func_tool_load` and `_func_tool_unload`.
     assert {tool["server"] for tool in listed.data["tools"]} == {
         "builtins",
-        "db",
+        "context",
         "skills-server",
         "toolhub",
     }
@@ -958,6 +964,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
             transports=plugin_transports(
                 live, {"fake": lambda settings: upstream_server()}
             ),
+            embedder=StubEmbedder(),
         )
     ) as first:
         # The list first, as the agent asks for it before every model call —
@@ -974,7 +981,9 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
             "fake": ToolServerSettings(name="fake", command="in-memory", enabled=False)
         },
     )
-    async with Client(build_hub(off, transports=plugin_transports(off))) as hub:
+    async with Client(
+        build_hub(off, transports=plugin_transports(off), embedder=StubEmbedder())
+    ) as hub:
         refused = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
         found = await call(hub, "tool_search", {"query": "echo"})
 
@@ -1033,6 +1042,7 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
         transports=plugin_transports(
             config, {"fake": lambda settings: upstream_server()}
         ),
+        embedder=StubEmbedder(),
     )
     async with Client(hub) as client:
         listed = await client.call_tool("list_tools", {})
@@ -1419,74 +1429,17 @@ async def test_an_entry_the_client_refuses_is_a_failed_server() -> None:
     assert "not a URL" in row["error"]
 
 
-class FlakyCatalogue:
-    """A catalogue connection whose first client is dead.
-
-    Stands in for the case a long-lived hub actually meets — `slife2-db`
-    restarted underneath it — and for the refusal it has to keep apart from
-    that.  A real db cannot be made to die on demand, so the client is what is
-    faked, exactly as `FakeClient` is for an upstream.
-    """
-
-    def __init__(self, *, dies: bool = False, refuses: bool = False) -> None:
-        self.dies = dies
-        self.refuses = refuses
-        self.calls = 0
-
-    async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
-        self.calls += 1
-        if self.dies:
-            raise ConnectionError("the db is not there")
-        if self.refuses:
-            raise ToolError("'x__echo' is already x__echo's tool")
-        return types.SimpleNamespace(data={"outcome": "loaded"})
-
-
-@pytest.mark.asyncio
-async def test_the_catalogue_reconnects_when_the_db_goes_away() -> None:
-    """The connection is opened once and kept, and the hub outlives the db.
-
-    Without dropping it, a db that restarts under a running hub fails every
-    later call — `tool_search`, `func_tool_load`, every merge — until the hub
-    is restarted too, and the hub is the longest-lived process here.
-    """
-    made: list[FlakyCatalogue] = []
-
-    async def connect() -> Any:
-        client = FlakyCatalogue(dies=not made)
-        made.append(client)
-        return client
-
-    catalogue = Catalogue(connect)
-
-    assert await catalogue.set_load("echo", "loaded") == {"outcome": "loaded"}
-    assert len(made) == 2, "the dead connection was kept and used again"
-    assert made[0].calls == 1, "the dead client is tried once, not twice"
-
-
-@pytest.mark.asyncio
-async def test_a_refusal_is_not_a_catalogue_that_is_gone() -> None:
-    """The db answered and said no, and the two are told apart by the SDK.
-
-    `ToolError` is what FastMCP raises when the *peer's tool* reported an
-    error, and nothing else raises it — a dead link raises its own exception —
-    so this is the framework's distinction rather than a guess.  Reporting a
-    name collision as "the tool catalogue is not answering" sends the reader to
-    examine a plugin that is working perfectly.
-    """
-    made: list[FlakyCatalogue] = []
-
-    async def connect() -> Any:
-        client = FlakyCatalogue(refuses=True)
-        made.append(client)
-        return client
-
-    catalogue = Catalogue(connect)
-
-    with pytest.raises(ToolError, match="already"):
-        await catalogue.merge("arxiv", "mcp", [])
-
-    assert len(made) == 1, "a refusal is not a reason to rebuild the link"
+# Two tests lived here — "the catalogue reconnects when the db goes away" and
+# "a refusal is not a catalogue that is gone" — plus the `FlakyCatalogue` they
+# shared, and all three were about a *link*: a kept MCP client, a transport
+# failure worth exactly one reconnect, and the SDK's own `ToolError`-versus-
+# transport distinction that told a name collision apart from a dead peer.  The
+# catalogue is a file this process opens now, so there is no link to keep,
+# nothing to reconnect, and no second kind of failure to hold apart: a refusal
+# is a `ValueError` out of `ToolStore` and anything else is this process come
+# apart.  `slife2.toolhub._refused` is where that line is drawn, and what it
+# decides — one source's bad rows do not fail the tool list, a broken store does
+# — is covered by the tests about a source that offers a name somebody owns.
 
 
 # --- how an entry becomes a connection ----------------------------------------

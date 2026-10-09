@@ -346,6 +346,30 @@ CREATE TABLE IF NOT EXISTS index_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- The **live context**: which of this file's turns the conversation is
+-- currently made of, in order.  v1 kept the same list in `turn_meta` under
+-- `context_turns`, and it is the same idea — a selection over the turn log, not
+-- a property of any turn, which is why it is a second table and not a column.
+--
+-- **`id` is pinned to 1, and that is the schema saying what a file is.**  There
+-- is one conversation per file (the client id *is* the filename), so there is
+-- exactly one live context to record; a plain `id INTEGER PRIMARY KEY` would
+-- permit a second row, and a second row would be a conversation this file is
+-- not.  The `CHECK` makes that a constraint rather than a convention.
+--
+-- **The order is the whole of the content.**  Reads replay it as written and
+-- never re-sort: the list already encodes what was kept, what was trimmed away
+-- and what was recalled, and re-sorting it by rowid would silently undo all
+-- three — a rebuild's selection is not always contiguous.
+--
+-- An empty file, or one that predates this table, has no row: `turn_ids` reads
+-- as `[]`, which is the honest answer for a conversation whose context has
+-- never been recorded.
+CREATE TABLE IF NOT EXISTS context (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    turn_ids TEXT    NOT NULL DEFAULT '[]'
+);
 """
 
 
@@ -713,7 +737,7 @@ class VectorIndexUnavailable(RuntimeError):
 
 
 #: The identity of the text the *vector* index was built from, as opposed to the
-#: keyword one.  Composed by the caller (`slife2.db_server`) out of the provider,
+#: keyword one.  Composed by the caller (`slife2.embedder`) out of the provider,
 #: model and endpoint, because what makes two embeddings comparable is a
 #: question about the embedding service and not about this file.
 class Embedder(Protocol):
@@ -972,6 +996,14 @@ class TurnStore:
                 (turn_id, record.search),
             )
             _write_vectors(connection, turn_id, vectors)
+            # **The live-context list is appended here, in this transaction.**
+            # v1's rule, and the reason is the one the three writes above already
+            # answer to: a turn that is stored but not in the list is a turn the
+            # next restore silently drops, and the window in which that is true
+            # is exactly the window between two transactions.  One transaction
+            # means there is no such window — a process that dies mid-save
+            # leaves either both or neither.
+            append_context(connection, turn_id)
             return turn_id
 
     @staticmethod
@@ -1047,6 +1079,186 @@ class TurnStore:
                 (int(turn_id),),
             ).fetchone()
         return _row_to_record(row) if row else None
+
+    # --- the live context -----------------------------------------------------
+
+    def context_turns(self) -> list[int]:
+        """The live-context list: which turns this conversation is made of.
+
+        `[]` for a conversation whose context has never been recorded, which is
+        every file on the day this table arrives — an addition, so a file
+        predating it opens unchanged and answers honestly rather than needing a
+        migration (`CREATE TABLE IF NOT EXISTS` is what additions need).
+        """
+        with self._connect() as connection:
+            return read_context(connection)
+
+    def set_context_turns(self, turn_ids: Sequence[int]) -> list[int]:
+        """Replace the live-context list; answers with what was written.
+
+        The caller is the party that decided, and `[]` is one of the things it
+        may decide — see `write_context` for why this store does not refuse an
+        empty list the way v1's does.
+        """
+        with self._connect() as connection:
+            return write_context(connection, turn_ids)
+
+    def turns_by_ids(self, turn_ids: Sequence[int]) -> list[TurnRecord]:
+        """Those turns, **in the order asked for**, and never re-sliced.
+
+        The order is not decoration: the live-context list *is* an ordering (it
+        records what a rebuild kept alongside what it recalled, which is not
+        always ascending), so this replays the list rather than re-sorting it —
+        and it applies no ceiling, because the list is already the bound.  A
+        method that quietly re-sorted by rowid would undo a recall every time a
+        conversation was restored.
+
+        Ids with no row are dropped rather than refused: a turn can be missing
+        because a file was rebuilt or a row pruned, and a restore that refused to
+        run over one absent id would turn a partial loss into a total one.
+
+        Chunked, because the list can be longer than one statement may bind
+        (`_MAX_SQL_VARS`) and an unbounded `IN (…)` is a query that works in
+        testing and raises in a long session.
+        """
+        wanted = normalise_ids(turn_ids)
+        found: dict[int, TurnRecord] = {}
+        with self._connect() as connection:
+            for start in range(0, len(wanted), _MAX_SQL_VARS):
+                chunk = wanted[start : start + _MAX_SQL_VARS]
+                marks = ",".join("?" * len(chunk))
+                rows = connection.execute(
+                    f"SELECT rowid AS turn_id, * FROM turn WHERE rowid IN ({marks})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    found[int(row["turn_id"])] = _row_to_record(row)
+        return [found[turn_id] for turn_id in wanted if turn_id in found]
+
+    def _ids_in_window(
+        self, turn_ids: Sequence[int], clauses: list[str], params: list[str]
+    ) -> set[int]:
+        """Which of those ids fall inside a `created_at` window.
+
+        The semantic leg cannot be windowed in SQL — a KNN has no column to
+        filter on — so the window is applied to the fused answer instead, which
+        is the one place the two legs can be held to one rule.
+        """
+        if not turn_ids:
+            return set()
+        if not clauses:
+            return set(turn_ids)
+        allowed: set[int] = set()
+        with self._connect() as connection:
+            for start in range(0, len(turn_ids), _MAX_SQL_VARS):
+                chunk = turn_ids[start : start + _MAX_SQL_VARS]
+                marks = ",".join("?" * len(chunk))
+                rows = connection.execute(
+                    f"SELECT rowid AS turn_id FROM turn WHERE rowid IN ({marks})"
+                    f" {_where(clauses)}",
+                    (*chunk, *params),
+                ).fetchall()
+                allowed |= {int(row["turn_id"]) for row in rows}
+        return allowed
+
+    def _time_ranked(
+        self, since: str | None, until: str | None, limit: int, newest_first: bool
+    ) -> list[tuple[int, float | None]]:
+        """Turn ids in a window, from the end `anchor` named, with no similarity.
+
+        `None` and not zero: there is no query, so nothing was measured, and
+        "no number" is a different fact from "measured as zero" — which is what
+        lets the caller exempt these from a similarity floor rather than drop
+        them all (see `recall`).
+        """
+        clauses, params = _time_window(since, until)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = "DESC" if newest_first else "ASC"
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT rowid AS turn_id FROM turn {where}"
+                f" ORDER BY rowid {order} LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [(int(row["turn_id"]), None) for row in rows]
+
+    async def recall(
+        self,
+        *,
+        query: str = "",
+        embedder: Embedder | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        anchor: str | None = None,
+        limit: int = 20,
+    ) -> list[tuple[int, float | None]]:
+        """Turns a rebuild may add, best first — the *ranking*, and no policy.
+
+        One of the store's three shapes, chosen by what the caller asked for:
+
+        * **a query** — the same hybrid as `search`, windowed, ranked by
+          relevance.  `anchor` is not consulted here; relevance decides which end
+          the caller spends from, and the caller is where that is logged.
+        * **no query, a window or an anchor** — ranked by *time* instead, from the
+          end `anchor` named (`newest` when it says nothing).  This branch has to
+          run before the hybrid one, and not for symmetry: an empty query reaches
+          the full-text index as a syntax error and embeds to noise.
+        * **neither** — nothing, which is not an error: a recall with no
+          condition is a caller that has not decided what to look for.
+
+        **What is returned is ranked pairs, not a selection.**  The count, the
+        similarity floor and the token budget are the *caller's* — they depend on
+        a model's window and on what the decision kept, neither of which this
+        store knows — and the split is v1's: the store ranks, the policy caps.
+
+        The similarity is `None` for a turn only the keyword leg found, and that
+        it is `None` rather than `0.0` is load-bearing: a fused score is a
+        function of rank position and carries no magnitude to threshold, so a
+        floor can only gate the *measured* similarity — and an exact keyword hit
+        has not been measured against anything.  An exact match is a stronger
+        signal than a cosine neighbourhood, and "no number" is not evidence
+        against it.
+
+        Raises:
+            EmptyQuery: If the query holds no term.
+            InvalidTimeBound: If a bound is in no grammar `slife2.timeutil`
+                speaks, for the reason `turns` gives.
+        """
+        limit = page_limit(limit)
+        if not query.strip():
+            if not since and not until and not anchor:
+                return []
+            return await self._off_loop(
+                self._time_ranked, since, until, limit, anchor != "oldest"
+            )
+
+        if embedder is None:
+            raise ValueError(
+                "a recall with a query has to be ranked by meaning, and no "
+                "embedder was given"
+            )
+        expression = textindex.match_expression(query)
+        clauses, params = _time_window(since, until)
+        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
+        # The keyword leg is windowed in SQL (its `rank` orders every match, so
+        # limiting after the window is still the best inside it); the semantic
+        # leg is not, and the fusion is filtered below.
+        keyword = await self._off_loop(
+            self._keyword_hits, expression, over, clauses, params
+        )
+        semantic = await self._semantic_hits(query, embedder, over)
+        fused = [
+            turn_id
+            for turn_id, _ in fuse_ranked(
+                {"keyword": keyword, "semantic": list(semantic)}
+            )
+        ][:_MAX_SQL_VARS]
+        allowed = await self._off_loop(self._ids_in_window, fused, clauses, params)
+        return [
+            (turn_id, semantic.get(turn_id))
+            for turn_id in fused
+            if turn_id in allowed
+        ][:limit]
 
     def count(self) -> int:
         with self._connect() as connection:
@@ -1159,8 +1371,9 @@ class TurnStore:
         answered is not "did the sync run" but "is every turn in the index, and
         is it the index this embedder built" — and only counting can answer
         that, because a sync that died halfway leaves nothing to remember it by.
-        `slife2.db_server` asks this before it serves and refuses to if the
-        answer is not clean: there is no mode in which a turn is stored that
+        Both halves of the plugin that owns this store ask it before they serve
+        and refuse to if the answer is not clean: there is no mode in which a
+        turn is stored that
         semantic search cannot find, so an index that is not ready is a system
         that has come apart rather than a plugin working with less.
 
@@ -1264,7 +1477,10 @@ class TurnStore:
             "keyword": await self._off_loop(
                 self._keyword_hits, expression, over, clauses, params
             ),
-            "semantic": await self._semantic_hits(query, embedder, over),
+            # `list(...)` of the mapping, which is in nearest-first order: the
+            # fusion wants a *ranking*, and the similarities the same call
+            # measured are what `recall` gates on.
+            "semantic": list(await self._semantic_hits(query, embedder, over)),
         }
         # Capped here and not on the legs: fusing takes the *union* of two lists
         # that are each already `over` long, and the next query binds one value
@@ -1297,7 +1513,9 @@ class TurnStore:
             ).fetchall()
         return [int(row["turn_id"]) for row in rows]
 
-    async def _semantic_hits(self, query: str, embedder: Embedder, k: int) -> list[int]:
+    async def _semantic_hits(
+        self, query: str, embedder: Embedder, k: int
+    ) -> dict[int, float]:
         """Turn ids by vector distance, nearest first.
 
         `k` counts **chunks**, not turns, which is why it is over-fetched: a
@@ -1307,6 +1525,12 @@ class TurnStore:
         constrained by a column it does not have — so `search` filters the fused
         answer instead, and a window narrow enough to exclude the k nearest
         chunks can return fewer turns than it asked for.
+
+        **A mapping, in nearest-first order, and the value is a similarity.**
+        The order is what `search` fuses; the value is what `recall` gates on —
+        and it is a *measured* number, unlike the fused score, which is a
+        function of rank position and carries no magnitude to threshold
+        (`recall`'s docstring is where that distinction is argued).
         """
         # The **raw** query, not `textindex.normalize(query)`.  Normalization is
         # the keyword leg's rule and it inserts a space between every pair of
@@ -1323,12 +1547,25 @@ class TurnStore:
                 f"the embedding model answered {len(vectors)} vectors for one "
                 f"query, so this search cannot say what a turn was about"
             )
-        return await self._off_loop(
-            self._nearest_turns, sqlite_vec.serialize_float32(vectors[0]), k
+        return dict(
+            await self._off_loop(
+                self._nearest_turns, sqlite_vec.serialize_float32(vectors[0]), k
+            )
         )
 
-    def _nearest_turns(self, query_vector: bytes, k: int) -> list[int]:
-        """The KNN, and the dedup it cannot do itself."""
+    def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
+        """The KNN, the dedup it cannot do itself, and the similarity.
+
+        **The *best* chunk of a turn stands for the turn**, which is what the
+        `setdefault` is: a turn's chunks are ranked separately, so the first one
+        seen for a turn is its nearest, and a later, worse chunk must not
+        overwrite it.
+
+        `1 - distance` is a similarity only because the DDL says `cosine` — on an
+        L2 table that arithmetic yields numbers that are plausible and wrong
+        rather than visibly broken, which is what `_vector_ddl` exists to
+        prevent.
+        """
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT c.turn_id AS turn_id, v.distance AS distance"
@@ -1338,8 +1575,8 @@ class TurnStore:
             ).fetchall()
         nearest: dict[int, float] = {}
         for row in rows:
-            nearest.setdefault(int(row["turn_id"]), float(row["distance"]))
-        return list(nearest)
+            nearest.setdefault(int(row["turn_id"]), 1.0 - float(row["distance"]))
+        return list(nearest.items())
 
     def _records_in_order(
         self,
@@ -1399,6 +1636,75 @@ def _write_vectors(
             "INSERT INTO turn_vec (rowid, embedding) VALUES (?, ?)",
             (int(row.lastrowid or 0), sqlite_vec.serialize_float32(vector)),
         )
+
+
+# --- the live context ---------------------------------------------------------
+
+
+def normalise_ids(turn_ids: Iterable[int]) -> list[int]:
+    """An id list with duplicates collapsed to their **first** position.
+
+    First and not last, which is the choice v1 made and the only one that keeps
+    the list's meaning: the order *is* the content (see the `context` DDL), so a
+    later mention of an id already in the list is a repeat rather than a
+    correction — nothing in a second mention says where in time it belongs.
+
+    The ints are coerced here rather than at each call site because a list that
+    arrives over a wire as JSON is a list of whatever the encoder wrote, and a
+    stringly `"7"` that reaches a `rowid IN (…)` query matches nothing — so the
+    failure would be a silently short context rather than an error.
+    """
+    seen: dict[int, None] = {}
+    for turn_id in turn_ids:
+        seen.setdefault(int(turn_id), None)
+    return list(seen)
+
+
+def read_context(connection: sqlite3.Connection) -> list[int]:
+    """The persisted live-context list, in the order it was written."""
+    row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
+    if row is None:
+        return []
+    return normalise_ids(_loads(row["turn_ids"], []))
+
+
+def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:
+    """Replace the live-context list, and answer with what was written.
+
+    **One operation, not four.**  v1 has `set`, `drop`, `clear` and a read-modify
+    -write on the save path because its list is edited from four places that each
+    know one thing; here every editor already holds the whole list it wants next
+    (a rebuild has the selection, a trim has the survivors, a reset has nothing),
+    so the operation they all want is "this is the list now" and the other three
+    would be spellings of it.  The save's *append* is the one exception, and it
+    lives in `append_context` where the transaction is.
+
+    **An empty list is a legitimate list**, which is the half v1's `set` refuses:
+    there, a guard protects a *partial* selection from being mistaken for a
+    deliberate one.  Here the caller has already made the decision — "none of
+    them" is one of the three things `context` can say — and a store that
+    second-guessed it would turn the one explicit clear into an error.
+    """
+    written = normalise_ids(turn_ids)
+    connection.execute(
+        "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
+        " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
+        (json.dumps(written),),
+    )
+    return written
+
+
+def append_context(connection: sqlite3.Connection, turn_id: int) -> list[int]:
+    """Add one turn to the end of the live-context list, read inside the write.
+
+    Read-modify-write inside the caller's transaction rather than by the caller,
+    because the two halves have to be one statement's worth of atomic: a caller
+    that read the list, and then wrote it back, would lose whatever a second
+    writer appended in between — and the second writer is the ordinary case, not
+    a race, since a queued turn's save can land while the next turn is being
+    built.
+    """
+    return write_context(connection, [*read_context(connection), int(turn_id)])
 
 
 def _storable(text: str) -> str:
@@ -1486,11 +1792,12 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #  cannot tell them apart, so which tools are installed — and which of them the
 #  model has loaded — is a property of the machine.
 #
-#  **The hub never reads this file.**  The catalogue is served over MCP by
-#  `slife2-db` (`tool_merge`, `tool_injectable`, `tool_search`, …) and the
-#  hub is a client of it, the way the hub is a client of every plugin:
-#  which tools exist is the hub's decision, what is known about them is this
-#  file's record, and neither process reaches into the other's half.
+#  **The hub opens this file, and holds nothing else of it.**  The catalogue
+#  used to be served over MCP by a plugin of its own; it is an in-process
+#  `ToolStore` now (`slife2.toolhub.Catalogue`), because a store has one writer
+#  and one writer is what a SQLite lock already is (DESIGN.md §1.1).  The split
+#  that survives is the one that matters: which tools exist is the hub's
+#  decision, what is known about them is this file's record.
 # ══════════════════════════════════════════════════════════════════════════════
 
 #: The categories whose owner is a *server* — and therefore the only rows with a

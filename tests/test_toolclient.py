@@ -19,7 +19,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.config import Config, ToolServerSettings, default_config
-from slife2.db_server import build_server as build_db
+from slife2.context_server import build_server as build_context
 from slife2.messages import ToolCall
 from slife2.paths import DATA_ENV_VAR
 from slife2.toolclient import (
@@ -198,6 +198,7 @@ def hub_with_upstream() -> FastMCP:
     return build_hub(
         config,
         transports=plugin_transports(config, {"fake": lambda settings: upstream}),
+        embedder=StubEmbedder(),
     )
 
 
@@ -271,9 +272,9 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     history that is not its own, or none at all.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    db = build_db(default_config(), embedder=StubEmbedder())
+    store = build_context(default_config(), embedder=StubEmbedder())
 
-    async with Client(db) as seed:
+    async with Client(store) as seed:
         for agent, said in (("jack", "jack asked"), ("jill", "jill asked")):
             await seed.call_tool(
                 "remember",
@@ -289,7 +290,10 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     config = default_config()
     hub = build_hub(
         config,
-        transports=plugin_transports(config, {"db": lambda settings: db}),
+        transports=plugin_transports(
+            config, {"context": lambda settings: store}
+        ),
+        embedder=StubEmbedder(),
     )
 
     async with Client(hub) as hub_client:
@@ -361,18 +365,21 @@ async def test_a_trim_that_cannot_happen_does_not_fail_the_turn() -> None:
     }
 
 
-def test_the_hub_holds_no_database() -> None:
+def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
     """各司其职, as a property of the import graph rather than a promise.
 
-    Every operation on the tool catalogue goes through the db plugin, over
-    MCP: the hub decides what tools *are* — the servers, the names, who may call
-    them — and it asks for everything else.  A `sqlite3` import in this module
-    would be the first sign that the two halves had started to overlap, and it
-    would be invisible until something drifted.
+    This guard used to be its own opposite — "the hub holds no database", when
+    the catalogue was served by a plugin and the hub asked for it over MCP.  The
+    catalogue is a *file this process opens* now, so the hub holds one, and what
+    is worth guarding is where the line moved to rather than that it moved:
+    `slife2.db` is a library of stores, and the hub imports the store and not the
+    machinery under it.  A `sqlite3` import here would be the hub writing SQL of
+    its own, which is the overlap this test exists to catch — the same failure
+    it always caught, one level down.
     """
     import slife2.toolhub as hub
 
     source = Path(hub.__file__).read_text(encoding="utf-8")
     assert "sqlite3" not in source
-    assert "from slife2.db import" not in source
-    assert "import slife2.db" not in source
+    assert "from slife2.db import" in source, "the catalogue is this process's"
+    assert "import slife2.db" not in source, "the store, not the module"

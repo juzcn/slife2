@@ -215,7 +215,7 @@ def _since_schema() -> dict:
     from fastmcp import Client
 
     from slife2.config import default_config
-    from slife2.db_server import build_server
+    from slife2.context_server import build_server
 
     async def read() -> dict:
         async with Client(

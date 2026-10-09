@@ -85,11 +85,11 @@ servers:
     host: 127.0.0.1
     port: 8004
     path: /mcp
-  # slife2's persistence: it keeps turns, one database per agent, and the two
-  # indexes over them.  The databases themselves live in the data directory's
-  # `slife2.db/`, not in this file — they are data, and this is the one file
-  # here that is checked in.
-  db:
+  # A conversation's memory: the turn log, and the decision about which of its
+  # turns a turn runs on.  One database per `(agent, subagent)`, in the data
+  # directory's `slife2.db/` — those are data, and this is the one file here
+  # that is checked in.  Its settings are the `context:` section below.
+  context:
     host: 127.0.0.1
     port: 8010
     path: /mcp
@@ -435,6 +435,36 @@ rest-api:
 # and 100 is v1's number, arrived at by watching a real tool set.
 tool_load:
   threshold: 100
+
+# ── Context ───────────────────────────────────────────────────────────────────
+# How a conversation's context is decided.  `slife2-context` owns the turn log
+# and, before every turn, makes **one model call** that reads the conversation
+# in hand and answers with what to keep of it plus what to recall from the log;
+# the turn runs on the two together.  This is v1's mechanism, ported, and the
+# reasons are in DESIGN.md §5.1.
+#
+# `rebuild: false` turns the step off and the context grows append-only — the
+# discriminator call costs about as much as the turn it precedes, so an operator
+# on a metered endpoint may want it gone.  Nothing then bounds the list yet
+# (DESIGN.md §9).
+#
+# `ceiling` and `floor` are **fractions of the model's own context window**, so
+# they only mean anything for a model whose config declares one.  The ceiling is
+# what a kept context is measured against — a recall's budget is the headroom
+# below it — and the floor is the size a recall may spend when nothing was kept.
+#
+# `min_similarity` gates only a similarity the store actually *measured*: a turn
+# found by the keyword leg has no number to compare, and an exact match is a
+# stronger signal than a cosine neighbourhood.  `timeout` bounds the
+# discriminator call; past it the turn runs on the context it already has, which
+# is the fallback for every way that call can fail, not an error.
+context:
+  rebuild: true
+  ceiling: 0.8
+  floor: 0.2
+  recall_limit: 40
+  min_similarity: 0.45
+  timeout: 20.0
 
 skills:
   baidu-search:

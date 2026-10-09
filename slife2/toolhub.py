@@ -12,7 +12,8 @@ server, to a REST API, to a program that wants an API key in its environment.
                              servers                       └─ what they declare: a `tools:` or
                              _func_tool_unload                `rest-api:` entry, held and called
                                     │                         by mcp-tools / restapi-tools
-                                    └──MCP──▶  slife2-db  (the tool catalogue)
+                                    └──in-process──▶  `slife2.db.ToolStore`
+                                                       (the catalogue's own file)
 
 **What this process owns is the set, and it owns all of it.**  Which tools
 exist, what the model is holding, what a name resolves to, what the budget takes
@@ -180,24 +181,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastmcp import Client, Context, FastMCP
-from fastmcp.client.messages import MessageHandler
-from fastmcp.exceptions import ToolError
+from fastmcp import Context, FastMCP
 
 from slife2.audience import for_the_model, forwarded_client, request_meta
-from slife2.config import (
-    DB_KEY,
-    DB_SERVER_NAME,
-    Config,
-    ToolServerSettings,
-    find_config_path,
-    load,
-)
+from slife2.config import Config, ToolServerSettings, find_config_path, load
+from slife2.db import Embedder, ToolStore
+from slife2.embedder import EmbedderConnection
 from slife2.gateway import (
     ClientFactory,
     Connection,
-    abandon,
-    make_client,
     mcp_config,
     proxied_name,
     sanitise,
@@ -205,15 +197,12 @@ from slife2.gateway import (
 from slife2.mcp_server import (
     CALL_SOURCE,
     LIST_SOURCES,
-    close_server,
     configure_logging,
     house_server,
-    open_server,
     parse_serve_args,
     serve,
-    tool_payload,
 )
-from slife2.paths import data_dir
+from slife2.paths import data_dir, tools_db
 from slife2.toolclient import UpstreamTool
 
 logger = logging.getLogger(__name__)
@@ -308,11 +297,24 @@ ALWAYS_LOADED = frozenset(
     }
 )
 
-#: How long a hop to the db — which is to say, to the tool catalogue — may take.
-#: Generous, for the reason the connect timeout is: the db's answer to a
-#: reconcile can include embedding every tool a server just offered, and a
-#: deadline that fired during a first embedding would read as a broken database.
-CATALOGUE_TIMEOUT_SECONDS = 120.0
+def _refused(exc: BaseException) -> bool:
+    """Whether a catalogue call was a *refusal* rather than a fault.
+
+    The line the hub has always drawn, and the only thing that changed when the
+    catalogue stopped being a plugin is how it is spelled.  A `ValueError` is the
+    record saying no to *this* data — two sources claiming one name, a category
+    that does not exist — and that is the calling source's own problem to report,
+    because it is the thing that offered the name.  Everything else is the
+    catalogue failing to work at all, which is this system come apart: it fails
+    the tool list rather than quietly shortening it.
+
+    A predicate over the exception rather than a class of our own, because the
+    store is in this process now: there is no hop to fail, so there is nothing
+    for a `CatalogueUnavailable` to describe that a traceback from `ToolStore`
+    does not describe better.
+    """
+    return isinstance(exc, ValueError)
+
 
 INSTRUCTIONS = (
     "The tools the agent may run. Call `list_tools` for the whole set, "
@@ -367,91 +369,59 @@ def model_name(server: str, tool: str, category: str) -> str:
     return proxied_name(server, tool)
 
 
-class CatalogueUnavailable(ConnectionError):
-    """The tool catalogue is not answering: a plugin that is gone.
-
-    Deliberately not the same thing as a source failing.  An upstream that will
-    not start is one tool server the operator can look at; a catalogue that is
-    not there is this system come apart, and it fails the tool list rather than
-    shortening it — the same rule a missing plugin has always had.
-    """
-
-
 class Catalogue:
-    """The hub's side of the tool catalogue, which `slife2-db` owns.
+    """The hub's side of the tool catalogue, which this process holds.
 
-    **Every database operation the hub makes goes through here**, and through
-    MCP: the hub holds no rows, no query and no budget — which tools exist is
-    this process's decision, and what is known about them is the db's record.
-    One loopback hop per call, on a path that already exists.
+    **Every database operation the hub makes goes through here.**  Which tools
+    exist is this process's decision; what is known about them is the record.
+    What changed is that the record is no longer a plugin: the store is
+    `slife2.db.ToolStore`, opened on first use, and every call below is a method
+    on it rather than a tool call to somebody else.
 
-    The three kinds of answer are kept apart, because they mean different things
-    to the caller: a payload (the db answered), `CatalogueUnavailable` (the db
-    is not there), and everything else — a refusal the db phrased, like two
-    sources claiming one name — which is that caller's own problem to report.
+    That it was ever a hop is worth stating, because the reason it stopped being
+    one is the reason the `db` plugin stopped existing.  A store needs a process
+    when something *else* has to reach it, and the two things that used to were
+    the turns and this catalogue — one writer each, and one writer is a property
+    of a SQLite file rather than of a server.  v1 answers the same question the
+    same way: its `memdb` is a plugin *and* a library, imported by the host for
+    the paths where a hop buys nothing, and the tool catalogue there lives in the
+    host rather than in a plugin at all.
 
-    **The connection is opened on first use, and once.**  Everything that holds
-    a `Catalogue` is built before there is a loop to open anything on: the
-    upstreams, the hub's own tools, the server itself.  So what is handed round
-    is this object and not a client, and whoever asks first pays for the
-    connection — under a lock, so that two of them cannot open two.
+    **Opened on first use, and once.**  Everything holding a `Catalogue` is built
+    before there is a loop to open anything on — the upstreams, the hub's own
+    tools, the server itself — so what is handed round is this object and not a
+    store, and whoever asks first pays.  The store's startup sync runs there too,
+    which is what makes "the model may be given these tools" true of an index
+    that was built by the model currently configured.
     """
 
-    def __init__(self, connect: Callable[[], Awaitable[Client]]) -> None:
-        self._connect = connect
-        self._client: Client | None = None
+    def __init__(
+        self,
+        open_store: Callable[[], Awaitable[ToolStore]],
+        embedder: Callable[[], Awaitable[Embedder]],
+    ) -> None:
+        self._open = open_store
+        self._embedder = embedder
+        self._store: ToolStore | None = None
         self._opening = asyncio.Lock()
 
-    async def client(self) -> Client:
-        if self._client is None:
+    async def store(self) -> ToolStore:
+        if self._store is None:
             async with self._opening:
-                if self._client is None:
-                    self._client = await self._connect()
-        return self._client
+                if self._store is None:
+                    self._store = await self._open()
+        return self._store
 
-    async def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """One operation, with the three answers above kept apart.
+    @staticmethod
+    async def _off_loop(function, *args, **kwargs):
+        """Run one blocking store call on a worker thread.
 
-        A refusal travels as itself.  `ToolError` is what the SDK raises when the
-        *peer's tool* reported an error and exactly then — a transport failure
-        raises its own exception instead, and `MCPError` is not a `ToolError` —
-        so this is the SDK's own distinction rather than a guess.  It matters
-        because the db refuses a merge when two sources claim one name: wrapped
-        as "the catalogue is not answering", that sends the reader to look at a
-        plugin which is working perfectly.
-
-        A transport failure is retried **once**, with the client dropped first,
-        for the reason `Upstream.call` gives: a call that never ran is worth a
-        second attempt, and a db that is down must not turn every call into two
-        timeouts.  Dropping it is the half that makes the retry a reconnect —
-        this client is opened once and kept for the process, so a db restarted
-        under a running hub would otherwise fail every later call until the hub
-        itself was restarted, which is the longest-lived process here.
+        The hub answers every conversation, so a synchronous read of the
+        catalogue on the event loop stalls turns that have nothing to do with it.
+        The stores open a connection per call, which is what makes the hop safe:
+        a connection is not shareable across threads, so there is none to share.
         """
-        try:
-            return tool_payload(await self._call_once(tool, arguments))
-        except (ToolError, CatalogueUnavailable):
-            raise
-        except Exception as first:  # noqa: BLE001 - a transport failure is worth one reconnect
-            logger.info("%s: the catalogue call failed, reconnecting: %s", tool, first)
-            await self.close()
-            try:
-                return tool_payload(await self._call_once(tool, arguments))
-            except (ToolError, CatalogueUnavailable):
-                raise
-            except Exception as exc:
-                # The db is a plugin: not answering is a system that has come
-                # apart, and it is named here rather than surfaced as whatever
-                # the transport happened to say.
-                raise CatalogueUnavailable(
-                    f"the tool catalogue ({DB_SERVER_NAME}) is not answering "
-                    f"{tool}: {type(exc).__name__}: {exc}"
-                ) from exc
-
-    async def _call_once(self, tool: str, arguments: dict[str, Any]) -> Any:
-        """One attempt, on the connection as it stands."""
-        client = await self.client()
-        return await client.call_tool(tool, arguments)
+        return await asyncio.to_thread(function, *args, **kwargs)
 
     async def merge(
         self,
@@ -463,24 +433,23 @@ class Catalogue:
     ) -> dict[str, Any]:
         """Record a source's whole tool list.  See `slife2.db.ToolStore.merge`.
 
-        `autoload` travels with the merge because the db can no longer read it:
-        it is the operator's `autoload: true`, which lives in the section the
-        plugin that holds the source owns — so the plugin says it and the hub
-        passes it on, exactly as liveness is passed on.
+        `autoload` still travels with the merge for the reason it always did: it
+        is the operator's `autoload: true`, which lives in the section the plugin
+        that holds the source owns — so the plugin says it and the hub passes it
+        on, exactly as liveness is passed on.
         """
-        return await self._call(
-            "tool_merge",
-            {
-                "source": source,
-                "category": category,
-                "tools": list(tools),
-                "autoload": autoload,
-            },
+        store = await self.store()
+        return await store.merge(
+            source,
+            category,
+            list(tools),
+            embedder=await self._embedder(),
+            autoload=autoload,
         )
 
     async def source_state(self, source: str, state: str) -> None:
         """Record the verdict on one source: `enabled` or `error`."""
-        await self._call("tool_source_state", {"source": source, "state": state})
+        await self._off_loop((await self.store()).set_source_state, source, state)
 
     async def injectable(self, sources: Sequence[str]) -> dict[str, Any]:
         """The tools the model may be given now.
@@ -489,7 +458,7 @@ class Catalogue:
         holding the connections, and a source is live when its tool list is in
         hand.  See `ToolStore.injectable`.
         """
-        return await self._call("tool_injectable", {"sources": list(sources)})
+        return await self._off_loop((await self.store()).injectable, list(sources))
 
     async def evict(
         self, sources: Sequence[str], *, autoload: Iterable[str] = ()
@@ -497,39 +466,40 @@ class Catalogue:
         """Trim the loaded set to the configured budget; name what it took out.
 
         `autoload` is the set of sources the budget may never touch, and it comes
-        from the declarations for the same reason the flag above does: the db
+        from the declarations for the same reason the flag above does: the store
         cannot read the sections those sources were configured in.
         """
-        found = await self._call(
-            "tool_evict", {"sources": list(sources), "autoload": list(autoload)}
+        found = await self._off_loop(
+            (await self.store()).evict, list(sources), autoload=list(autoload)
         )
-        unloaded = found.get("unloaded")
-        return [str(name) for name in unloaded] if isinstance(unloaded, list) else []
+        return [str(name) for name in found]
 
     async def route(self, name: str) -> dict[str, Any] | None:
         """The row for one advertised name, or `None` if there is no such tool."""
-        found = (await self._call("tool_route", {"name": name})).get("tool")
-        return found if isinstance(found, dict) else None
+        return await self._off_loop((await self.store()).route, name)
 
     async def sources(self) -> dict[str, dict[str, int]]:
         """Per source: how many tools it has, and how many the model holds."""
-        found = (await self._call("tool_sources", {})).get("sources")
-        return found if isinstance(found, dict) else {}
+        return await self._off_loop((await self.store()).source_counts)
 
     async def search(self, **arguments: Any) -> dict[str, Any]:
         """Both legs of a tool search, fused.  See `ToolStore.search`."""
-        return await self._call("tool_search", arguments)
+        store = await self.store()
+        query = str(arguments.pop("query", "") or "")
+        return await store.search(
+            query, embedder=await self._embedder(), **arguments
+        )
 
     async def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Move one tool in or out of the model's list.
 
-        The answer is the db's *fact* — `loaded`, `unloaded`, `already`,
+        The answer is the store's *fact* — `loaded`, `unloaded`, `already`,
         `unknown`, `no_load_state`, `disabled`, `error` — and the sentence a
         model reads is built from it here, because a store that wrote prose
         would be the second place model-facing text lived.
         """
-        return await self._call(
-            "tool_set_load", {"name": name, "load_status": load_status}
+        return await self._off_loop(
+            (await self.store()).set_load, name, load_status
         )
 
     async def touch(self, name: str) -> None:
@@ -545,12 +515,18 @@ class Catalogue:
         the wrong thing — the tool *did* run.
         """
         with contextlib.suppress(Exception):
-            await self._call("tool_touch", {"name": name})
+            await self._off_loop((await self.store()).touch, name)
 
     async def close(self) -> None:
-        if self._client is not None:
-            await close_server(self._client)
-            self._client = None
+        """Nothing to release, and deliberately still a method.
+
+        The store holds no connection between calls — every method opens one of
+        its own — so there is nothing here to hand back.  It exists because the
+        lifespan calls it, and a hook that silently does nothing is better named
+        than deleted: whoever adds a held resource to the store will find the
+        place it has to be released.
+        """
+        self._store = None
 
 
 def _unpacked(text: str, ok: bool) -> tuple[str, bool]:
@@ -818,11 +794,13 @@ class Upstream:
                 self.settings.kind,
                 [_row_of(self.settings.name, tool) for tool in offered],
             )
-        except CatalogueUnavailable:
+        except Exception as exc:  # noqa: BLE001 - split by _refused, below
             await self._connection.disconnect()
-            raise
-        except Exception as exc:  # noqa: BLE001 - the db refused this source's list, which is this source's problem
-            await self._connection.disconnect()
+            if not _refused(exc):
+                # The catalogue itself did not work, which is not this source's
+                # problem and must not be filed as one: `list_tools` fails the
+                # whole list rather than quietly losing a server's tools.
+                raise
             self._connection.fail(exc)
             return
         # Both counts, because the interesting number when a tool is missing is
@@ -1022,9 +1000,12 @@ class Upstream:
                 await self._catalogue.merge(
                     name, category, rows, autoload=bool(raw.get("autoload"))
                 )
-            except CatalogueUnavailable:
-                raise
-            except Exception as exc:  # noqa: BLE001 - the db refused these rows, which is this source's problem
+            except Exception as exc:  # noqa: BLE001 - split by _refused, below
+                if not _refused(exc):
+                    raise
+                # Refused rows are this *source's* problem: it is the thing that
+                # offered a name somebody else already owns, and the rest of the
+                # catalogue is untouched.
                 logger.warning(
                     "%s: the rows of %r were refused: %s", self.settings.name, name, exc
                 )
@@ -1664,6 +1645,7 @@ def build_server(
     *,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
+    embedder: Embedder | None = None,
 ) -> FastMCP:
     """Build the toolhub.
 
@@ -1671,9 +1653,12 @@ def build_server(
     built from — the seam that lets a test drive the whole hub over in-memory
     servers, with no process and no port, while production builds a connection
     from the config entry.  `client_factory` is the narrower seam on top of it,
-    for the tests that need a client which misbehaves.  There is no third: the
-    catalogue is reached through a wired `db` entry like every other plugin,
-    which is the seam tests use and the one production uses.
+    for the tests that need a client which misbehaves.
+
+    `embedder` is the third, and it is not a seam in the same sense: the
+    catalogue is a *file* this process opens, and its vectors come from the
+    embedding model the config names.  Injecting one is what lets a test index a
+    catalogue with no endpoint behind it, exactly as it does for the turns.
 
     **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
     `_func_tool_unload` are this plugin's, and the hub merges them into the
@@ -1697,46 +1682,44 @@ def build_server(
     def default_transport(settings: ToolServerSettings) -> Any:
         return mcp_config(settings, cwd=str(directory))
 
-    async def open_catalogue() -> Client:
-        """A connection to the db — the plugin that holds the catalogue.
+    async def open_catalogue() -> ToolStore:
+        """The tool catalogue's own file, with both its indexes current.
 
-        A peer that is not there **raises**, like every other peer in this
-        system: the hub cannot say what the model may call without it, so a
-        missing db is a system that has come apart rather than a hub working
-        with fewer abilities.  `CatalogueUnavailable` is that answer, and
-        `list_tools` passes it on.
+        **Opened here rather than reached over a wire**, which is the whole of
+        what happened to the `db` plugin: the catalogue has one writer — this
+        process — and "one writer" is what a SQLite file already guarantees.
+        Opening it can fail (a file this build cannot read, a directory that does
+        not exist), and that still fails the tool list rather than shortening it,
+        for the reason `list_tools` gives: a hub that cannot say what the model
+        may call is not a hub with fewer abilities.
 
-        `transports` is the seam, at this level and at the one below it: a
-        wired `db` entry is a transport, and a hub built for a test has one —
-        no process, no port, and the same tools either way.
+        The **sync runs here, once**, and it is the same pass the turns get: an
+        index built by another model, or by other normalization rules, is an
+        index this one cannot search, and the answer is to build it again from
+        the rows rather than to read numbers that do not mean what they say.
+
+        `transports` is still the seam at the level below — every *upstream* is
+        built from a wired entry in a test — and the catalogue is deliberately
+        no longer one of them: a file is not a plugin, and a test that wants it
+        elsewhere sets the data directory, which is what `conftest.py` does for
+        every test in this suite.
         """
-        wired = (transports or {}).get(DB_KEY)
-        if wired is not None:
-            client = make_client(
-                wired(plugin_settings(config, DB_KEY)), MessageHandler()
-            )
-            try:
-                await client.__aenter__()
-            except asyncio.CancelledError:
-                await abandon(client)
-                raise
-            except Exception:
-                # A half-entered client holds a task group nothing owns, and
-                # the error that stopped it is the one worth reporting — so it
-                # is let go of here and raised, exactly as `_establish` does
-                # for an upstream.
-                await abandon(client)
-                raise
-            return client
-        return await open_server(
-            config.server(DB_KEY).url,
-            name=DB_SERVER_NAME,
-            fallback_tool="tool_merge",
-            timeout=CATALOGUE_TIMEOUT_SECONDS,
+        store = await asyncio.to_thread(
+            ToolStore,
+            tools_db(),
+            threshold=config.tool_load.threshold,
+            known=frozenset(config.plugins()),
         )
+        status = await store.sync_indexes(await embedding.get())
+        logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
+        return store
 
-    #: The catalogue, and the one connection it opens when something first asks.
-    catalogue = Catalogue(open_catalogue)
+    #: The embedder, opened on first use: the catalogue's rows are placed in a
+    #: vector index by the same model the turns are, through the same hop.
+    embedding = EmbedderConnection(config, embedder=embedder)
+
+    #: The catalogue, and the one file it opens when something first asks.
+    catalogue = Catalogue(open_catalogue, embedding.get)
 
     #: The plugins first, in the order slife2 starts them, and required — see
     #: `list_tools`.  The hub asks every one of them, including the ones with
@@ -1950,7 +1933,11 @@ def build_server(
         finally:
             for upstream in upstreams:
                 await upstream.close()
+            # In-process, so this releases nothing; it is here because the
+            # embedder it opened *is* a connection, and a hub that exits leaving
+            # one open is a hub whose last act is a half-closed socket.
             await catalogue.close()
+            await embedding.close()
 
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan

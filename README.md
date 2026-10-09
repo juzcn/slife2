@@ -19,6 +19,15 @@ and they are the point of the whole thing:
 - **The agent loop imports no provider SDK.** Switching providers is changing a
   URL, and adding tools is adding an entry to a config file.
 
+**A plugin is a capability; a library is its implementation, and they are not
+alternatives.** The turn log is a *file*, so nothing has to be a process to hold
+it: `slife2.db` is a library, and the two plugins that own its two halves import
+it — `slife2-context` for the turns and the context, `slife2-toolhub` for the tool
+catalogue. What stays a plugin is what holds something a process should own: a
+credential, a provider SDK, or somebody else's connection. v1 draws the same line
+the same way — its `memdb` is a plugin *and* a library, imported by the host and
+by four other plugins. The test, and what it costs, is DESIGN §1.1.
+
 [DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
 
 ## Quickstart
@@ -55,10 +64,18 @@ leaves them up instead.
 `--agent NAME` (default `slife2`) names the instance. It titles the window, it
 signs the assistant's messages, and it renders the system prompt — and it is
 **exclusive**, so two live instances may not share a name. Where it *does*
-partition is the db: each agent's turns go in their own database. The servers
-themselves stay shared.
+partition is the context store: each agent's turns go in their own database. The
+servers themselves stay shared.
 
-That database is where the model can look back. `turn_list` browses it — newest
+The **context** is chosen rather than accumulated. Before every turn, one model
+call reads the conversation in hand and decides what to keep of it and what to
+recall from the log; the turn then runs on the two together. That is v1's
+mechanism, ported, and `context:` in the config is where it is tuned — including
+the switch that turns it off, after which the context grows append-only. A
+conversation that restarts, or that sat idle long enough for the loop to be
+reclaimed, comes back on the context it had at exit.
+
+That log is where the model can look back. `turn_list` browses it — newest
 first, one line per turn, `since`/`until` taking an ISO date or a phrase a person
 would write (`yesterday`, `last month`, `3 days ago`), paged with
 `limit`/`offset` against a `total` — and `turn_read` returns one turn whole.
@@ -71,8 +88,9 @@ text a turn is found by, and a vector index over what it was about — so a turn
 can later be found by relevance rather than only by time. Both indexes are
 derived from the turns and rebuilt from them, which is why changing the
 embedding model (under `embeddings:` in the config) costs a re-embedding of the
-whole history on the next start rather than a migration. The store can already
-answer such a search; no tool offers it to the model yet.
+whole history on the next start rather than a migration. A model can browse the
+log but cannot *search* it yet: the recall the context decision uses is the
+store's, and offering the same search as a tool is its own change (DESIGN §9).
 
 Each plugin is also its own console script, so a process manager can run one
 without passing an argument:
@@ -85,11 +103,11 @@ uv run slife2-skills           # the playbooks,              :8031
 uv run slife2-cli              # the cli: registry,          :8032
 uv run slife2-mcp-tools        # holds the tools: servers,   :8033
 uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
-uv run slife2-db               # turns and their two indexes, :8010
+uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
 uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
-uv run slife2-llm-embeddings   # vectors for the db's index, :8004
+uv run slife2-llm-embeddings   # vectors for both indexes,  :8004
 ```
 
 In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
@@ -121,10 +139,53 @@ local files, and only when the model's config lists `image` under `input` — a
 model that cannot read images says so rather than quietly ignoring what you
 attached.
 
-The picture itself goes to the model and no further: what the db keeps is the
+The picture itself goes to the model and no further: what the log keeps is the
 marker, plus a note where the image was saying it was there and how big it was.
 Attaching it again is what sends it again — the file is named in the prompt, so
 a turn read back a month later still says which picture it was about.
+
+## Context
+
+A conversation does not accumulate a context; it **chooses** one. `slife2-context`
+keeps the turn log — one SQLite file per `(agent, subagent)`, exactly as before —
+and before every turn makes **one model call** that reads the conversation in
+hand and answers with two things: what to keep of the turns already in it, and
+what to recall from the log. The turn runs on the two together, in time order.
+
+The call reads the conversation rather than the new message alone, and that is
+not a detail: the turn being recalled is usually a follow-up, and "what about the
+other one" names its subject only through the turns above it. Its answer is a
+selection, never a dump — the context is bounded, so a recall that matched more
+than fits returns what fits, and the keep-list is how a model says which of the
+turns in hand it is still working from. Every turn it reads carries a footnote
+naming its id, which is where those ids come from.
+
+**Nothing a model can call decides this.** The model has `turn_list` and
+`turn_read` — reading its own history is the point of a log — and the two
+decisions are the harness's: `restore`, which replays the context a conversation
+had when it last stopped (a restarted process, or one the idle sweep let go), and
+`rebuild`, which runs the decision above. A rebuild that decides to keep exactly
+what is in hand rebuilds nothing at all, which is the common case and what keeps
+a call this expensive from being paid for nothing.
+
+It is tuned under `context:` in `slife2.yaml` — the ceiling and floor as
+fractions of the model's own window, the recall's caps, and the timeout after
+which the turn simply runs on the context it has:
+
+```yaml
+context:
+  rebuild: true        # off: the context grows append-only, bounded by nothing yet
+  ceiling: 0.8         # what a kept context is measured against
+  floor: 0.2
+  recall_limit: 40
+  min_similarity: 0.45 # gates a *measured* similarity; a keyword hit is exempt
+  timeout: 20.0        # the discriminator call, after which the context stands
+```
+
+**A failure here is not a failed conversation.** A discriminator that times out,
+a provider that errors, an answer that is not the shape asked for — all of them
+keep the context and run the turn. A store that is *gone* is different and fails
+the turn, like every other missing plugin.
 
 ## Tools
 
@@ -173,6 +234,11 @@ cli:                                    # programs already on this machine
 
 tool_load:                              # how many tools the model may hold
   threshold: 100
+
+context:                                # how a conversation's context is decided
+  rebuild: true
+  ceiling: 0.8
+  floor: 0.2
 ```
 
 `command` starts a process and talks over its standard input; `url` connects to
@@ -241,7 +307,7 @@ evicted costs a search and a load, not a capability.
 
 Which of a plugin's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
-db's `remember` does not. A plugin's tools are its own code's until one of
+context store's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
 
@@ -293,7 +359,7 @@ directory into `skills/` is found at once and not at the next restart.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
-rule above, who may call one — and `slife2-db` keeps the record
+rule above, who may call one — and `slife2-context` keeps the record
 and answers the questions: which rows are loaded, what one is called at the far
 end, and the two search legs. Nothing in the hub opens a database, and nothing in
 the catalogue knows what a proxy name is.
@@ -338,8 +404,10 @@ runtime state of what is running, and the turns they produced:
 <data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
   slife2.yaml                      the config; absent means the defaults
   runtime/                         records, locks, logs — reconstructible
-  slife2.db/                       <agent>.turn.db — not reconstructible
-                                   tools.db — the tool catalogue, one file
+  slife2.db/                       <agent>.turn.db — a conversation's turns, and
+                                   the context the next turn runs on (not
+                                   reconstructible); tools.db — the catalogue,
+                                   one file for the data directory
   skills/                          <name>/SKILL.md — playbooks, written by you
 ```
 
@@ -404,9 +472,21 @@ slife2/
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ textindex.py       # how a turn becomes searchable text, and how a query
 │                     #   becomes a MATCH (no I/O)
-├─ db.py              # the store: TurnStore, one SQLite file per agent, with the
-│                     #   two derived indexes over its turns — and ToolStore,
-│                     #   the tool catalogue, one file per data directory
+├─ db.py              # the store, as a library: TurnStore, one SQLite file per
+│                     #   client id, with the two derived indexes over its turns
+│                     #   and the live-context list — and ToolStore, the tool
+│                     #   catalogue, one file per data directory.  No server
+│                     #   holds it: the two plugins that own its two halves
+│                     #   import it (DESIGN §1.1)
+├─ tokens.py          # how large a piece of a conversation is, when nobody has
+│                     #   measured it — one estimator, every user of one
+├─ embedder.py        # the client half of the embeddings server, as a library:
+│                     #   one hop, shared by the two things with an index
+├─ context.py         # a conversation's context as a pure function: the reply
+│                     #   parser, the union, the two fit rules, the turn footnote
+├─ context_server.py  # slife2-context: `remember`, `turn_list`, `turn_read`,
+│                     #   and the two decisions — `restore` and `rebuild` —
+│                     #   which are the harness's and never the model's
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by —
 │                     #   and how a client proves which one it reached
@@ -419,10 +499,6 @@ slife2/
 │                     #   search finds a playbook by
 ├─ cli_server.py      # slife2-cli: the `cli:` section as catalogue rows — one
 │                     #   per entry, and no tools at all yet
-├─ db_server.py       # slife2-db: `remember`, the model's `turn_list` and
-│                     #   `turn_read`, the `tool_*` catalogue API the hub calls,
-│                     #   and the startup pass that brings every index up to date
-│                     #   with the embedding model
 ├─ llm/
 │  ├─ base.py                    # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py                    # Chunk <-> progress payload (no I/O)
@@ -435,7 +511,9 @@ slife2/
 │  └─ anthropic_server.py        # slife2-llm-anthropic         <- imports anthropic
 ├─ server/server.py   # slife2-agent: FastMCP, the conversations and their two
 │                     #   tools, keyed by (agent, subagent)
-├─ templates/system.j2# the system prompt the distribution ships
+├─ templates/
+│  ├─ system.j2       # the system prompt the distribution ships
+│  └─ recall.j2       # the recall instruction, rendered per turn
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation

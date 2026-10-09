@@ -31,10 +31,12 @@ slife2                    TUI, MCP client              (no provider key, no SDK)
   ▼
 slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │  MCP client
-  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-db                     (one SQLite file per agent)
+  ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-context         (one SQLite file per client id)
+  │                                 │  the turn log, and the decision about it
   │                                 └── HTTP 127.0.0.1:8004/mcp ──▶ slife2-llm-embeddings
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
+  │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
   │                                 ├── :8030/mcp ──▶ slife2-builtins      (`echo`, `now`, `calc`)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
@@ -47,18 +49,18 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
 ```
 
-The embeddings server hangs off the **db** rather than the agent, because the
-thing that needs a vector is the store's index and not the turn: a turn is
-written with its vector in one transaction, so the writer is the party that
-holds the connection. The two plugins at the bottom of the hub's branch are that
-rule pointed at somebody else's processes rather than at a file: `tools:` and
-`rest-api:` are config sections, and the plugin that owns a section is the one
-that holds the connections its entries describe (§8).
+Two things reach the embeddings server — the context store, for a turn's
+vectors, and the hub, for a tool row's — because what needs a vector is an index
+and there are two of them. They share one *client* (`slife2.embedder`) and one
+server, which is the arrangement that keeps them ranking against the same model:
+two copies of "ask and check the shape of the answer" is how the two indexes
+would come to disagree about what an embedding is.
 
 **One plugin, one job, and the granularity is deliberate.**  A model backend
-speaks one wire protocol; the db keeps turns; the hub is where the tools come
-from; skills reads the playbooks, cli owns the command registry, and mcp-tools
-and restapi-tools hold the servers those two sections name; the agent loop runs
+speaks one wire protocol; the context store keeps a conversation's turns and
+decides which of them it runs on; the hub is where the tools come from; skills
+reads the playbooks, cli owns the command registry, and mcp-tools and
+restapi-tools hold the servers those two sections name; the agent loop runs
 turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
@@ -98,12 +100,49 @@ Two properties fall out of this and are the reason for it:
   inside the function that builds the client: three model servers, one per wire
   protocol, plus the embeddings server. Nothing else in the tree imports either
   — and the fourth is the one worth checking, because it is not a *model*
-  backend: the db reaches it for the index, and it holds a key for the same
-  reason the others do rather than for any reason of its own.
+  backend: the two things with an index reach it for their vectors, and it holds
+  a key for the same reason the others do rather than for any reason of its own.
+  It is also the only plugin kept after the test in §1.1 was applied, which is
+  the same fact said the other way round.
 
 The cost is one JSON-RPC hop per token on loopback. That is small and it is the
 price of the architecture; `ProgressObserver` is where a coalescing fix goes if
 it ever stops being small.
+
+## 1.1 Plugins and libraries
+
+**A plugin is a capability; a library is its implementation, and the two are not
+alternatives.**  v1 says the same thing by shipping one component as both:
+`memdb` is an MCP server *and* `store.py`, imported by the host and by four other
+plugins; `mcp_gateway`'s own docstring says it "ships with Slife as its MCP
+plugin but has no dependency on it". A capability is a plugin so that anything
+across a process boundary reaches it one way — list, call, progress — and the
+code that implements it is a library so that a process which already has it does
+not pay a hop to use it.
+
+Which one a component needs is decided by **what it holds**:
+
+| it holds | it is | why |
+|---|---|---|
+| a credential, a provider SDK, somebody else's connection | a **plugin** | a library would put the key and the SDK in every importer, which is what §1's two properties forbid |
+| a file, and nothing else | a **library** | a file needs no process, and one writer is what a SQLite lock already is |
+
+So `db` is a library — it holds the turn files and the tool catalogue, and
+nothing else — while the embeddings server stays a plugin because it reads an
+endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
+`restapi-tools` families stay plugins under the same rule, pointed at somebody
+else's processes rather than at a file: `tools:` and `rest-api:` are config
+sections, and the plugin that owns a section is the one that holds the
+connections its entries describe (§8). The gateway underneath them
+(`slife2.gateway`) is a library, and always was.
+
+The cost of a library is the error boundary: a plugin that is gone fails the
+turn with a named peer, and a file that will not open raises where it is used.
+That is the right trade for a file — the traceback lands in the process that can
+describe it — and the wrong one for a remote service. And it does not change
+with the number of agents: `--agent` is a label, the servers are shared by every
+instance (§4), so the multiplier for a library is the number of *processes* that
+import it, not the number of agents.
 
 ## 2. Streaming: one pattern, used twice
 
@@ -240,8 +279,12 @@ avoided:
   message. The `+ 1` is load-bearing: the loop appends the user's message itself,
   so truncating to the snapshot would delete the very message this arrangement
   exists to not lose.
-- **A conversation store that can grow without bound**, which is now the
-  server's problem rather than the caller's. See §9.
+- **A context that has to be decided rather than accumulated**, which is the
+  fifth and the one this design arrived at last. A conversation's turns are
+  *stored* — that is what makes the state survivable — and which of them a turn
+  runs on is a decision somebody has to make, made once per turn by the
+  discriminator (§5.1). The server owns the conversation; the store owns the log
+  and the decision.
 
 **Every turn of a loop that records is written, cancelled ones included.**
 The rule is deliberately not "remember to record the cancel path": a write that
@@ -255,14 +298,23 @@ parent agent's record.)
 One measurement decides *how* that write is made. From a cancelled handler a
 plain `await` is cancelled again at its next checkpoint — measured against the
 real transport, not assumed — so a record written that way is simply lost. A task
-created outside the cancelled scope does land, so the cancel path detaches the
-write and logs its failure instead of dropping it. What that gives up is
-ordering: if a queued turn follows immediately, it may write first. That is a
-cosmetic inversion in `turn_list`, and it is the cheaper half of the trade — the
-alternative is every queued turn waiting on the db server.
+created outside the cancelled scope does land, so the **cancel path** detaches
+the write and logs its failure instead of dropping it.
+
+**The ordinary path writes inside the lock**, and that reverses an earlier
+decision. It used to run after the lock was released, on the argument that a
+queued turn waiting on a network call is a wait with no reason behind it — and
+the argument held while the write was a store's alone. It stopped holding when
+the write started maintaining the *live-context list*: a rebuild reads that list,
+so a queued turn starting before the write landed would be handed a context
+missing the turn it is following up on. The price is one loopback before a queued
+turn starts. What is given up is nothing: the ordering hazard the detached path
+still has is confined to a cancelled turn, whose messages are deliberately left
+*unbacked* and carried verbatim by the next rebuild (§5.1) rather than counted
+twice.
 
 **The id travels with the call, at every hop.** It is not only the agent server
-that receives it: the write to the db and the model call are both made under the
+that receives it: the write to the store and the model call are both made under the
 same `(agent, subagent)`, so no hop in this system is anonymous. What the model
 servers do *not* do with it is keep a conversation — see §6, and the note there
 about why the history cannot live on the far side of a protocol-specific hop.
@@ -331,14 +383,25 @@ live instances may not share a name). It creates no port, no process, and no
 config section. Isolation, if it ever appears, belongs inside an MCP server —
 which is why the label reaches one.
 
-## 5. Persistence
+## 5. The context store
 
-A plugin with one job: keep what is worth keeping, and the turns are what it
-keeps today. It does not summarise, does not decide what mattered, and puts
-nothing back into a conversation. The schema is
-v1's `turn` table, minus one column — one row per turn, columns for the two
-token counts, the two timestamps and the identity that v1 arrived at by using
-it. The missing column is `user_message`: v1 keeps the user's half beside the
+**A conversation's turns, and the decision about which of them it runs on.**  One
+plugin, `slife2-context`, and this is v1's `memdb` ported: the turn log, the two
+tools a model reads it with, the live-context list, the recall, and the rebuild
+and restore that put a context together. The store underneath is a library
+(`slife2.db`), for the reason §1.1 gives — it holds files and nothing else — and
+that is v1's arrangement too, where the headless host restores a session
+straight from `SessionStore` with no MCP transport in the path.
+
+The **second** thing this module keeps is the tool catalogue, which is the
+*other* thing a file is enough for. It lives here and is opened by the toolhub
+rather than served by anybody (§8).
+
+**Kept as it happened, and nothing else.**  The store does not summarise, does
+not decide what mattered, and until this change put nothing back into a
+conversation. The schema is v1's `turn` table, minus one column — one row per
+turn, columns for the two token counts, the two timestamps and the identity that
+v1 arrived at by using it. The missing column is `user_message`: v1 keeps the user's half beside the
 assistant's so it can be searched and embedded apart from the answer, and here
 it is `messages[0]` instead, because a turn is one list of messages and a column
 holding the first element of it would be a second copy to keep in step.
@@ -364,6 +427,80 @@ beats isolation as a `WHERE` clause somebody can forget to write — and it is t
 one place `--agent` partitions anything, since the servers themselves stay
 shared.
 
+### 5.1 The live context, and the rebuild
+
+**The context is chosen, not accumulated.**  Before every turn the agent says
+what to keep of the turns in hand and what to *recall* from the log, and the turn
+runs on the two together. One model call decides it — the *discriminator* — and
+it is the most expensive thing in a turn, which is why every way it can fail ends
+in "keep the context" rather than in a retry:
+
+```
+send_message
+  └─ the first message for a key      → restore   the exit-time context, replayed
+  └─ per turn, inside the lock, before the user's message:
+       rebuild                                    keep ∪ recall, one model call
+       run the turn (the loop appends the message)
+       save                                       the new id joins the live list
+```
+
+**The live-context list is the state this adds**, and it is what makes the rest
+work. An ordered array of turn ids, in the `context` table of the turn file, with
+three writers: the save appends the new rowid *inside the turn's own
+transaction*; a rebuild replaces it wholesale; `forget` clears it. **Its order is
+authoritative** — reads replay it as written and never re-sort, because the list
+already encodes what was kept, what was dropped and what was recalled, and a
+selection is not always contiguous. It is an *addition* to the schema, so a file
+that predates it opens unchanged and answers `[]`, which is the honest answer for
+a conversation whose context has never been recorded.
+
+**The union is what makes "keep this and add that" expressible.** Kept and
+recalled are joined by id and never reconciled, so an empty recall is harmless —
+a union with nothing is the base — where an overriding selection would have
+discarded the context it replaced, and a query that merely failed to match would
+empty it. Clearing is only ever the explicit `"clear"`.
+
+**What decides is one call against the conversation in hand**, with the current
+input quoted inside the instruction. That shape is load-bearing twice over: the
+turn being recalled is usually a follow-up, and a follow-up names its subject
+only through the conversation, so a query written from the input alone retrieves
+nothing. The reply is `{"context": …, "recall": …}` — the ids to keep, or
+`"keep"`, or `"clear"`; and one recall condition, which is a period, a query, or
+a query within a period. Six decisions from two independent fields, and the
+common one is `{}` — **a decision that asks for exactly what is in hand rebuilds
+nothing at all**, which is what keeps a call this expensive from being paid for
+nothing.
+
+**Relevance and time are different axes, and the axis decides the cut.** With a
+query the candidates are ordered by relevance and the caps spend from that head,
+skipping a turn too large to fit rather than stopping. With no query the axis is
+*time*: `anchor` names the end the caps spend from, and the first candidate that
+does not fit **ends** the selection — a period read from its end is "the last N
+days", and skipping a large turn in the middle to reach a small one further back
+would answer a question nobody asked. The similarity floor gates only a
+*measured* similarity: a turn found by the keyword leg alone has not been
+measured against anything, and "no number" is not evidence against an exact
+match. The budget is the headroom below the **ceiling**, not the floor, because
+the floor is where a live context already sits.
+
+**Restore is the same replay at the other end.** When a conversation starts — a
+restarted process, a conversation the idle sweep let go — the list is replayed
+verbatim, in its own order, with no ceiling re-slicing. Each turn contributes a
+copy of its first message carrying a footnote naming its id and its span, which
+is **how a turn id reaches the model at all** and therefore how a keep-list is
+expressible. The footnote is added when a message list is built and never
+stored, so it cannot drift from the row it describes.
+
+**Both live behind one tool each, and neither is the model's.** A model may read
+its history (`turn_list`, `turn_read`); it may not decide what its context is. It
+says what it wants kept by what it writes, never by calling anything.
+
+Two things are deliberately not carried over from v1, and both are named in §9
+rather than half-built here: **the trim** — which with the rebuild on is a
+*guard* behind the selection rather than the mechanism the context is normally
+held to — and **the real-BPE token count**, for the reason `slife2.tokens`
+argues: it would be exact about a vocabulary none of these endpoints use.
+
 **A missing server is a broken system, not a degraded one.** `slife2` starts
 every plugin together and refuses to start at all if one of them will not come
 up — before it draws anything, so the failure is two lines rather than a terminal
@@ -374,12 +511,12 @@ recorded.
 That rule lives in one place, `slife2.mcp_server.open_server` — connect, prove the
 server is the one you meant, raise otherwise. It is there because it had four
 implementations and one of them was its own opposite: the LLM backend and the TUI
-each probed and raised, and the agent server's db client swallowed the
+each probed and raised, and the agent server's store client swallowed the
 failure and latched itself off, which made the same situation fatal at startup
 and silent a minute later.
 
 One thing is deliberately not fatal: **a `ToolError` is not absence.** It means
-the db server answered and refused *this* request — an agent name that cannot
+the store answered and refused *this* request — an agent name that cannot
 be a filename, say — which is one caller's problem rather than a sign that
 anything is down.
 
@@ -438,7 +575,7 @@ and the one a future port of its time-window queries will compare against.
 
 **Reading is by time, and there are two ways to do it.** `turn_list` browses —
 newest first, one line per turn, paged — and `turn_read` returns one turn whole.
-Both are the *model's* tools, both are the reason the db is a plugin the hub
+Both are the *model's* tools, and both are the reason the store is a plugin the hub
 asks rather than ours alone, and both are windows over `created_at` with the
 grammar v1's `timeutil` implemented (ISO, `yesterday`, `last month`,
 `3 days ago`), ported whole so a window means the same thing on both sides of
@@ -447,12 +584,12 @@ result: SQLite answers an unrecognised string with no rows, and "no rows" is an
 answer a caller believes.
 
 **And a model reads only its own history, which is not something an argument can
-say.** V1's db server ran one process per agent, so the connection *was* the
+say.** V1's store ran one process per agent, so the connection *was* the
 identity. This one is shared — one process serves every client id, the way one
 model server serves every provider — so the identity has to travel, and it
 travels in the call's `_meta` rather than in its arguments (`slife2.audience`).
 The agent binds the conversation it is running for when it builds the loop, the
-hub forwards what it was given without reading it, and the db answers about the
+hub forwards what it was given without reading it, and the store answers about the
 conversation the call came from. A model that could name an agent could read
 somebody else's turns, and the only thing standing in the way would be a
 sentence in its own system prompt — which is an instruction, not a boundary.
@@ -588,6 +725,16 @@ for step in 1..max_steps:
     Phase B: run each call, feed every result back             ← never raises
 ```
 
+**What the loop is *not* shown is everything around the turn.** The context is
+decided before `run_turn` is called and the turn is recorded after it returns,
+and both are the *agent server's* — the loop is handed a list and asked to
+advance it, which is the same contract as when the caller owned that list. The
+one thing that crossed that line is the *carried tail*: a cancelled turn leaves
+the user's own message in the list with no row behind it, so the server tracks
+how many messages the live-context list accounts for and tells the rebuild how
+many it does not. A library did not have to know that; a server that decides what
+to keep does.
+
 Three load-bearing details:
 
 - **Phase A strictly precedes Phase B.** Running a tool inside the `async for`
@@ -610,10 +757,12 @@ is a port of v1's `mcp-gateway` with one thing moved out of it, and the shape
 that survived the port is the whole of the rest:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins            (ours; `builtins`, `db`, …)
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins            (ours; `builtins`, `context`, …)
                           list_tools        └──▶  what they declare   (their servers, their rows,
                           call_tool                                   and the families that are
                           servers                                      not servers at all)
+                             │
+                             └── in-process ──▶ `slife2.db.ToolStore`  (the catalogue's own file)
 ```
 
 **What the hub owns is the set, and it owns all of it.** Which tools exist, what
@@ -630,7 +779,7 @@ families.
 **Two ways in, and they are not the same kind of claim.** A *plugin's own tools*
 arrive by `tools/list` and have to declare themselves the model's
 (`slife2.audience`), because they belong to that plugin's code — `remember`
-writes into any agent's database and `send_message` drives another conversation,
+writes into a conversation's log and `send_message` drives another conversation,
 and those are exactly the tools a model would reach for if it could read their
 descriptions. What a plugin *holds* arrives by declaration instead, and is not
 gated, because it is the operator's configuration: a `tools:` entry, a playbook,
@@ -652,8 +801,8 @@ is read and why a plugin that holds sources and cannot answer for them fails the
 list rather than quietly contributing none.
 
 **A call can say who it is on behalf of, and the hub passes that on without
-reading it.** The db is the case that needs it: the model may browse its own
-history and must not browse anybody else's, and one db server serves every
+reading it.** The store is the case that needs it: the model may browse its own
+history and must not browse anybody else's, and one store serves every
 conversation in the system. So the conversation rides in the call's `_meta`
 rather than in its arguments — off the schema the model reads, out of reach of a
 prompt that asks for somebody else's turns — and the hub, which cannot act on it
@@ -661,7 +810,7 @@ and could not use it, forwards exactly that key and nothing else of `_meta` (the
 protocol's own keys name *this* request's progress stream, and a proxy has no
 business passing those on). §5 has the rest.
 
-**The hub's API is the agent's and never the model's.** Like the db server's
+**The hub's API is the agent's and never the model's.** Like the store's
 `remember`, the model never sees `list_tools`, `call_tool` or
 `servers`; it sees the tools themselves, by the names below. That
 indirection is what keeps the hub's surface constant: a server coming and going
@@ -771,7 +920,7 @@ callable stay two different things**. The model will still call one, because a
 search result is an invitation to call the name in it; the answer says what to
 do instead (`skill_use` for a playbook, and for a command the truth that nothing
 runs one yet). Those sentences are the hub's, keyed on the row's *category* —
-which is the db's vocabulary rather than knowledge of the family, and cheaper
+which is the catalogue's vocabulary rather than knowledge of the family, and cheaper
 than a per-source template the hub would have to hold and keep.
 
 **A credential is held by the process that needs it, and that is a plugin.**
@@ -832,14 +981,27 @@ throws — which is one of the reasons this port is a few hundred lines where v1
 was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
-plugin gone and fails the turn, like the db. A missing *catalogue* — the db
-itself — is the same kind of thing and is said in its own words rather than
-reported as "that tool server is broken". A missing *upstream* is the operator's
-configuration and somebody else's process: reported by `servers()`, its rows left
-in the catalogue with `error` on them, and retried on the next ask. An upstream
-*refusing a call* is one caller's bad data. Collapsing these is how a config
-mistake becomes an outage, and separating them is most of what the module's prose
-is about.
+plugin gone and fails the turn, like the store. A missing *source* — a plugin
+that is not answering, a `tools:` entry whose process will not start — is not the
+same kind of thing, and is said in its own words rather than reported as "that
+tool server is broken". A missing *upstream* is the operator's configuration and
+somebody else's process: reported by `servers()`, its rows left in the catalogue
+with `error` on them, and retried on the next ask. An upstream *refusing a call*
+is one caller's bad data. Collapsing these is how a config mistake becomes an
+outage, and separating them is most of what the module's prose is about.
+
+**The catalogue is a file this process opens, not a plugin it asks.**  It was
+the second half of `slife2-db` and that plugin is gone, for the test in §1.1: a
+store has one writer — this process — and "one writer" is what a SQLite lock
+already is. So `Catalogue` in `slife2.toolhub` is a thin face over
+`slife2.db.ToolStore`, opened on first use with its indexes brought up to date,
+and what it replaces is a hop, a kept MCP client, a reconnect path and a
+`CatalogueUnavailable` — the last of which was a class for a failure that can no
+longer happen. What is left of the old split is the one that mattered and is not
+about processes at all: **the hub decides, the record remembers.** A refusal is
+the record saying no to *this* data (`_refused`, a `ValueError`), which is the
+calling source's own problem; anything else is the catalogue itself failing to
+work, which fails the tool list rather than quietly shortening it.
 
 **The model's list is the tools it has loaded, and the rest are on demand.** This
 is the change that a catalogue buys, and it is v1's mechanism restored with one
@@ -970,16 +1132,41 @@ Named so they are decisions rather than oversights:
   and the code moved past it.
 - **Delta coalescing.** One notification per token. The seam is
   `ProgressObserver`.
-- **History trimming, and now it is the server's problem.** A long conversation
-  grows without bound. It used to grow in the caller's list, which made it
-  something a caller could feel and bound; it now grows in the loop, and the
-  caller re-sends nothing, so nothing feels it. This is the first thing to do
-  next, not a note that can sit.
+- **The trim, which is now a guard rather than the bound.** This bullet used to
+  read "history trimming, and now it is the server's problem" and it was the
+  first thing to do next; the *selection* landed instead (§5.1), which is v1's
+  default and makes the context bounded by construction — every turn is rebuilt
+  to fit the window before it runs, and a recall that would overfill it is cut by
+  the recall's own budget. What is missing is the mechanism *behind* that: at the
+  ceiling, after the turn is saved, drop the oldest complete turns down to the
+  floor and take their ids out of the live list. What it catches is the one thing
+  no selection can see in advance — a turn whose tool results balloon *while it
+  runs* — and what this plugin already owes it is the list and the write that
+  maintains it, which both exist. The `context.ceiling` and `context.floor`
+  fractions are read today; the pass that consumes them is not written.
+- **The real token count.** v1 counts with `tiktoken`'s `o200k_base` and
+  provisions the vocabulary at install time. `slife2.tokens` is a script-aware
+  character measure instead, for the reason its docstring gives: this system's
+  endpoints are DeepSeek, Qwen, Ollama and whatever gateway the operator points
+  at, and `o200k_base` is not one of their vocabularies either — so the
+  dependency would buy exactness about a tokenizer nobody here is using. What it
+  costs is tolerance: the budget is a fraction of a window, so an estimate that
+  is 10% wrong spends 10% of a window sized for it. Measured usage is untouched
+  by this — `context_tokens` is the provider's own count, and it is what the
+  status bar and any future ceiling check read.
+- **`turn_search`, offered to the model.** `TurnStore.search` fuses a keyword leg
+  with a semantic one, and the *rebuild* reads it through `recall` — but a model
+  cannot: there is still no `turn_search` tool, on purpose. The order matters and
+  it is v1's: the two legs landed and were measured, then the harness started
+  using them, and offering them to a model is a third step that changes what a
+  prompt is made of. The scoring such a tool should expose (`similarity`, the
+  per-leg ranks, a snippet) is a question about the tool rather than about the
+  store, and the store's API is already the whole of what it would need.
 - **Bounds.** A loop caps its inbox (`MAX_QUEUED`), because a client's call
   timeout starts when the call is made and an unbounded queue is therefore an
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
-  how many loops exist, and nothing bounds a loop's history.
+  how many loops exist.
 - **The tool that runs a `cli:` entry.** The entry is a row now (§8's
   declaration), so a search finds the command by what it does — but nothing
   executes one, and `func_tool_load` says so in as many words ("a command
@@ -1058,13 +1245,13 @@ Named so they are decisions rather than oversights:
   key passes through to the SDK's browser flow for the rest. The gap is the
   headless case, where the browser flow has no browser.
 - **Digesting an oversized tool result.** A tool can return more text than the
-  conversation can hold, and nothing here bounds it. The db already has the
+  conversation can hold, and nothing here bounds it. The store already has the
   pattern for the turn record — an oversized result becomes an announced
   head-and-tail digest — and the same rule belongs on the way *into* the model,
-  not only on the way into the database.
+  not only on the way into the record.
 - **Subagents.** One seam of the two this paragraph used to claim is actually
   in: `Loop.records` exists (`slife2.server.server.Loop`), so a worker's round
-  trips are the ones not written to the db, and `send_message` already takes a
+  trips are the ones not written to the log, and `send_message` already takes a
   `subagent` — a worker's conversation is a separate key with its own history,
   its own inbox and its own lock, in the same process. **`Loop.children` does
   not exist**, and neither does anything that hangs a worker off its parent, so
@@ -1082,6 +1269,6 @@ Named so they are decisions rather than oversights:
 - **A client id on the turn record.** Nothing reads it yet, and adding a column
   to `turn` means deleting every existing `*.turn.db` (there is no migration
   layer, §5). The failure mode of getting it wrong is worse than the gap: the
-  new INSERT would raise `OperationalError`, the db server would report it
+  new INSERT would raise `OperationalError`, the store would report it
   as one caller's bad data, and every turn after the upgrade would run perfectly
   and never be recorded. Add it with the reader that needs it.
