@@ -472,6 +472,24 @@ common one is `{}` — **a decision that asks for exactly what is in hand rebuil
 nothing at all**, which is what keeps a call this expensive from being paid for
 nothing.
 
+**The decision is reported, because it is the one thing in a turn nobody sees.**
+`rebuild` answers with two counts — what survived of the turns in hand, and how
+many came back from the log — and the agent server turns them into a
+`ContextChosen` event **before the turn's first token**: it is a fact about what
+the conversation is about to be, and a display that learned it afterwards would be
+showing one turn's context under another turn's answer. The window draws it as a
+note between the prompt and the answer, in the same shape and the same dim
+styling as `[restored N turns]`, because both say what the harness did rather than
+what anyone in the conversation said.
+
+**And there is no switch for this.** There used to be one — `context.rebuild`,
+whose `false` grew the context append-only — and it went for the two reasons a
+switch that is never off is worth removing: the step is not optional (a context
+that grows append-only is bounded by nothing, which is the trim §9 still owes), so
+the flag configured a system nobody runs; and the one thing it could still do was
+make the note lie, since `kept 12, recalled 0` is a true sum describing a decision
+that no discriminator made.
+
 **Relevance and time are different axes, and the axis decides the cut.** With a
 query the candidates are ordered by relevance and the caps spend from that head,
 skipping a turn too large to fit rather than stopping. With no query the axis is
@@ -1184,6 +1202,15 @@ where a cosine is graded, and it is the one piece of evidence no cutoff can
 express, because a row can be named exactly whatever it scores — `pandoc` scores
 0.514 against the row *named* `mcp-pandoc`, and a threshold alone would answer
 "nothing here" to somebody who just said the tool's name.
+
+It also says **where** those words are, and that is not a detail: a row is
+indexed by five columns and a result line prints two of them, so a mark whose
+evidence is not on the page is a mark the reader has to take on faith. The case
+that made it matter is a skill, whose whole playbook rides in the `schema` column
+— `skill:browser-harness` matched `read`/`file` through its body while its
+description mentioned neither — so a row says `matched your words` when they are
+in the name or the description it prints, and `... in its body` or `... in its
+parameters` when they are behind it.
 
 And the order is that number, in the two tiers the header names. A column that
 does not run in order is a column a model will sort by and be wrong about — the
