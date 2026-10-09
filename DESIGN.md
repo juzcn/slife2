@@ -1080,26 +1080,54 @@ wants the top few.
 Then the one `query` that replaced them went too, because one string cannot serve
 both legs. The keyword leg asks for every term it is handed, so a sentence —
 "take a screenshot of a web page" — demands six words at once and matches
-nothing; the semantic leg takes a phrase and is wasted on three loose words. What
-is left is `keywords` and `sentences`, both required, either may be an empty
-array, and each goes to the leg shaped for it: words are matched exactly, meaning
-by meaning. Measured on the live catalogue — 253 tools, the real embedder — the
-split is **20/20 in the page against 18/20** for the single string, and the two
-it missed are found by the two halves of the split: `work out 17 times 23` by a
-second sentence, `读一下这个网页的内容` by one written in English. Every hit in
-the split is inside the top three, against three outside it before.
+nothing. What is left is `keywords` and `sentences`, both required, either may be
+an empty array, and each goes to the leg shaped for it: words are matched
+exactly, meaning by meaning. Measured on the live catalogue — 253 tools, the real
+embedder — the split is **20/20 in the page against 18/20** for the single
+string, and the two it missed are found by the two halves of the split: `work out
+17 times 23` by a second sentence, `读一下这个网页的内容` by one written in
+English. Every hit in the split is inside the top three, against three outside it
+before.
 
-Two things about that measurement are worth carrying forward, because both look
+**That is not because the semantic leg wants a sentence over words.** This said
+"the semantic leg takes a phrase and is wasted on three loose words", and that
+was measured and is false: a compact word list embeds as well as the sentence it
+was taken from — on the 130-tool catalogue the two rank identically, 36/36 with
+the same MRR either way. The two inputs are one call apart, not one being the
+other's poor relation. What a *sentence* breaks is the keyword leg, which cannot
+`AND` six words into a row that holds three.
+
+**A keywords-only call reaches both legs anyway** (`local_tools.search`): given
+no sentences, the words are handed to the meaning leg as well. Measured through
+the real handler on the 253-tool catalogue, that is **34/36 against 23/36** for
+the keyword leg alone, and none of the 36 now returns nothing — where nine did.
+The words were never the poorer text; they never reached the leg that could
+answer them.
+
+Two things about the measurement are worth carrying forward, because both look
 like language problems and neither is. **A sentence kills the keyword leg in
 either language** (`take a screenshot of a web page` and `搜索一下附近的餐厅`
 both match nothing — the first six terms `AND`ed, the second one phrase of ten
 adjacent characters), which is why splitting the inputs rather than tuning the
 boolean was the fix. And **Chinese words were never the problem**: a CJK run is
 indexed character by character and queried as a *phrase*, so `搜索` finds the
-rows holding 搜索 and nothing else is needed — no stemming, no bigrams. What
-Chinese shares with English is the one real weakness left: a query in one language
-against a document in another is the semantic leg's alone, and it is the case
-that needed help.
+rows holding 搜索. That is a measurement and not a preference — on the twelve
+Chinese tool descriptions the catalogue holds (1178 characters, the only Chinese
+documents there are), character tokens and *bigrams* answer the same 8 of 15
+queries with the same MRR, cell for cell, and a word dictionary buys one more
+(9 of 15) until it is the boolean rather than the tokenizer that changes. What
+Chinese shares with English is the one real weakness left: a query in one
+language against a document in another is the semantic leg's alone, and it is the
+case that needed help.
+
+**And the keyword leg is worth more the larger the catalogue.** At 130 tools the
+fused answer was the semantic leg's answer with a worse MRR, and no query was
+rescued by it; at 253 it finds one the semantic leg alone misses and ranks better
+overall (34/36 and MRR 0.786, against 33/36 and 0.781). The case is `screenshot`,
+where 55 of the 253 rows are browser or document tools: the embedding's
+neighbourhood is crowded and the exact token cuts through it. One case is not a
+trend, but it is the direction the theory predicts, and it is the reason both
+legs are still here.
 Both rows are the hub's own, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted — which is the hub's
 own three plus `skill_use`, the one entry there that a plugin serves
@@ -1220,7 +1248,12 @@ Named so they are decisions rather than oversights:
   one server's, or the ones switched off — and it is what a model asks when it
   wants to know what exists rather than find a thing. Nothing needs building on
   the store's side: `ToolStore.search` still takes all five filters and still
-  browses on an empty query, which is where the tool will sit.
+  browses on an empty query, which is where the tool will sit. **And `tool_search`
+  no longer points at it.** Its refusal used to end "ask for the list", which read
+  as an instruction to a model that then called `skill_use` with an invented name
+  and got "no skill called `__list__`" — a refusal naming a tool that does not
+  exist is a promise it cannot keep. When this bullet stops being deferred, the
+  sentence can name the tool and be true.
 - **Markdown rendering.** The transcript shows model output as plain text.
 - **`thinking` deltas, and the display decision has since been made.** Both SDKs
   expose them cheaply, and rendering a model's private reasoning as its *answer*
