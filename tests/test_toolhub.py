@@ -31,6 +31,7 @@ from slife2.toolhub import (
     LIST_SETTLE_SECONDS,
     MAX_LOAD_NAMES,
     PLUGIN,
+    _verdict,
     model_name,
 )
 from slife2.toolhub import (
@@ -1072,6 +1073,64 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     for line in rows:
         assert "meaning " in line, f"and carries its number: {line!r}"
     assert "cli:x" in found["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_header_says_which_of_the_two_tiers_is_listed_first() -> None:
+    """A page in two tiers has to say so, or its numbers read as broken.
+
+    Measured on the report's own call: a row the words matched at `meaning 0.38`
+    sat above one they did not at `0.56`.  That ordering is right — the words are
+    certain and a cosine is graded — but the header named *which* rows were which
+    and not that one group is listed above the other, so "the rest are by meaning"
+    read as a claim about the whole column and the column looked out of order.
+    "listed first" is the half that was missing, and this is what pins it.
+
+    The stub makes the two tiers maximally obvious: `alpha` is the only row the
+    words match and scores nothing by meaning, `beta` is the reverse.
+    """
+    hub = hub_with_documents(
+        {
+            "alpha": {"command": "alpha", "description": "工具"},
+            "beta": {"command": "beta", "description": "测试"},
+        }
+    )
+    async with Client(hub) as client:
+        answer = await call(
+            client, "tool_search", {"keywords": ["工具"], "sentences": ["测试"]}
+        )
+
+    header = answer["text"].split("\n")[0]
+    assert "listed first" in header, header
+
+    rows = [line for line in answer["text"].split("\n") if line[:1].isdigit()]
+    assert "matched your words" in rows[0], "the worded row is the one on top"
+    assert "matched your words" not in rows[-1], "and the other is beneath it"
+
+
+def test_the_verdict_describes_the_two_tiers_and_never_a_rest_that_is_absent() -> None:
+    """Every branch of the first line, asserted where the wording lives.
+
+    `_verdict` is called with the page and its best number, so the wording can be
+    pinned without a catalogue — which matters because the case that was wrong is
+    the one where a whole page lands in one tier: `["pdf"]` matched all ten rows
+    and the header still said "the rest are by meaning", describing a rest that
+    was not there.
+    """
+    worded = [{"matched_words": True}]
+    plain = [{}]
+
+    assert "All of these matched your words" in str(_verdict(worded, 0.7))
+    assert "the rest" not in str(_verdict(worded, 0.7))
+
+    mixed = _verdict([*worded, *plain], 0.7)
+    assert "listed first" in mixed, "which group is on top is the half that was missing"
+    assert "1 of these" in mixed
+
+    assert "Closest first by meaning" in str(_verdict(plain, 0.7))
+    # And the tier does not hide a page that found nothing: the words matching is
+    # evidence, not a score, so it says weak rather than best.
+    assert str(_verdict(worded, 0.2)).startswith("Weak")
 
 
 @pytest.mark.asyncio

@@ -1569,9 +1569,21 @@ def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
         head = f"Weak — {why}."
     else:
         head = f"Nothing here matches: no row is above {WEAK_FLOOR:.2f} by meaning."
-    if worded:
-        return f"{head} Your words matched {worded} of these; the rest are by meaning."
-    return f"{head} Closest first by meaning."
+    if not worded:
+        return f"{head} Closest first by meaning."
+    if worded == len(rows):
+        # No "rest" to describe.  Saying there was one made the header read as a
+        # claim about the whole column when the whole column was one group.
+        return f"{head} All of these matched your words."
+    # **"listed first" is the load-bearing half.**  Without it the clause says
+    # which rows are which and not that the order puts one group above the other,
+    # so a reader takes "the rest by meaning" as describing the whole column — and
+    # then `pdf_render_pages` at 0.38 sitting above `scan_workspace` at 0.56 reads
+    # as the numbers being out of order rather than as a tier boundary.
+    return (
+        f"{head} Your words matched {worded} of these, listed first; "
+        f"the rest by meaning."
+    )
 
 
 def _results_as_text(found: Mapping[str, Any]) -> str:
