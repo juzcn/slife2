@@ -3025,6 +3025,14 @@ class ToolStore:
         the row it rides on is shown to a model, and a similarity is the only
         one of the two that means the same thing when it goes up.
 
+        **That conversion is `_nearest`'s, and this method must not repeat it.**
+        It used to: the value came back already a similarity, under a variable
+        named `distance`, and `1.0 - distance` inverted it a second time — so the
+        nearest tool carried the *lowest* score in a result a model reads, which
+        is the failure `_nearest` warns about two functions down.  The turn store
+        converts in its own KNN and passes the result straight up; this is the
+        same shape, and the rounding and the floor are all that is left here.
+
         The **raw** query, not the normalized one: normalization is the keyword
         leg's rule, and it inserts a space between every pair of CJK characters,
         which is what makes them tokens there and is nonsense as text handed to
@@ -3039,9 +3047,7 @@ class ToolStore:
         nearest = await asyncio.to_thread(
             self._nearest, sqlite_vec.serialize_float32(vectors[0]), k
         )
-        return [
-            (rowid, round(max(0.0, 1.0 - distance), 4)) for rowid, distance in nearest
-        ]
+        return [(rowid, round(max(0.0, similarity), 4)) for rowid, similarity in nearest]
 
     def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, and the dedup it cannot do itself.
