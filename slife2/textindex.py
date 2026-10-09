@@ -46,10 +46,18 @@ from __future__ import annotations
 
 import re
 
-#: The rule set's own version.  It is recorded beside the indexes, because an
-#: index built by one version of `normalize` cannot be searched by another —
-#: the version is how the index learns that it has to be rebuilt.  Bump it with
-#: any change to what `normalize` or `terms` produces.
+#: The rule set's own version, and the lever that rebuilds what it governs.
+#:
+#: Recorded beside every keyword index and folded into every vector identity —
+#: `slife2.db` stamps both of its files with it — because an index built by one
+#: version of `normalize` cannot be searched by another: the recorded version is
+#: how the index learns that it has to be built again.  Bump it with any change
+#: to what `normalize` or `terms` produces.
+#:
+#: This is the *only* such constant, which is the point of it being here rather
+#: than in each store: it was documented as this lever while nothing read it and
+#: both databases stamped a private copy of the same string, so bumping it
+#: rebuilt nothing and the two could drift apart silently.
 RULES_VERSION = "1"
 
 #: CJK Unified Ideographs and its Extension A — the two ranges v1 split on —
@@ -73,9 +81,21 @@ _CJK_RE = re.compile(f"[{_CJK_CLASS}]")
 _CJK_RUN_RE = re.compile(f"[{_CJK_CLASS}]+")
 
 #: What separates one term from the next: whitespace, ASCII punctuation, and
-#: the full-width and CJK forms a Chinese sentence is punctuated with.  A
-#: character kept out of this set stays inside a term, so an underscore does —
-#: it is a token character to `unicode61`, and a term holding one is one word.
+#: the full-width and CJK forms a Chinese sentence is punctuated with.  **This
+#: is where a query is cut** (`terms`), and it has to cut exactly what
+#: `unicode61` cuts in the index: a term kept whole here is a term the index
+#: has already split, so the query asks for a word that was never written
+#: down — and the reverse leaves a term the index holds unreachable.
+#:
+#: The underscore is in the class, and measured to be on both sides:
+#: `unicode61` splits `builtins__calc` at its underscores (`calc` matches it),
+#: and this cuts `foo_bar` into `foo` and `bar` the same way.  `normalize` does
+#: **not** cut it, which is not a disagreement — `normalize` spaces CJK and
+#: collapses whitespace, and cutting terms is this expression's job, not its.
+#:
+#: (An earlier comment here said an underscore "is a token character to
+#: `unicode61`, and a term holding one is one word".  Measured against the
+#: pinned SQLite, it is neither.)
 _SEPARATOR_RE = re.compile(
     "[\u0000-/:-@[-`{-¿"
     "‐-‧"  # dashes, quotes, ellipsis

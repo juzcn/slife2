@@ -50,9 +50,17 @@ def test_cjk_punctuation_survives_normalize() -> None:
     assert normalize("工具，测试。") == "工 具 ， 测 试 。"
 
 
-def test_an_underscore_stays_inside_a_term() -> None:
-    """It is a token character to `unicode61`, so it is not a term boundary."""
+def test_normalize_does_not_cut_a_term() -> None:
+    """`normalize` is not where a term is cut — `terms` and `unicode61` are.
+
+    It spaces CJK and collapses whitespace and does nothing else, so an
+    underscore survives it.  Measured against the pinned SQLite, the tokenizer
+    *does* split one (`calc` matches `builtins__calc`) and `terms` splits it
+    too — that agreement is what has to hold, and this pins the half that is
+    easy to "fix" into disagreement.
+    """
     assert normalize("ABC_DEF 工具") == "abc_def 工 具"
+    assert terms("foo_bar") == ["foo", "bar"], "and the term boundary does cut it"
 
 
 # --- terms --------------------------------------------------------------------

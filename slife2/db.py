@@ -118,6 +118,19 @@ TOOL_RESULT_CHARS = 8000
 #: and a `total`, not a context window full of history.
 MAX_PAGE = 200
 
+
+def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
+    """The page size a request for `limit` actually gets.
+
+    One function because two parties have to agree on the number: the query
+    that builds the page, and the answer that says which page this was.  A
+    caller pages by `offset`, so a response echoing the `limit` *asked* for —
+    1000, say, for a 200-row cap — is a response that makes the caller's own
+    arithmetic skip the rows in between.
+    """
+    return max(1, min(int(limit), cap))
+
+
 #: How much of each message a listing shows.  The browse is for *choosing* a turn
 #: to read, and a preview long enough to choose from is not the same thing as the
 #: turn — which is what `turn_read` is for.  Four hundred characters is roughly a
@@ -132,9 +145,11 @@ PREVIEW_CHARS = 400
 #: to one turn.
 _OVERFETCH = 4
 
-#: How many values one statement may bind.  SQLite's default limit is 999, and
-#: the fused id list costs a bound value per row, so a search over-fetching a
-#: full page would otherwise run past it.
+#: How many values one statement may bind, and therefore how long the list a
+#: search hands to its final query may be.  SQLite's default limit is 999 and
+#: the fused id list costs a bound value per *row*, so the cap belongs on the
+#: fused list — two over-fetched legs fuse to twice the length either one had,
+#: which is the number that has to stay under this.
 _MAX_SQL_VARS = 900
 
 
@@ -503,11 +518,6 @@ def _cut(text: str, chars: int) -> str:
 # is what those columns are for) while the vector index keeps only the
 # conversation, for the reason below.
 
-
-#: The version of both contracts above.  Recorded beside the indexes, so a
-#: change to either is what makes an index rebuild — the same lever as a changed
-#: embedding model, and deliberately not a second one.
-TEXT_VERSION = "1"
 
 #: How much of a tool call's arguments a vector keeps.  The call is part of what
 #: a turn was about — "the one where it used the calculator" is a real question —
@@ -1001,11 +1011,19 @@ class TurnStore:
         Raises:
             InvalidTimeBound: If a bound is in no known grammar.
         """
-        limit = max(1, min(int(limit), MAX_PAGE))
+        limit = page_limit(limit)
         offset = max(0, int(offset))
         clauses, params = _time_window(since, until)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
+            # One read transaction for both statements.  They are two reads of a
+            # table a turn can be saved to at any moment, and a save landing
+            # between them makes `total` describe a different table than the
+            # page does — so a caller paging by offset skips or repeats a turn.
+            # WAL gives a reader one consistent snapshot for as long as its
+            # transaction lasts, which is exactly this; the `with` commits it,
+            # and a read-only commit changes nothing.
+            connection.execute("BEGIN")
             total = connection.execute(
                 f"SELECT COUNT(*) FROM turn {where}", params
             ).fetchone()[0]
@@ -1094,7 +1112,10 @@ class TurnStore:
         quietly upgraded.
         """
         with self._connect() as connection:
-            if self._meta(connection).get("text_version", "") == TEXT_VERSION:
+            if (
+                self._meta(connection).get("text_version", "")
+                == textindex.RULES_VERSION
+            ):
                 return
             connection.execute("DELETE FROM turn_fts")
             rows = connection.execute(
@@ -1112,7 +1133,7 @@ class TurnStore:
                     for row in rows
                 ],
             )
-            self._set_meta(connection, text_version=TEXT_VERSION)
+            self._set_meta(connection, text_version=textindex.RULES_VERSION)
 
     def _turns_without_vectors(self) -> list[tuple[int, str]]:
         """Every turn the vector index does not hold, oldest first.
@@ -1197,7 +1218,6 @@ class TurnStore:
         }
 
     @staticmethod
-    @staticmethod
     def _meta(connection: sqlite3.Connection) -> dict[str, str]:
         """What each index was built with, as recorded in the file itself."""
         return _meta(connection)
@@ -1237,7 +1257,7 @@ class TurnStore:
         """
         expression = textindex.match_expression(query)
         clauses, params = _time_window(since, until)
-        limit = max(1, min(int(limit), MAX_PAGE))
+        limit = page_limit(limit)
         over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
 
         ranked = {
@@ -1246,7 +1266,10 @@ class TurnStore:
             ),
             "semantic": await self._semantic_hits(query, embedder, over),
         }
-        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)]
+        # Capped here and not on the legs: fusing takes the *union* of two lists
+        # that are each already `over` long, and the next query binds one value
+        # per id.  A cap applied to each leg would leave the union at twice it.
+        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)][:_MAX_SQL_VARS]
         return await self._off_loop(
             self._records_in_order, fused, clauses, params, limit
         )
@@ -1352,7 +1375,7 @@ def _vector_identity(embedder: Embedder) -> str:
     every stored vector the wrong vector for its turn, which is the same failure
     as changing the model and takes the same rebuild.
     """
-    return f"{TEXT_VERSION}|{embedder.identity}|{embedder.dimension}"
+    return f"{textindex.RULES_VERSION}|{embedder.identity}|{embedder.dimension}"
 
 
 def _write_vectors(
@@ -1474,7 +1497,9 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #: load state and a connectivity verdict.  This set is the whole of what "is
 #: this a function tool?" means, so there is no second column to keep in sync
 #: with it: v1 dropped its derived `type` column for exactly this reason.
-FUNCTION_CATEGORIES = frozenset({"component", "mcp", "rest"})
+COMPONENT = "component"
+
+FUNCTION_CATEGORIES = frozenset({COMPONENT, "mcp", "rest"})
 
 #: The one category with nothing behind it: a skill is a document, read by the
 #: hub itself, and it has no connection that could be down and no load state to
@@ -1533,18 +1558,44 @@ _TOOL_COLUMNS = frozenset(
 
 #: The `category` values a live `tool` DDL accepts, parsed rather than
 #: substring-matched: `'skill'` is an ordinary word another clause could carry.
-_TOOL_CATEGORY_RE = re.compile(
-    r"check\s*\(\s*category\s+in\s*\(([^)]*)\)",
-    re.IGNORECASE,
-)
+#: The columns of `tool` whose live DDL is a closed domain the code writes into,
+#: and the whole set of values this build writes into each.  Read at open: a file
+#: whose DDL accepts fewer values than this build uses passes a column check and
+#: then raises `IntegrityError` at the first write — inside a tool call, where
+#: the hub reads it as the db refusing one caller's data and carries on.
+_CHECKED_DOMAINS: dict[str, frozenset[str] | set[str]] = {
+    "category": CATEGORIES,
+    "status": {STATUS_ENABLED, STATUS_DISABLED, STATUS_ERROR},
+    "load_status": {LOADED, UNLOADED, NA},
+}
 
-#: The version of what a tool row is *found* by and *about* — the FTS document's
-#: normalization and the text a vector is made from.  Recorded beside both
-#: indexes, because an index built by other rules cannot be searched by these:
-#: a change here is what makes them rebuild, and it is the same lever as a
-#: changed embedding model rather than a second one.
-TOOL_TEXT_VERSION = "1"
 
+def _check_values(ddl: str, column: str) -> set[str] | None:
+    """The values a live `tool` DDL accepts for one CHECKed column, or `None`.
+
+    Scoped to that column's own clause rather than the whole statement on
+    purpose: `'skill'` and `'rest'` are ordinary words another clause could
+    carry, and a substring test would call a list complete when it was not.
+    """
+    found = re.search(
+        rf"check\s*\(\s*{re.escape(column)}\s+in\s*\(([^)]*)\)",
+        ddl,
+        re.IGNORECASE,
+    )
+    if found is None:
+        return None
+    return {
+        value.strip().strip("'\"")
+        for value in found.group(1).split(",")
+        if value.strip()
+    }
+
+
+#: The version of what a tool row is *found* by and *about* is
+#: `slife2.textindex.RULES_VERSION` — the same one the turns use, because it is
+#: the same `normalize`/`terms` that produce both.  A second constant here would
+#: be the second lever this module keeps saying it does not have.
+#:
 #: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
 #: its name far more often than by anything else about it — "the calculator" and
 #: `builtins__calc` have to meet — so the name dominates and the schema, which is
@@ -1814,11 +1865,15 @@ class ToolStore:
         }
         if not columns:  # no table yet: the schema creates it complete
             return
-        allowed = _category_check_values(str(_table_ddl(connection, "tool") or ""))
+        ddl = str(_table_ddl(connection, "tool") or "")
         missing = sorted(_TOOL_COLUMNS - columns)
         unexpected = sorted(columns - _TOOL_COLUMNS)
-        wrong = sorted(CATEGORIES - allowed) if allowed is not None else []
-        if not missing and not unexpected and not wrong:
+        short = [
+            f"no {column} value {'/'.join(sorted(wanted - allowed))}"
+            for column, wanted in _CHECKED_DOMAINS.items()
+            if (allowed := _check_values(ddl, column)) is not None and wanted - allowed
+        ]
+        if not missing and not unexpected and not short:
             return
         logger.warning(
             "%s holds a tool catalogue this build does not write (%s); it is "
@@ -1829,7 +1884,7 @@ class ToolStore:
                 [
                     *(f"no {name} column" for name in missing),
                     *(f"unknown {name} column" for name in unexpected),
-                    *(f"no {name} category" for name in wrong),
+                    *short,
                 ]
             ),
         )
@@ -1990,8 +2045,13 @@ class ToolStore:
                     updates.append({**previous, **fields, "moved": sorted(moved)})
                     # A description or a schema that moved is a document that
                     # moved, and the vector it had is a vector of text that is
-                    # no longer there.
-                    documents.append((name, tool_document(fields)))
+                    # no longer there — those two are the whole of what
+                    # `tool_document` reads.  Anything else that moved (a
+                    # `remote_name`, a status) leaves the document identical, so
+                    # re-embedding it would buy a vector of the same text at the
+                    # price of an embedding call and a rewritten row.
+                    if moved.keys() & {"description", "schema"}:
+                        documents.append((name, tool_document(fields)))
                 if previous["status"] != STATUS_ENABLED:
                     reconnected.append(name)
                 if not moved and previous["status"] == STATUS_ENABLED:
@@ -2121,7 +2181,14 @@ class ToolStore:
         A new row is the only thing this decides.  Discovery never puts a tool
         into the model's list by itself, and it never takes one out.
         """
-        if category == "component" or source in self.autoload:
+        if category == SKILL:
+            # A skill has no load state at all: it is a document the hub reads,
+            # not a tool behind a connection, so "not loaded yet" would be a
+            # promise about a step that does not exist — and `load_status='n/a'`
+            # is what `tool_search`'s own filter and the column's documentation
+            # both say a skill carries.
+            return NA
+        if category == COMPONENT or source in self.autoload:
             return LOADED
         return UNLOADED
 
@@ -2384,7 +2451,7 @@ class ToolStore:
             if excess <= 0:
                 return []
             values = list(live)
-            protected = "category = 'component'"
+            protected = f"category IN ({_in_list({COMPONENT})})"
             if self.autoload:
                 protected += f" OR source_id IN ({_marks(self.autoload)})"
                 values.extend(sorted(self.autoload))
@@ -2483,7 +2550,7 @@ class ToolStore:
         that category, and one with `status='disabled'` is how "it exists but is
         switched off" becomes answerable rather than a guess.
         """
-        limit = max(1, min(int(limit), MAX_TOOL_PAGE))
+        limit = page_limit(limit, MAX_TOOL_PAGE)
         clauses, values = _tool_filters(
             category=category,
             source_id=source_id,
@@ -2516,7 +2583,7 @@ class ToolStore:
             )
         ]
         rows = await asyncio.to_thread(
-            self._rows_in_order, fused, clauses, values, limit
+            self._rows_in_order, fused[:_MAX_SQL_VARS], clauses, values, limit
         )
         results = []
         for row in rows:
@@ -2703,7 +2770,10 @@ class ToolStore:
         and is rebuilt whole.
         """
         with self._connect() as connection:
-            if _meta(connection, "meta").get("text_version", "") == TOOL_TEXT_VERSION:
+            if (
+                _meta(connection, "meta").get("text_version", "")
+                == textindex.RULES_VERSION
+            ):
                 return
             connection.execute("DELETE FROM tool_fts")
             for row in connection.execute("SELECT rowid AS rowid, * FROM tool"):
@@ -2718,7 +2788,7 @@ class ToolStore:
                         "schema": str(row["schema"]),
                     },
                 )
-            _set_meta(connection, "meta", text_version=TOOL_TEXT_VERSION)
+            _set_meta(connection, "meta", text_version=textindex.RULES_VERSION)
 
     def tools_without_vectors(self) -> list[tuple[str, str]]:
         """Every row the vector index does not hold, as `(name, document)`.
@@ -2749,7 +2819,7 @@ def _tool_index_identity(embedder: Embedder) -> str:
     every stored vector the wrong vector for its tool, which is the same failure
     as changing the model and takes the same rebuild.
     """
-    return f"{TOOL_TEXT_VERSION}|{embedder.identity}|{embedder.dimension}"
+    return f"{textindex.RULES_VERSION}|{embedder.identity}|{embedder.dimension}"
 
 
 def _chunk_documents(
@@ -2812,23 +2882,6 @@ def _injectable_sql(sources: Sequence[str]) -> str:
         f" AND source_id IN ({_marks(sources)})"
         f" AND name NOT LIKE '\\_%' ESCAPE '\\'"
     )
-
-
-def _category_check_values(ddl: str) -> set[str] | None:
-    """The categories a live `tool` DDL accepts; `None` when it has no CHECK.
-
-    Scoped to the `category` clause rather than the whole statement on purpose:
-    `'skill'` and `'rest'` are ordinary words another clause could carry, and a
-    substring test would call a category list complete when it was not.
-    """
-    found = _TOOL_CATEGORY_RE.search(ddl)
-    if found is None:
-        return None
-    return {
-        value.strip().strip("'\"")
-        for value in found.group(1).split(",")
-        if value.strip()
-    }
 
 
 def _table_ddl(connection: sqlite3.Connection, table: str) -> str | None:

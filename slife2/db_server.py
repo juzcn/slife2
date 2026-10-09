@@ -74,7 +74,14 @@ from slife2.config import (
     find_config_path,
     load,
 )
-from slife2.db import PREVIEW_CHARS, Embedder, ToolStore, TurnStore, store_for
+from slife2.db import (
+    PREVIEW_CHARS,
+    Embedder,
+    ToolStore,
+    TurnStore,
+    page_limit,
+    store_for,
+)
 from slife2.mcp_server import (
     close_server,
     configure_logging,
@@ -472,7 +479,12 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         return {
             "entries": [record.to_listing(PREVIEW_CHARS) for record in records],
             "total": total,
-            "limit": limit,
+            # The limit that *produced* this page, not the one asked for.  The
+            # docstring above tells a caller to page with `offset + len(entries)
+            # < total`, and that arithmetic is only right against the size the
+            # page was actually built with — a request for 1000 answered with
+            # `limit: 1000` and 200 rows skips the 800 in between.
+            "limit": page_limit(limit),
             "offset": max(0, offset),
         }
 

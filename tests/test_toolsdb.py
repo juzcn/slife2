@@ -22,8 +22,11 @@ import pytest
 
 from slife2.db import (
     LOADED,
+    NA,
     STATUS_DISABLED,
+    STATUS_ENABLED,
     STATUS_ERROR,
+    UNLOADED,
     ToolStore,
 )
 from tests.fakes import StubEmbedder
@@ -239,6 +242,71 @@ def test_a_catalogue_from_before_the_use_stamp_is_rebuilt(tmp_path) -> None:
     store = ToolStore(path, threshold=100)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"]
+
+
+def test_a_file_whose_check_predates_a_value_is_rebuilt(tmp_path) -> None:
+    """A closed domain is what decides an INSERT, and there are three of them.
+
+    A file whose `category` list is current and whose `status` list is not is
+    the case a category-only check waves through: every column is there, the
+    open succeeds, and the first verdict that is neither `enabled` nor
+    `disabled` raises `IntegrityError` *inside* a tool call — where the hub
+    reads it as the db refusing one caller's data and carries on, every turn.
+    """
+    path = tmp_path / "tools.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE tool (name TEXT PRIMARY KEY, description TEXT,"
+            " category TEXT CHECK (category IN ('component','mcp','rest','skill')),"
+            " source_id TEXT, remote_name TEXT, schema TEXT,"
+            " status TEXT CHECK (status IN ('enabled','disabled')),"
+            " load_status TEXT, last_loaded TEXT, last_used TEXT)"
+        )
+
+    store = ToolStore(path, threshold=100)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+
+    assert store.set_source_state("arxiv", STATUS_ERROR) == 1, "a verdict was refused"
+    assert rows_in(store) == [("arxiv__search", STATUS_ERROR, UNLOADED)]
+
+
+def test_a_skill_row_carries_no_load_state(tmp_path) -> None:
+    """`n/a` is what the column documents for a skill, and what its filter means.
+
+    A skill is a document the hub reads, not a tool behind a connection: there
+    is no load step for "not loaded yet" to describe, and `tool_search`'s
+    `load_status` filter says `n/a` for exactly this row — so a skill stored as
+    `unloaded` is one the model is told to load and can never find.
+    """
+    store = store_at(tmp_path)
+    merge(store, "skills", "skill", [tool("skill:browser-harness")])
+
+    assert rows_in(store) == [("skill:browser-harness", STATUS_ENABLED, NA)]
+
+
+def test_a_move_that_is_not_the_document_does_not_re_embed(tmp_path) -> None:
+    """A vector is of the name, the description and the schema — nothing else.
+
+    So a `remote_name` that moved leaves the document byte-identical, and
+    re-embedding it would buy the same vector for the price of an embedding
+    call and a rewritten row on a path that runs every time a server is
+    listed.
+    """
+    embedder = StubEmbedder()
+    store = store_at(tmp_path)
+    asyncio.run(store.merge("arxiv", "mcp", [tool("arxiv__search")], embedder=embedder))
+    before = len(embedder.calls)
+
+    renamed = tool("arxiv__search")
+    renamed["remote_name"] = "search_v2"
+    answer = asyncio.run(store.merge("arxiv", "mcp", [renamed], embedder=embedder))
+
+    assert answer["updated"] == ["arxiv__search"], "the row did move"
+    assert len(embedder.calls) == before, "a renamed tool was embedded again"
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT remote_name FROM tool").fetchall() == [
+            ("search_v2",)
+        ]
 
 
 # --- the boot pass: off is not down -------------------------------------------

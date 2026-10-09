@@ -19,7 +19,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.audience import client_meta
 from slife2.config import default_config
-from slife2.db import TurnStore
+from slife2.db import MAX_PAGE, TurnStore
 from slife2.db_server import RemoteEmbedder, build_server
 from slife2.paths import DATA_ENV_VAR, db_dir
 from tests.fakes import StubEmbedder
@@ -196,6 +196,31 @@ async def test_browsing_pages_and_reports_a_total(tmp_path, monkeypatch) -> None
     assert (page.data["limit"], page.data["offset"]) == (2, 1)
     assert [e["user_message"] for e in page.data["entries"]] == ["q1", "q0"]
     assert [e["assistant_message"] for e in page.data["entries"]] == ["a1", "a0"]
+
+
+@pytest.mark.asyncio
+async def test_the_page_reports_the_limit_that_built_it(tmp_path, monkeypatch) -> None:
+    """`limit` in the answer is the capped one, not the one asked for.
+
+    The docstring tells a model to page with `offset + len(entries) < total`,
+    and that arithmetic only holds against the size the page was actually built
+    with: answering a request for 1000 with `limit: 1000` and two hundred rows
+    makes the next request skip the eight hundred in between.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await client.call_tool(
+            "remember",
+            {"agent": "jack", "messages": _exchange("q0", "a0")},
+        )
+        page = await client.call_tool(
+            "turn_list", {"limit": 1000}, meta=client_meta("jack")
+        )
+
+    assert page.data["total"] == 1
+    assert page.data["limit"] == MAX_PAGE
+    assert len(page.data["entries"]) == 1
 
 
 @pytest.mark.asyncio
