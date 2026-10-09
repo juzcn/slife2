@@ -56,12 +56,13 @@ not write it.  What it shares with both is the thing that matters here: **an
 entry is the operator's opt-in**, and this file is where the operator says it.
 That is v1's `cli:` section, ported as configuration.
 
-**Nothing reads this yet.**  The tools that serve these entries — and the
-`skills/` directory beside this file, which is the same family written as
-playbooks rather than commands — arrive through the toolhub like every other
-tool, and are the next change rather than this one (DESIGN.md §9).  What is
-settled here is where an entry is written down and what it may say, so a config
-copied from v1 keeps working when the tools land.
+**Nothing reads this section yet.**  What reads the *other* half of the same
+family has since landed: `skills/` is a playbook folder the toolhub reads
+(`skill_use`, DESIGN.md §8), and where a skill's key comes from is the `skills:`
+section below.  An entry *here* is still configuration and nothing else — the
+tool that runs one per `cli:` entry is the next change (DESIGN.md §9) — so what
+is settled for now is where an entry is written down and what it may say, which
+is what lets a config copied from v1 keep working when that tool lands.
 
 Three things are worth stating outright.
 
@@ -210,7 +211,7 @@ def _credstore_lookup(key: str) -> str | None:
         from credstore import get_credential
 
         return get_credential(key)
-    except Exception:
+    except Exception:  # noqa: BLE001 - a keyring that is not there is one this chain steps past
         return None
 
 
@@ -229,7 +230,7 @@ def resolve_secret(value: object) -> str:
 
         if is_keyring_uri(value):
             return resolve_uri(value)
-    except Exception:
+    except Exception:  # noqa: BLE001 - an unresolvable reference is left verbatim, by design
         pass
 
     def _replace(match: re.Match[str]) -> str:
@@ -289,6 +290,17 @@ class ModelSettings:
     #: `compat.thinking` — `enabled`, `disabled`, or `omit` for gateways that
     #: reject the standard shape while reasoning anyway.
     thinking: str = ""
+    #: `compat.stream_usage` — `omit` for a gateway that rejects OpenAI's
+    #: `stream_options` extension with a 400.
+    #:
+    #: **Not tri-state like `store`, and the difference is which way the default
+    #: has to fall.**  There, saying nothing leaves the endpoint's own default in
+    #: place and that is the right one.  Here it is not: usage arrives only
+    #: because it was asked for, and §6 of DESIGN.md is the measurement that
+    #: made the counts load-bearing — an adapter reading only the documented
+    #: OpenAI shape reported zero tokens against a real endpoint.  So an absent
+    #: value means *send*, and the escape hatch is a marked one.
+    stream_usage: str = ""
     #: `compat.store` — whether the Responses API may keep the response
     #: server-side.  **Tri-state, and the third state is the default.**
     #:
@@ -469,11 +481,19 @@ class ToolServerSettings:
     #: stdio: the program to start.
     command: str = ""
     args: tuple[str, ...] = ()
-    env: dict[str, str] = field(default_factory=dict)
+    #:
+    #: `repr=False` on this and `headers`, and it is the one place in this
+    #: module where a resolved secret is *held* rather than referenced: a
+    #: `ProviderSettings` keeps `api_key_ref` and resolves on access, while a
+    #: tool server's environment has to be materialised to be handed to a child
+    #: process.  Everything that prints a config — a log line, a traceback, a
+    #: REPL — goes through the generated `__repr__`, so this is what keeps a
+    #: live key out of all three.
+    env: dict[str, str] = field(default_factory=dict, repr=False)
     #: http: the endpoint, either transport.  A URL ending in `/sse` is the
     #: older SSE transport; anything else is Streamable HTTP.
     url: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
     #: stdio only, and it matters more than it looks: a server started with a
     #: relative path in its arguments resolves that path against its working
     #: directory, and a daemon's own working directory is the runtime folder.
@@ -880,7 +900,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     agent_raw = _mapping(raw.get("agent"), "agent")
     agent = AgentSettings(
         server=servers["agent"],
-        max_steps=int(agent_raw.get("max_steps") or base.agent.max_steps),
+        max_steps=_int_or(agent_raw.get("max_steps"), base.agent.max_steps),
         system_prompt=_template_path(
             agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
         ),
@@ -911,7 +931,7 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
     if raw is None:
         return base
     section = _mapping(raw, "tool_load")
-    threshold = int(section.get("threshold") or base.threshold)
+    threshold = _int_or(section.get("threshold"), base.threshold)
     if threshold < 1:
         raise ConfigError(
             f"tool_load.threshold: {threshold} would evict every tool the model "
@@ -1244,9 +1264,21 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping with host/port/path")
+    port = _int_or(raw.get("port"), default.port)
+    if not 0 < port < 65536:
+        # Refused rather than defaulted, and rather than passed on: a port is
+        # how the launcher finds this server again — it probes the address it
+        # decided, before it starts anything — so `port: 0` would bind whatever
+        # the kernel liked and then be probed at a port nobody is on.  The
+        # `_int_or` above is what makes this reachable at all; `int(x or
+        # default)` read the zero as "not given".
+        raise ConfigError(
+            f"{where}.port: {port} is not a port (1-65535); leave it out for "
+            f"the default ({default.port})"
+        )
     return ServerSettings(
         host=str(raw.get("host") or default.host),
-        port=int(raw.get("port") or default.port),
+        port=port,
         path=str(raw.get("path") or default.path),
     )
 
@@ -1270,9 +1302,20 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
         model = _model(entry, name)
         models[model.model] = model
 
+    base_url = str(raw.get("base_url") or "")
+    if not base_url:
+        # The same hole `_embedding_provider` guards, and the same reason: a
+        # key with nowhere to go makes the SDK fall back to its **own** default
+        # host, so the key and the whole conversation are posted to somebody
+        # else's server.  Chat providers had no equivalent check.
+        raise ConfigError(
+            f"providers.{name}: needs `base_url` — without one the SDK sends "
+            f"this provider's key and the conversation to its own default host"
+        )
+
     return ProviderSettings(
         api=api,
-        base_url=str(raw.get("base_url") or ""),
+        base_url=base_url,
         api_key_ref=str(raw.get("api_key") or ""),
         models=models,
     )
@@ -1307,13 +1350,27 @@ def _model(raw: Any, provider: str) -> ModelSettings:
         name=str(raw.get("name") or ""),
         reasoning=bool(raw.get("reasoning", False)),
         input=inputs,
-        context_window=int(raw.get("context_window") or 0),
+        context_window=_int_or(raw.get("context_window"), 0),
         max_tokens=_optional_int(raw.get("max_tokens")),
         temperature=_optional_float(raw.get("temperature")),
         top_p=_optional_float(raw.get("top_p")),
         thinking=str(compat.get("thinking") or ""),
+        stream_usage=str(compat.get("stream_usage") or ""),
         store=None if store_raw is None else bool(store_raw),
     )
+
+
+def _int_or(value: Any, default: int) -> int:
+    """`value` as an int, or `default` when the key is **absent**.
+
+    Absent means absent, and that is the whole of what this adds over
+    `int(value or default)`: the `or` idiom also treats an explicit `0` as "not
+    given", so `tool_load.threshold: 0` — the value the guard below exists to
+    refuse — was silently replaced by the default, as were `max_steps: 0` (a
+    turn with no model call in it) and `port: 0` (the kernel's "pick one for
+    me", which is not something a server of ours should be handed by accident).
+    """
+    return default if value is None else int(value)
 
 
 def _optional_int(value: Any) -> int | None:

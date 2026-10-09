@@ -37,6 +37,11 @@
 #   compat.thinking       omit  — send no thinking field (for gateways that
 #                                 reject the standard shape yet reason natively)
 #                         disabled / enabled are also accepted
+#   compat.stream_usage   omit  — send no `stream_options`, for a gateway that
+#                                 rejects OpenAI's usage extension with a 400.
+#                                 Leaving it out *sends* it (not the other way
+#                                 round, as with store): the token counts the
+#                                 status bar shows arrive only when asked for.
 #   compat.store          openai-responses only: whether the provider may keep
 #                         the response on its side.  Leave it out and slife2
 #                         sends nothing, which leaves that provider's own

@@ -152,6 +152,7 @@ def test_the_flag_picks_that_models_own_window(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
+    base_url: https://example.test/v1
     models:
       - model: small
         context_window: 1000
@@ -178,6 +179,7 @@ def test_a_model_with_no_window_reports_none(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
+    base_url: https://example.test/v1
     models:
       - model: m
 default: p/m

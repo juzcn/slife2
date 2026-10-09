@@ -144,6 +144,7 @@ def test_vision_is_opted_into_by_listing_image(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
+    base_url: https://example.test/v1
     models:
       - model: sees
         input: [text, image]
@@ -170,6 +171,7 @@ def test_the_responses_store_flag_is_tri_state(tmp_path) -> None:
 providers:
   p:
     api: openai-responses
+    base_url: https://example.test/v1
     models:
       - model: refused
         compat: {store: false}
@@ -197,12 +199,61 @@ def test_a_store_flag_on_another_protocol_is_carried_but_unused(tmp_path) -> Non
 providers:
   p:
     api: openai-completions
+    base_url: https://example.test/v1
     models:
       - model: m
         compat: {store: false}
 """,
     )
     assert load(path).provider("p").model("m").store is False
+
+
+def test_a_provider_with_nowhere_to_send_is_refused(tmp_path) -> None:
+    """The hole the embedding provider always guarded, closed on the chat side.
+
+    A provider entry carrying a key and no `base_url` makes the SDK fall back
+    to its **own** default host — so the key, and every message of every
+    conversation, is posted to somebody else's server.  The
+    `embeddings.providers:` loader has refused this from the start; the chat
+    loader accepted it.
+    """
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-completions
+    api_key: sk-live
+    models: [{model: m}]
+""",
+    )
+    with pytest.raises(ConfigError, match="needs `base_url`"):
+        load(path)
+
+
+def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
+    """`int(x or default)` reads a written `0` as "not given".
+
+    Three settings were affected and each fails differently: a threshold of
+    zero is the configuration the guard exists to refuse, and was silently
+    replaced by the default instead; `max_steps: 0` is a turn with no model
+    call in it, and became sixteen; and `port: 0` is a server bound somewhere
+    the launcher will never look for it.
+    """
+    path = write(tmp_path, "tool_load:\n  threshold: 0\n")
+    with pytest.raises(ConfigError, match="would evict every tool"):
+        load(path)
+
+    path = write(tmp_path, "tool_load:\n  threshold: -5\n")
+    with pytest.raises(ConfigError, match="would evict every tool"):
+        load(path)
+
+    path = write(tmp_path, "agent:\n  max_steps: 0\n")
+    assert load(path).agent.max_steps == 0, "a written zero is a written zero"
+
+    path = write(tmp_path, "servers:\n  db:\n    port: 0\n")
+    with pytest.raises(ConfigError, match="is not a port"):
+        load(path)
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:
@@ -273,6 +324,7 @@ def test_the_default_falls_back_to_the_first_model(tmp_path) -> None:
 providers:
   p:
     api: openai-completions
+    base_url: https://example.test/v1
     models:
       - model: only
 """,
