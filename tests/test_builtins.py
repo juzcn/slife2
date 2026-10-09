@@ -156,6 +156,33 @@ def test_calc_bounds_a_runaway_exponent() -> None:
         evaluate("9 ** 9 ** 9")
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "(10 ** 1000) ** 1000",
+        "((10 ** 1000) ** 1000) ** 10",
+    ],
+)
+def test_calc_bounds_a_runaway_result_too(expression: str) -> None:
+    """The exponent check bounds one operation, and the base is a value.
+
+    Every `**` above passes an exponent limit of 1000 on its own while asking
+    for an integer of millions of bits: the first is 3.3M bits in 0.12s, the
+    second 33M in 6.6s, and nesting once more does not finish in 20s.  `calc` is
+    always in the model's list, so what has to be bounded is the answer — and
+    the error has to be about the answer, since the exponent it was written with
+    is one `calc` allows.
+    """
+    with pytest.raises(ValueError, match="bits"):
+        evaluate(expression)
+
+
+def test_calc_still_does_the_arithmetic_it_is_for() -> None:
+    """The bound must not be so eager that it refuses ordinary sums."""
+    assert evaluate("2 ** 10") == 1024
+    assert evaluate("10 ** 100") == 10**100
+
+
 def test_calc_reports_division_by_zero_to_the_model() -> None:
     """The model gets to see the mistake and correct it."""
     with pytest.raises(ZeroDivisionError):

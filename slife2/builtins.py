@@ -164,6 +164,20 @@ _UNARY_OPS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
 #: digits; the model gets an error instead.
 _MAX_EXPONENT = 1000
 
+#: Largest result `**` may produce, in bits.  The exponent limit above is a
+#: bound per *operation*, and a power's base is itself a value: `(10**1000)**1000`
+#: passes that check twice and still asks for a three-million-bit integer —
+#: measured at 0.12s for that one, 6.6s for a third nesting, and not finished
+#: after 20s for a fourth.  One call from a tool that is always loaded is
+#: therefore enough to pin a core and allocate hundreds of megabytes, so what
+#: is bounded here is the answer rather than the spelling of the question.
+#:
+#: The estimate is `bit_length * exponent`, an upper bound (exact when the base
+#: is a power of two, up to twice the truth otherwise), which is the safe
+#: direction: refusing `2**4000` — 4001 bits, and not a sum anybody wanted —
+#: costs a model nothing next to hanging the process that answers it.
+_MAX_POWER_BITS = 4096
+
 
 def evaluate(expression: str) -> float | int:
     """Evaluate an arithmetic expression safely.
@@ -212,8 +226,16 @@ def _apply_binary(
     op: ast.operator,
 ) -> float | int:
     """Apply an operator, bounding the one that can run away."""
-    if isinstance(op, ast.Pow) and abs(right) > _MAX_EXPONENT:
-        raise ValueError(f"exponent too large (limit {_MAX_EXPONENT})")
+    if isinstance(op, ast.Pow):
+        if abs(right) > _MAX_EXPONENT:
+            raise ValueError(f"exponent too large (limit {_MAX_EXPONENT})")
+        if (
+            isinstance(left, int)
+            and isinstance(right, int)
+            and right > 0
+            and left.bit_length() * right > _MAX_POWER_BITS
+        ):
+            raise ValueError(f"that power would be larger than {_MAX_POWER_BITS} bits")
     return handler(left, right)
 
 

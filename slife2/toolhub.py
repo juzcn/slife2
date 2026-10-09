@@ -161,6 +161,7 @@ from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.client.messages import MessageHandler
+from fastmcp.exceptions import ToolError
 
 from slife2 import skills
 from slife2.audience import for_the_model, forwarded_client, request_meta
@@ -262,6 +263,13 @@ CALL_TIMEOUT_SECONDS = 300.0
 #: paid once per daemon, not once per turn.
 LIST_SETTLE_SECONDS = 5.0
 
+#: How many names one `func_tool_load` may carry.  Each name is its own
+#: catalogue write and its own embedding call — the loop is a `for` over a hop
+#: rather than a batch — and the model's list is trimmed to the budget at every
+#: turn boundary, so a list longer than the budget holds is one the next trim
+#: takes back at the price of embedding everything in it.
+MAX_LOAD_NAMES = 50
+
 
 def sanitise(part: str) -> str:
     """A name a provider will accept as a tool name.
@@ -355,6 +363,19 @@ def flatten(content: Any) -> str:
     return "\n".join(parts) or "(the tool returned nothing)"
 
 
+async def _abandon(client: Client) -> None:
+    """Let go of a client that was never handed to anyone.
+
+    A `close` that raises must not replace the failure being reported, and that
+    goes double here: this runs on the error path and on the way out of a
+    cancellation.  One function rather than a method, because two owners reach
+    it — an upstream that could not establish, and the catalogue closure that
+    could not enter.
+    """
+    with contextlib.suppress(Exception):
+        await client.__aexit__(None, None, None)
+
+
 class CatalogueUnavailable(ConnectionError):
     """The tool catalogue is not answering: a component that is gone.
 
@@ -398,20 +419,48 @@ class Catalogue:
         return self._client
 
     async def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One operation, with the three answers above kept apart.
+
+        A refusal travels as itself.  `ToolError` is what the SDK raises when the
+        *peer's tool* reported an error and exactly then — a transport failure
+        raises its own exception instead, and `MCPError` is not a `ToolError` —
+        so this is the SDK's own distinction rather than a guess.  It matters
+        because the db refuses a merge when two sources claim one name: wrapped
+        as "the catalogue is not answering", that sends the reader to look at a
+        component which is working perfectly.
+
+        A transport failure is retried **once**, with the client dropped first,
+        for the reason `Upstream.call` gives: a call that never ran is worth a
+        second attempt, and a db that is down must not turn every call into two
+        timeouts.  Dropping it is the half that makes the retry a reconnect —
+        this client is opened once and kept for the process, so a db restarted
+        under a running hub would otherwise fail every later call until the hub
+        itself was restarted, which is the longest-lived process here.
+        """
         try:
-            client = await self.client()
-            result = await client.call_tool(tool, arguments)
-        except CatalogueUnavailable:
+            return tool_payload(await self._call_once(tool, arguments))
+        except (ToolError, CatalogueUnavailable):
             raise
-        except Exception as exc:
-            # The db is a component: not answering is a system that has come
-            # apart, and it is named here rather than surfaced as whatever the
-            # transport happened to say.
-            raise CatalogueUnavailable(
-                f"the tool catalogue ({DB_SERVER_NAME}) is not answering "
-                f"{tool}: {type(exc).__name__}: {exc}"
-            ) from exc
-        return tool_payload(result)
+        except Exception as first:  # noqa: BLE001 - a transport failure is worth one reconnect
+            logger.info("%s: the catalogue call failed, reconnecting: %s", tool, first)
+            await self.close()
+            try:
+                return tool_payload(await self._call_once(tool, arguments))
+            except (ToolError, CatalogueUnavailable):
+                raise
+            except Exception as exc:
+                # The db is a component: not answering is a system that has come
+                # apart, and it is named here rather than surfaced as whatever
+                # the transport happened to say.
+                raise CatalogueUnavailable(
+                    f"the tool catalogue ({DB_SERVER_NAME}) is not answering "
+                    f"{tool}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+    async def _call_once(self, tool: str, arguments: dict[str, Any]) -> Any:
+        """One attempt, on the connection as it stands."""
+        client = await self.client()
+        return await client.call_tool(tool, arguments)
 
     async def merge(
         self, source: str, category: str, tools: Sequence[Mapping[str, Any]]
@@ -555,6 +604,12 @@ class Upstream:
         #: The attempt in flight, if any.  Held so that a caller can wait for it
         #: and so that a second one is never started alongside it.
         self._attempt: asyncio.Task[None] | None = None
+        #: Verdicts written without waiting for them.  Held for the reason
+        #: `slife2.server.server.detach` holds its own: a task nothing
+        #: references can be collected before it runs, and its failure is
+        #: otherwise only ever reported as a warning about a task nobody
+        #: awaited.
+        self._verdicts: set[asyncio.Task[None]] = set()
 
     # --- what the hub reports ------------------------------------------------
 
@@ -670,29 +725,18 @@ class Upstream:
                     # Only a shutdown cancels an attempt (see `settle`), and a
                     # half-entered client would hold a connection nobody owns.
                     if client is not None:
-                        await self._abandon(client)
+                        await _abandon(client)
                     raise
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - every connect failure is this server's, and is reported
                     # `str(exc)` for a stdio server is usually the child's own
                     # last words, which is the only place they are readable —
                     # there is no console for it to have printed to.
                     if client is not None:
-                        await self._abandon(client)
+                        await _abandon(client)
                     self._fail(exc)
                     return
                 self._client = client
             await self._relist()
-
-    @staticmethod
-    async def _abandon(client: Client) -> None:
-        """Let go of a client that was never handed to anyone.
-
-        A `close` that raises must not replace the failure being reported, and
-        that goes double here: this runs on the error path and on the way out of
-        a cancellation.
-        """
-        with contextlib.suppress(Exception):
-            await client.__aexit__(None, None, None)
 
     async def _relist(self) -> None:
         """Ask for a tool list and record it, or fail this source.
@@ -715,7 +759,7 @@ class Upstream:
             return
         try:
             listed = await client.list_tools()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a listing that threw is this source being unusable
             await self.disconnect()
             self._fail(exc)
             return
@@ -729,7 +773,7 @@ class Upstream:
         except CatalogueUnavailable:
             await self.disconnect()
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the db refused this source's list, which is this source's problem
             # The db answered and refused: a name another source owns, say.  That
             # is this source's list that cannot be recorded, so it is this
             # source that is unusable until it is fixed.
@@ -774,9 +818,11 @@ class Upstream:
     def invalidate(self) -> None:
         """Forget the tool list, keeping the connection.
 
-        Called from the peer's own `tools/list_changed`, and after a call that
-        failed at the transport.  Not `disconnect`: the socket is usually fine
-        and only the answer changed, and re-entering the transport on a
+        Called from the peer's own `tools/list_changed`, and from there only:
+        a call that failed at the transport takes `disconnect` instead, because
+        what has to go in that case is the link and not merely the answer.
+        Named apart from it for that reason — the socket is usually fine and
+        only the listing changed, and re-entering the transport on a
         notification would restart every stdio server that ever renames a tool.
 
         Forgetting it means the source is no longer *live*, so its rows stop
@@ -804,9 +850,31 @@ class Upstream:
         self._ready = False
         self._error = f"{type(exc).__name__}: {exc}".strip()
         logger.warning("%s is not usable: %s", self.settings.name, self._error)
-        with contextlib.suppress(Exception):
-            asyncio.get_running_loop().create_task(
+        try:
+            verdict = asyncio.get_running_loop().create_task(
                 self._catalogue.source_state(self.settings.name, "error")
+            )
+        except RuntimeError:  # pragma: no cover - `_fail` is reached from an await
+            # No loop to write on.  The verdict is the catalogue's next-start
+            # problem, and nothing here may replace the reason this failed.
+            return
+        self._verdicts.add(verdict)
+        verdict.add_done_callback(self._verdict_written)
+
+    def _verdict_written(self, verdict: asyncio.Task[None]) -> None:
+        """Retrieve a detached verdict, so a failure is logged and not a warning.
+
+        `create_task` is the only statement in the block above that cannot
+        raise for a reason worth reporting, which is why the retrieval is here
+        rather than a `suppress` around the call: a `suppress` would swallow the
+        *creation* and leave the coroutine's own failure to surface as "Task
+        exception was never retrieved" — a message about nothing, naming no
+        server, some minutes later.
+        """
+        self._verdicts.discard(verdict)
+        if not verdict.cancelled() and (failure := verdict.exception()):
+            logger.info(
+                "the verdict on %s was not recorded: %s", self.settings.name, failure
             )
 
     async def disconnect(self) -> None:
@@ -887,7 +955,7 @@ class Upstream:
                 # did not come from the model.
                 meta=meta,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a call that threw is a transport failure, and returns None
             logger.warning("%s: calling %s failed: %s", self.settings.name, tool, exc)
             self._error = f"{type(exc).__name__}: {exc}".strip()
             return None
@@ -1038,6 +1106,21 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
         name: dict(settings.env) for name, settings in config.skills.items()
     }
 
+    def _as_int(value: Any, default: int) -> int:
+        """A number a model wrote, read as leniently as it is written.
+
+        A JSON schema saying `integer` is not a promise about what arrives: a
+        model sends `"10"` for `limit` as readily as `10`, and `int()` on
+        anything else raises — which would answer a tool call with an MCP error
+        instead of the sentence a model can act on.  A page size that cannot be
+        read is the default rather than a refusal, because there is nothing for
+        the model to correct: it asked for a page and it gets one.
+        """
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     async def use_skill(arguments: dict[str, Any]) -> tuple[str, bool]:
         return await skills.use(arguments, environments=environments)
 
@@ -1048,7 +1131,7 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
             source_id=str(arguments.get("source_id") or ""),
             status=str(arguments.get("status") or ""),
             load_status=str(arguments.get("load_status") or ""),
-            limit=int(arguments.get("limit") or 10),
+            limit=_as_int(arguments.get("limit"), 10),
         )
         return _results_as_text(found), True
 
@@ -1056,6 +1139,18 @@ def local_tools(config: Config, catalogue: Catalogue) -> list[LocalTool]:
         names = _names_of(arguments)
         if not names:
             return "func_tool_load needs at least one tool name", False
+        if len(names) > MAX_LOAD_NAMES:
+            # A bound, because each name is its own catalogue write and its own
+            # embedding call — this is a `for` over a hop, not a batch — and
+            # because a list longer than the budget holds is a list the next
+            # trim takes back anyway.  Refused as a whole rather than truncated:
+            # a model told *which* half was loaded has to diff two lists, and
+            # one told to ask for fewer knows exactly what to do.
+            return (
+                f"func_tool_load takes at most {MAX_LOAD_NAMES} names at a time "
+                f"({len(names)} given): the list is trimmed to the budget at "
+                f"every turn boundary, so load the ones you want now."
+            ), False
         lines: list[str] = []
         ok = True
         for name in names:
@@ -1116,7 +1211,14 @@ async def unload_tools(
 
     Returns:
         `unloaded`, `refused` (named but not unloadable: one of
-        `ALWAYS_LOADED`), and `not_loaded` (named but already out of the list).
+        `ALWAYS_LOADED`), `unknown` (no row has that name), and `not_loaded`
+        (named but already out of the list).
+
+        `unknown` is apart from `refused` on purpose.  Three of the four are
+        facts about a row's *state* — a skill has no load state, a switched-off
+        source is not the runtime's to touch — and one is a fact about the name
+        itself; a caller told "refused, the system needs them" about a name that
+        does not exist has been told something false.
     """
     if not names:
         return {
@@ -1126,6 +1228,7 @@ async def unload_tools(
         }
     unloaded: list[str] = []
     refused: list[str] = []
+    unknown: list[str] = []
     not_loaded: list[str] = []
     for name in names:
         if name in ALWAYS_LOADED:
@@ -1136,9 +1239,19 @@ async def unload_tools(
             unloaded.append(name)
         elif outcome == "already":
             not_loaded.append(name)
+        elif outcome == "unknown":
+            # A name nothing holds.  Not a refusal, and saying so as one would
+            # be the opposite of true: "refused, the system needs them" tells a
+            # caller that a tool it invented is a tool this process protects.
+            unknown.append(name)
         else:
             refused.append(name)
-    return {"unloaded": unloaded, "refused": refused, "not_loaded": not_loaded}
+    return {
+        "unloaded": unloaded,
+        "refused": refused,
+        "unknown": unknown,
+        "not_loaded": not_loaded,
+    }
 
 
 def _unload_as_text(found: Mapping[str, Any]) -> str:
@@ -1152,6 +1265,9 @@ def _unload_as_text(found: Mapping[str, Any]) -> str:
     refused = [str(name) for name in found.get("refused") or []]
     if refused:
         parts.append("refused (the system needs them): " + ", ".join(refused))
+    unknown = [str(name) for name in found.get("unknown") or []]
+    if unknown:
+        parts.append("no such tool: " + ", ".join(unknown))
     not_loaded = [str(name) for name in found.get("not_loaded") or []]
     if not_loaded:
         parts.append("already out of the list: " + ", ".join(not_loaded))
@@ -1210,9 +1326,12 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
             f"{row.get('name')}  ({', '.join(part for part in state if part)})"
         )
         lines.append(f"    {row.get('description')}")
-    if not found.get("browsed"):
-        lines.append("")
-        lines.append("Call func_tool_load(name) to put one of these in your list.")
+    # Said for a browse as well as for a search, which is the opposite of what
+    # this did: an empty query is the "what is installed, and how do I get one
+    # of them" question, and answering it with a list and no next step leaves
+    # the model to guess the mechanism a moment after asking about it.
+    lines.append("")
+    lines.append("Call func_tool_load(name) to put one of these in your list.")
     return "\n".join(lines)
 
 
@@ -1354,7 +1473,6 @@ def build_server(
     *,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
-    catalogue_client: Client | None = None,
 ) -> FastMCP:
     """Build the toolhub.
 
@@ -1362,9 +1480,9 @@ def build_server(
     be built from — the seam that lets a test drive the whole hub over in-memory
     servers, with no process and no port, while production builds a connection
     from the config entry.  `client_factory` is the narrower seam on top of it,
-    for the tests that need a client which misbehaves.  `catalogue_client` is
-    the third: a connection to the tool catalogue, which a test supplies as the
-    real db server over the in-memory transport.
+    for the tests that need a client which misbehaves.  There is no third: the
+    catalogue is reached through a wired `db` entry like every other component,
+    which is the seam tests use and the one production uses.
 
     **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
     `skill_use` are this component's, and the hub merges them into the catalogue
@@ -1372,6 +1490,16 @@ def build_server(
     list of exceptions kept beside it.  What has a *body* is still only known
     here: the row says what the tool is, and `local_route` says what running it
     means.
+
+    **This function is long and is not going to be split.**  Measured: of its
+    455 lines, 202 are docstrings and 80 are blank or comment, leaving 173 lines
+    of code across fifteen nested helpers — the longest run of them is 22 lines.
+    What it looks like it wants is a `Hub` object holding `upstreams`,
+    `catalogue` and `mcp`, and what that would buy is moving the same prose and
+    the same closures one indent to the left, at the price of a name that has to
+    be threaded through every one of them.  The nesting here is the *state*, not
+    an accident; the model-facing prose it used to mix in lives at module level
+    already (`_results_as_text`, `_load_as_text`, `_unload_as_text`).
     """
     directory = data_dir()
 
@@ -1387,19 +1515,27 @@ def build_server(
         with fewer abilities.  `CatalogueUnavailable` is that answer, and
         `list_tools` passes it on.
 
-        `catalogue_client` is the seam a test uses to hand over the real db
-        server over the in-memory transport — no process, no port, and the same
-        tools either way.  `transports` is the same seam one level up: a wired
-        `db` entry is a transport, and a hub built for a test has one.
+        `transports` is the seam, at this level and at the one below it: a
+        wired `db` entry is a transport, and a hub built for a test has one —
+        no process, no port, and the same tools either way.
         """
-        if catalogue_client is not None:
-            return catalogue_client
         wired = (transports or {}).get(DB_KEY)
         if wired is not None:
             client = make_client(
                 wired(component_settings(config, DB_KEY)), MessageHandler()
             )
-            await client.__aenter__()
+            try:
+                await client.__aenter__()
+            except asyncio.CancelledError:
+                await _abandon(client)
+                raise
+            except Exception:
+                # A half-entered client holds a task group nothing owns, and
+                # the error that stopped it is the one worth reporting — so it
+                # is let go of here and raised, exactly as `_establish` does
+                # for an upstream.
+                await _abandon(client)
+                raise
             return client
         return await open_server(
             config.server(DB_KEY).url,
@@ -1645,7 +1781,17 @@ def build_server(
         # this is the only branch in the hub that does not end in a connection.
         one = local_route(name)
         if one is not None:
-            text, ok = await one.run(arguments)
+            # A local tool is the one kind with no server to phrase a refusal,
+            # so its failure has to be phrased here.  This is the same contract
+            # the rest of the path keeps — a `ToolError` is a value the model
+            # reads and acts on — and without the wrapper an exception escaping
+            # a body becomes an MCP error carrying our own traceback text,
+            # which is neither actionable nor true.
+            try:
+                text, ok = await one.run(arguments)
+            except Exception as exc:  # noqa: BLE001 — a tool failure is a message
+                logger.exception("%s failed", name)
+                return {"text": f"{name} failed: {exc}", "ok": False}
             return {"text": text, "ok": ok}
 
         forwarded = forwarded_client(request_meta(ctx))
@@ -1743,9 +1889,9 @@ def build_server(
 
         Returns:
             `unloaded` — the names that moved, which is the answer this exists
-            for — plus `refused` (named but not unloadable) and `not_loaded`
-            (named but already out of the list), and `text`, the same thing said
-            in a sentence.
+            for — plus `refused` (named but not unloadable), `unknown` (no row
+            has that name) and `not_loaded` (named but already out of the
+            list), and `text`, the same thing said in a sentence.
         """
         found = await unload_tools(catalogue, live_sources(), list(names or []))
         return {**found, "text": _unload_as_text(found)}

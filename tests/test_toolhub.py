@@ -24,6 +24,7 @@ from fastmcp.tools import Tool
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
 from slife2.toolhub import (
+    MAX_LOAD_NAMES,
     Catalogue,
     Upstream,
     flatten,
@@ -430,6 +431,73 @@ async def test_loading_says_why_it_cannot() -> None:
     assert unknown["ok"] is False
     assert "unknown tool" in unknown["text"]
     assert "tool_search" in unknown["text"], "the way to find the right name"
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_does_not_exist_is_not_a_tool_the_system_needs() -> None:
+    """`unknown` and `refused` are different facts, and one of them was false.
+
+    The db answers `unknown` for a name no row holds; the hub filed it with the
+    refusals, whose sentence is "the system needs them" — so a caller asking
+    about a tool it invented was told the process protects it.
+    """
+    async with Client(hub_for()) as hub:
+        answer = await hub.call_tool(
+            "_func_tool_unload", {"names": ["nothing__at_all"]}
+        )
+
+    assert answer.data["unknown"] == ["nothing__at_all"]
+    assert answer.data["refused"] == []
+    assert "no such tool" in answer.data["text"]
+
+
+@pytest.mark.asyncio
+async def test_loading_too_many_names_at_once_is_refused_whole() -> None:
+    """Each name is its own catalogue write and its own embedding call.
+
+    A list longer than the budget holds is one the next turn boundary takes
+    back anyway, and truncating it would leave a model diffing two lists to
+    work out which half it got.
+    """
+    async with Client(hub_for()) as hub:
+        many = [f"fake__t{number}" for number in range(MAX_LOAD_NAMES + 1)]
+        answer = await call(hub, "func_tool_load", {"names": many})
+
+    assert answer["ok"] is False
+    assert str(MAX_LOAD_NAMES) in answer["text"], "the message says the bound"
+
+
+@pytest.mark.asyncio
+async def test_a_browse_says_how_to_load_one() -> None:
+    """The empty query is the "what is installed, and how do I get one" question.
+
+    Withholding the mechanism there withheld it exactly where a model asks
+    about it — the hint was appended only for a *search*, which is the case
+    where the model has already found its way to the mechanism.
+    """
+    async with Client(hub_for()) as hub:
+        answer = await call(hub, "tool_search", {})
+
+    assert answer["text"], "a browse answers with what is installed"
+    assert "func_tool_load" in answer["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_size_a_model_wrote_as_text_still_answers() -> None:
+    """A schema saying `integer` is not a promise about what arrives.
+
+    A model writes `"5"` for `limit` as readily as `5`, and the hub's own tools
+    are the one surface no framework validates: a server's tool is checked
+    against its schema before the body runs, while `tool_search` is a closure
+    called with a plain dict.  So the reading is this module's job, and the
+    failure it prevents is a `ValueError` escaping as an MCP error — a model
+    reading our traceback where it asked for a page.
+    """
+    async with Client(hub_for()) as hub:
+        found = await call(hub, "tool_search", {"query": "echo", "limit": "1"})
+
+    assert found["ok"] is True
+    assert found["text"], "the page came back rather than the parse failure"
 
 
 @pytest.mark.asyncio
@@ -934,6 +1002,76 @@ async def test_an_entry_the_client_refuses_is_a_failed_server() -> None:
     row = reported.data["servers"][0]
     assert row["state"] == "failed"
     assert "not a URL" in row["error"]
+
+
+class FlakyCatalogue:
+    """A catalogue connection whose first client is dead.
+
+    Stands in for the case a long-lived hub actually meets — `slife2-db`
+    restarted underneath it — and for the refusal it has to keep apart from
+    that.  A real db cannot be made to die on demand, so the client is what is
+    faked, exactly as `FakeClient` is for an upstream.
+    """
+
+    def __init__(self, *, dies: bool = False, refuses: bool = False) -> None:
+        self.dies = dies
+        self.refuses = refuses
+        self.calls = 0
+
+    async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
+        self.calls += 1
+        if self.dies:
+            raise ConnectionError("the db is not there")
+        if self.refuses:
+            raise ToolError("'x__echo' is already x__echo's tool")
+        return types.SimpleNamespace(data={"outcome": "loaded"})
+
+
+@pytest.mark.asyncio
+async def test_the_catalogue_reconnects_when_the_db_goes_away() -> None:
+    """The connection is opened once and kept, and the hub outlives the db.
+
+    Without dropping it, a db that restarts under a running hub fails every
+    later call — `tool_search`, `func_tool_load`, every merge — until the hub
+    is restarted too, and the hub is the longest-lived process here.
+    """
+    made: list[FlakyCatalogue] = []
+
+    async def connect() -> Any:
+        client = FlakyCatalogue(dies=not made)
+        made.append(client)
+        return client
+
+    catalogue = Catalogue(connect)
+
+    assert await catalogue.set_load("echo", "loaded") == {"outcome": "loaded"}
+    assert len(made) == 2, "the dead connection was kept and used again"
+    assert made[0].calls == 1, "the dead client is tried once, not twice"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_not_a_catalogue_that_is_gone() -> None:
+    """The db answered and said no, and the two are told apart by the SDK.
+
+    `ToolError` is what FastMCP raises when the *peer's tool* reported an
+    error, and nothing else raises it — a dead link raises its own exception —
+    so this is the framework's distinction rather than a guess.  Reporting a
+    name collision as "the tool catalogue is not answering" sends the reader to
+    examine a component that is working perfectly.
+    """
+    made: list[FlakyCatalogue] = []
+
+    async def connect() -> Any:
+        client = FlakyCatalogue(refuses=True)
+        made.append(client)
+        return client
+
+    catalogue = Catalogue(connect)
+
+    with pytest.raises(ToolError, match="already"):
+        await catalogue.merge("arxiv", "mcp", [])
+
+    assert len(made) == 1, "a refusal is not a reason to rebuild the link"
 
 
 # --- how an entry becomes a connection ----------------------------------------
