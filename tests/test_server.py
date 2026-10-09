@@ -79,7 +79,7 @@ async def db():
     `slife2.mcp_server.open_server`.
 
     The real server rather than a stub, so what these tests exercise is the
-    component the agent server actually talks to — the one test that is *about*
+    plugin the agent server actually talks to — the one test that is *about*
     the failure passes its own config instead.
     """
     from slife2.db_server import build_server as build_db
@@ -104,13 +104,13 @@ async def hub():
     tests see crossed a real MCP hop.
     """
     from slife2.toolhub import build_server as build_hub
-    from tests.fakes import component_transports
+    from tests.fakes import plugin_transports
 
-    # The hub asks every component for a tool list and refuses when one does not
+    # The hub asks every plugin for a tool list and refuses when one does not
     # answer, so all of them need something behind them.  In-memory, which keeps
     # `calc` and `now` real without a port.
     async with Client(
-        build_hub(default_config(), transports=component_transports(default_config()))
+        build_hub(default_config(), transports=plugin_transports(default_config()))
     ) as client:
         yield client
 
@@ -597,7 +597,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     from slife2.paths import DATA_ENV_VAR
     from slife2.server import server as server_module
     from slife2.toolhub import build_server as build_hub
-    from tests.fakes import component_transports
+    from tests.fakes import plugin_transports
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     opened: list[str] = []
@@ -612,7 +612,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
             client = Client(
                 build_hub(
                     default_config(),
-                    transports=component_transports(default_config()),
+                    transports=plugin_transports(default_config()),
                 )
             )
         await client.__aenter__()
@@ -635,8 +635,8 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
 async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     """The turn lands in that agent's own database, and nowhere else.
 
-    Both halves matter.  Written at all, because a db component that nothing
-    calls is a component that does nothing; and written to *that agent's* file,
+    Both halves matter.  Written at all, because a db plugin that nothing
+    calls is a plugin that does nothing; and written to *that agent's* file,
     because isolation between agents is the reason the file is per-agent in the
     first place.
 

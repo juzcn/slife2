@@ -2,10 +2,14 @@
 
 **Terminal-based AI agent — slife v2, a clean-slate rebuild.**
 
-Every component is an MCP server. The TUI is a client; the agent loop is a server
-and a client; each model backend is its own server, and so is the hub the tools
-come from. Two properties follow from that, and they are the point of the whole
-arrangement:
+**A plugin is an MCP server over Streamable HTTP plus a small contract** — an
+implementation of the protocol, not one of its own. The TUI is a client; the
+agent loop is a server and a client; each model backend is its own server, and
+so is the hub the tools come from. The word is what separates the servers slife2
+starts from the ones somebody else wrote under `tools:`, and the difference is
+load-bearing: a plugin is required and a missing one fails the turn, where an
+entry under `tools:` is optional. Two properties follow from the arrangement,
+and they are the point of the whole thing:
 
 - **A key exists only inside the process that needs it.** A provider's API key
   lives in the LLM server that calls it; a tool server's token lives in the
@@ -68,7 +72,7 @@ embedding model (under `embeddings:` in the config) costs a re-embedding of the
 whole history on the next start rather than a migration. The store can already
 answer such a search; no tool offers it to the model yet.
 
-Each component is also its own console script, so a process manager can run one
+Each plugin is also its own console script, so a process manager can run one
 without passing an argument:
 
 ```bash
@@ -120,7 +124,7 @@ a turn read back a month later still says which picture it was about.
 
 The model's tool list — the ones slife2 ships and the ones other people run —
 comes from **`slife2-toolhub`**, which is also the only process that holds a tool
-server's credentials. It draws from three kinds of place — our own components,
+server's credentials. It draws from three kinds of place — our own plugins,
 the sections below, and the one thing that has no server behind it at all — and
 never from a list written down beside it. What the model is *handed* is the part
 of that it has loaded, which is the section after the config:
@@ -201,13 +205,13 @@ the names come back, so what the model just lost is something the log can say
 rather than something nothing notices. Being evicted costs a search and a load,
 not a capability.
 
-Which of a component's tools the model may call is said on the tool —
+Which of a plugin's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
-db's `remember` does not. A component's tools are its own code's until one of
+db's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
 
-The hub has three sources: the components, which it asks for a tool list the way
+The hub has three sources: the plugins, which it asks for a tool list the way
 it asks anybody; everything under `tools:`; and the tools it serves itself.
 
 That third one is an exception, and it is narrow. **`skill_use`** is served by
@@ -252,8 +256,8 @@ belongs in the reader.
 lever worth knowing: everything enabled is a process at startup and its tools in
 every request. `slife2 down` takes the hub's child processes down with it.
 
-A component is required and everything in `tools:` is optional: the hub asks
-each component for a tool list, and one that cannot answer fails the turn rather
+A plugin is required and everything in `tools:` is optional: the hub asks
+each plugin for a tool list, and one that cannot answer fails the turn rather
 than quietly continuing with fewer tools, while a server that is somebody else's
 is reported and left out. The builtins are the case that makes the rule worth
 having — a model that has quietly lost `now` and `calc` is a failure nobody can
@@ -375,8 +379,8 @@ servers means — the flags, the HTTP transport, the record that says a daemon i
 here, and the two conventions (`house_server`) that would otherwise be copied
 into each server. It is not LLM-specific, which is why it is not under
 `llm/`: the db server, the toolhub and the agent server are not LLM
-components, and the scaffold they serve on should not come out of the LLM
-package. The embeddings server is the one component under `llm/` that is not a
+plugins, and the scaffold they serve on should not come out of the LLM
+package. The embeddings server is the one plugin under `llm/` that is not a
 chat backend — it speaks `/embeddings` and nothing else — and it is there
 because it is the other thing in this system that imports a provider SDK.
 

@@ -103,7 +103,7 @@ servers:
     port: 8030
     path: /mcp
   # The model's tools, and the only process that holds a tool server's
-  # credentials.  It has two sources and neither is listed here: every component
+  # credentials.  It has two sources and neither is listed here: every plugin
   # above — asked like any other server, and handing over only the tools marked
   # as the model's — and everything under `tools:` below.
   toolhub:
@@ -114,7 +114,7 @@ servers:
 # ── External tool servers ───────────────────────────────────────────────────
 # Other people's MCP servers, connected to by the toolhub — which is why they
 # are `tools:` and not `servers:`.  The difference matters: `servers:` above is
-# *our* components, which slife2 starts, shares and stops, and a missing one is
+# *our* plugins, which slife2 starts, shares and stops, and a missing one is
 # a system that has come apart.  An entry here is somebody else's process; if it
 # is slow, paid or down, the hub says so through its `servers` tool and the
 # model simply has fewer tools, while the conversation keeps working.

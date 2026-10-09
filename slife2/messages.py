@@ -1,4 +1,4 @@
-"""The neutral message model — the one vocabulary every component shares.
+"""The neutral message model — the one vocabulary every plugin shares.
 
 Why OpenAI-shaped
 -----------------

@@ -37,7 +37,7 @@ REPO = str(Path(__file__).resolve().parents[1])
 # --- which servers are needed ------------------------------------------------
 
 
-def test_there_is_one_component_per_job() -> None:
+def test_there_is_one_plugin_per_job() -> None:
     """One agent loop, one db, one builtins server, one hub of tools,
     one process per wire protocol.
 
@@ -47,7 +47,7 @@ def test_there_is_one_component_per_job() -> None:
     processes, not four.  Note which way the list is ordered, too — it is
     `API_BACKENDS` order, because the servers start in the order they are
     needed and the model ones come before the agent that talks to them, with the
-    local components after: `embeddings` first among them, because the db's
+    local plugins after: `embeddings` first among them, because the db's
     startup sync asks it for a dimension before it can build an index at all.
     """
     config = load(_config_with_every_protocol())
@@ -75,7 +75,7 @@ def test_there_is_one_component_per_job() -> None:
     }
 
 
-def test_every_component_has_a_module_and_every_module_a_component() -> None:
+def test_every_plugin_has_a_module_and_every_module_a_plugin() -> None:
     """The two lists that could drift, held together.
 
     `config.LOCAL_SERVERS` says which names a `servers:` section may use and in
@@ -90,19 +90,19 @@ def test_every_component_has_a_module_and_every_module_a_component() -> None:
 def test_the_hub_asks_exactly_what_the_launcher_starts() -> None:
     """The third thing that could drift, and the one with teeth.
 
-    The hub reaches into our components for the model's tools, and it asks every
+    The hub reaches into our plugins for the model's tools, and it asks every
     one of them because it cannot know which have anything to offer.  So the set
-    it asks has to be the set that exists: a component the launcher starts and
+    it asks has to be the set that exists: a plugin the launcher starts and
     the hub does not ask is a whole server's worth of tools nobody can see, and
     one the hub asks and nothing starts is a connection that can only fail —
-    which, a component being required, fails the tool list of every turn.
+    which, a plugin being required, fails the tool list of every turn.
     """
     config = load(_config_with_every_protocol())
     started = {
         spec.name.removeprefix(launcher.BACKEND_PREFIX)
         for spec in launcher.specs(config)
     }
-    assert set(config.components()) == started
+    assert set(config.plugins()) == started
 
 
 def test_one_server_per_wire_protocol() -> None:

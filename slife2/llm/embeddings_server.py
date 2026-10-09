@@ -10,7 +10,7 @@ server built from the chat providers has no chat provider to attach it to.
 
 **Two tools, neither of them the model's.**  `embed` and `describe` carry no
 `meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the same
-standing as the db's `remember`.  They are the db component's plumbing: the
+standing as the db's `remember`.  They are the db plugin's plumbing: the
 index needs vectors and needs to know how wide they are, and this is where both
 questions are answered.
 
@@ -226,7 +226,7 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
     mcp: FastMCP = house_server(
         SERVER_NAME,
         instructions=(
-            "Embeddings for the db component's vector index. `describe` reports "
+            "Embeddings for the db plugin's vector index. `describe` reports "
             "the width and input limit of the configured model; `embed` turns "
             "text into vectors. Neither is offered to the model."
         ),

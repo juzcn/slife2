@@ -36,7 +36,7 @@ from slife2.toolhub import (
 from slife2.toolhub import (
     build_server as build_hub,
 )
-from tests.fakes import component_transports
+from tests.fakes import plugin_transports
 
 pytestmark = pytest.mark.unit
 
@@ -83,10 +83,10 @@ def hub_for(
     configured but *not* wired, which is how the one test that spawns a real
     process gets a real transport.
 
-    **Every component is here, and only the builtins and the db are real.**  They
+    **Every plugin is here, and only the builtins and the db are real.**  They
     are the servers slife2 starts, the hub asks each of them for a tool list, and
     it refuses to hand one out at all when one does not answer — which is what
-    `test_a_component_that_is_not_answering_fails_the_list` is about, and not
+    `test_a_plugin_that_is_not_answering_fails_the_list` is about, and not
     something every other test should have to trip over.  The db is real because
     the hub is a client of it: the tool catalogue is there, so a hub built here
     has a catalogue, which is what `connected={"db": refuses_to_start}` takes
@@ -109,8 +109,8 @@ def hub_for(
         tools={
             **{
                 name: ToolServerSettings(name=name, command="in-memory", autoload=True)
-                for name in [*base.components(), *(connected or {})]
-                if name not in base.components()
+                for name in [*base.plugins(), *(connected or {})]
+                if name not in base.plugins()
             },
             **(entries or {}),
         },
@@ -120,7 +120,7 @@ def hub_for(
         # a testable one: a trim is how the eviction *order* is observed from
         # outside, and the order is only visible when something is over the cap.
         config = replace(config, tool_load=ToolLoadSettings(threshold=threshold))
-    wired = component_transports(config, connected)
+    wired = plugin_transports(config, connected)
     return build_hub(config, transports=wired, **kwargs)
 
 
@@ -178,7 +178,7 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         "builtins__now",
         "builtins__calc",
     }
-    # Three sources, and each is a real one: the builtins are a component, the
+    # Three sources, and each is a real one: the builtins are a plugin, the
     # db offers the model its two history tools (they carry the mark), and the
     # third is this process's own — `tool_search`, `func_tool_load`, `skill_use`.
     assert {tool["server"] for tool in listed.data["tools"]} == {
@@ -187,14 +187,14 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         "toolhub",
     }
 
-    # Found by name, not by position: the hub asks every component, so the
+    # Found by name, not by position: the hub asks every plugin, so the
     # builtins are one row among several and are not first.
     row = next(one for one in reported.data["servers"] if one["name"] == "builtins")
-    assert row["kind"] == "component"
+    assert row["kind"] == "plugin"
     assert row["required"] is True
     assert row["state"] == "ready"
     assert row["tools"] == 3
-    assert row["loaded"] == 3, "a component's tools are in the model's list"
+    assert row["loaded"] == 3, "a plugin's tools are in the model's list"
 
 
 def write_skill(data_dir: Path, name: str = "one") -> Path:
@@ -258,14 +258,14 @@ async def test_a_local_tool_that_says_no_is_a_refusal(isolated_runtime: Path) ->
     assert "one" in answer["text"], "the answer names what does exist"
 
 
-def component_with_two_kinds_of_tool() -> FastMCP:
+def plugin_with_two_kinds_of_tool() -> FastMCP:
     """One of our own servers, offering one tool of each kind.
 
     Which is what every one of them is: `slife2-db` serves `turn_list` to
     the model and `remember` to the agent, and the difference is not visible in
     anything but the tool itself.
     """
-    server = FastMCP("component")
+    server = FastMCP("plugin")
 
     @server.tool(meta=FOR_THE_MODEL)
     def turn_list(limit: int = 10) -> str:
@@ -281,19 +281,17 @@ def component_with_two_kinds_of_tool() -> FastMCP:
 
 
 @pytest.mark.asyncio
-async def test_a_components_tool_is_the_models_only_when_it_says_so() -> None:
+async def test_a_plugins_tool_is_the_models_only_when_it_says_so() -> None:
     """The rule the two sources turn on, and it is opt-in.
 
-    A component's tools belong to that component's own code until one of them
+    A plugin's tools belong to that plugin's own code until one of them
     says otherwise — because the ones that would leak are the ones a model
     would reach for: `remember` here stands in for a write into any agent's
     database.  An entry under `tools:` needs no mark at all: the operator opted
     in by writing it down, which is what the tests above are listing.
     """
     async with Client(
-        hub_for(
-            connected={"agent": lambda settings: component_with_two_kinds_of_tool()}
-        )
+        hub_for(connected={"agent": lambda settings: plugin_with_two_kinds_of_tool()})
     ) as hub:
         listed = await hub.call_tool("list_tools", {})
         unreachable = await call(hub, "agent__remember", {"text": "hi"})
@@ -519,7 +517,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
     async with Client(
         build_hub(
             live,
-            transports=component_transports(
+            transports=plugin_transports(
                 live, {"fake": lambda settings: upstream_server()}
             ),
         )
@@ -538,7 +536,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
             "fake": ToolServerSettings(name="fake", command="in-memory", enabled=False)
         },
     )
-    async with Client(build_hub(off, transports=component_transports(off))) as hub:
+    async with Client(build_hub(off, transports=plugin_transports(off))) as hub:
         refused = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
         found = await call(hub, "tool_search", {"query": "echo"})
 
@@ -593,7 +591,7 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
     )
     hub = build_hub(
         config,
-        transports=component_transports(
+        transports=plugin_transports(
             config, {"fake": lambda settings: upstream_server()}
         ),
     )
@@ -749,8 +747,8 @@ async def test_servers_says_which_are_ready_and_what_they_offer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_component_that_is_not_answering_fails_the_list() -> None:
-    """The rule that separates a component from an entry in `tools:`.
+async def test_a_plugin_that_is_not_answering_fails_the_list() -> None:
+    """The rule that separates a plugin from an entry in `tools:`.
 
     A model that has quietly lost `now` and `calc` is a failure nobody can see,
     so the hub refuses rather than serving a shorter list.  An upstream that is
@@ -763,7 +761,7 @@ async def test_a_component_that_is_not_answering_fails_the_list() -> None:
         raise FileNotFoundError("no such program: python")
 
     async with Client(hub_for(connected={"builtins": refuses_to_start})) as hub:
-        with pytest.raises(ToolError, match="a component is not answering"):
+        with pytest.raises(ToolError, match="a plugin is not answering"):
             await hub.call_tool("list_tools", {})
 
         # The report still works, and says which one and why.
@@ -1057,7 +1055,7 @@ async def test_a_refusal_is_not_a_catalogue_that_is_gone() -> None:
     error, and nothing else raises it — a dead link raises its own exception —
     so this is the framework's distinction rather than a guess.  Reporting a
     name collision as "the tool catalogue is not answering" sends the reader to
-    examine a component that is working perfectly.
+    examine a plugin that is working perfectly.
     """
     made: list[FlakyCatalogue] = []
 
@@ -1200,7 +1198,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
             "builtins__now",
             "builtins__calc",
             # The db's two history tools are the model's — they carry the mark —
-            # so the real db component brings them along.
+            # so the real db plugin brings them along.
             "db__turn_list",
             "db__turn_read",
             "skill_use",

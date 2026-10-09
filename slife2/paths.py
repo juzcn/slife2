@@ -143,7 +143,7 @@ def db_dir() -> Path:
 def tools_db() -> Path:
     """The tool catalogue — `<data>/slife2.db/tools.db`.
 
-    Beside the turns rather than in a component of its own, which is what
+    Beside the turns rather than in a plugin of its own, which is what
     `slife2.db`'s own docstring said the second thing worth keeping would be:
     the catalogue is rows and two indexes over them, and the machinery for that
     (the embedder, the vector index, the text normalization) is already here.

@@ -65,7 +65,7 @@ from slife2.runtime import (
     write_claim,
 )
 
-#: The components that are not model backends, keyed by the name the config's
+#: The plugins that are not model backends, keyed by the name the config's
 #: `servers:` section uses for each: the module that serves it, the MCP name
 #: that module advertises, and the tool that identifies it for a server that
 #: reports no name at all.  See `slife2.mcp_server.identifies` for why both are
@@ -78,7 +78,7 @@ from slife2.runtime import (
 #: closed set.
 #:
 #: The *order* these start in is `slife2.config.LOCAL_SERVERS`, so that what a
-#: component is and when it starts are each said once; `tests/test_launcher.py`
+#: plugin is and when it starts are each said once; `tests/test_launcher.py`
 #: holds the two together.
 AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 DB_SERVER = ("slife2.db_server", DB_SERVER_NAME, "remember")

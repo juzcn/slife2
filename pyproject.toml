@@ -52,8 +52,8 @@ classifiers = [
     "Topic :: Terminals",
 ]
 
-# One console script per component, rather than one script with subcommands, so
-# a process manager can start any component without passing it an argument.
+# One console script per plugin, rather than one script with subcommands, so
+# a process manager can start any plugin without passing it an argument.
 # Each of these is a process that speaks MCP; `slife2` is the only client.
 [project.scripts]
 slife2 = "slife2:main"

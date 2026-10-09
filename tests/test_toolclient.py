@@ -32,7 +32,7 @@ from slife2.toolclient import (
 )
 from slife2.toolhub import build_server as build_hub
 from slife2.tools import ToolFailed, ToolRegistry
-from tests.fakes import StubEmbedder, component_transports
+from tests.fakes import StubEmbedder, plugin_transports
 
 pytestmark = pytest.mark.unit
 
@@ -198,7 +198,7 @@ def hub_with_upstream() -> FastMCP:
     )
     return build_hub(
         config,
-        transports=component_transports(config, {"fake": lambda settings: upstream}),
+        transports=plugin_transports(config, {"fake": lambda settings: upstream}),
     )
 
 
@@ -292,7 +292,7 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     config = default_config()
     hub = build_hub(
         config,
-        transports=component_transports(config, {"db": lambda settings: db}),
+        transports=plugin_transports(config, {"db": lambda settings: db}),
     )
 
     async with Client(hub) as hub_client:
@@ -352,7 +352,7 @@ async def test_a_trim_that_cannot_happen_does_not_fail_the_turn() -> None:
 def test_the_hub_holds_no_database() -> None:
     """各司其职, as a property of the import graph rather than a promise.
 
-    Every operation on the tool catalogue goes through the db component, over
+    Every operation on the tool catalogue goes through the db plugin, over
     MCP: the hub decides what tools *are* — the servers, the names, who may call
     them — and it asks for everything else.  A `sqlite3` import in this module
     would be the first sign that the two halves had started to overlap, and it

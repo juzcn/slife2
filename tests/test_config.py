@@ -563,7 +563,7 @@ def test_a_disabled_entry_is_configured_but_not_connected(tmp_path) -> None:
     assert "off" not in [server.name for server in config.tool_servers()]
 
 
-def test_the_hub_is_a_component_the_config_knows(tmp_path) -> None:
+def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:
     assert default_config().server("toolhub").port == 8020
     with pytest.raises(ConfigError, match="not a server this system runs"):
         load(write(tmp_path, "servers:\n  nonsense: {port: 9}\n"))

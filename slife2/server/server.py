@@ -286,7 +286,7 @@ def build_server(
 
         A db server that is not there **raises**, like every other peer in
         this system.  `slife2.mcp_server.open_server` is where that rule lives
-        and why; what matters here is that this component is not the exception
+        and why; what matters here is that this plugin is not the exception
         to it.
         """
         nonlocal db_conn

@@ -1,4 +1,15 @@
-"""The MCP layer every component shares: what it takes to be one of our servers.
+"""The MCP layer every plugin shares: what it takes to be one of our servers.
+
+**A plugin is an MCP server over Streamable HTTP — an implementation of the
+protocol, not a protocol of its own.**  Nothing here adds a method, a frame or a
+transport: a plugin answers the same JSON-RPC as any MCP server does, and the
+`arxiv` entry under `tools:` speaks the same wire.  Two things separate the
+words.  A *plugin* is started by slife2 and shared by every instance, which is
+what makes it required — the hub refuses to list anything when one is missing
+(DESIGN.md §8) — while an entry under `tools:` is somebody else's process that
+may be slow, paid or down.  And a plugin honours the contract below, which is
+the part that is ours: what follows is not the protocol, it is what this project
+puts on top of it.
 
 Four processes here are MCP servers — the agent loop, the db, and one process
 per wire protocol — and they agree about more than they disagree about.
@@ -13,7 +24,7 @@ piece of protocol knowledge, and splitting them is how the halves drift.
 
 Nothing here is LLM-specific.  That is the point of the module: the db
 server and the agent server used to reach into `slife2.llm` for this, which put
-the serving scaffold of a non-LLM component inside the LLM package.
+the serving scaffold of a non-LLM plugin inside the LLM package.
 
 ## The contract: a server keys its state by client id
 
@@ -158,7 +169,7 @@ async def open_server(
     """Connect to one of our servers, or raise naming what could not be reached.
 
     **A server here is either there, or the system has come apart.**  `slife2`
-    starts every component together and refuses to start at all if one of them
+    starts every plugin together and refuses to start at all if one of them
     will not come up — before it draws anything, so the failure is two lines
     rather than a terminal that can never connect.  A peer that goes missing
     later is the same situation arriving late, and it takes the same answer:
@@ -229,7 +240,7 @@ def tool_payload(result: Any) -> dict[str, Any]:
 
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
-    components hop to a peer now — the toolhub and the db — and a second copy of
+    plugins hop to a peer now — the toolhub and the db — and a second copy of
     this is how the two would come to disagree about the shape of an answer.
     """
     data = getattr(result, "data", None)

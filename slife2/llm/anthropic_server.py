@@ -88,7 +88,7 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     """A `data:` URL as Anthropic's base64 source, or None if it is not one.
 
     Only inline data is accepted.  A remote URL would have to be fetched, and
-    fetching a URL a model or a user named is a capability this component has no
+    fetching a URL a model or a user named is a capability this plugin has no
     business having — so it is refused rather than quietly turned into a request
     somebody did not make.
     """

@@ -82,8 +82,8 @@ def build_server(config: Config) -> FastMCP:  # noqa: ARG001 - house signature
     """Build the builtins server.
 
     Takes the config and reads none of it, which is not dead weight: every
-    server in this system is built the same way, and a component that is one
-    argument short of the others is a component somebody has to remember is
+    server in this system is built the same way, and a plugin that is one
+    argument short of the others is a plugin somebody has to remember is
     different.
     """
     mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)

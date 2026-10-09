@@ -1,6 +1,6 @@
 # slife2 — design
 
-**A terminal agent whose components are MCP servers.**
+**A terminal agent whose plugins are MCP servers.**
 
 This document records the decisions behind the first cut: what was chosen, what
 was rejected, and — where it matters — the measurement that forced the choice.
@@ -11,7 +11,18 @@ decisions look arbitrary until you know what happens if you undo them.
 
 ## 1. The shape
 
-Every component is an MCP server but the TUI — all of them brought up on demand
+**"Plugin" is the word for one of ours, and it names an implementation rather
+than a protocol.** A plugin is an MCP server over Streamable HTTP — the same
+transport, the same JSON-RPC and the same tool listing as the servers under
+`tools:` — plus the *plugin contract*, which is the part this project adds on
+top: state keyed by a client id rather than by a session, a tool that says who
+may call it, and an identity another process checks before it reuses what it
+found (`slife2.mcp_server`). The word is worth having because "MCP server" does
+not separate the servers slife2 starts from the twenty somebody else wrote, and
+that line is load-bearing everywhere below: a missing plugin fails the turn,
+where a missing entry under `tools:` is a model with fewer tools.
+
+Every plugin is an MCP server but the TUI — all of them brought up on demand
 by `slife2` and shared by every instance (see §4):
 
 ```
@@ -36,7 +47,7 @@ thing that needs a vector is the store's index and not the turn: a turn is
 written with its vector in one transaction, so the writer is the party that
 holds the connection.
 
-**One component, one job, and the granularity is deliberate.**  A model backend
+**One plugin, one job, and the granularity is deliberate.**  A model backend
 speaks one wire protocol; the db keeps turns; the hub is where the tools come
 from; the agent loop runs turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
@@ -48,7 +59,7 @@ all, and the hub is one process whether it fronts one tool server or twenty.
 The builtins being a server of their own is the same rule applied to the one
 place it looks like overkill: they have no credential and no network, and they
 are still behind the hub, because "where the tools come from" is a job and a
-component that is sometimes the answer to it is a component with a branch in it.
+plugin that is sometimes the answer to it is a plugin with a branch in it.
 See §8.
 
 The two OpenAI entries are the point worth checking, because they look like
@@ -306,7 +317,7 @@ which is why the label reaches one.
 
 ## 5. Persistence
 
-A component with one job: keep what is worth keeping, and the turns are what it
+A plugin with one job: keep what is worth keeping, and the turns are what it
 keeps today. It does not summarise, does not decide what mattered, and puts
 nothing back into a conversation. The schema is
 v1's `turn` table, minus one column — one row per turn, columns for the two
@@ -338,7 +349,7 @@ one place `--agent` partitions anything, since the servers themselves stay
 shared.
 
 **A missing server is a broken system, not a degraded one.** `slife2` starts
-every component together and refuses to start at all if one of them will not come
+every plugin together and refuses to start at all if one of them will not come
 up — before it draws anything, so the failure is two lines rather than a terminal
 that can never connect. A peer that goes missing *later* takes the same answer:
 the turn fails where the peer is used, rather than being answered and not
@@ -411,7 +422,7 @@ and the one a future port of its time-window queries will compare against.
 
 **Reading is by time, and there are two ways to do it.** `turn_list` browses —
 newest first, one line per turn, paged — and `turn_read` returns one turn whole.
-Both are the *model's* tools, both are the reason the db is a component the hub
+Both are the *model's* tools, both are the reason the db is a plugin the hub
 asks rather than ours alone, and both are windows over `created_at` with the
 grammar v1's `timeutil` implemented (ISO, `yesterday`, `last month`,
 `3 days ago`), ported whole so a window means the same thing on both sides of
@@ -443,7 +454,7 @@ own docstring said it would be.** `ToolStore` is the tool catalogue — v1's
 `tools.db`, rows plus a keyword index and a vector index — in
 `<data>/slife2.db/tools.db`, beside the turn files and for the same reason: the
 store, the embedder, the text normalization and the vector index are already
-here, and a catalogue needs all four. It is served over MCP by this component
+here, and a catalogue needs all four. It is served over MCP by this plugin
 (`tool_merge`, `tool_injectable`, `tool_search`, …) and §8 has what it is for.
 
 **One file for the tool catalogue and one per agent for the turns**, which is
@@ -583,19 +594,19 @@ credentials.** It is a port of v1's `mcp-gateway`, and the shape that survived
 the port is the whole of it:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  components           (ours; `builtins`, `db`, …)
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins              (ours; `builtins`, `db`, …)
                           list_tools        └──▶  external tool servers (stdio or http)
                           call_tool
                           servers
 ```
 
-**Two sources, and the hub is the only thing that knows both.** The *components*
-are the servers slife2 starts — `Config.components()`, which is also what the
+**Two sources, and the hub is the only thing that knows both.** The *plugins*
+are the servers slife2 starts — `Config.plugins()`, which is also what the
 launcher starts, so there is no list of them here to go stale. The *tool servers*
 are everybody else's, from `tools:` and `rest-api:`. Which source a tool came
 from is not what decides who may call it; which *caller* it is for does, and that
 is said on the tool itself (`slife2.audience`) rather than in its name, in the
-config, or in the hub. A component's tools belong to that component's own code
+config, or in the hub. A plugin's tools belong to that plugin's own code
 until one of them declares itself the model's — `remember` writes into any
 agent's database and `send_message` drives another conversation, and those are
 exactly the tools a model would reach for if it could read their descriptions —
@@ -705,7 +716,7 @@ throws — which is one of the reasons this port is a few hundred lines where v1
 was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
-component gone and fails the turn, like the db. A missing *catalogue* — the db
+plugin gone and fails the turn, like the db. A missing *catalogue* — the db
 itself — is the same kind of thing and is said in its own words rather than
 reported as "that tool server is broken". A missing *upstream* is the operator's
 configuration and somebody else's process: reported by `servers()`, its rows left
@@ -721,14 +732,14 @@ a load takes effect one step later **inside the same turn** — v1 needed a turn
 boundary for that. `tool_search` is the way in and `func_tool_load` is the way
 through; both are the hub's own rows, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted (`skill_use` is the
-third). A component's tools start loaded, because a model that has quietly lost
+third). A plugin's tools start loaded, because a model that has quietly lost
 `now` and `calc` is the failure this section is built around; a server's do not
 unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
 
 **The budget is enforced by the harness, at a turn boundary, and it says what it
 took.** Over `tool_load.threshold` (a hundred, v1's number), the least recently
-*called* function tools are unloaded — never a component's, never an `autoload`
+*called* function tools are unloaded — never a plugin's, never an `autoload`
 one — and the trim is a call rather than a rule inside the gate: `_func_tool_unload`
 is on the hub's API, the agent server runs it before it saves a turn, and the
 answer names the tools the model has just lost. That is the whole reason it is a
@@ -761,8 +772,8 @@ one the source dropped is deleted, one whose columns moved is updated, and one
 already identical is left alone. A steady state therefore writes nothing at all,
 which is what makes asking before every model call affordable.
 
-**A component is not an upstream, and the difference is a flag.** Everything
-under `tools:` is somebody else's and optional; a component is started by slife2,
+**A plugin is not an upstream, and the difference is a flag.** Everything
+under `tools:` is somebody else's and optional; a plugin is started by slife2,
 so a hub that cannot read its tool list *refuses to list anything* — because a
 model that has quietly lost `now` and `calc` is a failure nobody can see, and a
 shorter tool list is exactly what that failure looks like. It is one `required`
@@ -772,7 +783,7 @@ themselves the model's. The builtins are the worked example of it being ordinary
 — the URL, the connection, the snapshot, the naming and the mark are all
 arxiv's, or would be if arxiv had anything to declare.
 
-There is deliberately no list of "components worth asking". The hub asks all of
+There is deliberately no list of "plugins worth asking". The hub asks all of
 them, including the three model backends and the agent server, which have
 nothing to offer: which tools a server has is not knowable without asking, and a
 second list is a list that goes stale the first time somebody adds a tool.

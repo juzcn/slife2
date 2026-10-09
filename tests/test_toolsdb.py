@@ -257,7 +257,7 @@ def test_a_file_whose_check_predates_a_value_is_rebuilt(tmp_path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(
             "CREATE TABLE tool (name TEXT PRIMARY KEY, description TEXT,"
-            " category TEXT CHECK (category IN ('component','mcp','rest','skill')),"
+            " category TEXT CHECK (category IN ('plugin','mcp','rest','skill')),"
             " source_id TEXT, remote_name TEXT, schema TEXT,"
             " status TEXT CHECK (status IN ('enabled','disabled')),"
             " load_status TEXT, last_loaded TEXT, last_used TEXT)"
@@ -411,15 +411,13 @@ def test_a_harness_tool_is_never_injected(tmp_path) -> None:
     harness's is who calls it, and that belongs on the thing itself.
     """
     store = store_at(tmp_path)
-    merge(
-        store, "toolhub", "component", [tool("_func_tool_unload"), tool("tool_search")]
-    )
+    merge(store, "toolhub", "plugin", [tool("_func_tool_unload"), tool("tool_search")])
 
     injected = [row["name"] for row in store.injectable(["toolhub"])["tools"]]
     assert injected == ["tool_search"], "the harness's own is not the model's"
 
 
-def test_a_components_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
+def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
     """Ours are few and wanted; somebody else's may be ninety and are on demand.
 
     `autoload: true` is the operator saying a server is wanted every turn, and
@@ -427,7 +425,7 @@ def test_a_components_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
     because somebody asked for it must not be evicted by the count either.
     """
     store = store_at(tmp_path, autoload={"serper"})
-    merge(store, "builtins", "component", [tool("builtins__calc")])
+    merge(store, "builtins", "plugin", [tool("builtins__calc")])
     merge(store, "serper", "mcp", [tool("serper__search")])
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
 
@@ -524,13 +522,13 @@ def stamps(store: ToolStore, name: str) -> tuple[str, str]:
 def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> None:
     """Three candidates, and the two the system will not give up.
 
-    A component's tools and anything marked `autoload: true` are never victims:
+    A plugin's tools and anything marked `autoload: true` are never victims:
     the budget exists to stop somebody else's ninety tools crowding the request,
     not to take away a tool slife2 guarantees — a model that has quietly lost
     `now` and `calc` is the failure DESIGN.md §8 is built around.
     """
     store = store_at(tmp_path, threshold=4, autoload={"serper"})
-    merge(store, "builtins", "component", [tool("builtins__calc")])
+    merge(store, "builtins", "plugin", [tool("builtins__calc")])
     merge(store, "serper", "mcp", [tool("serper__search")])
     merge(
         store,

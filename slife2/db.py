@@ -8,7 +8,7 @@ model has loaded — derived from servers that can be asked again, except for th
 last column, which is the model's own decision.  The first half of this module
 is the turns; `ToolStore` and everything after it is the catalogue.
 
-That a second thing worth keeping belongs *here* rather than in a component of
+That a second thing worth keeping belongs *here* rather than in a plugin of
 its own is what this module's opening sentence always said — and it is not a
 guess: the machinery a catalogue needs is the machinery the turns already have,
 so sharing it means writing one embedder, one normalization and one vector
@@ -67,7 +67,7 @@ async because the embedding is a call to a model, and its three writes are
 atomic because the alternative is a turn that is half indexed — and because a
 save that raises has to be a save that stored nothing.  That is the one property
 that makes the failure honest, and it is why the embedding model is a hard
-dependency of this component rather than something that can be switched off: an
+dependency of this plugin rather than something that can be switched off: an
 endpoint that cannot be reached fails the save, where an endpoint that silently
 degraded would store turns nothing could ever find.
 """
@@ -706,7 +706,7 @@ class VectorIndexUnavailable(RuntimeError):
     """The vector extension could not be loaded, so nothing here can work.
 
     Fatal rather than a degraded mode: an index that silently is not there
-    stores turns nothing can find, which is the one failure this component must
+    stores turns nothing can find, which is the one failure this plugin must
     not have.  The message names both ways it happens — an interpreter built
     without `enable_load_extension`, and a missing wheel.
     """
@@ -1162,7 +1162,7 @@ class TurnStore:
         `slife2.db_server` asks this before it serves and refuses to if the
         answer is not clean: there is no mode in which a turn is stored that
         semantic search cannot find, so an index that is not ready is a system
-        that has come apart rather than a component working with less.
+        that has come apart rather than a plugin working with less.
 
         `problems` is written to be read by a person looking at a startup
         failure, so each entry names what is wrong rather than which check ran.
@@ -1476,7 +1476,7 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #
 #  One row per tool the model may be given, with two indexes over the rows: a
 #  keyword one (`tool_fts`) and a semantic one (`tool_vec`).  It lives in this
-#  module rather than in a component of its own because that is what this
+#  module rather than in a plugin of its own because that is what this
 #  module's opening paragraph already said the second thing worth keeping would
 #  be: rows and two indexes over them, with the embedder, the normalization and
 #  the vector index already here.
@@ -1497,9 +1497,18 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #: load state and a connectivity verdict.  This set is the whole of what "is
 #: this a function tool?" means, so there is no second column to keep in sync
 #: with it: v1 dropped its derived `type` column for exactly this reason.
-COMPONENT = "component"
+#:
+#: `plugin` is ours, and it is the only one of the three that is: a plugin is a
+#: server slife2 starts and therefore one that carries the plugin contract
+#: (`slife2.mcp_server`), while `mcp` and `rest` are somebody else's process,
+#: reached as a client.  The word is chosen for what it keeps apart in a
+#: sentence — a plugin *is* an MCP server, so calling ours "MCP servers" would
+#: distinguish them from the twenty under `tools:` not at all — and the
+#: difference it names is load-bearing: `required` on the hub's connection, a
+#: missing one failing the turn, and tools that start loaded (DESIGN.md §8).
+PLUGIN = "plugin"
 
-FUNCTION_CATEGORIES = frozenset({COMPONENT, "mcp", "rest"})
+FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
 
 #: The one category with nothing behind it: a skill is a document, read by the
 #: hub itself, and it has no connection that could be down and no load state to
@@ -1508,8 +1517,9 @@ FUNCTION_CATEGORIES = frozenset({COMPONENT, "mcp", "rest"})
 SKILL = "skill"
 
 #: Everything the code can write, which is what the live table's `CHECK` must
-#: accept.  v1 also had `job`, `plugin` and `cli`; nothing writes them here yet
-#: (`cli:` entries have no tool serving them — DESIGN.md §9), and adding one
+#: accept.  v1 also had `job` and `cli`, and a `plugin` that was a package of
+#: somebody's own code rather than a server; nothing writes `job` or `cli` here
+#: yet (`cli:` entries have no tool serving them — DESIGN.md §9), and adding one
 #: later is free: the DDL is checked at open and a file that is not this build's
 #: is rebuilt rather than migrated.
 CATEGORIES = FUNCTION_CATEGORIES | {SKILL}
@@ -1810,7 +1820,7 @@ class ToolStore:
         #: call because the count it bounds is a `SELECT COUNT(*)` over these
         #: rows: the budget and the rows it applies to live in one place.
         self.threshold = max(1, int(threshold))
-        #: Sources whose tools are wanted every turn: a component's (ours are
+        #: Sources whose tools are wanted every turn: a plugin's (ours are
         #: few and the model is expected to have them) and an entry the operator
         #: marked `autoload: true`.  Such a row starts *loaded* and is never
         #: evicted, which is v1's rule for the same two cases.
@@ -2169,7 +2179,7 @@ class ToolStore:
     def _seed(self, category: str, source: str) -> str:
         """What a tool's load state is when it is first seen.
 
-        **Ours are loaded; somebody else's are on demand.**  A component's tools
+        **Ours are loaded; somebody else's are on demand.**  A plugin's tools
         are few and the model is expected to have them — a model that has
         quietly lost `now` and `calc` is the failure DESIGN.md §8 is built
         around — while a server under `tools:` may offer ninety tools that cost
@@ -2188,7 +2198,7 @@ class ToolStore:
             # is what `tool_search`'s own filter and the column's documentation
             # both say a skill carries.
             return NA
-        if category == COMPONENT or source in self.autoload:
+        if category == PLUGIN or source in self.autoload:
             return LOADED
         return UNLOADED
 
@@ -2451,7 +2461,7 @@ class ToolStore:
             if excess <= 0:
                 return []
             values = list(live)
-            protected = f"category IN ({_in_list({COMPONENT})})"
+            protected = f"category IN ({_in_list({PLUGIN})})"
             if self.autoload:
                 protected += f" OR source_id IN ({_marks(self.autoload)})"
                 values.extend(sorted(self.autoload))

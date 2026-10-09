@@ -36,7 +36,7 @@ toolhub connects to:
           Authorization: Bearer ${ARXIV_TOKEN}
 
 Note the two words that are one letter apart throughout this file: `servers:` is
-*our* components — the ones slife2 starts, shares and stops — while `tools:` is
+*our* plugins — the ones slife2 starts, shares and stops — while `tools:` is
 other people's, which the toolhub connects to as a client.  They are different
 things with different failure rules (`slife2.toolhub`), and this is the only
 place both are configured.
@@ -51,7 +51,7 @@ And one section for a program that is neither, because it is already here:
 
 An entry names a command on this machine rather than a server to connect to:
 there is no process for slife2 to start, no URL, and nothing to keep alive — so
-it is not a `tools:` entry, and it is not a component either, because slife2 did
+it is not a `tools:` entry, and it is not a plugin either, because slife2 did
 not write it.  What it shares with both is the thing that matters here: **an
 entry is the operator's opt-in**, and this file is where the operator says it.
 That is v1's `cli:` section, ported as configuration.
@@ -179,16 +179,16 @@ BUILTINS_SERVER_NAME = "slife2-builtins"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
-#: The db component's key in the `servers:` table, where a *client* of it needs
+#: The db plugin's key in the `servers:` table, where a *client* of it needs
 #: to look it up: the toolhub asks the db for the tool catalogue by this name.
 #: Here rather than only in `slife2.db_server`, because a client that imported
 #: the server to read one string would pull a server into a process that must
 #: not have one.
 DB_KEY = "db"
 
-#: The components that are not model backends, and so have a name of their own
+#: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
-#: launcher starts them in — see `slife2.config.Config.components` — and two of
+#: launcher starts them in — see `slife2.config.Config.plugins` — and two of
 #: these positions are load-bearing: `builtins` before `toolhub`, because the hub
 #: asks it for a tool list and the answer to a first turn should not be "not
 #: connected yet"; and `embeddings` before `db`, because the db's startup sync
@@ -403,7 +403,7 @@ class EmbeddingsSettings:
     **No `enabled` switch, on purpose.**  v1 had one, and its cost was a
     misconfiguration that looked exactly like a working system with nothing to
     recall: semantic search quietly off, every keyword search still answering.
-    The db component cannot be run without an embedding model, so the switch had
+    The db plugin cannot be run without an embedding model, so the switch had
     one useful setting, and a setting with one useful value is a way to be wrong.
     """
 
@@ -466,12 +466,14 @@ class ToolServerSettings:
     #: The name it is configured under.  It prefixes every tool this server
     #: offers, so it is also the name a person reads in a tool call.
     name: str
-    #: Which section it was written in — `"mcp"` or `"rest"`.  A label, not a
-    #: behaviour: a REST API entry has already been expanded into the stdio
-    #: command it describes by the time one of these exists (see `_rest_api`),
-    #: so nothing downstream branches on this.  It is kept because it is the
-    #: answer to the first question anyone debugging asks, which is why a server
-    #: they never wrote a `command:` for is running `uvx`.
+    #: Which kind of entry this is: `"mcp"` or `"rest"` for one somebody wrote
+    #: under `tools:`, and `"plugin"` for one of ours, which has no section of
+    #: its own — `slife2.toolhub.plugin_settings` builds it from `servers:`.  A
+    #: label, not a behaviour: a REST API entry has already been expanded into
+    #: the stdio command it describes by the time one of these exists (see
+    #: `_rest_api`), so nothing downstream branches on this.  It is kept because
+    #: it is the answer to the first question anyone debugging asks, which is why
+    #: a server they never wrote a `command:` for is running `uvx`.
     kind: str = "mcp"
     #: What the server is for, in the operator's words.  Not the model's: the
     #: descriptions the model reads come from the server itself, tool by tool.
@@ -538,7 +540,7 @@ class ToolLoadSettings:
     unbounded prompt — and the thing that makes the bound bearable is that being
     evicted costs a `tool_search` and a `func_tool_load`, not a capability.
 
-    Eviction never touches a tool of ours (a component's) or a server marked
+    Eviction never touches a tool of ours (a plugin's) or a server marked
     `autoload: true`: those are loaded because the operator said so, and a
     budget that could take `now` and `calc` away is the failure DESIGN.md §8 is
     about.  See `slife2.db.ToolStore.injectable`.
@@ -628,7 +630,7 @@ class Config:
     #: not what it becomes.  `ToolServerSettings.kind` keeps the provenance.
     tools: dict[str, ToolServerSettings] = field(default_factory=dict)
     #: The programs already on this machine that the model may be told about,
-    #: from `cli:`.  A third kind of source beside the components and the tool
+    #: from `cli:`.  A third kind of source beside the plugins and the tool
     #: servers, and the only one with no connection in it at all.
     cli: dict[str, CliToolSettings] = field(default_factory=dict)
     #: The playbooks in `<data>/skills/` that need something supplied to them,
@@ -637,7 +639,7 @@ class Config:
     skills: dict[str, SkillSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
     #: How many function tools the model's list may hold.  Read by the db
-    #: component, which owns the catalogue and therefore the budget: the count it
+    #: plugin, which owns the catalogue and therefore the budget: the count it
     #: bounds is a `SELECT COUNT(*)` over its own rows.
     tool_load: ToolLoadSettings = field(default_factory=ToolLoadSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
@@ -696,7 +698,7 @@ class Config:
         _, provider, _ = self.resolve(reference)
         return self.server(provider.api).url
 
-    def components(self) -> list[str]:
+    def plugins(self) -> list[str]:
         """Every server slife2 itself brings up, in the order it must start.
 
         The model backends first, then the rest, because a model server
@@ -772,17 +774,17 @@ def default_config() -> Config:
     return Config(
         servers={
             "agent": ServerSettings(port=8000),
-            # A component of its own: keeping turns is one job, and it is not a
+            # A plugin of its own: keeping turns is one job, and it is not a
             # wire protocol like the model backends.
             "db": ServerSettings(port=8010),
             # The tools slife2 ships — `echo`, `now`, `calc` — served like
             # anybody else's, because the hub is the one place that decides what
             # the model may call; see `slife2.builtins` and DESIGN.md §8.  It is
-            # not special to the hub, which asks every component above for a
+            # not special to the hub, which asks every plugin above for a
             # tool list and keeps the ones marked for the model.
             "builtins": ServerSettings(port=8030),
             # The model's tools, and the only process that holds a tool server's
-            # credentials.  It has two sources: every component above, and
+            # credentials.  It has two sources: every plugin above, and
             # everything under `tools:` in the config file.
             "toolhub": ServerSettings(port=8020),
             # One port per wire protocol, not per provider: a process speaks one
@@ -948,7 +950,7 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     would be a migration in a different coat, which is the thing this project
     does not have.  The requirement is enforced where it is real: a section that
     *is* there may not be empty, because there is no configuration in which the
-    db component runs without an embedding model.
+    db plugin runs without an embedding model.
 
     A stale `active_model` falls back to the first provider rather than
     refusing, which is v1's rule and the useful one: the failure it prevents is

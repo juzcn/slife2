@@ -6,11 +6,11 @@ tools.db`, one file for the whole data directory rather than one per agent,
 because the tool set is not a property of a conversation.  It is served here
 rather than in the toolhub for the reason this module's opening paragraph gives:
 a catalogue is rows and two indexes over them, and the store, the embedder and
-the normalization they need are already in this component.
+the normalization they need are already in this plugin.
 
 That makes the two halves of this server the same *kind* of thing — a thing
 worth keeping, and the API to keep it — and it draws the line that keeps the
-hub and this component out of each other's half: **which tools exist is the
+hub and this plugin out of each other's half: **which tools exist is the
 hub's decision** (the servers, the names, who may call them), and **what is
 known about them is this file's record** (the rows, the load state, the two
 indexes, the budget).  The `tool_*` tools below are that record's public API,
@@ -23,7 +23,7 @@ does that, and the agent server is the caller that knows a worker's turns are
 not.  A turn is stored as it happened — with one
 deliberate exception, an oversized tool result, which is kept as an announced
 head-and-tail digest rather than in full (see `slife2.db`) — so a question
-this component cannot answer today can be asked of the same rows later without a
+this plugin cannot answer today can be asked of the same rows later without a
 migration: search, embedding and summarising are each a table the schema has a
 place for and nothing here builds yet.
 
@@ -42,7 +42,7 @@ keyword index is built here from the text; the vector index needs an embedding,
 so this process reaches the embeddings server (`slife2-llm-embeddings`) before
 it opens its transaction — and a save that cannot embed stores nothing, rather
 than storing a turn nothing can find.  That makes the embedding model a hard
-dependency of this component: it cannot be switched off, and an endpoint that
+dependency of this plugin: it cannot be switched off, and an endpoint that
 cannot be reached fails the save and is reported, because there is no mode in
 which this server runs without semantic search.
 
@@ -117,10 +117,10 @@ INSTRUCTIONS = (
     "naming the `(agent, subagent)` the turn was taken under. The store keeps no "
     "opinion about what matters: it writes what it is given and returns it in "
     "order. Reading is by time — `turn_list` browses and pages, `turn_read` "
-    "returns one turn whole — which is the honest thing for a component that "
+    "returns one turn whole — which is the honest thing for a plugin that "
     "stores without judging. Both of those are the model's, and neither names an "
     "agent: they answer about the conversation the call came from. The same "
-    "component holds the tool catalogue, which is the toolhub's: the `tool_*` "
+    "plugin holds the tool catalogue, which is the toolhub's: the `tool_*` "
     "tools record what tools exist and find them by keyword and by meaning."
 )
 
@@ -213,7 +213,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         A peer that is not there **raises**, like every other peer in this
         system: this server cannot store a turn it cannot index, so a missing
         embeddings server is a system that has come apart rather than a
-        component working with fewer abilities.
+        plugin working with fewer abilities.
         """
         nonlocal embedding
         if embedding is not None:
@@ -288,7 +288,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 disabled=frozenset(
                     name for name, entry in config.tools.items() if not entry.enabled
                 ),
-                known=frozenset(config.tools) | frozenset(config.components()),
+                known=frozenset(config.tools) | frozenset(config.plugins()),
             )
             catalogue = store
         if not catalogue_ready:
@@ -412,7 +412,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             ValueError: If the call arrived without one.  Every real caller is
                 the hub, which forwards what the agent gave it, so this is a
                 caller that reached the db server directly — a test, or a
-                component that is not the agent — and it is better told than
+                plugin that is not the agent — and it is better told than
                 quietly served whatever it named.
         """
         found = request_client(ctx)
@@ -510,7 +510,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     # --- the tool catalogue ---------------------------------------------------
     #
-    #  The other thing this component keeps, and the same kind of API: the
+    #  The other thing this plugin keeps, and the same kind of API: the
     #  record's own operations, named for what they do to the record rather than
     #  for who calls them.  None of these carries the model's audience mark —
     #  they are the hub's tools, and the hub's own rule (`slife2.audience`) keeps
@@ -540,9 +540,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         longer has.
 
         Args:
-            source: The server or component these tools came from — the key
+            source: The server or plugin these tools came from — the key
                 every row is owned by, and what `tool_injectable` filters on.
-            category: `component` (ours), `mcp` or `rest` (somebody else's).
+            category: `plugin` (ours), `mcp` or `rest` (somebody else's).
                 A skill has no server behind it and is not merged by this.
             tools: One entry per tool: `name` (what the model calls, and the
                 row's identity — two sources cannot offer one), `description`,
@@ -676,7 +676,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             query: What to look for.  Empty browses, ordered by category and
                 name.
-            category: `component`, `mcp`, `rest` or `skill`; empty for any.
+            category: `plugin`, `mcp`, `rest` or `skill`; empty for any.
             source_id: One owner's name; empty for any.
             status: `enabled`, `disabled` (the config switched it off) or
                 `error` (its source is not answering); empty for any.

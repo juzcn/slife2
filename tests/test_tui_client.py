@@ -1,6 +1,6 @@
 """What the TUI puts on the wire.
 
-`MCPAgentClient` is the one component with nothing else watching it — every TUI
+`MCPAgentClient` is the one plugin with nothing else watching it — every TUI
 test injects a stand-in — and that blind spot has now cost two parameters:
 `--model` reached the window title and nothing else, and an image was read,
 turned into a `data:` URL, handed to this class, and dropped.  Both were
@@ -66,7 +66,7 @@ def install(monkeypatch, transport: FakeTransport) -> None:
     """Point the client at a stubbed transport instead of a URL.
 
     Patched in `slife2.mcp_server` rather than here: the client no longer builds
-    its own `Client` — `open_server` does, for every component in this system —
+    its own `Client` — `open_server` does, for every plugin in this system —
     so that module is where the construction happens and therefore where a test
     has to stand in for it.
     """

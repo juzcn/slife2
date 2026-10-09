@@ -5,9 +5,9 @@ behind it: the model (an HTTP call to a provider), the embedding model (another
 one), the agent server (a socket), and the observer (nothing — but a recorder is
 how a test reads what happened).
 
-Plus one that is not a seam but a *shape*: the set of components a toolhub will
+Plus one that is not a seam but a *shape*: the set of plugins a toolhub will
 ask for tools.  It is here because three test modules need it and none of them
-owns it — see `component_transports`.
+owns it — see `plugin_transports`.
 """
 
 from __future__ import annotations
@@ -241,20 +241,20 @@ class FailingEmbedder:
         raise RuntimeError(self.message)
 
 
-def component_transports(
+def plugin_transports(
     config: Config, overrides: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
-    """What a toolhub built from `config` needs to reach its own components.
+    """What a toolhub built from `config` needs to reach its own plugins.
 
-    **A hub with no components is a hub that lists nothing.**  It asks every
+    **A hub with no plugins is a hub that lists nothing.**  It asks every
     server slife2 starts — that is where its tools come from, alongside the
     entries under `tools:` — and it refuses to hand out a list when one of them
-    does not answer, because a component that is not there is a system that has
+    does not answer, because a plugin that is not there is a system that has
     come apart rather than a model with fewer tools.
 
     So a test that builds a hub stands each one up, the way the launcher does.
     These are in-memory, and apart from `builtins` and `db` they offer the model
-    nothing, which is what most components are: asking them is how "nothing for
+    nothing, which is what most plugins are: asking them is how "nothing for
     you" becomes a fact rather than an assumption.
 
     **`db` is the real server**, because the hub is a client of it: the tool
@@ -263,33 +263,33 @@ def component_transports(
     deterministic `StubEmbedder`, so a test gets the real merge, the real search
     and the real budget with no embedding endpoint behind them.
 
-    `overrides` replaces or adds a transport by name — a component the test
+    `overrides` replaces or adds a transport by name — a plugin the test
     wants to misbehave, or an entry under `tools:` it wants wired.
     """
     from slife2.builtins import build_server as build_builtins
     from slife2.db_server import build_server as build_db
 
-    def for_component(name: str) -> Any:
+    def for_plugin(name: str) -> Any:
         if name == "builtins":
             return lambda settings: build_builtins(config)
         if name == "db":
             return lambda settings: build_db(config, embedder=StubEmbedder())
-        return lambda settings: blank_component()
+        return lambda settings: blank_plugin()
 
     transports: dict[str, Any] = {
-        name: for_component(name) for name in config.components() if name != "toolhub"
+        name: for_plugin(name) for name in config.plugins() if name != "toolhub"
     }
     transports.update(overrides or {})
     return transports
 
 
-def blank_component() -> Any:
+def blank_plugin() -> Any:
     """One of our own servers, answering, with nothing for the model.
 
-    The ordinary case, and the one worth being able to state: a component whose
+    The ordinary case, and the one worth being able to state: a plugin whose
     tools belong to its own code is asked for a list like every other, and the
     answer is empty rather than absent.
     """
     from fastmcp import FastMCP
 
-    return FastMCP("component")
+    return FastMCP("plugin")

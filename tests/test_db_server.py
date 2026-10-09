@@ -371,7 +371,7 @@ async def test_the_vectors_come_back_as_floats() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_catalogue_is_a_capability_of_this_component(
+async def test_the_catalogue_is_a_capability_of_this_plugin(
     tmp_path, monkeypatch
 ) -> None:
     """The `tool_*` tools, and who may see them.
@@ -380,7 +380,7 @@ async def test_the_catalogue_is_a_capability_of_this_component(
     caller is an ordinary thing rather than a surprise — so none of them carries
     the model's audience mark.  That is what keeps them out of the model's tool
     list without a second filter anywhere: the hub's own rule drops an unmarked
-    component tool by itself.
+    plugin tool by itself.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
@@ -402,7 +402,7 @@ async def test_the_catalogue_is_a_capability_of_this_component(
             "tool_merge",
             {
                 "source": "builtins",
-                "category": "component",
+                "category": "plugin",
                 "tools": [
                     {
                         "name": "builtins__calc",
@@ -443,7 +443,7 @@ async def test_the_catalogue_is_indexed_before_anything_is_served(
             "tool_merge",
             {
                 "source": "builtins",
-                "category": "component",
+                "category": "plugin",
                 "tools": [
                     {
                         "name": "builtins__calc",

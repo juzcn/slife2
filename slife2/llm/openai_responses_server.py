@@ -88,7 +88,7 @@ def to_input_image(raw: Any) -> dict[str, Any] | None:
 
     Only inline data is accepted, and the reason is the same as the Anthropic
     adapter's: a remote URL would have to be fetched, and fetching an address a
-    model or a user named is a capability this component has no business having.
+    model or a user named is a capability this plugin has no business having.
     Dropping is safe here only because the agent server has already refused to
     send one.
     """

@@ -1,7 +1,7 @@
 """slife2-toolhub — the model's tools, and the only process that holds their
 credentials.
 
-Every other component in this system is a place a capability comes from: a model
+Every other plugin in this system is a place a capability comes from: a model
 backend speaks one wire protocol, the db keeps turns, the agent loop runs turns.
 This one is where **the tools come from**, and it exists because tools are the
 one capability that has to reach *outside* the machine — to somebody else's MCP
@@ -23,10 +23,10 @@ editing a URL or a command in `slife2.yaml`, exactly as switching models is.
 
 **The set is decided here and remembered there.**  Which tools exist, what they
 are called and who may call one is this process's to say; the rows, the load
-state, the two search indexes and the budget are the db component's to keep, and
+state, the two search indexes and the budget are the db plugin's to keep, and
 every operation on them is a call over MCP (`Catalogue`).  Nothing in this
 module opens a database, and nothing in that one knows what a proxy name is —
-which is the same line the two components draw everywhere else, and the reason
+which is the same line the two plugins draw everywhere else, and the reason
 the next thing that needs the catalogue can have it.
 
 Three sources, one list
@@ -34,7 +34,7 @@ Three sources, one list
 The tools come from three places, and this is the only thing that knows all of
 them.
 
-**Components** are the servers slife2 starts — builtins, the db, the agent, a
+**Plugins** are the servers slife2 starts — builtins, the db, the agent, a
 model backend — and each offers its tools to one of two callers.  `now` and
 `calc` are for the model; `remember` and `send_message` are for our own code,
 called at a moment the code already knows.  **Tool servers** are everybody
@@ -46,11 +46,11 @@ those itself, for the reason given below.
 
 Which source a tool came from is not what decides who may call it — which
 *caller* it is for does, and that is said on the tool itself (`slife2.audience`)
-rather than in its name, in this file, or in the config.  **A component's tools
-belong to that component's own code until one of them says otherwise**, so
+rather than in its name, in this file, or in the config.  **A plugin's tools
+belong to that plugin's own code until one of them says otherwise**, so
 `remember` stays where it was and `now` carries the mark, while an entry under
 `tools:` needs no mark at all: the operator opted in by writing the entry.  The
-list of components is not written down here either — it is `Config.components()`,
+list of plugins is not written down here either — it is `Config.plugins()`,
 which is what the launcher starts, so the hub cannot drift from the set of
 processes that exist.
 
@@ -101,7 +101,7 @@ they are.  The hub's own tools are the other path, and they are named as
 themselves (`skill_use`) rather than `{server}__{tool}`, because there is no
 server to name.  See DESIGN.md §8.
 
-They are still *rows*, though — owned by this component, like every other tool's
+They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
 model may call, with no list of exceptions kept beside it here.
 
@@ -124,13 +124,13 @@ reach are the operator's decision, made in a file, once.
 
 The failure rules, all four
 ---------------------------
-* **A component that is not answering is a broken system.**  Everything under
+* **A plugin that is not answering is a broken system.**  Everything under
   `servers:` is ours: slife2 starts it, the launcher refuses to bring the system
   up without it, and a hub that cannot read its tool list refuses to hand one out
   rather than serving the model a shorter one — a model that has quietly lost
   `now` and `calc` is a failure nobody can see.  It is a *flag on the
   connection* rather than a branch in the tool table, and which section a server
-  was configured in is the whole of the difference: a component is required, an
+  was configured in is the whole of the difference: a plugin is required, an
   upstream is not.
 * **An upstream missing is not.**  An external server is the operator's
   configuration and somebody else's process; it can be slow, paid, or down
@@ -190,13 +190,13 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "slife2-toolhub"
 
 #: This server's key in the config's `servers:` table — and therefore the one
-#: name in `Config.components()` that is not a source of tools.  The hub asks
+#: name in `Config.plugins()` that is not a source of tools.  The hub asks
 #: every plugin but itself; a connection to itself would list the three tools of
 #: its own API and drop all three, which is a loopback nobody should have to
 #: reason about.
 #:
 #: It is also the name the hub's **own** tools are catalogued under.  They are
-#: this component's tools, served by this process: `tool_search`, the two
+#: this plugin's tools, served by this process: `tool_search`, the two
 #: loaders, and `skill_use`.  Being rows like everything else is what makes one
 #: query enough to answer "what may the model call", and it is why nothing here
 #: has to remember a list of its own.
@@ -377,12 +377,12 @@ async def _abandon(client: Client) -> None:
 
 
 class CatalogueUnavailable(ConnectionError):
-    """The tool catalogue is not answering: a component that is gone.
+    """The tool catalogue is not answering: a plugin that is gone.
 
     Deliberately not the same thing as a source failing.  An upstream that will
     not start is one tool server the operator can look at; a catalogue that is
     not there is this system come apart, and it fails the tool list rather than
-    shortening it — the same rule a missing component has always had.
+    shortening it — the same rule a missing plugin has always had.
     """
 
 
@@ -427,7 +427,7 @@ class Catalogue:
         so this is the SDK's own distinction rather than a guess.  It matters
         because the db refuses a merge when two sources claim one name: wrapped
         as "the catalogue is not answering", that sends the reader to look at a
-        component which is working perfectly.
+        plugin which is working perfectly.
 
         A transport failure is retried **once**, with the client dropped first,
         for the reason `Upstream.call` gives: a call that never ran is worth a
@@ -449,7 +449,7 @@ class Catalogue:
             except (ToolError, CatalogueUnavailable):
                 raise
             except Exception as exc:
-                # The db is a component: not answering is a system that has come
+                # The db is a plugin: not answering is a system that has come
                 # apart, and it is named here rather than surfaced as whatever
                 # the transport happened to say.
                 raise CatalogueUnavailable(
@@ -593,7 +593,7 @@ class Upstream:
         #: cannot be reached is a tool the model does not have; a required one
         #: that cannot be reached is this system coming apart, and `list_tools`
         #: refuses rather than quietly serving a shorter list.  Nothing in
-        #: `tools:` sets this — it is what makes a component a component, and it
+        #: `tools:` sets this — it is what makes a plugin a plugin, and it
         #: is read twice: for that failure rule, and for whether this server's
         #: tools have to ask before the model is given them (`_offered`).
         self.required = required
@@ -750,7 +750,7 @@ class Upstream:
 
         Both failures below end the same way for this source and differently for
         the system.  A *transport* failure is this server's problem, and it is
-        recorded as such.  A *catalogue* that is not answering is a component
+        recorded as such.  A *catalogue* that is not answering is a plugin
         gone, and it is raised: it must not be reported as "that tool server is
         broken", because the next ask would then look in the wrong place.
         """
@@ -796,7 +796,7 @@ class Upstream:
         """The tools of one listing the model may be given.
 
         **Ours have to ask, and the answer is no until they do**
-        (`slife2.audience`).  A component's tools belong to that component's own
+        (`slife2.audience`).  A plugin's tools belong to that plugin's own
         code until one says otherwise, because the ones that would leak —
         `remember`, which writes into any agent's database, `send_message`,
         which drives another conversation — are exactly the ones a model would
@@ -985,7 +985,7 @@ class LocalTool:
     of the same name — and local wins, which is the direction that keeps a tool
     this system guarantees from being shadowed by somebody else's configuration.
 
-    Its *row*, though, is an ordinary one, owned by this component: that is what
+    Its *row*, though, is an ordinary one, owned by this plugin: that is what
     makes the catalogue the single answer to "what may the model call", instead
     of that answer plus a list of exceptions kept here.
     """
@@ -1010,12 +1010,12 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
         },
         "category": {
             "type": "string",
-            "enum": ["component", "mcp", "rest", "skill"],
+            "enum": ["plugin", "mcp", "rest", "skill"],
             "description": "One kind of tool only.",
         },
         "source_id": {
             "type": "string",
-            "description": "One server's or component's tools only.",
+            "description": "One server's or plugin's tools only.",
         },
         "status": {
             "type": "string",
@@ -1444,12 +1444,12 @@ def _parameters(schema: str) -> dict[str, Any]:
     return found if isinstance(found, dict) else {}
 
 
-def component_settings(config: Config, name: str) -> ToolServerSettings:
+def plugin_settings(config: Config, name: str) -> ToolServerSettings:
     """One of our own servers, as one upstream of the hub.
 
     **Written here rather than under `tools:` because it is ours.**  An entry in
     `tools:` is somebody else's process, which slife2 may fail to reach without
-    anything being wrong; a component is one slife2 starts, and the hub treats it
+    anything being wrong; a plugin is one slife2 starts, and the hub treats it
     accordingly (`required` on an `Upstream`, which is also what makes its tools
     ask before they are offered to the model).
 
@@ -1457,12 +1457,12 @@ def component_settings(config: Config, name: str) -> ToolServerSettings:
     a tool list — and that is the point of the hub having two *sources* rather
     than two code paths.  The address comes from `servers:`, so a config that
     moves a port moves both halves at once and there is no second place to
-    update, and there is no list of components here at all: it is
-    `Config.components()`, which is what the launcher starts.
+    update, and there is no list of plugins here at all: it is
+    `Config.plugins()`, which is what the launcher starts.
     """
     return ToolServerSettings(
         name=name,
-        kind="component",
+        kind="plugin",
         url=config.server(name).url,
         description="",
     )
@@ -1481,11 +1481,11 @@ def build_server(
     servers, with no process and no port, while production builds a connection
     from the config entry.  `client_factory` is the narrower seam on top of it,
     for the tests that need a client which misbehaves.  There is no third: the
-    catalogue is reached through a wired `db` entry like every other component,
+    catalogue is reached through a wired `db` entry like every other plugin,
     which is the seam tests use and the one production uses.
 
     **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
-    `skill_use` are this component's, and the hub merges them into the catalogue
+    `skill_use` are this plugin's, and the hub merges them into the catalogue
     when it starts — so one query answers "what may the model call", with no
     list of exceptions kept beside it.  What has a *body* is still only known
     here: the row says what the tool is, and `local_route` says what running it
@@ -1507,7 +1507,7 @@ def build_server(
         return mcp_config(settings, cwd=str(directory))
 
     async def open_catalogue() -> Client:
-        """A connection to the db — the component that holds the catalogue.
+        """A connection to the db — the plugin that holds the catalogue.
 
         A peer that is not there **raises**, like every other peer in this
         system: the hub cannot say what the model may call without it, so a
@@ -1522,7 +1522,7 @@ def build_server(
         wired = (transports or {}).get(DB_KEY)
         if wired is not None:
             client = make_client(
-                wired(component_settings(config, DB_KEY)), MessageHandler()
+                wired(plugin_settings(config, DB_KEY)), MessageHandler()
             )
             try:
                 await client.__aenter__()
@@ -1547,22 +1547,22 @@ def build_server(
     #: The catalogue, and the one connection it opens when something first asks.
     catalogue = Catalogue(open_catalogue)
 
-    #: The components first, in the order slife2 starts them, and required — see
+    #: The plugins first, in the order slife2 starts them, and required — see
     #: `list_tools`.  The hub asks every one of them, including the ones with
     #: nothing to offer the model: which
     #: tools a server has is not knowable without asking, and a second list of
-    #: "components worth asking" is a list that goes stale the first time
+    #: "plugins worth asking" is a list that goes stale the first time
     #: somebody adds a tool.
     upstreams: list[Upstream] = [
         *(
             Upstream(
-                component_settings(config, name),
+                plugin_settings(config, name),
                 transport=(transports or {}).get(name, default_transport),
                 catalogue=catalogue,
                 client_factory=client_factory,
                 required=True,
             )
-            for name in config.components()
+            for name in config.plugins()
             if name != CONFIG_KEY
         ),
         *(
@@ -1647,7 +1647,7 @@ def build_server(
     async def start() -> None:
         """What the hub does before it serves anything.
 
-        **The components are asked for their tools, and the hub's own tools are
+        **The plugins are asked for their tools, and the hub's own tools are
         written down.**  Both are merges into the catalogue: the upstreams find
         theirs by connecting, and this process's three are known without
         connecting to anything — so they are recorded here, once, and are rows
@@ -1656,7 +1656,7 @@ def build_server(
         Order matters once: this has to happen before the first `list_tools`, or
         the model's first answer would be missing the tool that finds tools.
         """
-        category = "component"
+        category = "plugin"
         await catalogue.merge(
             CONFIG_KEY, category, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
@@ -1697,15 +1697,15 @@ def build_server(
         they are the mechanism, and a budget that could take them away would
         leave the model holding a set it cannot change.
 
-        A component's tools are left out unless they declare themselves the
+        A plugin's tools are left out unless they declare themselves the
         model's (`slife2.audience`); a tool server's are all offered, because the
         operator put the server in the config.  Both were decided when the
         listing was merged, so nothing in this answer says which is which — by
         the time a tool is listed, the question has been answered.
 
         Raises:
-            ConnectionError: If a component — or the catalogue itself — is not
-                answering.  Deliberately not a shorter list instead: a component
+            ConnectionError: If a plugin — or the catalogue itself — is not
+                answering.  Deliberately not a shorter list instead: a plugin
                 that is gone is a system that has come apart, and a model that
                 has quietly lost `now` and `calc` is a failure nobody can see.  A
                 server from the `tools:` section is the opposite case and is
@@ -1733,7 +1733,7 @@ def build_server(
         ]
         if missing:
             raise ConnectionError(
-                "a component is not answering — "
+                "a plugin is not answering — "
                 + "; ".join(
                     f"{row['name']}: {row['error'] or row['state']}" for row in missing
                 )
@@ -1907,14 +1907,14 @@ def build_server(
 
         Returns:
             `servers`: one row per source of tools — `name`, `kind` (`mcp`,
-            `rest` or `component`), `transport`, `state` (`ready`, `connecting`,
+            `rest` or `plugin`), `transport`, `state` (`ready`, `connecting`,
             `failed` or `idle`), how many `tools` it last offered, how many of
             them are `loaded` (which is what the model has now), `autoload` —
             whether they are wanted every turn, so they are never evicted — the
             `description` it was configured with, the `error` if there is one,
             and `required` — whether slife2 starts it, which is what decides if
             its absence fails a turn or merely shortens the tool list.  A
-            component that offers fewer tools than it has is the normal case,
+            plugin that offers fewer tools than it has is the normal case,
             not a fault: the rest are its own code's, and this count is the one
             the model sees.
         """
@@ -1942,12 +1942,12 @@ def main(argv: list[str] | None = None) -> int:
     config = load()
     settings = config.server(CONFIG_KEY)
     logger.info(
-        "serving %s on http://%s:%d%s (%d component(s), %d tool server(s))",
+        "serving %s on http://%s:%d%s (%d plugin(s), %d tool server(s))",
         SERVER_NAME,
         args.host or settings.host,
         args.port or settings.port,
         settings.path,
-        len([name for name in config.components() if name != CONFIG_KEY]),
+        len([name for name in config.plugins() if name != CONFIG_KEY]),
         len(config.tool_servers()),
     )
     serve(

@@ -1,4 +1,4 @@
-"""slife2 — a terminal AI agent whose components are MCP servers.
+"""slife2 — a terminal AI agent whose plugins are MCP servers.
 
 The MCP servers are **shared infrastructure**.  ``slife2`` brings up the ones
 its config needs and attaches to whatever is already running, so a second
