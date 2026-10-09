@@ -66,11 +66,18 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     # token streamed into the refresh the scroll waits on does not find
     # following still off.
     chat._autoscroll = True
-    chat.add_note(f"[restored {_turns(len(turns))}]")
+    chat.add_note(f"[restored {as_turns(len(turns))}]")
     chat.jump_to_tail()
 
 
-def _turns(count: int) -> str:
+def as_turns(count: int) -> str:
+    """`3 turns`, or `1 turn` — the phrase both notes are written in.
+
+    Shared rather than spelled twice: the restored-history note and
+    the discriminator's note are the same kind of line, and a reader
+    who has learned to read one should not meet `1 turns` in the
+    other.
+    """
     return f"{count} turn" if count == 1 else f"{count} turns"
 
 

@@ -702,34 +702,6 @@ async def test_the_carried_tail_survives_a_rebuild(tmp_path, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_the_rebuild_can_be_turned_off(tmp_path, monkeypatch) -> None:
-    """The switch an operator on a metered endpoint wants.
-
-    Off, the turn runs on the context it already has and the discriminator is
-    never called — which is the append-only mode v1 keeps behind the same flag.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    from dataclasses import replace
-
-    from slife2.config import ContextSettings
-
-    config = replace(default_config(), context=ContextSettings(rebuild=False))
-    replies = Replies('{"context": "clear"}')
-    hold = [SYSTEM, {"role": "user", "content": "one"}]
-
-    async with Client(
-        build_server(config, embedder=EMBEDDER, ask=replies)
-    ) as client:
-        answer = await client.call_tool(
-            "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
-        )
-
-    assert answer.data["changed"] is False
-    assert replies.asked == [], "the model was asked anyway"
-
-
-@pytest.mark.asyncio
 async def test_forget_clears_the_context_and_keeps_the_turns(
     tmp_path, monkeypatch
 ) -> None:

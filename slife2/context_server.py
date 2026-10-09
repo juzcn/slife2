@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -463,6 +463,31 @@ def build_server(
     def _rows(store: TurnStore, turn_ids: list[int]) -> list[dict[str, Any]]:
         return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
 
+
+    def _in_hand(
+    messages: Sequence[dict[str, Any]], turn_ids: Sequence[int]
+) -> dict[str, Any]:
+        """The answer when the turns in hand are what the turn runs on.
+
+        Four of `rebuild`'s five exits are this one outcome — the switch is off, a
+        decision that asks for nothing, a decision that equals what is held, and a
+        selection that cannot be fetched — and they are one dict because they are
+        one thing: nothing was fetched, nothing was written, and the caller's list
+        stands.  Spelled out four times they were four chances to describe that
+        differently, and four places to add a key to.
+
+        `kept` is what the caller in hand, `recalled` none of it — and the two
+        together are what `rebuild` always reports, so a reader of the answer never
+        has to know which of the five ways it was reached to read the counts.
+        """
+        return {
+            "messages": list(messages),
+            "turn_ids": list(turn_ids),
+            "changed": False,
+            "kept": len(turn_ids),
+            "recalled": 0,
+        }
+
     @mcp.tool
     async def restore(
         agent: str,
@@ -659,14 +684,6 @@ def build_server(
             many of the selected turns came from the turn log rather than from
             in hand).
         """
-        if not config.context.rebuild:
-            return {
-                "messages": list(messages),
-                "turn_ids": list(turn_ids),
-                "changed": False,
-                "recalled": 0,
-            }
-
         store = await store_of(agent, subagent)
         decision = await _discriminate(agent, subagent, model, messages, prompt)
         if decision is None or decision.asks_for_nothing:
@@ -675,12 +692,7 @@ def build_server(
             # written — and the list already on disk still describes what the
             # caller is holding.
             logger.info("recall_not_needed reason=context_sufficient")
-            return {
-                "messages": list(messages),
-                "turn_ids": list(turn_ids),
-                "changed": False,
-                "recalled": 0,
-            }
+            return _in_hand(messages, turn_ids)
 
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
@@ -710,12 +722,7 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return {
-                "messages": list(messages),
-                "turn_ids": list(turn_ids),
-                "changed": False,
-                "recalled": 0,
-            }
+            return _in_hand(messages, turn_ids)
 
         rows = await _on_thread(_rows, store, target)
         if len(rows) != len(target):
@@ -724,12 +731,7 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return {
-                "messages": list(messages),
-                "turn_ids": list(turn_ids),
-                "changed": False,
-                "recalled": 0,
-            }
+            return _in_hand(messages, turn_ids)
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -755,6 +757,9 @@ def build_server(
             "messages": rebuilt,
             "turn_ids": target,
             "changed": changed,
+            # What survived the decision, and what came back from the log.  The
+            # two add to `len(target)`, which is what the turn runs on.
+            "kept": len(base),
             "recalled": len(set(recalled) - set(base)),
         }
 

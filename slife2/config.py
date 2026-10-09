@@ -492,12 +492,6 @@ class ContextSettings:
     section is how a setting comes to mean two things.
     """
 
-    #: Whether the context is *chosen* before each turn.  On, one model call per
-    #: turn decides what to keep and what to recall; off, the context grows
-    #: append-only and nothing bounds it (§9 still owes the trim).  Kept as a
-    #: switch because the discriminator call is about as expensive as the turn it
-    #: precedes, and an operator on a metered endpoint should be able to say no.
-    rebuild: bool = True
     #: Both are **fractions of the model's own context window**, and both are
     #: therefore only meaningful where the model's config declares one.  The
     #: ceiling is what a kept context is measured against — a recall's budget is
@@ -1082,34 +1076,16 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     if timeout is not None and timeout <= 0:
         raise ConfigError(
             f"context.timeout: {timeout} would abandon every discriminator call "
-            f"before it was made; set `rebuild: false` to turn the step off"
+            f"before it was made"
         )
     similarity = _optional_float(section.get("min_similarity"))
     return ContextSettings(
-        rebuild=_bool_or(section.get("rebuild"), base.rebuild),
         ceiling=ceiling,
         floor=floor,
         recall_limit=limit,
         min_similarity=base.min_similarity if similarity is None else similarity,
         timeout=base.timeout if timeout is None else timeout,
     )
-
-
-def _bool_or(value: Any, default: bool) -> bool:
-    """`value` as a bool, or `default` when the key is absent.
-
-    `bool(value)` is the tempting one-liner and is wrong on the value most likely
-    to be written by hand: `rebuild: "false"` — quoted, which YAML permits — is a
-    non-empty string and would read as *on*, silently doing the opposite of what
-    the file says.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no"):
-        return value.strip().lower() in ("true", "yes")
-    raise ConfigError(f"expected true or false, got {value!r}")
 
 
 def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:

@@ -73,7 +73,7 @@ from slife2.config import (
     load,
 )
 from slife2.context import turn_note, with_note
-from slife2.events import TurnEvent, TurnObserver, encode
+from slife2.events import ContextChosen, TurnEvent, TurnObserver, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult
@@ -698,8 +698,8 @@ def build_server(
                 describe((loop.agent, loop.subagent)),
             )
 
-    async def rebuild_into(loop: Loop, prompt: str) -> None:
-        """Ask what this turn runs on, and take the answer.
+    async def rebuild_into(loop: Loop, prompt: str) -> ContextChosen:
+        """Ask what this turn runs on, take the answer, and report the counts.
 
         **Before the user's message is appended**, because the answer replaces
         the list and an appended message would be destroyed by it — and the
@@ -710,7 +710,14 @@ def build_server(
         a cancelled turn's repair, and nothing else.  The store puts those
         messages back verbatim, so a rebuild replaces the *turns* without
         destroying something that has no turn to be replaced by.
-        """
+
+        Returns the counts as the event that reports them, because the
+        discriminator is the most expensive thing a turn does and the two
+        numbers are the only sight of it anybody gets — how much of what was in
+        hand it kept, and how much it went back to the log for.  Handing back the
+        event rather than the counts keeps the vocabulary in one module: this
+        knows *what happened*, `slife2.events` knows how it is said.
+"""
         carried = max(len(loop.messages) - loop.covered, 0)
         payload = tool_payload(
             await (await memory()).call_tool(
@@ -727,6 +734,10 @@ def build_server(
             )
         )
         _adopt(loop, payload, carried=carried)
+        return ContextChosen(
+            kept=int(payload.get("kept") or 0),
+            recalled=int(payload.get("recalled") or 0),
+        )
 
     async def forget_context(agent: str, subagent: str) -> None:
         """Clear a conversation's stored live context.
@@ -1043,9 +1054,16 @@ def build_server(
                 # includes this very prompt, would be destroyed by it — and it
                 # reads the list the previous turn's write maintains, so it has
                 # to wait for that write the way the next turn does.
-                await rebuild_into(loop, item.prompt)
+                chosen = await rebuild_into(loop, item.prompt)
+                observer = ProgressObserver(ctx)
+                # **Reported before the turn**, because it is a fact about what
+                # the turn runs on and not about how it went — and because the
+                # answer that follows is the thing it is about.  The
+                # discriminator is one model call the caller never sees, so this
+                # is the only place its decision is visible at all.
+                await observer.on_event(chosen)
                 try:
-                    await run_turn_into(loop, item, ProgressObserver(ctx), outcome)
+                    await run_turn_into(loop, item, observer, outcome)
                 except BaseException:
                     # A turn that happened is recorded however it ended, and this
                     # is deliberately one clause rather than a handler per ending

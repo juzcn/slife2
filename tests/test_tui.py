@@ -15,6 +15,7 @@ import pytest
 from fakes import FakeAgentClient
 
 from slife2.events import (
+    ContextChosen,
     TextDelta,
     ThinkingDelta,
     ToolCallFinished,
@@ -308,10 +309,10 @@ async def test_an_intermediate_step_folds_its_reasoning() -> None:
 async def test_a_block_with_only_reasoning_is_not_signed() -> None:
     """The signature signs an *answer*, so a reasoning-only step has none.
 
-    A block is opened before anything is known about it — at `begin_assistant`,
-    and again after each tool panel when reasoning or text resumes — so a
-    signature painted at construction left a bare `jack>` row in the transcript
-    for every step that had only reasoning to show.  On a reasoning model that
+    A block is opened by whatever has something to put in it — the first delta,
+    a resumed stream after a tool panel, the final answer — so a signature
+    painted at construction left a bare `jack>` row in the transcript for every
+    step that had only reasoning to show.  On a reasoning model that
     is one per tool call, and it reads as the prompt being printed over and over
     down the conversation.
     """
@@ -788,13 +789,18 @@ async def test_space_on_a_message_unfolds_its_reasoning() -> None:
 # --- a window opened after a restart ------------------------------------------
 
 
-def stored(*messages: Message, turn_id: int = 1, asked: str = "") -> dict:
+def stored(
+    *messages: Message, turn_id: int = 1, asked: str = "", context: int = 0
+) -> dict:
     """One stored turn, as the server hands it back.
 
     Built from the real message model rather than by writing the dicts out by
     hand: the tool-call half of the shape (`arguments` as a JSON *string*,
     nested under `function`) is exactly the kind of thing a fixture that spells
     it itself gets subtly wrong and then proves itself right about.
+
+    `context` is how large the conversation had become by the end of the turn —
+    `TurnRecord.context_tokens`, which `to_wire` always sends and the bar reads.
     """
     return {
         "turn_id": turn_id,
@@ -803,6 +809,8 @@ def stored(*messages: Message, turn_id: int = 1, asked: str = "") -> dict:
         "completed_at": None,
         "channel": "tui",
         "what_model": "fake",
+        "token_count": context,
+        "context_tokens": context,
     }
 
 
@@ -877,11 +885,86 @@ async def test_a_name_that_has_never_run_shows_nothing() -> None:
         assert shown(app) == ""
 
 
+def context_of(kept: int, recalled: int):
+    """A scripted client whose turn reports the discriminator's answer first."""
+
+    def respond(prompt: str, on_event):
+        on_event(ContextChosen(kept=kept, recalled=recalled))
+        on_event(TextDelta("ok"))
+        on_event(
+            TurnFinished(
+                text="ok", usage=Usage(), last_usage=Usage(), steps=1, stop_reason="stop"
+            )
+        )
+        return "ok"
+
+    return respond
+
+
+async def test_the_discriminators_decision_is_reported_under_the_prompt() -> None:
+    """One model call decides the context, and this is the only sight of it.
+
+    The note is `add_note`'s, so it carries the class the restored history's line
+    carries — the same shape and the same dim styling, which is the point: both
+    say what the harness did, and a reader has one kind of line to learn.  It
+    lands between the prompt and the answer because that is what it is about:
+    the context the answer was written from, not a comment on how it went.
+    """
+    app = window(FakeAgentClient(context_of(12, 3)))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        blocks = [widget.classes for widget in app.query_one(ChatView).children]
+        text = shown(app)
+
+    assert "[kept 12 turns, recalled 3]" in text
+    assert "user-message" in blocks[0]
+    assert "system-message" in blocks[1], "the line the restore writes is this line"
+    assert "assistant-message" in blocks[2]
+
+
+async def test_the_context_note_is_spelled_the_way_the_restored_one_is() -> None:
+    """`1 turn`, not `1 turns` — one phrase, written in one place.
+
+    A reader who has learned to read `[restored 14 turns]` should not meet
+    `1 turns` in the note that sits beside it.
+    """
+    app = window(FakeAgentClient(context_of(1, 0)))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "[kept 1 turn, recalled 0]" in shown(app)
+
+
 async def test_the_restored_history_says_how_much_came_back() -> None:
     app = window(answering_with(*CONVERSATION))
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         assert "[restored 2 turns]" in shown(app)
+
+
+async def test_a_restored_conversation_shows_how_full_the_window_is() -> None:
+    """The bar was the one part of the window that did not know it had a history.
+
+    Measured on a restart: the transcript said `[restored 14 turns]` and the bar
+    directly under it said `0 (0.0%)`, because `_context_tokens` is set from a
+    live turn's `last_usage` and a window that has only restored has run no turn.
+    `context_of` reads it from the last restored turn instead — the same
+    quantity, since a turn records how large the conversation had become by the
+    end of it, which is what a percentage of the window is a percentage of.
+
+    The newest turn carries the larger number on purpose: a bar filled from the
+    first restored turn, or from a sum over all of them, would read differently.
+    """
+    app = window(
+        answering_with(
+            stored(Message(role="user", content="a"), turn_id=1, context=1_000),
+            stored(Message(role="user", content="b"), turn_id=2, context=65_514),
+        ),
+        model="m",
+        context_window=100_000,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "65,514 (65.5%)" in status(app)
 
 
 async def test_a_restored_message_is_stamped_when_it_was_sent() -> None:

@@ -242,10 +242,11 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
     the newest turns are the only ones a keep-list cannot name, and "keep
     everything" is the only thing that can be said about them.
 
-    A rebuild would put the same footnote back, so the switch is off: with an
-    append-only context the annotation is the only thing that can be putting one
-    there, which is what makes this a test of the annotation rather than of
-    `messages_from_turns`.
+    A rebuild that decides to keep everything rebuilds nothing at all, and the
+    fixture's discriminator answers `{}` — which *is* that case — so
+    `messages_from_turns` is never reached and the annotation is the only thing
+    that can be putting a footnote here.  That is what makes this a test of the
+    annotation rather than of the rebuild's renderer.
     """
     base = default_config()
     backend = FakeBackend(
@@ -267,10 +268,7 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
 
     backend.stream = stream  # type: ignore[method-assign]
     server = build_server(
-        replace(base, context=replace(base.context, rebuild=False)),
-        context_client=context,
-        hub_client=hub,
-        backend=backend,
+        base, context_client=context, hub_client=hub, backend=backend
     )
 
     await send(server, "one", channel="tui")
@@ -1239,7 +1237,12 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     await send_with_progress(server, "what is 6*7?", on_progress)
 
     kinds = [type(e).__name__ for e in seen]
-    assert kinds[0] == "TextDelta"
+    # The context first, and that ordering is the point of the event: what the
+    # turn runs on is decided before the turn says anything, so a display that
+    # learned it last would be showing one turn's context under another turn's
+    # answer.
+    assert kinds[0] == "ContextChosen"
+    assert "TextDelta" in kinds
     assert "ToolCallStarted" in kinds
     assert "ToolCallFinished" in kinds
     assert kinds[-1] == "TurnFinished"

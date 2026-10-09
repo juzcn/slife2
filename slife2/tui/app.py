@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -40,6 +40,7 @@ from textual.worker import Worker
 
 from slife2.config import DEFAULT_AGENT
 from slife2.events import (
+    ContextChosen,
     TextDelta,
     ThinkingDelta,
     ToolCallFinished,
@@ -49,7 +50,7 @@ from slife2.events import (
 )
 from slife2.tui import attachments
 from slife2.tui.client import AgentClient, MCPAgentClient
-from slife2.tui.restore import restore
+from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import ChatView, HistoryInput, StatusBar
 
@@ -63,6 +64,27 @@ class TurnEventMessage(TextualMessage):
         self.ticket = ticket
         self.event = event
         super().__init__()
+
+
+def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
+    """How large the conversation was, from the turns a window has just drawn.
+
+    **The same quantity a live turn reports, and the only place it can come from
+    on a window that has run no turn.**  `_context_tokens` is set from
+    `TurnFinished`'s `last_usage`, so a window that has only restored kept its
+    initial zero — a conversation the server had just rebuilt from fourteen turns
+    showed `0 (0.0%)` directly under a note saying fourteen turns had come back.
+
+    `TurnRecord.context_tokens` is documented as exactly this question ("how
+    large the conversation had become by the end of it — the number the *next*
+    request would resend"), so the bar reads one quantity either way.  A turn
+    stored before that column meant anything answers 0, which is what the bar
+    says for a size nobody has measured rather than a guess from an older turn.
+    """
+    if not turns:
+        return 0
+    value = turns[-1].get("context_tokens")
+    return value if isinstance(value, int) and value > 0 else 0
 
 
 class SlifeApp(App[None]):
@@ -266,6 +288,10 @@ class SlifeApp(App[None]):
             self._refresh_status()
             return
         restore(self._transcript, turns)
+        # The bar was the one part of the window that did not know the
+        # conversation had come back — see `context_of`.
+        self._context_tokens = context_of(turns)
+        self._refresh_status()
 
     # --- the queue of turns --------------------------------------------------
 
@@ -388,6 +414,18 @@ class SlifeApp(App[None]):
             return
         event = message.event
         match event:
+            case ContextChosen(kept=kept, recalled=recalled):
+                # The discriminator's answer, and the only sight of it there is:
+                # one model call decides what the turn runs on, it is the most
+                # expensive thing a turn does, and until this arrived nothing in
+                # the window said whether it had run, what it kept or what it
+                # went back to the log for.  A note rather than a panel, in the
+                # same bracketed shape as "[restored N turns]", because it is the
+                # same kind of thing: something the harness did that the
+                # conversation itself does not show.
+                self._transcript.add_note(
+                    f"[kept {as_turns(kept)}, recalled {recalled}]"
+                )
             case TextDelta(text=text):
                 self._transcript.append_text(text)
             case ThinkingDelta(text=text):

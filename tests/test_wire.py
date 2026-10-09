@@ -15,6 +15,7 @@ import pytest
 from slife2.events import (
     NULL_OBSERVER,
     PREVIEW_CHARS,
+    ContextChosen,
     TextDelta,
     ToolCallFinished,
     TurnFinished,
@@ -35,6 +36,9 @@ from slife2.messages import (
 pytestmark = pytest.mark.unit
 
 EVENTS = [
+    # The discriminator's answer, which arrives before any of the rest and is
+    # the only event a turn has that is about the context rather than the work.
+    ContextChosen(kept=12, recalled=3),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
     ToolCallFinished(

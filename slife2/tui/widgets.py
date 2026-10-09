@@ -28,8 +28,8 @@ the text that moved it, so the follow a burst of deltas asks for is aimed at a
 height that is already out of date by the time it lands.
 
 **The agent's `name>` is painted only where there is text under it.**  A block
-is opened before anything is known about it — on `begin_assistant`, and again
-after each tool panel when reasoning or text resumes — so a signature painted
+is opened by whatever has something to put in it — the first delta, a resumed
+stream after a tool panel, the final answer — so a signature painted
 unconditionally leaves a bare `slife2>` row in the transcript for every step
 that has only reasoning to show.  slife v1 signs the message, not the widget.
 """
@@ -335,10 +335,22 @@ class ChatView(VerticalScroll):
     # --- the assistant's turn ------------------------------------------------
 
     def begin_assistant(self) -> None:
-        """Open a turn: from here until `finish_assistant`, deltas land."""
+        """Open a turn: from here until `finish_assistant`, deltas land.
+
+        **No block yet, because nothing has been said.**  One used to be opened
+        here — "before anything is known about it" — and *anything* that wrote a
+        line first closed it again: `add_note` closes the block it is given, so a
+        note arriving before the first delta left an empty assistant block in the
+        transcript, a blank gap between the prompt and the answer.  The
+        discriminator's note is such a line, and so is `[cancelled]` on a turn
+        that streamed nothing before it was interrupted.
+
+        Text, reasoning and the final answer each open the block they need —
+        which `append_text` was already doing for the case after a tool panel —
+        so a turn with nothing to say leaves nothing behind.
+        """
         self._close_block()
         self._turn_open = True
-        self._streaming = self._open_block()
 
     def _open_block(self) -> AssistantMessage:
         widget = self._add(AssistantMessage(self._agent), "assistant-message")

@@ -46,6 +46,25 @@ def preview(text: str, limit: int = PREVIEW_CHARS) -> str:
 
 
 @dataclass(frozen=True)
+class ContextChosen:
+    """What the turn is about to run on, reported before it runs.
+
+    The discriminator's answer (`slife2.context`).  It arrives **first**, before
+    any text, because it is a fact about what the conversation is about to be
+    and not about how the turn went — a display that only learned it afterwards
+    would be showing one turn's context under another turn's answer.
+
+    Two counts, because the decision has two halves and they are what somebody
+    watching wants to know: `kept` is how much of what was in hand survived it,
+    `recalled` is how much came back from the turn log.  Their sum is how many
+    turns the turn runs on.
+    """
+
+    kept: int
+    recalled: int
+
+
+@dataclass(frozen=True)
 class TextDelta:
     """A piece of the assistant's visible answer."""
 
@@ -117,7 +136,12 @@ class TurnFinished:
 
 
 TurnEvent = (
-    TextDelta | ThinkingDelta | ToolCallStarted | ToolCallFinished | TurnFinished
+    ContextChosen
+    | TextDelta
+    | ThinkingDelta
+    | ToolCallStarted
+    | ToolCallFinished
+    | TurnFinished
 )
 
 
@@ -163,6 +187,8 @@ def encode(event: TurnEvent) -> str:
     payload: dict[str, Any] = {}
 
     match event:
+        case ContextChosen(kept=kept, recalled=recalled):
+            payload = {"t": "context", "kept": kept, "recalled": recalled}
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -230,6 +256,11 @@ def decode(message: str) -> TurnEvent | None:
     # `d` is always a string when present; a payload whose `d` is a number is
     # somebody else's message that happens to share our key space.
     match payload.get("t"):
+        case "context":
+            return ContextChosen(
+                kept=int(payload.get("kept") or 0),
+                recalled=int(payload.get("recalled") or 0),
+            )
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):

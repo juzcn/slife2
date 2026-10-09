@@ -146,6 +146,15 @@ and draws them, reasoning and all — a step that thought before it answered com
 back with its thinking folded away exactly where a live one had it. **Ctrl+N** is
 what starts a genuinely new conversation.
 
+**The window also says what the context is doing.** A restored conversation shows
+its size in the status bar — the count the last call left the conversation at, not
+a running total, and what fraction of the model's window that is. Each turn is
+then preceded by a note naming what the *discriminator* decided for it: how much
+of the conversation in hand it kept, and how much it went back to the turn log
+for. That is one model call per turn that nothing else would show you, and it is
+the mechanism that keeps a long conversation from growing without bound —
+`slife2-context`'s own judgement, argued in DESIGN §5.1.
+
 Name an image with `@` and it goes with the prompt:
 
 ```
@@ -194,7 +203,6 @@ which the turn simply runs on the context it has:
 
 ```yaml
 context:
-  rebuild: true        # off: the context grows append-only, bounded by nothing yet
   ceiling: 0.8         # what a kept context is measured against
   floor: 0.2
   recall_limit: 40
@@ -256,7 +264,6 @@ tool_load:                              # how many tools the model may hold
   threshold: 100
 
 context:                                # how a conversation's context is decided
-  rebuild: true
   ceiling: 0.8
   floor: 0.2
 ```
