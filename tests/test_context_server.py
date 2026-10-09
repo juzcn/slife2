@@ -22,6 +22,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.audience import client_meta
 from slife2.config import default_config
+from slife2.context import turn_footnote, turn_note
 from slife2.context_server import build_server
 from slife2.db import MAX_PAGE, TurnStore
 from slife2.paths import DATA_ENV_VAR, db_dir
@@ -328,7 +329,7 @@ async def test_a_new_conversation_restores_its_own_head(tmp_path, monkeypatch) -
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
 
-    assert answer.data == {"messages": [SYSTEM], "turn_ids": []}
+    assert answer.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
 
 
 @pytest.mark.asyncio
@@ -359,9 +360,38 @@ async def test_a_restore_replays_the_list_and_names_its_turns(
         "assistant",
     ]
     assert messages[1]["content"].startswith("first")
-    assert json.loads(messages[1]["content"].split("[INFO: ")[1].rstrip("]"))[
+    assert json.loads(messages[1]["content"].split("[TURN: ")[1].rstrip("]"))[
         "turn_id"
     ] == ids[0]
+
+
+def test_the_footnote_a_screen_shows_is_the_one_the_model_reads() -> None:
+    """One function, two readers, and the marker is the whole difference.
+
+    A window that shows a turn's id beside a message is showing the id a
+    keep-list will be written with, so the two spellings are one function with
+    the envelope applied and not two that have to be kept in step.
+
+    The marker says `TURN` and not v1's `INFO` because this build has one thing
+    to put in that envelope: which turn a message opened.  `channel` is the
+    second thing in it, and it is what an id alone cannot say — whose turn it is.
+    """
+    when = "2026-08-10T14:03:00+08:00"
+    ended = "2026-08-10T14:05:00+08:00"
+
+    assert turn_note(12, when, ended, "tui") == (
+        f"[TURN: {turn_footnote(12, when, ended, 'tui')}]"
+    )
+    assert json.loads(turn_footnote(12, when, ended, "tui")) == {
+        "turn_id": 12,
+        "channel": "tui",
+        "begin": "2026-08-10 14:03",
+        # The same day, so the date is not repeated.
+        "end": "14:05",
+    }
+    # With nothing to say but the id, which is the shape a seeded turn has, and
+    # an absent channel rather than an empty one — no caller meant "unknown".
+    assert turn_footnote(12, "", None) == '{"turn_id": 12}'
 
 
 @pytest.mark.asyncio
@@ -721,7 +751,7 @@ async def test_forget_clears_the_context_and_keeps_the_turns(
         )
 
     assert forgotten.data == {"turn_ids": []}
-    assert restored.data == {"messages": [SYSTEM], "turn_ids": []}
+    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
     assert still_readable.data["messages"][0]["content"] == "one"
 
 

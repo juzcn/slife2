@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -51,6 +51,16 @@ class AgentClient(Protocol):
 
     async def reset(self) -> None:
         """Forget the conversation so the next turn starts fresh."""
+        ...
+
+    async def transcript(self) -> list[dict[str, Any]]:
+        """The turns this conversation is made of, for a window to draw.
+
+        Empty for a conversation that has never run, which is the honest answer
+        for a new name and not a failure.  Read once, when the window opens: the
+        history is the server's, so a window that failed to read it has lost
+        nothing but the sight of it.
+        """
         ...
 
     async def run_turn(
@@ -176,6 +186,30 @@ class MCPAgentClient:
             timeout=self._timeout,
         )
 
+    async def transcript(self) -> list[dict[str, Any]]:
+        """Read the conversation back, for the window that has just opened.
+
+        The transport rule is `run_turn`'s, for `run_turn`'s reason: a failure
+        that is not the server *answering* means the connection is gone, and a
+        client that kept it would look connected to a server nothing is talking
+        to for the rest of the session.
+        """
+        if self._client is None:
+            raise ConnectionError("not connected")
+        try:
+            result = await self._client.call_tool(
+                "transcript",
+                {"agent": self._agent, "subagent": self._subagent},
+                timeout=self._timeout,
+            )
+        except ToolError:
+            raise
+        except Exception:
+            await self.close()
+            raise
+        turns = (result.data or {}).get("turns")
+        return list(turns) if isinstance(turns, list) else []
+
     async def run_turn(
         self,
         prompt: str,
@@ -197,10 +231,15 @@ class MCPAgentClient:
             "agent": self._agent,
             "subagent": self._subagent,
             "prompt": prompt,
-            # Every turn this client sends came from somebody typing, which is
-            # the whole of what the channel records.  A second kind of caller
-            # gets a second client rather than a flag on this one.
-            "channel": "human",
+            # Every turn this client sends came from somebody typing at *this*
+            # window, and that is the whole of what the channel records — which
+            # is why it names the window and not the person: `human` was the
+            # first spelling and it says less, since a turn's channel is what
+            # tells one caller's turns from another's, and "a human" does not
+            # distinguish the terminal from anything else a person might type
+            # into.  A second kind of caller gets a second client rather than a
+            # flag on this one.
+            "channel": "tui",
         }
         # Omitted rather than sent empty: an empty string and an absent key mean
         # the same thing to the server — "you choose" — and a payload that says

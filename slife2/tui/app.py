@@ -49,6 +49,7 @@ from slife2.events import (
 )
 from slife2.tui import attachments
 from slife2.tui.client import AgentClient, MCPAgentClient
+from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import ChatView, HistoryInput, StatusBar
 
@@ -85,6 +86,17 @@ class SlifeApp(App[None]):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+n", "new_conversation", "New conversation"),
         Binding("ctrl+q", "quit", "Quit"),
+        # Home/End go to the transcript rather than to the draft, and
+        # `priority` is what makes that true: the priority pass runs *before*
+        # the focused widget, and the focused widget is the prompt, whose
+        # `TextArea` binds both keys to the ends of the line the cursor is on.
+        # TextArea keeps the Emacs spelling of each (Ctrl+A / Ctrl+E), so the
+        # bargain slife v1 made — the transcript gets the obvious keys, the
+        # draft keeps a way to reach the line's ends — is affordable.
+        # PageUp/PageDown need no binding here: they are taken on the prompt
+        # itself, because `TextArea` claims them and nothing else can.
+        Binding("home", "scroll_home", "Scroll to top", priority=True),
+        Binding("end", "scroll_end", "Scroll to bottom", priority=True),
     ]
 
     def __init__(
@@ -130,6 +142,10 @@ class SlifeApp(App[None]):
         self._client: AgentClient | None = None
         self._connected = False
         self._connection_text = "connecting"
+        #: Whether the previous conversation is drawn, or being drawn.  Once
+        #: per window: reading it again would append a second copy of a history
+        #: the transcript is already showing.
+        self._restored = False
         #: Prompts sent but not started, oldest first.  The user's message is
         #: added to the transcript when its turn starts rather than on submit,
         #: so that the transcript stays a faithful record of the turns that
@@ -208,7 +224,48 @@ class SlifeApp(App[None]):
             self._connected = True
             self._connection_text = "connected"
         self._refresh_status()
+        if self._connected:
+            # Here rather than in `on_mount`, because a window opened before the
+            # servers were is the ordinary case on a cold start: the connect
+            # this ends is the lazy retry, and that is the first moment there is
+            # anything to ask.  It is also the last moment it may happen — the
+            # turn about to run opens its block next.
+            await self._restore()
         return self._connected
+
+    async def _restore(self) -> None:
+        """Show the conversation this name already had.  Once.
+
+        A restart is not a new conversation.  The server has restored the
+        *context* the moment a loop is built, so a window that drew nothing
+        would be the only part of the system acting as though the conversation
+        were over — it would sit blank while the model answered from a history
+        the user could not see.
+        """
+        # Claimed *before* the await, and given back if the read fails.  The
+        # flag means "somebody is drawing it", not "it has been drawn": the
+        # check and the claim are one statement, so a second caller arriving
+        # while the read is in flight returns instead of mounting a second copy
+        # of the whole conversation.  `connect` is guarded the same way and for
+        # the same reason — it is the shape of anything with an await in it.
+        if self._restored:
+            return
+        self._restored = True
+        assert self._client is not None
+        try:
+            turns = await self._client.transcript()
+        except Exception as exc:  # noqa: BLE001 - a window is not worth losing
+            self._restored = False
+            # Given back because this is the retry path: a read that failed
+            # because the servers were still coming up should be tried again
+            # when they are.  Nothing is lost by waiting — the history is the
+            # server's, and the conversation continues either way.
+            logger.warning("the previous conversation could not be read: %s", exc)
+            self._connected = False
+            self._connection_text = f"disconnected: {exc}"
+            self._refresh_status()
+            return
+        restore(self._transcript, turns)
 
     # --- the queue of turns --------------------------------------------------
 
@@ -245,6 +302,12 @@ class SlifeApp(App[None]):
                 self._ticket += 1
                 ticket = self._ticket
                 self._transcript.add_user(prompt)
+                # The reader's own message owns the view: sending it goes to
+                # the end and re-arms following, however far up they had read.
+                # `add_user` follows the tail like every other mount, and that
+                # does nothing for a reader who is not at it — so a message sent
+                # from up in the history would be written below the fold.
+                self._transcript.jump_to_tail()
                 # Read before the answer's block is opened, so a complaint about
                 # an attachment lands under the prompt rather than *inside* the
                 # answer: `add_note` closes the block it is given, so a note
@@ -387,6 +450,25 @@ class SlifeApp(App[None]):
         """
         if not self._cancel_turn():
             self.exit()
+
+    def action_scroll_home(self) -> None:
+        """Scroll the transcript to the top, and stop following the tail.
+
+        `scroll_home` rather than `scroll_to(y=0)`: it states the request
+        through the same funnel as every other mover, which is where following
+        is decided.
+        """
+        self._transcript.scroll_home(animate=False)
+
+    def action_scroll_end(self) -> None:
+        """Scroll to the bottom *and* follow from there.
+
+        `jump_to_tail` rather than `scroll_end`, because End is the reader
+        saying they are done with the history: `scroll_end` would leave
+        following to be re-armed by the request's own deferred landing, and a
+        token streamed inside that window would find it still off.
+        """
+        self._transcript.jump_to_tail()
 
     async def action_new_conversation(self) -> None:
         """Start over: a new loop, an empty queue, an empty window.

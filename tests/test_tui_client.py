@@ -100,7 +100,7 @@ async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
         "agent": "jack",
         "subagent": "",
         "prompt": "hi",
-        "channel": "human",
+        "channel": "tui",
         "model": "deepseek/deepseek-flash",
         "images": ["data:image/png;base64,AA"],
     }
@@ -121,9 +121,9 @@ async def test_a_payload_says_nothing_it_does_not_have_to(monkeypatch) -> None:
     (arguments,) = sent(transport, "send_message")
     assert "model" not in arguments
     assert "images" not in arguments
-    # The channel is not optional: this client exists to serve somebody typing,
-    # and that is a fact about the caller rather than something it may lack.
-    assert arguments["channel"] == "human"
+    # The channel is not optional: this client exists to serve one window, and
+    # that is a fact about the caller rather than something it may lack.
+    assert arguments["channel"] == "tui"
 
 
 @pytest.mark.asyncio

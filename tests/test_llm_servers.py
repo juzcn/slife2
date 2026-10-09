@@ -70,6 +70,9 @@ from slife2.llm.openai_server import (
     build_request as openai_build_request,
 )
 from slife2.llm.openai_server import (
+    to_provider_messages as openai_provider_messages,
+)
+from slife2.llm.openai_server import (
     translate as openai_translate,
 )
 from slife2.llm.server_common import ToolCallAccumulator, build_llm_server
@@ -950,6 +953,34 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_returns_the_assembled_reasoning() -> None:
+    """Assembled the same way the text is, and for the same reason.
+
+    The chunks go to the reader to be watched; the *result* is what the turn
+    keeps, and a consumer that reassembled the reasoning out of the progress
+    stream would be reading the record off a channel that is allowed to drop
+    fragments.  One accumulator, both fields.
+    """
+    server = build_llm_server(
+        name="t",
+        streamer=scripted(
+            Chunk(thinking="six sevens "),
+            Chunk(thinking="are forty-two"),
+            Chunk(text="42"),
+            Finish("stop"),
+        ),
+    )
+    result, chunks = await call_stream_chat(
+        server, messages=[{"role": "user", "content": "6*7?"}], tools=[], model="m"
+    )
+
+    assert result.data["thinking"] == "six sevens are forty-two"
+    assert result.data["text"] == "42"
+    # ...and the reader saw it as it arrived, on its own kind of chunk.
+    assert [c.thinking for c in chunks] == ["six sevens ", "are forty-two", ""]
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_reassembles_a_fragmented_tool_call() -> None:
     """The whole reason tool-call assembly lives in this server.
 
@@ -1155,6 +1186,91 @@ def test_openai_thinking_is_opt_in() -> None:
 
     omitted = ModelSettings(model="m", thinking="omit")
     assert "thinking" not in openai_build_request([], [], omitted, stream_usage=True)
+
+
+def keys_in(value: Any) -> set[str]:
+    """Every key at any depth, for asking what reached a provider."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found.add(key)
+            found |= keys_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            found |= keys_in(item)
+    return found
+
+
+def test_openai_renames_reasoning_for_a_model_that_reasons() -> None:
+    """The one place what we carry differs from what a provider is sent.
+
+    `thinking` is ours: the turn log stores messages, and a conversation read
+    back with the reasoning stripped has a hole in it.  This wire has no such
+    name and DeepSeek's is `reasoning_content`, so here it is renamed — and the
+    empty string below is the load-bearing part.  A reasoner that is asked to
+    think must carry the field on *every* assistant message in the history or
+    the API answers 400, and an assistant message that reported nothing is
+    exactly the one that would be missing it.
+    """
+    messages = [
+        Message(role="user", content="6*7?"),
+        Message(
+            role="assistant",
+            content="",
+            thinking="six sevens",
+            tool_calls=[ToolCall(id="c1", name="calc", arguments={"e": "6*7"})],
+        ),
+        Message(role="tool", content="42", tool_call_id="c1"),
+        Message(role="assistant", content="it is 42"),
+    ]
+
+    converted = openai_provider_messages(messages, reasoning=True)
+
+    assert converted[1]["reasoning_content"] == "six sevens"
+    assert "thinking" not in converted[1], "our own name never leaves"
+    assert converted[3]["reasoning_content"] == "", "nor is the field ever absent"
+    # The filler is an assistant-side rule: a user message and a tool result
+    # have no reasoning to report and say nothing about any.
+    assert "reasoning_content" not in converted[0]
+    assert "reasoning_content" not in converted[2]
+
+
+def test_the_filler_is_only_for_models_that_reason() -> None:
+    """Two rules, drawn the way v1 draws them.
+
+    A message that *has* reasoning is renamed wherever it turns up — an endpoint
+    that produced it is an endpoint that knows the name.  The empty filler is
+    the other rule: only a model the config says reasons gets one, because an
+    endpoint that never reports reasoning is an endpoint whose acceptance of the
+    key is unknown.
+    """
+    quiet = openai_provider_messages(
+        [Message(role="assistant", content="hi")], reasoning=False
+    )
+    assert "reasoning_content" not in quiet[0]
+
+    carried = openai_provider_messages(
+        [Message(role="assistant", content="hi", thinking="because")], reasoning=False
+    )
+    assert carried[0]["reasoning_content"] == "because"
+
+
+def test_the_other_two_protocols_drop_reasoning_altogether() -> None:
+    """Not sent, and not quietly carried either.
+
+    The Anthropic and Responses shapes have nowhere to put a model's own earlier
+    reasoning, so it is simply not built into their requests — v1's behaviour
+    for both, and the reason the rename lives in one adapter rather than in
+    `to_wire`.  Asserted by asking what keys reached the request, because a
+    field that leaked would be present and unnoticed rather than wrong.
+    """
+    assistant = Message(role="assistant", content="42", thinking="sevens")
+
+    _, blocks = to_anthropic_messages([assistant])
+    assert not (keys_in(blocks) & {"thinking", "reasoning_content"})
+
+    request = responses_build_request([assistant], [], ModelSettings(model="m"))
+    assert not (keys_in(request) & {"thinking", "reasoning_content"})
 
 
 def test_anthropic_sends_max_tokens_always() -> None:

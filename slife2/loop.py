@@ -145,6 +145,12 @@ class AgentLoop:
                 Message(
                     role="assistant",
                     content=result.text or None,
+                    # Kept on the message rather than only streamed at the
+                    # reader: it is part of what the model said, and the turn
+                    # log is where a conversation is read back from.  It does
+                    # not go to the model again — `Message.to_wire` leaves it
+                    # out, which is the whole of that decision.
+                    thinking=result.thinking,
                     tool_calls=list(result.tool_calls),
                 )
             )

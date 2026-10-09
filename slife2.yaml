@@ -29,7 +29,11 @@
 #   model                 API model name; doubles as the local id, referenced
 #                         elsewhere as "provider/model"
 #   name                  display label for the status bar and logs
-#   reasoning             the model thinks natively
+#   reasoning             the model thinks natively.  On an openai-completions
+#                         wire that also means its reasoning is kept on the turn
+#                         and re-sent to it as `reasoning_content` — which the
+#                         DeepSeek reasoners require on every assistant message
+#                         once thinking has been asked for
 #   input                 modalities accepted; list image only for vision models
 #   context_window        token budget, shown as a percentage in the status bar
 #   max_tokens            output cap

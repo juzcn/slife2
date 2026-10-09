@@ -228,11 +228,12 @@ it is busy can **wait** for it rather than displace what is running, and so that
 a caller which is not displaying the conversation can still continue one. (A
 subagent is that caller — see §9.)
 
-So a conversation is an object, and the surface is two tools:
+So a conversation is an object, and the surface is three tools:
 
 ```
 send_message(agent, subagent, prompt) → {text, usage, steps, stop_reason, model}
 reset(agent, subagent)
+transcript(agent, subagent)           → {turns}   the conversation, for a screen
 ```
 
 **`new_messages` is gone**, and its absence is the point: the caller has nothing
@@ -486,14 +487,71 @@ the floor is where a live context already sits.
 **Restore is the same replay at the other end.** When a conversation starts — a
 restarted process, a conversation the idle sweep let go — the list is replayed
 verbatim, in its own order, with no ceiling re-slicing. Each turn contributes a
-copy of its first message carrying a footnote naming its id and its span, which
-is **how a turn id reaches the model at all** and therefore how a keep-list is
-expressible. The footnote is added when a message list is built and never
-stored, so it cannot drift from the row it describes.
+copy of its first message carrying a `[TURN: {…}]` footnote naming its id, its
+channel and its span, which is **how a turn id reaches the model at all** and
+therefore how a keep-list is expressible. The footnote is added when a message
+list is built and never stored, so it cannot drift from the row it describes.
+
+**And there is a second place it is written, because a rebuild is not the only
+way a turn enters the list.** The turn that has just run was appended by the loop
+and is in no rebuilt list, so annotating only at build time leaves exactly the
+newest turns unaddressable — the ones a keep-list would most often want, and
+whose absence is silent. So the agent server writes the same footnote onto the
+message that opened the turn once the turn is saved (`annotate_turn`) and the id
+is known: after the save and never into it, and with the timestamps and channel
+the row was written with, because the rebuilt spelling and the in-memory one have
+to agree to the character or every rebuild costs a prompt-cache miss.
+
+v1 spells the marker `[INFO: …]` and shares that envelope with a second thing —
+the trim note — that this build does not have (§9). With one occupant the
+envelope can say what it holds, so it says `TURN`.
 
 **Both live behind one tool each, and neither is the model's.** A model may read
 its history (`turn_list`, `turn_read`); it may not decide what its context is. It
 says what it wants kept by what it writes, never by calling anything.
+
+**The restoring read has two readers, and the second one is a screen.** The
+context is put back by `send_message` — the first message under a key builds the
+loop, and a loop that has just been built is the one moment the store is asked
+what this conversation was made of. That leaves a terminal that has just opened
+with the opposite question: the context is already right, and what is missing is
+the *sight* of it. So `transcript` answers the same read with the stored turns
+instead of the rebuilt message list, and the TUI draws them. It is the turns and
+not the messages because the message list is the model's: when a line was said,
+which turn it belongs to and where a turn's work ends are the record's facts, and
+a window that had only the messages would render every restored conversation as
+one undivided block stamped now.
+
+It is a read, and it stays one. Opening a window must not start, end or rebuild
+anything, so `transcript` touches neither the loops nor the live-context list —
+which is also why it answers from the store rather than from the running loop: a
+window opened against a server that has been up for a week shows the same
+conversation as one opened against a server that has just started. The drawing
+half is `slife2/tui/restore.py`, and it drives the transcript with the *live*
+calls (`add_user`, `finish_assistant`, `add_tool_start`/`add_tool_end`) rather
+than with a rendering vocabulary of its own — which is what makes a rebuilt
+conversation and a live one the same thing rather than two renderings that
+happen to agree.
+
+That required one thing of the record. The model's reasoning is part of what
+happened — a transcript read back that has lost it has a hole exactly where the
+reader was looking — so it is kept on the message, and it is the one key on that
+message no provider is guaranteed to know. The way out is v1's: the neutral
+message (`Message.to_wire`) is what *we* pass a conversation around in, and each
+adapter builds its own provider request from it, so a field can be renamed or
+dropped at the edge. `slife2.llm.openai_server` renames it to DeepSeek's
+`reasoning_content` — including, deliberately, an *empty* one on assistant
+messages that reported no reasoning, because a reasoner that has been asked to
+think requires the field on every assistant message in the history and answers
+400 when one is missing. The Anthropic and Responses adapters build their
+requests field by field and simply never put it in.
+
+One thing a rebuild still cannot show: **a tool's failure.** It is a fact the
+loop knows only while it runs (`ToolCallFinished.ok`), where the record keeps the
+text the tool answered with — and for most tools a failure is an ordinary
+sentence. A restored panel therefore reads as done. That is an absence in the
+record rather than a mistake in `slife2/tui/restore.py`, and it is worth closing
+in the record rather than guessed at from the text.
 
 Two things are deliberately not carried over from v1, and both are named in §9
 rather than half-built here: **the trim** — which with the rebuild on is a

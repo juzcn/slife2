@@ -111,18 +111,41 @@ class Message:
 
     role: Role
     content: str | list[dict[str, Any]] | None = None
+    #: Assistant turns only — the model's own reasoning, when it reported any.
+    #:
+    #: **Not one of the OpenAI wire's fields**, and it travels anyway: this is
+    #: the shape *we* pass a conversation around in, and each provider adapter
+    #: builds its own request from it — so a field the provider has no name for
+    #: can ride here and be renamed or dropped at the edge.  That is v1's
+    #: arrangement exactly, and it is what makes the two things reasoning has to
+    #: do possible at once: `openai_server` re-sends it as DeepSeek's
+    #: `reasoning_content`, and `anthropic_server` and the responses server drop
+    #: it, because those two have nowhere to put it.
+    #:
+    #: Kept on the message rather than only streamed at the reader, because the
+    #: turn log stores messages: a conversation read back after a restart that
+    #: has lost the reasoning has a hole in it, and the hole is exactly where
+    #: the reader was looking.
+    thinking: str = ""
     #: Assistant turns only — the calls this turn is asking for.
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: Tool turns only — which call this is the result of.
     tool_call_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        """Render as the OpenAI chat message.
+        """Render as the message our own hop carries.
+
+        The OpenAI chat message, plus `thinking` where there is any — the one
+        key on this dict a provider may not know (see the field).  Whoever
+        builds a provider's request is what turns this into that provider's
+        shape, and `slife2.llm.openai_server` is where the one rename lives.
 
         Keys that do not apply to the role are omitted rather than sent as null:
         several OpenAI-compatible servers (vLLM, some gateways) reject a `tool`
         message carrying a `tool_calls` key, and an assistant message with
-        `tool_call_id: null` is a 400 on others.
+        `tool_call_id: null` is a 400 on others.  `thinking` is omitted on the
+        same terms: an absent key and an empty one mean the same thing, and the
+        absent spelling is what a turn stored before this field existed has.
         """
         payload: dict[str, Any] = {"role": self.role}
         # `content` is sent as an empty string rather than null when there are
@@ -133,6 +156,8 @@ class Message:
         elif self.tool_calls:
             payload["content"] = ""
 
+        if self.thinking:
+            payload["thinking"] = self.thinking
         if self.tool_calls:
             payload["tool_calls"] = [c.to_wire() for c in self.tool_calls]
         if self.tool_call_id is not None:
@@ -141,7 +166,7 @@ class Message:
 
     @classmethod
     def from_wire(cls, raw: dict[str, Any]) -> Message:
-        """Rebuild from the OpenAI chat message.
+        """Rebuild from the message our own hop carries.
 
         Normalises the one asymmetry `to_wire` introduces: it sends `""` as the
         content of a tool-calling assistant turn, where this stores `None`.  Both
@@ -156,6 +181,7 @@ class Message:
         return cls(
             role=cast(Role, raw.get("role", "user")),
             content=content,
+            thinking=str(raw.get("thinking") or ""),
             tool_calls=tool_calls,
             tool_call_id=raw.get("tool_call_id"),
         )
@@ -244,6 +270,14 @@ class StreamChatResult:
 
     text: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
+    #: The model's reasoning, for the models that reported any.
+    #:
+    #: Here as well as on the progress stream, and for the same reason `text` is:
+    #: the chunks are how reasoning is *watched* and this is what the turn
+    #: *keeps*.  A caller that accumulated it from the deltas would be trusting
+    #: the display channel for a fact about the record — which is the mistake
+    #: this class exists to prevent, one field over.
+    thinking: str = ""
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
 
@@ -251,6 +285,7 @@ class StreamChatResult:
         return {
             "text": self.text,
             "tool_calls": [c.to_wire() for c in self.tool_calls],
+            "thinking": self.thinking,
             "usage": self.usage.to_wire(),
             "stop_reason": self.stop_reason,
         }
@@ -263,6 +298,10 @@ class StreamChatResult:
             tool_calls=tuple(
                 ToolCall.from_wire(c) for c in raw.get("tool_calls") or []
             ),
+            # An absent key reads as empty, which is what a server from before
+            # this field existed sends — and is the truth about a model that
+            # reported no reasoning.
+            thinking=str(raw.get("thinking") or ""),
             usage=Usage.from_wire(raw.get("usage")),
             stop_reason=str(raw.get("stop_reason") or ""),
         )

@@ -114,6 +114,13 @@ In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
 a running turn (and quits when there is none), **Ctrl+N** starts a new
 conversation, **Ctrl+Q** quits.
 
+**PageUp/PageDown** page the transcript and **Home/End** jump to its ends, and
+the wheel scrolls it wherever the pointer happens to be — the transcript is what
+those keys move, not the draft, so a long answer can be read while the next
+message is being typed. Scrolling up holds the page there: streamed tokens do
+not drag the view back down, and sending a message is what returns it to the
+end. The draft keeps **Ctrl+A** and **Ctrl+E** for the ends of the line.
+
 **Ctrl+C is still the copy key.** With something selected — in the prompt, or
 with the mouse in the transcript — it copies, and nothing is cancelled; that is
 what it does in every other program, and a terminal where it cannot copy is
@@ -127,6 +134,17 @@ turn already running finishes, yours runs next, and the status bar says how many
 are waiting. Esc stops the turn in flight and leaves the queue alone — the
 message you gave up on and the one you are still waiting for are not the same
 message.
+
+**A restart is not a new conversation.** Close the window and open it again — or
+restart the daemons, or leave it long enough for the idle sweep to let the
+conversation go — and the transcript comes back: the same questions, the same
+answers, the same tool calls with the results they returned, each line stamped
+with the moment it was sent rather than with the moment the window opened. What
+is put back is the conversation's *context*, restored by the agent server the
+moment it builds the loop; the window asks for the turns that context was made of
+and draws them, reasoning and all — a step that thought before it answered comes
+back with its thinking folded away exactly where a live one had it. **Ctrl+N** is
+what starts a genuinely new conversation.
 
 Name an image with `@` and it goes with the prompt:
 
@@ -157,8 +175,10 @@ not a detail: the turn being recalled is usually a follow-up, and "what about th
 other one" names its subject only through the turns above it. Its answer is a
 selection, never a dump — the context is bounded, so a recall that matched more
 than fits returns what fits, and the keep-list is how a model says which of the
-turns in hand it is still working from. Every turn it reads carries a footnote
-naming its id, which is where those ids come from.
+turns in hand it is still working from. Every turn it reads carries a `[TURN: …]`
+footnote naming its id, its channel and its span, which is where those ids come
+from — and every turn the process ran itself gets one too, written the moment it
+is saved, so the newest turns are as addressable as the restored ones.
 
 **Nothing a model can call decides this.** The model has `turn_list` and
 `turn_read` — reading its own history is the point of a log — and the two

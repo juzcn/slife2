@@ -11,6 +11,15 @@ resolved at all.  It holds no state between calls.
 OpenAI, DeepSeek, Ollama, vLLM, scnet, and most gateways, because they all speak
 the chat-completions wire format — which is exactly why that format was chosen
 as the neutral one in `slife2.messages`.
+
+**One field is translated rather than passed on.**  The neutral message carries
+the model's own reasoning, because a turn log stores messages and a conversation
+read back with the reasoning stripped has a hole exactly where the reader was
+looking — but the chat-completions wire has no such field.  `reasoning_content`
+is DeepSeek's name for it, and `to_provider_messages` is where it is renamed:
+that function is the whole of the difference between what we carry and what a
+provider is sent.  The other two protocols build their requests field by field
+and so drop it, which is the arrangement v1 arrives at from the other side.
 """
 
 from __future__ import annotations
@@ -66,6 +75,44 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
             return None
 
 
+def to_provider_messages(
+    messages: list[Message], *, reasoning: bool
+) -> list[dict[str, Any]]:
+    """The messages as this wire wants them — the one place the two differ.
+
+    `thinking` is carried on the neutral message for the reason it exists: a
+    turn log stores messages, and a conversation read back with the reasoning
+    stripped has a hole in it.  This wire has no such field, and DeepSeek's name
+    for the same thing is `reasoning_content` — so here it is renamed, and this
+    function is the whole of the difference between what we carry and what a
+    provider is sent.  The other two adapters build their requests field by
+    field and so drop it, which is v1's arrangement exactly.
+
+    **The empty string is the load-bearing part.**  When its reasoners are asked
+    to think, the DeepSeek API requires `reasoning_content` on *every* assistant
+    message in the history and answers 400 when one is missing — and a harness
+    pair, or an assistant message whose model reported nothing, is exactly such
+    a message.  So "no reasoning" and "no field" have to be spelled differently,
+    and only one of the two is accepted.
+
+    `reasoning` is the model's own `reasoning: true`, which is v1's rule: the
+    flag that says a model thinks is the flag that says its thinking comes back
+    to it.  A model without it gets neither the field nor the empty filler,
+    because an endpoint that never reports reasoning is an endpoint whose
+    acceptance of the key is unknown.
+    """
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        wire = message.to_wire()
+        thinking = wire.pop("thinking", "")
+        if thinking:
+            wire["reasoning_content"] = thinking
+        elif reasoning and message.role == "assistant":
+            wire["reasoning_content"] = ""
+        converted.append(wire)
+    return converted
+
+
 def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
@@ -81,7 +128,7 @@ def build_request(
     """
     request: dict[str, Any] = {
         "model": settings.model,
-        "messages": [m.to_wire() for m in messages],
+        "messages": to_provider_messages(messages, reasoning=settings.reasoning),
         "stream": True,
     }
     if tools:

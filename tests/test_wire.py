@@ -189,10 +189,40 @@ def test_stream_chat_result_round_trips() -> None:
     result = StreamChatResult(
         text="answer",
         tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "1+1"}),),
+        thinking="eight times eight is sixty-four",
         usage=Usage(5, 6),
         stop_reason="tool_calls",
     )
     assert StreamChatResult.from_wire(result.to_wire()) == result
+
+
+def test_reasoning_rides_our_wire_and_comes_back() -> None:
+    """`thinking` is not an OpenAI field, and it travels with the message anyway.
+
+    This shape is what *we* pass a conversation around in — the hop to an LLM
+    server, and the turn log — and each provider adapter builds its own request
+    from it, so a key no provider has a name for can ride here and be renamed or
+    dropped at the edge.  It has to ride: the log stores messages, and a
+    conversation read back with the reasoning stripped has a hole exactly where
+    the reader was looking.
+    """
+    message = Message(
+        role="assistant",
+        content="42",
+        thinking="let me work it out",
+        tool_calls=[ToolCall(id="c1", name="calc", arguments={"e": "6*7"})],
+    )
+
+    assert message.to_wire()["thinking"] == "let me work it out"
+    assert Message.from_wire(message.to_wire()) == message
+
+
+def test_a_message_without_reasoning_has_no_thinking_key() -> None:
+    """Absent, not empty — which is what a turn stored before the field existed
+    has, so the two are the same bytes and neither adapter sees a stray key."""
+    wire = Message(role="assistant", content="hello").to_wire()
+    assert "thinking" not in wire
+    assert Message.from_wire(wire).thinking == ""
 
 
 def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:

@@ -15,6 +15,23 @@ kept by construction rather than by escaping.
 stylable span rather than part of a format string, which is why slife's messages
 can carry a coloured `You>` and slife2's can too, without either of them
 inventing an escaping scheme.
+
+**Following the tail is decided where a scroll is ASKED FOR**, not from the
+offset — see :meth:`ChatView._scroll_to`.  Textual re-clamps `scroll_y` by
+itself whenever a size change leaves it past the end, and reading that
+correction as intent re-arms following under a reader who is up in the history:
+the next streamed token then pulls the page out from under them.
+
+**And it is re-armed when the content's height changes** — see
+:meth:`ChatView._size_updated`.  The end of the content is settled a frame after
+the text that moved it, so the follow a burst of deltas asks for is aimed at a
+height that is already out of date by the time it lands.
+
+**The agent's `name>` is painted only where there is text under it.**  A block
+is opened before anything is known about it — on `begin_assistant`, and again
+after each tool panel when reasoning or text resumes — so a signature painted
+unconditionally leaves a bare `slife2>` row in the transcript for every step
+that has only reasoning to show.  slife v1 signs the message, not the widget.
 """
 
 from __future__ import annotations
@@ -23,9 +40,12 @@ from datetime import datetime
 from typing import TypeVar
 
 from rich.text import Text
+from textual import events
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.geometry import Size
 from textual.message import Message as TextualMessage
+from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -43,10 +63,21 @@ PRIMARY_ARG_CHARS = 72
 THINKING_PREVIEW_CHARS = 500
 
 
-def _timestamp(moment: datetime | None = None) -> str:
-    """`HH:MM`, or a longer form once the day is no longer today."""
+def _timestamp(when: datetime | str | None = None) -> str:
+    """`HH:MM`, or a longer form once the day is no longer today.
+
+    Accepts the ISO-8601 string a turn records its own time as, so a restored
+    message can carry the moment it was sent rather than the moment the window
+    was opened — which is the whole difference between a transcript that reads
+    as a conversation and one that reads as a wall of text stamped now.
+    """
     now = datetime.now()
-    moment = moment or now
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when)
+        except ValueError:
+            when = None
+    moment = when or now
     if moment.date() == now.date():
         return moment.strftime("%H:%M")
     if moment.year == now.year:
@@ -69,6 +100,30 @@ def _duration(ms: int) -> str:
 def plain(text: str, style: str = "") -> Text:
     """Model, tool or user text as a renderable it cannot style itself with."""
     return Text(text, style=style)
+
+
+async def redirect_printable(widget: Widget, event: events.Key) -> bool:
+    """Forward a printable key to the prompt; `True` when it was taken.
+
+    The transcript's widgets are focusable — that is what gives a message Enter
+    and Space to unfold its reasoning, and a tool panel the same to open — but a
+    click lands focus on one of them, and after that typing has to reach the
+    prompt anyway.  Letters and punctuation are what a person types at; the keys
+    those widgets were made focusable for are theirs.
+    """
+    # Space is the one printable key that is *also* a binding, and the widget's
+    # own `_on_key` runs before the binding chain is consulted — so taking it
+    # here would type a space into the prompt instead of unfolding the reasoning
+    # the message was made focusable for.
+    if not event.is_printable or event.key == "space":
+        return False
+    prompt = widget.screen.query_one_optional(HistoryInput)
+    if prompt is None or prompt.has_focus:
+        return False
+    prompt.focus()
+    await prompt._on_key(event)
+    event.stop()
+    return True
 
 
 def _primary_argument(arguments: dict) -> str:
@@ -110,19 +165,109 @@ class ChatView(VerticalScroll):
         #: scrolls up, so streaming does not yank the page out from under
         #: someone reading back.
         self._at_tail = True
+        #: Whether mounting a widget follows the tail.  On for a live turn;
+        #: restore turns it off, mounts the whole history and scrolls exactly
+        #: once at the end — a scroll per widget is what made a rebuild jitter.
+        self._autoscroll = True
 
     # --- following the tail --------------------------------------------------
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
-        self._at_tail = self.is_vertical_scroll_end
+        """Repaint at the new offset — and deliberately nothing else.
+
+        This overrides `Widget.watch_scroll_y`, which is what repaints the
+        widget at the new offset: dropping the delegation left the reader
+        scrolling an image that never moved.
+
+        Following is **not** decided here, and that is the whole point of the
+        method being this short.  The offset is not the reader's alone: Textual
+        re-clamps `scroll_y` whenever a size change leaves it past the end, and
+        that assignment arrives through this watcher exactly like a keypress
+        does.  Reading it as intent re-armed following under a reader who was
+        reading history — the prompt box growing a line was enough, and the next
+        streamed token then pulled them to the bottom.  The decision is made
+        where the request is made; see :meth:`_scroll_to`.
+        """
+        super().watch_scroll_y(old_value, new_value)
+
+    def _scroll_to(self, x=None, y=None, **kwargs) -> bool:
+        """Following is decided here, from the REQUEST — the one place.
+
+        Every scroll Textual can make funnels through this method: the arrow
+        keys, PageUp/PageDown, Home/End, the wheel, the scrollbar, and our own
+        `scroll_end`.  So one comparison covers every mover, including one added
+        later — which is what a per-method override could never promise, since
+        each new way to move the view would have to remember to state the
+        intent, and the one that forgot re-armed following under the reader.
+
+        `scroll_target_y` is the clamped request — the value the offset will
+        land on — so aiming at or past the end means "follow from here" and
+        anything else means the reader is reading history.  A move nothing
+        requested never reaches this method, which is the point.
+
+        *x* is the horizontal half of the framework signature: this widget
+        scrolls one axis, and a request without a *y* says nothing about
+        following.
+        """
+        result = super()._scroll_to(x, y, **kwargs)
+        if y is not None:
+            self._at_tail = self.scroll_target_y >= self.max_scroll_y
+        return result
+
+    def _size_updated(
+        self,
+        size: Size,
+        virtual_size: Size,
+        container_size: Size,
+        layout: bool = True,
+    ) -> bool:
+        """The content grew or shrank: follow it, if the reader is at the tail.
+
+        Following is armed by whatever *changes* the content, but the tail is a
+        property of the content's *height*, and the height is settled a frame
+        later — in the layout pass this method is part of.  A burst of deltas
+        that arrives inside one frame therefore asks to follow the height the
+        content had a frame ago; every one of those requests lands short, and
+        once the layout has moved past them nothing asks again.  The end of the
+        answer then sits below the fold until something else scrolls the view.
+
+        Following on the size is what closes that gap, and it is also the
+        cheapest place to do it: this is called on every layout pass, so the
+        guard is the change itself rather than the call.
+        """
+        before = self.virtual_size
+        resized = super()._size_updated(size, virtual_size, container_size, layout)
+        if self.virtual_size != before:
+            self.follow_tail()
+        return resized
 
     def follow_tail(self) -> None:
-        if self._at_tail:
+        """Follow new content, unless following is off or the reader has gone
+        back to reading.
+
+        Every streamed token and every mounted widget lands here, so the guards
+        have to be here too: without the second, each token scrolls back to the
+        end and paging up during a turn is impossible; without the first, a
+        rebuild scrolls once per widget.
+        """
+        if self._autoscroll and self._at_tail:
             self.scroll_end(animate=False)
 
     def jump_to_tail(self) -> None:
+        """Return to the tail and follow from there — the reader's own send.
+
+        The re-arm is stated here as well as by the request, and that is not
+        redundant: `scroll_end` makes its request a refresh later, and a token
+        streamed inside that window would find following still off.  The intent
+        is known now, so it is recorded now.
+        """
         self._at_tail = True
         self.scroll_end(animate=False)
+
+    async def _on_key(self, event: events.Key) -> None:
+        """Redirect printable keys to the prompt — see `redirect_printable`."""
+        if not await redirect_printable(self, event):
+            await super()._on_key(event)
 
     def _add(self, widget: WidgetT, classes: str = "") -> WidgetT:
         if classes:
@@ -137,15 +282,40 @@ class ChatView(VerticalScroll):
 
     # --- messages ------------------------------------------------------------
 
-    def add_user(self, text: str) -> None:
-        """`[HH:MM] You> text`, the timestamp dim and the prefix bold amber."""
+    def add_user(
+        self,
+        text: str,
+        moment: datetime | str | None = None,
+        footnote: str = "",
+    ) -> None:
+        """`[HH:MM] You> text`, the timestamp dim and the prefix bold amber.
+
+        `moment` is when the message was *sent*, and defaults to now.  Restore
+        is the only caller that passes one, and it is what keeps a rebuilt
+        transcript honest: a conversation from yesterday that says every line
+        arrived at the second the window opened is worse than no timestamps.
+
+        `footnote` is the turn's id, channel and span, and restore is its only
+        caller too — a live message has no turn yet to name.  It is drawn as its
+        own span rather than found in the text and restyled, which is what keeps
+        this widget free of the escaping rules a marker needs: the text a person
+        typed is one piece and the metadata is another, and neither has to be
+        parsed back out of a string.  v1 reaches the same picture from the other
+        side, wrapping the footnote in `[INFO: …]` for the model and unstyling it
+        again for the screen.
+        """
         self._turn_open = False
         self._close_block()
         line = Text.assemble(
-            (f"[{_timestamp()}] ", f"dim {PALETTE['dim']}"),
+            (f"[{_timestamp(moment)}] ", f"dim {PALETTE['dim']}"),
             ("You> ", f"bold {PALETTE['amber-bold']}"),
             (text, PALETTE["text"]),
         )
+        if footnote:
+            # Inline and after the words, in the style reasoning gets: dim and
+            # italic, so it reads as a note about the message rather than as
+            # part of it — the distinction the styling carries, not a bracket.
+            line.append(f" {footnote}", f"italic {PALETTE['dim']}")
         self._add(Static(line), "user-message")
 
     def add_note(self, text: str) -> None:
@@ -405,19 +575,27 @@ class AssistantMessage(Static):
         line = Text()
         if self._thinking:
             line.append_text(self._thinking_block())
-            line.append("\n")
-        if self._agent:
+        if self._text:
+            if self._thinking:
+                line.append("\n")
             # The same treatment as the user's `You> `: a signature in bold
             # amber, so the two sides of a conversation are marked the same way
             # and the agent's name is visible where it is being used.
-            line.append(f"{self._agent}> ", f"bold {PALETTE['amber-bold']}")
-        if not self._text:
-            if not self._agent:
-                # Nothing at all yet: a dim ellipsis is the only affordance that
-                # says "working", and dim so it never reads as content.
-                line.append(GLYPHS["ellipsis"], PALETTE["dimmest"])
-        else:
+            #
+            # Signed only where there is text to sign.  A block is opened before
+            # anything is known about it — at `begin_assistant`, and again after
+            # each tool panel when reasoning or text resumes — so a signature
+            # painted at construction leaves a bare `slife2>` row in the
+            # transcript for every step that has only reasoning to show: one per
+            # tool call, on a reasoning model.  slife v1 signs the message, not
+            # the widget.
+            if self._agent:
+                line.append(f"{self._agent}> ", f"bold {PALETTE['amber-bold']}")
             line.append(self._text, PALETTE["text"])
+        elif not self._thinking:
+            # Nothing at all yet: a dim ellipsis is the only affordance that
+            # says "working", and dim so it never reads as content.
+            line.append(GLYPHS["ellipsis"], PALETTE["dimmest"])
         if self._tokens:
             line.append(f"\n{GLYPHS['up']} {self._tokens:,} tokens", PALETTE["dim"])
         self.update(line)
@@ -590,6 +768,13 @@ class HistoryInput(TextArea):
         Binding("shift+enter", "newline", "Newline", show=False, priority=True),
         Binding("up", "history_previous", "Previous prompt", show=False),
         Binding("down", "history_next", "Next prompt", show=False),
+        # TextArea claims PageUp/PageDown to page through its *own* text, and
+        # for a chat prompt that is the wrong target: the draft is three rows
+        # while the transcript above is what the reader is paging.  The binding
+        # is what takes the key back — a binding here beats the one inherited
+        # from TextArea — and the action forwards it to the transcript.
+        Binding("pageup", "transcript_page_up", show=False),
+        Binding("pagedown", "transcript_page_down", show=False),
     ]
 
     class Submitted(TextualMessage):
@@ -626,6 +811,76 @@ class HistoryInput(TextArea):
                 self.clear()
             return
         await super()._on_key(event)
+
+    # --- paging the transcript, which the prompt sits under ------------------
+
+    def _transcript(self) -> ChatView | None:
+        """The chat view, or None when there is no transcript to page.
+
+        `HistoryInput` is a `TextArea` and can be mounted on its own, where the
+        keys above have nothing to forward to.
+        """
+        return self.screen.query_one_optional(ChatView)
+
+    def action_transcript_page_up(self) -> None:
+        """Page the transcript up — the key belongs to it, not to the draft."""
+        transcript = self._transcript()
+        if transcript is not None:
+            transcript.scroll_page_up(animate=False)
+
+    def action_transcript_page_down(self) -> None:
+        """The mirror of :meth:`action_transcript_page_up`."""
+        transcript = self._transcript()
+        if transcript is not None:
+            transcript.scroll_page_down(animate=False)
+
+    # The wheel over this box is the same case as PageUp/PageDown above, and it
+    # is how the transcript is normally read: Textual delivers a tick to
+    # whatever is under the pointer, and the pointer sits here after typing.
+    # The draft has nothing to scroll — `overflow` is `hidden` on the prompt, so
+    # it follows the cursor rather than a wheel — and the base handler neither
+    # moved it nor stopped the tick, leaving the tick to bubble to a Screen with
+    # no scroll to give it.  `_scroll_*_for_pointer` is still asked first, so a
+    # stylesheet that ever made the draft scrollable would not have this
+    # override steal every tick from it.
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        """Forward a wheel tick the draft cannot use to the transcript."""
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_up(event)  # horizontal — not ours
+            return
+        if not self._scroll_up_for_pointer(animate=False):
+            self._wheel_transcript(up=True)
+        event.stop()
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """The mirror of :meth:`_on_mouse_scroll_up`."""
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_down(event)
+            return
+        if not self._scroll_down_for_pointer(animate=False):
+            self._wheel_transcript(up=False)
+        event.stop()
+
+    def _wheel_transcript(self, *, up: bool) -> None:
+        """Step the transcript by one wheel notch.
+
+        Measured from the offset, not from `scroll_target_y`: a token's follow
+        is aimed at the end and may still be on its way there, so a notch taken
+        from the target would jump the reader to the end minus one line instead
+        of stepping from where they are looking.  `immediate=True` is the same
+        point — the notch lands now, and stating the intent now is what stops
+        the next token from following it back down.
+        """
+        transcript = self._transcript()
+        if transcript is None:
+            return  # nothing to scroll
+        step = self.app.scroll_sensitivity_y
+        transcript.scroll_to(
+            y=transcript.scroll_y - step if up else transcript.scroll_y + step,
+            animate=False,
+            immediate=True,
+        )
 
     def action_newline(self) -> None:
         self.insert("\n")

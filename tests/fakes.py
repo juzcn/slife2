@@ -145,11 +145,24 @@ class FakeAgentClient:
         #: reached the client rather than only that the file was read.
         self.images: list[list[str]] = []
         self.resets = 0
+        #: What `transcript` answers with — the previous conversation, as the
+        #: window opened after a restart sees it.  Empty is the real answer for
+        #: a name that has never run, and so is the default.
+        self.turns: list[dict[str, Any]] = []
+        #: How many times the history was read, so a test can prove a window
+        #: reads it once rather than once per connection.
+        self.reads = 0
 
     async def connect(self) -> None:
         if self._connect_error is not None:
             raise self._connect_error
         self.connected = True
+
+    async def transcript(self) -> list[dict[str, Any]]:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.reads += 1
+        return list(self.turns)
 
     async def close(self) -> None:
         self.connected = False

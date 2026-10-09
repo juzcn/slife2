@@ -133,6 +133,12 @@ class _TurnBuilder:
     """Accumulates provider events into the complete assistant message."""
 
     text_parts: list[str] = field(default_factory=list)
+    #: Accumulated on the same terms as the text, and for the same reason: the
+    #: reasoning chunks are forwarded to the progress stream to be *watched*, and
+    #: what the turn keeps is the completed message.  A consumer that reassembled
+    #: this from the display channel would be reading the record out of a stream
+    #: that is allowed to drop fragments.
+    thinking_parts: list[str] = field(default_factory=list)
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
@@ -150,6 +156,8 @@ class _TurnBuilder:
 
         if event.text:
             self.text_parts.append(event.text)
+        if event.thinking:
+            self.thinking_parts.append(event.thinking)
         for delta in event.tool_call_deltas:
             self.calls.add(delta)
         if event.usage is not None:
@@ -160,6 +168,7 @@ class _TurnBuilder:
         return StreamChatResult(
             text="".join(self.text_parts),
             tool_calls=tuple(self.calls.complete()),
+            thinking="".join(self.thinking_parts),
             usage=self.usage,
             stop_reason=self.stop_reason,
         )

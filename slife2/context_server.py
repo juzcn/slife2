@@ -305,7 +305,7 @@ def build_server(
                 is a bill, the other is what the context window has to hold.
             who_helped: The agent that answered.
             what_model: Which model answered, as `provider/model`.
-            channel: Where the turn came in from — `human`, or a client id.
+            channel: Where the turn came in from — `tui`, or a client id.
                 Empty when the caller has nothing to say about it.
             created_at: When the user pressed enter.  Defaults to now, which is
                 the same moment to within a hop for a caller on loopback.
@@ -485,14 +485,22 @@ def build_server(
             subagent: Which of that agent's conversations; empty for its own.
 
         Returns:
-            `messages` (the rebuilt list) and `turn_ids` (what it was built
-            from — the caller should adopt it, since a turn named by the list
-            and no longer stored is dropped here and must not be kept in hand).
+            `messages` (the rebuilt list), `turn_ids` (what it was built from —
+            the caller should adopt it, since a turn named by the list and no
+            longer stored is dropped here and must not be kept in hand), and
+            `turns` (the stored rows themselves).
+
+            `turns` is here for the reader that wants the conversation rather
+            than the context: a terminal that has just opened has to *show* what
+            the previous one was showing, and the message list will not do —
+            timestamps, the channel a turn arrived on and the turn's own
+            boundaries are the record's and not the model's.  v1 answered both
+            readers from one read for the same reason.
         """
         store = await store_of(agent, subagent)
         turn_ids = await _on_thread(store.context_turns)
         if not turn_ids:
-            return {"messages": list(messages), "turn_ids": []}
+            return {"messages": list(messages), "turn_ids": [], "turns": []}
         rows = await _on_thread(_rows, store, turn_ids)
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -501,7 +509,7 @@ def build_server(
         logger.info(
             "restored %d turn(s) for %s", len(restored), describe((agent, subagent))
         )
-        return {"messages": rebuilt, "turn_ids": restored}
+        return {"messages": rebuilt, "turn_ids": restored, "turns": rows}
 
     def _window(model: str) -> int:
         """How many tokens the model this conversation runs on can hold.

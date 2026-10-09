@@ -21,7 +21,8 @@ from slife2.events import (
     ToolCallStarted,
     TurnFinished,
 )
-from slife2.messages import Usage
+from slife2.messages import Message, ToolCall, Usage
+from slife2.toolclient import FUNC_TOOL_UNLOAD
 from slife2.tui.app import SlifeApp
 from slife2.tui.client import MCPAgentClient
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -112,6 +113,65 @@ async def submit(pilot, text: str) -> None:
     pilot.app.query_one(HistoryInput).text = text
     await pilot.press("enter")
     await pilot.pause()
+
+
+def visible_lines(app: SlifeApp) -> list[str]:
+    """The text the terminal is showing — the compositor's own output.
+
+    Not `scroll_y`: the offset was always right, and every assertion that read
+    it passed while the screen stood still.  What the reader sees is the
+    compositor's strips, so a repaint is only testable here.
+    """
+    strips = app.screen._compositor.render_strips()
+    return ["".join(segment.text for segment in strip) for strip in strips]
+
+
+async def repainted(app: SlifeApp, pilot, previous: list[str], tries: int = 20):
+    """The screen once it differs from `previous` — a repaint, waited for."""
+    lines = visible_lines(app)
+    for _ in range(tries):
+        if lines != previous:
+            break
+        await pilot.pause()
+        lines = visible_lines(app)
+    return lines
+
+
+async def settled(pilot, condition, *, tries: int = 20) -> bool:
+    """`condition` once it holds — polled, because a scroll lands a turn late.
+
+    `scroll_to` and `scroll_end` do not move the offset when they are called:
+    both defer, and the deferred scroll runs once the widget is next idle — a
+    turn *after* the `pilot.pause` written to cover it.  The read right after
+    that pause therefore compared the old position with itself.
+    """
+    for _ in range(tries):
+        if condition():
+            return True
+        await pilot.pause()
+    return bool(condition())
+
+
+def wheel_over(widget, *, up: bool):
+    """A wheel event over *widget*, as the driver would deliver it."""
+    from textual import events
+
+    x, y = widget.region.x + 1, widget.region.y + 1
+    cls = events.MouseScrollUp if up else events.MouseScrollDown
+    return cls(
+        widget=None,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+        style=None,
+    )
 
 
 async def settle(pilot, app: SlifeApp, *, tries: int = 200) -> None:
@@ -243,6 +303,45 @@ async def test_an_intermediate_step_folds_its_reasoning() -> None:
     assert len(blocks) == 2
     assert blocks[0].thinking_expanded is False, "the pre-tool step should fold"
     assert blocks[1].thinking_expanded is True, "the answer should not"
+
+
+async def test_a_block_with_only_reasoning_is_not_signed() -> None:
+    """The signature signs an *answer*, so a reasoning-only step has none.
+
+    A block is opened before anything is known about it — at `begin_assistant`,
+    and again after each tool panel when reasoning or text resumes — so a
+    signature painted at construction left a bare `jack>` row in the transcript
+    for every step that had only reasoning to show.  On a reasoning model that
+    is one per tool call, and it reads as the prompt being printed over and over
+    down the conversation.
+    """
+
+    def reasons_then_calls(prompt, on_event):
+        on_event(ThinkingDelta("first, what is six times seven"))
+        on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name="calc",
+                ok=True,
+                result_preview="42",
+                result_chars=2,
+                elapsed_ms=1,
+            )
+        )
+        on_event(ThinkingDelta("now say it"))
+        on_event(TextDelta("42"))
+        return "42"
+
+    app = make_app(reasons_then_calls)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        rows = shown(app).splitlines()
+
+    assert [row for row in rows if row.strip() == "jack>"] == [], (
+        "a signature with nothing under it"
+    )
+    assert "jack> 42" in rows, "and the answer is still signed"
 
 
 async def test_reasoning_is_never_mixed_into_the_answer() -> None:
@@ -450,6 +549,653 @@ async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
         assert "it is 42" in shown(app)
         blocks = app.query_one(ChatView).query(".assistant-message")
         assert len(list(blocks)) == 2, "text after a tool panel is its own block"
+
+
+# --- scrolling the transcript -------------------------------------------------
+
+
+#: An answer taller than the 30-row test screen, so the transcript really does
+#: have somewhere to scroll to.
+SCROLLABLE = "\n".join(f"line {n}" for n in range(60))
+
+
+async def overflowing_transcript(pilot, app: SlifeApp) -> ChatView:
+    """Submit a prompt whose answer overflows the screen, and return the view.
+
+    Every test here starts from "the reader is at the tail", so the start is
+    asserted rather than assumed: a `scroll_end` is deferred, and a test that
+    began somewhere else would pass or fail for the wrong reason.
+    """
+    await submit(pilot, "hi")
+    transcript = app.query_one(ChatView)
+    await settle(pilot, app)
+    assert await settled(pilot, lambda: transcript.max_scroll_y > 0), (
+        "the answer has to overflow, or none of this section means anything"
+    )
+    assert await settled(
+        pilot, lambda: transcript.scroll_y == transcript.max_scroll_y
+    ), "and it has to come to rest at its tail"
+    return transcript
+
+
+async def test_page_up_and_page_down_move_the_transcript() -> None:
+    """PageUp/PageDown page the transcript, not the three-row draft.
+
+    `TextArea` claims both keys to page through its *own* text, and the prompt
+    is what always has focus — so without a binding here to take them back, the
+    transcript's only ways to move were the wheel and a scrollbar the stylesheet
+    hides.  The keys were simply dead.
+    """
+    app = make_app(answering(SCROLLABLE))
+    async with app.run_test(size=SIZE) as pilot:
+        transcript = await overflowing_transcript(pilot, app)
+
+        await pilot.press("pageup")
+        assert await settled(
+            pilot, lambda: transcript.scroll_y < transcript.max_scroll_y
+        )
+        paged_up = transcript.scroll_y
+
+        await pilot.press("pagedown")
+        assert await settled(pilot, lambda: transcript.scroll_y > paged_up)
+
+
+async def test_home_and_end_jump_to_the_ends() -> None:
+    """Home/End go to the transcript even though the prompt has focus.
+
+    `priority=True` on the app's bindings is what does it: the priority pass
+    runs *before* the focused widget, and the focused widget is the prompt,
+    whose `TextArea` binds both keys to the ends of the line the cursor is on.
+    What the draft keeps is the Emacs spelling of each, which is the bargain
+    slife v1 struck.
+    """
+    app = make_app(answering(SCROLLABLE))
+    async with app.run_test(size=SIZE) as pilot:
+        transcript = await overflowing_transcript(pilot, app)
+
+        await pilot.press("home")
+        assert await settled(pilot, lambda: transcript.scroll_y == 0)
+        reading = transcript._at_tail
+
+        await pilot.press("end")
+        assert await settled(
+            pilot, lambda: transcript.scroll_y == transcript.max_scroll_y
+        )
+        following = transcript._at_tail
+
+    assert reading is False, "scrolling up into history stopped the following"
+    assert following is True, "and End resumed it"
+
+
+async def test_a_scroll_repaints_what_is_on_screen() -> None:
+    """A scroll must repaint, not just move the offset.
+
+    `ChatView.watch_scroll_y` overrides Textual's watcher, and the override has
+    to delegate: the base one is what repaints the widget at the new offset.
+    Dropping the delegation moved the offset and left the screen exactly as it
+    was — which is why this section reads the compositor rather than `scroll_y`,
+    and why every assertion on the offset stayed green through the bug.
+    """
+    app = make_app(answering(SCROLLABLE))
+    async with app.run_test(size=SIZE) as pilot:
+        transcript = await overflowing_transcript(pilot, app)
+        at_tail = visible_lines(app)
+
+        transcript.scroll_to(y=0, animate=False)
+        moved = await repainted(app, pilot, at_tail)
+
+    assert moved != at_tail, "the offset moved and the screen stood still"
+    assert moved[0] != at_tail[0], "the top row is a different row now"
+
+
+async def test_the_wheel_over_the_prompt_moves_the_transcript() -> None:
+    """A tick aimed at the bottom of the screen still moves the reading.
+
+    Textual delivers a wheel tick to the widget under the pointer, and that
+    widget is the prompt whenever the pointer sits low on the screen — where it
+    lands after typing.  The draft has nothing to scroll and the base handler
+    neither moved it nor stopped the tick, so the tick bubbled to a Screen with
+    no scroll to give it and the transcript never moved.
+    """
+    app = make_app(answering(SCROLLABLE))
+    async with app.run_test(size=SIZE) as pilot:
+        transcript = await overflowing_transcript(pilot, app)
+        prompt = app.query_one(HistoryInput)
+        prompt.focus()
+        await pilot.pause()
+
+        before = transcript.scroll_y
+        app.screen._forward_event(wheel_over(prompt, up=True))
+        assert await settled(pilot, lambda: transcript.scroll_y < before)
+        focused = app.focused
+
+    assert isinstance(focused, HistoryInput), "the wheel must not move focus"
+
+
+async def test_a_streaming_turn_does_not_drag_a_reader_back_to_the_tail() -> None:
+    """The other half of the bug: tokens undid every page the reader turned.
+
+    Every token and every mounted widget landed on an unconditional
+    `scroll_end`, so the wheel and the keys both looked dead while the model was
+    working and worked again once it was idle.  Following is sticky — it holds
+    while the reader asks for the end, and stops the moment they ask for
+    anything else.
+    """
+    arrived = asyncio.Event()
+    release = asyncio.Event()
+
+    async def streams_in_two(prompt, on_event, *, images=None):
+        on_event(TextDelta(SCROLLABLE))
+        arrived.set()
+        await release.wait()
+        on_event(TextDelta("\nand more"))
+        return SCROLLABLE + "\nand more"
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = streams_in_two
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await asyncio.wait_for(arrived.wait(), timeout=2)
+        transcript = app.query_one(ChatView)
+        assert await settled(pilot, lambda: transcript.max_scroll_y > 0)
+
+        await pilot.press("pageup")
+        assert await settled(
+            pilot, lambda: transcript.scroll_y < transcript.max_scroll_y
+        )
+        held = transcript.scroll_y
+
+        release.set()
+        await settle(pilot, app)
+        after = transcript.scroll_y
+
+    assert after == held, "a streamed token dragged the reader back to the tail"
+
+
+async def test_sending_a_message_returns_to_the_tail() -> None:
+    """The reader's own send goes to the end, however far up they had read.
+
+    Sticky following is what keeps a streaming turn from pulling the page out
+    from under a reader in history; the other half of it is that the reader's
+    own message is not held back with the stream.  Without the re-arm the
+    message is written below the fold and the answer under that, so a reader who
+    had scrolled up sees nothing at all happen.
+    """
+    app = make_app(answering(SCROLLABLE))
+    async with app.run_test(size=SIZE) as pilot:
+        transcript = await overflowing_transcript(pilot, app)
+
+        await pilot.press("pageup")
+        assert await settled(
+            pilot, lambda: transcript.scroll_y < transcript.max_scroll_y
+        )
+
+        await submit(pilot, "another")
+        await settle(pilot, app)
+        assert await settled(
+            pilot, lambda: transcript.scroll_y == transcript.max_scroll_y
+        )
+
+
+# --- the keyboard, once the transcript has it ---------------------------------
+
+
+async def test_typing_after_focusing_a_message_still_reaches_the_prompt() -> None:
+    """A click lands focus on a message; typing has to go on working.
+
+    The transcript's widgets are focusable — that is what gives a message Enter
+    and Space to unfold its reasoning, and a tool panel the same to open — so a
+    click is enough to take the keyboard off the prompt, and the next letter
+    typed would go nowhere.
+    """
+    app = make_app(answering("hello"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        app.query_one(AssistantMessage).focus()
+        await pilot.pause()
+
+        await pilot.press("o", "k")
+        await pilot.pause()
+        typed = app.query_one(HistoryInput).text
+
+    assert typed == "ok"
+
+
+async def test_space_on_a_message_unfolds_its_reasoning() -> None:
+    """Space is the message's, not the redirect's.
+
+    It is printable, so a redirect that took every printable key would type a
+    space into the prompt instead of running the binding the message was made
+    focusable for.
+    """
+    app = make_app(reasoning_turn())
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        block = app.query_one(AssistantMessage)
+        block.focus()
+        await pilot.pause()
+
+        await pilot.press("space")
+        await pilot.pause()
+        expanded = block.thinking_expanded
+        typed = app.query_one(HistoryInput).text
+
+    assert expanded is False, "space did not reach the message's own binding"
+    assert typed == "", "and it did not fall through into the prompt"
+
+
+# --- a window opened after a restart ------------------------------------------
+
+
+def stored(*messages: Message, turn_id: int = 1, asked: str = "") -> dict:
+    """One stored turn, as the server hands it back.
+
+    Built from the real message model rather than by writing the dicts out by
+    hand: the tool-call half of the shape (`arguments` as a JSON *string*,
+    nested under `function`) is exactly the kind of thing a fixture that spells
+    it itself gets subtly wrong and then proves itself right about.
+    """
+    return {
+        "turn_id": turn_id,
+        "messages": [message.to_wire() for message in messages],
+        "created_at": asked,
+        "completed_at": None,
+        "channel": "tui",
+        "what_model": "fake",
+    }
+
+
+def answering_with(*turns: dict, text: str = "ok"):
+    """A client that has a previous conversation and answers plainly."""
+    client = FakeAgentClient(answering(text))
+    client.turns = list(turns)
+    return client
+
+
+def window(client: FakeAgentClient, **kwargs) -> SlifeApp:
+    return SlifeApp(
+        "http://test/mcp", client_factory=lambda: client, agent="jack", **kwargs
+    )
+
+
+CONVERSATION = [
+    stored(
+        Message(role="user", content="what is 6*7?"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calc", arguments={"e": "6*7"})],
+        ),
+        Message(role="tool", content="42", tool_call_id="c1"),
+        Message(role="assistant", content="it is 42"),
+        turn_id=1,
+    ),
+    stored(
+        Message(role="user", content="and times two?"),
+        Message(role="assistant", content="84"),
+        turn_id=2,
+    ),
+]
+
+
+async def restored(pilot, app: SlifeApp) -> None:
+    """Wait for the window's one read of the history to have landed."""
+    assert await settled(pilot, lambda: app._restored), "the history was never read"
+
+
+async def test_a_restarted_window_shows_the_conversation_it_left() -> None:
+    """The whole point: nothing about the screen should say "restart".
+
+    The server has restored the *context* the moment it builds a loop, so a
+    window that drew nothing was the only part of the system acting as though
+    the conversation were over — blank, while the model went on answering from a
+    history the user could not see.
+    """
+    client = answering_with(*CONVERSATION)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+        panels = list(app.query(ToolCallWidget))
+
+    assert "You> what is 6*7?" in text
+    assert "jack> it is 42" in text
+    assert "You> and times two?" in text
+    assert "jack> 84" in text
+    # ...and the work between the question and the answer, which a rebuild that
+    # only replayed the text would leave out.
+    assert len(panels) == 1
+    assert "Calc" in panels[0].plain_text()
+
+
+async def test_a_name_that_has_never_run_shows_nothing() -> None:
+    """No empty heading, and no "restored 0 turns": that is inventing an event."""
+    app = window(answering_with())
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert shown(app) == ""
+
+
+async def test_the_restored_history_says_how_much_came_back() -> None:
+    app = window(answering_with(*CONVERSATION))
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "[restored 2 turns]" in shown(app)
+
+
+async def test_a_restored_message_is_stamped_when_it_was_sent() -> None:
+    """Not when the window opened.
+
+    A conversation from March that says every line arrived this second is worse
+    than one with no timestamps at all — it is the transcript making a claim
+    about the record that the record contradicts.
+    """
+    client = answering_with(
+        stored(Message(role="user", content="hello"), asked="2020-03-04T09:05:00+08:00")
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "[2020-03-04 09:05] You> hello" in shown(app)
+
+
+async def test_a_restored_message_says_which_turn_it_opened() -> None:
+    """The id the model addresses turns by, shown to the person watching.
+
+    It is the *same* footnote the model reads inside `[TURN: …]` — one function,
+    two readers — and showing it is what makes a keep-list legible from the
+    outside: a model that says it is keeping turn 12 is naming a number its
+    reader can point at, and a channel besides.  What a screen shows is the
+    payload; `[TURN: ` is the machine's marker and stays behind.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="hello"),
+            Message(role="assistant", content="hi"),
+            turn_id=12,
+            asked="2026-08-10T14:03:00+08:00",
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert '{"turn_id": 12, "channel": "tui", "begin": "2026-08-10 14:03"}' in text
+    assert "[TURN:" not in text, "the envelope is the model's, not the reader's"
+
+
+async def test_every_restored_turn_says_which_one_it_was() -> None:
+    """One footnote per turn, on the message that opened it."""
+    client = answering_with(*CONVERSATION)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert text.count('"turn_id": 1') == 1
+    assert text.count('"turn_id": 2') == 1
+
+
+async def test_a_live_message_carries_no_turn_footnote() -> None:
+    """A turn has no id until it is stored, and the bubble is drawn before that.
+
+    v1's arrangement, kept: the footnote is metadata about a *stored* turn, so
+    it appears in a rebuilt transcript and never beside something being typed.
+    """
+    app = make_app(answering("hi"))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hello")
+        text = shown(app)
+
+    assert "You> hello" in text
+    assert "turn_id" not in text
+
+
+async def test_a_restored_tool_panel_opens_and_shows_what_it_returned() -> None:
+    client = answering_with(*CONVERSATION)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        panel = app.query_one(ToolCallWidget)
+        collapsed = panel.collapsed
+        panel.action_toggle_detail()
+        await pilot.pause()
+        expanded = panel.plain_text()
+
+    assert collapsed is True, "a panel is born collapsed, restored or not"
+    assert "Result" in expanded
+    assert "42" in expanded
+    assert "e = 6*7" in expanded
+
+
+async def test_a_restored_result_reads_like_a_live_one() -> None:
+    """A preview and a true count, not the whole thing.
+
+    The wire caps what a panel displays, so 100 KB of tool output is not
+    duplicated into every widget and log line.  A rebuild that passed the stored
+    text through unshaped would make the restored panel the one place a tool's
+    entire output is rendered — and the one place a call looks different from
+    the same call seen live.
+    """
+    long = "x" * 5000
+    client = answering_with(
+        stored(
+            Message(role="user", content="read it"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id="c1", name="read", arguments={"path": "big"})],
+            ),
+            Message(role="tool", content=long, tool_call_id="c1"),
+            Message(role="assistant", content="read"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        panel = app.query_one(ToolCallWidget)
+        panel.action_toggle_detail()
+        await pilot.pause()
+        expanded = panel.plain_text()
+
+    assert long not in expanded, "the whole result was rendered"
+    assert f"{len(long):,} characters in all" in expanded
+
+
+async def test_a_restored_step_that_only_called_a_tool_gets_no_empty_block() -> None:
+    """The live transcript could not have shown one, so a rebuild must not.
+
+    An assistant message with tool calls and no text exists in the record for
+    the model's benefit.  Opening a block for it would put a stray `…` — or,
+    worse, a bare signature — between the question and the work.
+    """
+    client = answering_with(*CONVERSATION)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        rows = shown(app).splitlines()
+        # One block per turn: the callee's "it is 42", and "84".  Not three.
+        assert len(list(app.query(AssistantMessage))) == 2
+
+    assert [row for row in rows if row.strip() in ("jack>", "…")] == []
+
+
+async def test_a_restored_step_shows_the_reasoning_it_had() -> None:
+    """The reasoning is part of what happened, and the record is where it lives.
+
+    It is not on the API wire — a model is never sent its own earlier reasoning
+    — so a store written as `to_wire` output loses it, and the transcript comes
+    back with a hole exactly where the reader was looking.  It rides the
+    message, which is what the turn log stores.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="6*7?"),
+            Message(
+                role="assistant",
+                content="42",
+                thinking="six sevens are forty-two",
+            ),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        block = app.query_one(AssistantMessage)
+        text = shown(app)
+
+    assert block.thinking == "six sevens are forty-two"
+    assert "Thinking" in text
+    assert "six sevens are forty-two" in text
+    # The final answer's reasoning stays open, as it does live.
+    assert block.thinking_expanded is True
+
+
+async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -> None:
+    """And the rule is not restated here: the tool call is what folds it.
+
+    A step on the way somewhere is machinery and reads better as one line; the
+    answer keeps its own reasoning open.  Restore drives the transcript with the
+    live calls, so `add_tool_start` does that by itself — a rebuild that set the
+    fold explicitly would be a second place that knows the rule.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="6*7?"),
+            Message(
+                role="assistant",
+                content="",
+                thinking="first, what is six times seven",
+                tool_calls=[ToolCall(id="c1", name="calc", arguments={"e": "6*7"})],
+            ),
+            Message(role="tool", content="42", tool_call_id="c1"),
+            Message(role="assistant", content="it is 42", thinking="now say it"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        blocks = list(app.query(AssistantMessage))
+
+    assert len(blocks) == 2
+    assert blocks[0].thinking_expanded is False, "the pre-tool step should fold"
+    assert blocks[1].thinking_expanded is True, "the answer should not"
+
+
+async def test_a_harness_tool_call_is_not_drawn() -> None:
+    """`_func_tool_unload` is the harness talking to itself, and always was.
+
+    It is in the record because the model's tool list carries it, and the live
+    transcript does not show it either.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="trim please"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(id="c1", name=FUNC_TOOL_UNLOAD, arguments={}),
+                    ToolCall(id="c2", name="calc", arguments={"e": "1"}),
+                ],
+            ),
+            Message(role="tool", content="dropped 3", tool_call_id="c1"),
+            Message(role="tool", content="1", tool_call_id="c2"),
+            Message(role="assistant", content="done"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        names = [panel.tool_name for panel in app.query(ToolCallWidget)]
+
+    assert names == ["calc"]
+
+
+async def test_a_restored_history_ends_at_its_tail() -> None:
+    """The reader is put where a live session would have left them."""
+    many = [
+        stored(
+            Message(role="user", content=f"question {n}"),
+            Message(role="assistant", content="a long answer\n" * 20),
+            turn_id=n,
+        )
+        for n in range(1, 6)
+    ]
+    client = answering_with(*many)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        transcript = app.query_one(ChatView)
+        assert await settled(
+            pilot, lambda: transcript.scroll_y == transcript.max_scroll_y
+        )
+        assert transcript.max_scroll_y > 0
+
+
+async def test_a_history_that_cannot_be_read_does_not_close_the_window() -> None:
+    """Losing the sight of the conversation is not losing the conversation."""
+    client = FakeAgentClient(answering("ok"))
+
+    async def refuse() -> list[dict]:
+        raise ConnectionError("the transcript call died")
+
+    client.transcript = refuse  # type: ignore[method-assign]
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        running = app.is_running
+        bar = status(app)
+
+    assert running is True
+    assert "disconnected" in bar
+
+
+async def test_the_history_is_read_once() -> None:
+    """Not once per turn: a second read would draw a second copy of it."""
+    client = answering_with(*CONVERSATION)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        await submit(pilot, "hi")
+        await settle(pilot, app)
+        text = shown(app)
+
+    assert client.reads == 1
+    assert text.count("You> what is 6*7?") == 1
+
+
+async def test_a_prompt_typed_before_the_servers_were_up_still_restores() -> None:
+    """The cold-start case, and the reason the read sits on `_connect`.
+
+    A window opened first and the daemons started after is ordinary.  The lazy
+    reconnect inside the first turn is the first moment there is anything to
+    ask, and it is also the last moment it may happen — the turn opens its
+    block next.
+    """
+    client = answering_with(*CONVERSATION, text="new answer")
+    attempts = {"n": 0}
+    connect = client.connect
+
+    async def flaky() -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ConnectionError("nothing is listening yet")
+        await connect()
+
+    client.connect = flaky  # type: ignore[method-assign]
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await settle(pilot, app)
+        text = shown(app)
+
+    assert attempts["n"] > 1, "the prompt never retried the connection"
+    assert "You> what is 6*7?" in text
+    assert "jack> new answer" in text
 
 
 # --- the palette -------------------------------------------------------------

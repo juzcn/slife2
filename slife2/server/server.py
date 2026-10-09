@@ -9,7 +9,8 @@ and a model name from the config.
 `(agent, subagent)` — the same pair every other server in this system keys its
 own state by.  `subagent=""` is the agent's own conversation; anything else is a
 worker it is running.  A caller submits a user message under that key and gets
-that turn's answer back; the surface is two tools, `send_message` and `reset`.
+that turn's answer back; the surface is three tools — `send_message`, `reset`,
+and `transcript`, which is what a window that has just opened asks for.
 
 **A key is created when it is first used, and it never expires.**  That is the
 difference from the handle this server used to mint: an id could go stale — a
@@ -71,6 +72,7 @@ from slife2.config import (
     find_config_path,
     load,
 )
+from slife2.context import turn_note, with_note
 from slife2.events import TurnEvent, TurnObserver, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
@@ -810,6 +812,46 @@ def build_server(
             )
         )
 
+    def annotate_turn(outcome: Outcome, item: Pending, turn_id: int) -> None:
+        """Write a turn's id and span onto the message that opened it.
+
+        **The footnote is how a turn id reaches the model at all**, and
+        therefore how a keep-list is expressible: the ids a model writes back
+        are the ids it read.  `messages_from_turns` puts one on every turn a
+        *rebuild* builds, which covers everything that came out of the store —
+        and this is the other half, and v1's: the turn that has just run is in
+        memory and in no rebuilt list yet, so without this the newest turns are
+        the only ones the model cannot name, and a keep-list silently drops
+        exactly those.
+
+        Called **after** the save, and never written into it.  The row holds the
+        user's own words and the footnote is derived from the row when a list is
+        built; storing it as well would put two of them in one message on the
+        next rebuild.  That is also why the timestamps are the ones the row was
+        written with — the two spellings have to agree to the character.
+
+        The message is `outcome.messages[0]`, which is the *same object* the
+        loop is holding: the snapshot is a shallow copy, so there is no index to
+        carry and the live list is annotated by annotating this.  A turn with no
+        id — a subagent's, which is not written to the log — is left alone
+        rather than given a number nothing can be looked up by.
+        """
+        opening = outcome.messages[0] if outcome.messages else None
+        if opening is None or opening.role != "user":
+            return
+        opening.content = with_note(
+            opening.content,
+            turn_note(
+                turn_id,
+                outcome.started_at,
+                outcome.completed_at,
+                # The channel the row is written with, from the same field — a
+                # footnote that disagreed with the record would be the one thing
+                # the model has no way to check.
+                item.channel,
+            ),
+        )
+
     async def run_turn_into(
         loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
     ) -> None:
@@ -952,10 +994,12 @@ def build_server(
                 the model's config lists `image` under `input` — silently
                 dropping an attachment somebody made is worse than saying the
                 model cannot read it.
-            channel: Where this turn came in from — `human`, or the key of
+            channel: Where this turn came in from — `tui`, or the key of
                 whoever sent it.  Recorded with the turn and used for nothing
                 else; the caller is the only party that knows, which is why it is
-                a parameter rather than something this server infers.
+                a parameter rather than something this server infers.  It is also
+                what a turn's footnote carries, so a model reading a conversation
+                can tell a person's turn from a worker's.
 
         Returns:
             `text` (the final answer), `usage`, `steps`, `stop_reason`, and the
@@ -1033,6 +1077,10 @@ def build_server(
                         # The turn's own messages are covered now, so what was
                         # carried stays carried and nothing else does.
                         loop.covered = len(loop.messages)
+                        # ...and it is addressable now, which is what the next
+                        # turn's discriminator needs: a turn it cannot name is
+                        # one a keep-list cannot keep.
+                        annotate_turn(outcome, item, turn_id)
         finally:
             # On every path, including a cancellation while queued: the turn
             # never started, so there is nothing to record, but the inbox entry
@@ -1055,6 +1103,53 @@ def build_server(
             "stop_reason": result.stop_reason if result else "cancelled",
             "model": loop.model,
         }
+
+    @mcp.tool
+    async def transcript(agent: str, subagent: str = "") -> dict[str, Any]:
+        """What a conversation is made of, for a screen that has just opened.
+
+        The restoring read's second reader.  `restore` exists because a
+        conversation that has just been *built* has to be put back on its
+        context before it can run; a terminal that has just been opened asks the
+        opposite question — the context is fine, and what it needs is to show
+        the conversation the previous terminal was showing.  One read answers
+        both, and this is it: the same list, answered with the turns it was
+        built from rather than with the message list.
+
+        **A read, deliberately.**  Opening a window must not start, end or
+        rebuild anything, so this touches neither the loops nor the list — which
+        is also why it is the *stored* list rather than the in-memory one: a
+        window opened against a server that has been up for a week still shows
+        the conversation, and so does one opened against a server that has just
+        started.
+
+        Args:
+            agent: Whose conversation.
+            subagent: Which of that agent's conversations; empty for its own.
+
+        Returns:
+            `turns`: the stored turns this conversation's context is made of, in
+                the list's own order, oldest first.  Empty for a conversation
+                that has never run — the honest answer for a genuinely new
+                name, and not an error.
+        """
+        payload = tool_payload(
+            await (await memory()).call_tool(
+                "restore",
+                {
+                    "agent": agent,
+                    "subagent": subagent,
+                    # Read and thrown away: `restore` answers with a rebuilt
+                    # message list as well, and that half is the agent loop's.
+                    # The opening prompt is what a conversation that has never
+                    # run would head with, so it is the honest thing to hand
+                    # over rather than an empty list.
+                    "messages": [m.to_wire() for m in opening_messages(agent)],
+                },
+            )
+        )
+        turns = payload.get("turns")
+        return {"turns": turns if isinstance(turns, list) else []}
 
     @mcp.tool
     async def reset(agent: str, subagent: str = "") -> dict[str, Any]:

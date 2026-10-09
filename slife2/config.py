@@ -303,6 +303,14 @@ class ModelSettings:
     #: What to show a person.  Falls back to `model` when absent.
     name: str = ""
     #: The model thinks natively, so reasoning is worth asking for.
+    #:
+    #: On the OpenAI-compatible wire this also decides that the model's own
+    #: reasoning is carried *back* to it: the turn keeps it, and
+    #: `slife2.llm.openai_server` re-sends it as `reasoning_content`, which the
+    #: DeepSeek reasoners require on every assistant message once thinking has
+    #: been asked for.  v1's rule, and the two belong together — a model that
+    #: thinks is the model whose endpoint knows the field's name.  Nothing
+    #: depends on it otherwise: this is a fact about the model, not a switch.
     reasoning: bool = False
     #: Modalities accepted.  This is the config that says whether a model can
     #: read an image, and the agent server refuses an attachment against a model

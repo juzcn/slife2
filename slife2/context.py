@@ -78,11 +78,15 @@ KEEP_NONE = "clear"
 #: that a person also reads.
 INTERRUPTED = "(Tool execution interrupted)"
 
-#: The prefix and suffix a turn's footnote is wrapped in.  The prefix is v1's,
-#: and it is what makes the footnote *findable* rather than merely present: a
-#: reader looking for one has a string to look for.
-INFO_PREFIX = "[INFO: "
-INFO_SUFFIX = "]"
+#: The prefix and suffix a turn's footnote is wrapped in, and the marker is what
+#: makes the footnote *findable* rather than merely present: a reader looking for
+#: one has a string to look for.
+#:
+#: v1 spells this `[INFO: …]` and shares the envelope with a second thing — the
+#: trim note — that this build does not have.  With one occupant the envelope can
+#: say what it holds, and `TURN` is what it holds: which turn this message opened.
+TURN_PREFIX = "[TURN: "
+TURN_SUFFIX = "]"
 
 
 class _Rejected:
@@ -334,19 +338,30 @@ def _format_moment(value: str) -> str:
     return moment.strftime("%Y-%m-%d %H:%M")
 
 
-def turn_note(turn_id: int, created_at: str, completed_at: str | None) -> str:
-    """The footnote a rebuilt turn carries, naming its id and its span.
+def turn_footnote(
+    turn_id: int,
+    created_at: str,
+    completed_at: str | None,
+    channel: str = "",
+) -> str:
+    """The footnote's *payload* — the part of it that is not the envelope.
 
-    **This is how a turn id reaches the model at all**, and therefore how a
-    keep-list is expressible: the ids a model writes back are the ids it read
-    here.  It is added when a message list is *built* and never stored — the turn
-    row holds the user's own words — so a footnote can never be persisted twice
-    or drift from the row it describes.
+    The same string the model reads inside `[TURN: …]`, and it is one function
+    `turn_note` calls rather than a copy, because the two readers must not
+    disagree: a window showing a turn's id beside a message is showing the id a
+    keep-list will be written with, and a second spelling of it would be a
+    second thing to get wrong.
+
+    `channel` is where the turn came from — `tui` for a window, and the key of a
+    worker for a turn one of the agent's own subagents ran.  It is in the
+    footnote because an id alone does not say whose turn it is, and the model
+    reading a conversation is exactly the reader that cannot tell: two turns
+    addressed the same way and answered by different parties look identical
+    without it.
 
     The end collapses to a time when it shares the begin's day, which is the
     ordinary case and the one where repeating the date costs a token to say
-    nothing.  A turn with no id and no timestamps gets no footnote, because an
-    empty one would tell the model that something is being withheld.
+    nothing.
     """
     begin = _format_moment(created_at)
     end = _format_moment(completed_at or "")
@@ -354,20 +369,51 @@ def turn_note(turn_id: int, created_at: str, completed_at: str | None) -> str:
     if day and end.startswith(day):
         end = end[11:]
     payload: dict[str, Any] = {"turn_id": int(turn_id)}
+    if channel:
+        payload["channel"] = channel
     if begin:
         payload["begin"] = begin
     if end:
         payload["end"] = end
-    return f"{INFO_PREFIX}{json.dumps(payload, ensure_ascii=False)}{INFO_SUFFIX}"
+    return json.dumps(payload, ensure_ascii=False)
 
 
-def _with_note(content: Any, note: str) -> Any:
+def turn_note(
+    turn_id: int,
+    created_at: str,
+    completed_at: str | None,
+    channel: str = "",
+) -> str:
+    """The footnote a rebuilt turn carries, naming its id, its channel and span.
+
+    **This is how a turn id reaches the model at all**, and therefore how a
+    keep-list is expressible: the ids a model writes back are the ids it read
+    here.  It is added when a message list is *built* and never stored — the turn
+    row holds the user's own words — so a footnote can never be persisted twice
+    or drift from the row it describes.  `turn_footnote` is the same footnote
+    without the marker, for the reader that is a screen.
+    """
+    return (
+        f"{TURN_PREFIX}"
+        f"{turn_footnote(turn_id, created_at, completed_at, channel)}"
+        f"{TURN_SUFFIX}"
+    )
+
+
+def with_note(content: Any, note: str) -> Any:
     """A message's content with the footnote appended.
 
     Two shapes, because content is a string or a list of parts: text is appended
     to text, and a part-list gains a text part.  Appending to a list would be a
     type error and replacing it would drop an attachment's note, which is the one
     thing the stored turn still says about what was attached.
+
+    Public because there are two places a message gains its footnote and they
+    have to agree to the character: this module, when a list is *built*, and the
+    agent server, on the turn it has just run and saved (`annotate_turn`).  The
+    second is why it is a function rather than three lines inline — a rebuilt
+    turn and the same turn in memory differ by a prompt-cache miss when their
+    footnotes are not byte-identical.
     """
     if isinstance(content, str):
         return f"{content} {note}".strip()
@@ -404,10 +450,11 @@ def messages_from_turns(
             int(turn.get("turn_id") or 0),
             str(turn.get("created_at") or ""),
             turn.get("completed_at"),
+            str(turn.get("channel") or ""),
         )
         first = dict(messages[0])
         if note:
-            first["content"] = _with_note(first.get("content"), note)
+            first["content"] = with_note(first.get("content"), note)
         built.append(first)
         built.extend(messages[1:])
     return built

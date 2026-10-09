@@ -92,6 +92,28 @@ async def test_text_only_turn() -> None:
     assert [m.role for m in messages] == ["user", "assistant"]
 
 
+async def test_reasoning_lands_on_the_message_the_way_text_does() -> None:
+    """Off the *result*, not off the deltas — the same rule as the answer.
+
+    Both are streamed to the reader and both are kept, and only one of those two
+    channels is allowed to drop fragments.  Scripted contradictorily on purpose:
+    the chunks spell one thing and the result another, so a loop that
+    reassembled the reasoning from what it forwarded would be caught here.  That
+    the provider is never sent it back is `to_wire`'s, and `tests/test_wire.py`
+    states it.
+    """
+    turn = ScriptedTurn(
+        result=StreamChatResult(text="42", thinking="six sevens are forty-two"),
+        chunks=[Chunk(thinking="six sevens are a dozen")],
+    )
+    backend = FakeBackend(turn)
+    messages: list[Message] = []
+
+    await AgentLoop(backend, registry()).run_turn(messages, "6*7?")
+
+    assert messages[-1].thinking == "six sevens are forty-two"
+
+
 async def test_the_result_wins_over_the_deltas() -> None:
     """Progress notifications are display; the call result is the truth.
 

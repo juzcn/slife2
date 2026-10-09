@@ -26,6 +26,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -34,6 +35,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.config import DEFAULT_AGENT, default_config
+from slife2.context import TURN_PREFIX, TURN_SUFFIX
 from slife2.events import TurnEvent, decode
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import StreamChatResult, ToolCall, Usage
@@ -167,15 +169,37 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
+def without_footnote(content: Any) -> Any:
+    """One message's content with the turn footnote taken off the end.
+
+    A `[TURN: {…}]` footnote is on every user message after its turn is saved,
+    so leaving it in would make every assertion about *which turns are in hand*
+    longer and clock-dependent without making it stronger — the same argument
+    `prompts_seen` makes for the system prompt below, and the footnote has its
+    own test (`test_a_turn_in_memory_carries_its_own_footnote`).
+
+    Only a *trailing* one is cut, and only when it is closed: a message may
+    legitimately contain the literal marker in prose, and the footnote is always
+    a suffix.  That is v1's rule for its own envelope, for the same reason.
+    """
+    if not isinstance(content, str) or not content.endswith(TURN_SUFFIX):
+        return content
+    start = content.rfind(TURN_PREFIX)
+    return content[:start].rstrip() if start != -1 else content
+
+
 def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
     """What the model was sent on one of its calls, as role-tagged text.
 
     The system prompt is dropped: it is the same on every call and its content
     is the subject of its own tests, so including it here would only make every
-    assertion about the conversation longer without making it stronger.
+    assertion about the conversation longer without making it stronger.  The
+    turn footnote goes for the same reason, and `without_footnote` says why.
     """
     return [
-        f"{m.role}:{m.content}" for m in backend.calls[call][0] if m.role != "system"
+        f"{m.role}:{without_footnote(m.content)}"
+        for m in backend.calls[call][0]
+        if m.role != "system"
     ]
 
 
@@ -195,7 +219,112 @@ async def test_the_server_exposes_two_tools(context, hub) -> None:
         build_server(config(), context_client=context, hub_client=hub, backend=FakeBackend())
     ) as client:
         tools = await client.list_tools()
-    assert [t.name for t in tools] == ["send_message", "reset"]
+    assert [t.name for t in tools] == ["send_message", "transcript", "reset"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
+    """The half a rebuild does not cover: the turns *this* process ran.
+
+    `messages_from_turns` annotates everything that came out of the store, so a
+    restored conversation's turns are addressable.  The turns added since are in
+    no rebuilt list — the loop appended them — so without a second annotation
+    the newest turns are the only ones a keep-list cannot name, and "keep
+    everything" is the only thing that can be said about them.
+
+    A rebuild would put the same footnote back, so the switch is off: with an
+    append-only context the annotation is the only thing that can be putting one
+    there, which is what makes this a test of the annotation rather than of
+    `messages_from_turns`.
+    """
+    base = default_config()
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    # Snapshotted when the call is made, not read out of `backend.calls`
+    # afterwards: that keeps *references* to the loop's own Message objects, so a
+    # later read shows the annotation on a message that had none when it was
+    # sent — which is exactly the question this test is asking.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append(
+            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+        )
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(
+        replace(base, context=replace(base.context, rebuild=False)),
+        context_client=context,
+        hub_client=hub,
+        backend=backend,
+    )
+
+    await send(server, "one", channel="tui")
+    await send(server, "two", channel="tui")
+
+    # A turn's own call cannot see its own footnote — it has no id until it is
+    # saved, which is after that call — and the call after it must.
+    assert as_sent[0] == ["user:one"]
+    assert as_sent[1][0].startswith("user:one [TURN: ")
+    footnote = json.loads(as_sent[1][0].split("[TURN: ", 1)[1].rstrip("]"))
+    assert footnote["turn_id"] > 0
+    assert footnote["channel"] == "tui"
+    assert footnote["begin"], "a turn that cannot say when it happened"
+    assert as_sent[1][2] == "user:two", "and the newest turn has none yet"
+
+    # ...and the record keeps the user's own words, so a later rebuild derives
+    # the same footnote from the row rather than finding a second one in it.
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    stored = answer.data["turns"][0]["messages"][0]["content"]
+    assert stored == "one"
+
+
+@pytest.mark.asyncio
+async def test_a_window_can_read_the_conversation_it_left(context, hub) -> None:
+    """What a terminal asks for when it opens, and the answer it needs.
+
+    The *context* is restored by the turn path; this is the other reader of the
+    same stored list — the screen, which needs the turns rather than the message
+    list, because when a line was said and which turn it belongs to are the
+    record's facts and not the model's.
+
+    A read, and provably one: the turn ran before it, and nothing about the
+    answer moved.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=answering("42")
+    )
+    await send(server, "what is 6*7?")
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+        # ...and again, to prove it is a read rather than something that
+        # consumed what it answered with.
+        again = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+
+    turns = answer.data["turns"]
+    assert len(turns) == 1
+    assert turns[0]["messages"][0]["role"] == "user"
+    assert turns[0]["messages"][0]["content"] == "what is 6*7?"
+    assert turns[0]["created_at"], "a turn that cannot say when it happened"
+    assert again.data["turns"] == turns
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_has_never_run_reads_nothing(context, hub) -> None:
+    """Not an error, and not a heading: a new name has no past."""
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": "nobody"})
+
+    assert answer.data["turns"] == []
 
 
 @pytest.mark.asyncio
