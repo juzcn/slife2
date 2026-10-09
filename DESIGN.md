@@ -677,6 +677,43 @@ plugin's would name slife2 itself. The list is still one list, assembled in one
 place, with one naming rule; what varies is only whether a name resolves to a
 connection or to a function in this process.
 
+**Two families are rows without being tools, and that is the whole of what a
+search needed.** A playbook and a `cli:` entry have no connection, no load state
+and no call — but `tool_search` reads the catalogue, so a skill the catalogue
+does not hold is a skill only a model that already knew its name could read, and
+finding out what is installed is the question a search exists to answer. v1
+mirrored both the same way (`sync_category`) and this port keeps its decisions,
+because each one is load-bearing:
+
+* **The row name is namespaced** — `skill:browser-harness`, `cli:yt-dlp` — and
+  the collision is not hypothetical: this config has `browser-harness` as a
+  command *and* as the skill documenting it. A name is a row's identity, so two
+  families cannot share one, and the prefix also tells the reader which of the
+  two a hit is.
+* **A skill's schema is the whole document**, which is what makes "drive a
+  browser" reach the playbook: the semantic leg ranks the text, and a playbook
+  *is* its documentation. `cli:` rows carry the invocation and the `install`
+  line for the same reason.
+* **The mirror writes the status** — a `cli:` entry is `disabled` when the
+  config says so, an unreadable `SKILL.md` is `error` — because there is no
+  connection whose state a verdict could come from. That is the one family where
+  a merge may write `status`, and the one family a re-merge must *not* re-enable:
+  the mirror runs again before every search, so "a source that answered is
+  enabled again" would flip a switched-off command back on several times a
+  minute.
+* **It is a merge, not a row at a time**, so a deleted skill stops being a hit —
+  and it runs before every search rather than once at start, because the folder
+  is the install: a skill dropped in must not be readable and unfindable at the
+  same time. A mirror of an unchanged folder plans no writes, which is what
+  makes that affordable.
+
+Neither family has a load state (`n/a`), and that is also what keeps them out of
+the model's list — the gate is the function categories — so **findable and
+callable stay two different things**. The model will still call one, because a
+search result is an invitation to call the name in it; the answer says what to
+do instead (`skill_use` for a playbook, and for a command the truth that nothing
+runs one yet).
+
 **A credential is not a server, and skills have them.** baidu-search's header
 declares `BAIDU_API_KEY`, and the playbook's first instruction runs a script that
 dies without it — so a skill that "needs nothing" was the wrong thing to say,
@@ -866,19 +903,11 @@ Named so they are decisions rather than oversights:
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
-- **Skills as catalogue rows.** v1 catalogues each `SKILL.md` as a `skill:<name>`
-  row whose schema is the whole document, which is what lets a search find a
-  playbook by what it is about — "drive a browser" reaching
-  `skill:browser-harness` — and that is the largest single win the semantic leg
-  has here. Not in this cut: a skill is read on demand today (`skill_use`), the
-  row would be a second thing to keep in step with the folder, and the search
-  works without it. The schema is ready for it — `skill` is a category,
-  `load_status` is `'n/a'`, and a file that cannot be read is a status the row
-  can carry.
-- **`cli:` entries as rows, and the tool that runs them.** The config section
-  exists and nothing serves it (README's Tools section says so). When a tool
-  does, it is a row like any other — v1 catalogued them the same way — and the
-  same "installed, but not a tool" answer applies.
+- **The tool that runs a `cli:` entry.** The entry is a row now (§8's mirror),
+  so a search finds the command by what it does — but nothing executes one, and
+  `func_tool_load` says so in as many words ("a command already installed on
+  this machine … nothing runs one yet"). Those entries are `tools.yaml`'s other
+  half served: what a call would do is the change, not the row.
 - **A word to the model about the loaded set.** `tool_search` and
   `func_tool_load` explain themselves in their own descriptions and nothing else
   does. v1 also carried a per-turn prompt saying how many tools were loaded;

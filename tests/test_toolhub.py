@@ -10,6 +10,7 @@ them is ours.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -157,6 +158,153 @@ def unused(settings: ToolServerSettings) -> Any:
     return UNUSED
 
 
+# --- the two families nothing connects to -------------------------------------
+
+
+def hub_with_documents(cli: Mapping[str, Any] | None = None) -> FastMCP:
+    """A hub whose config also carries `cli:` entries.
+
+    A mapping rather than keywords, because the interesting names have hyphens
+    in them: `browser-harness` is a `cli:` entry *and* the skill that documents
+    it, which is the collision the namespaced row name exists for.
+    """
+    from slife2.config import CliToolSettings
+
+    config = replace(
+        default_config(),
+        cli={
+            name: CliToolSettings(name=name, **entry)
+            for name, entry in (cli or {}).items()
+        },
+    )
+    return build_hub(config, transports=plugin_transports(config))
+
+
+@pytest.mark.asyncio
+async def test_a_skill_is_a_row_so_a_search_can_find_it(isolated_runtime: Path) -> None:
+    """The whole reason a playbook is catalogued: `tool_search` reads rows.
+
+    `skill_use` reads the *folder*, so a skill nobody catalogued is a skill only
+    a model that already knew its name could ever read — and finding out what is
+    installed is the question a search exists to answer.  The name is namespaced
+    because a name is a row's identity and the collision is real: this config
+    has `browser-harness` as a `cli:` entry *and* as the skill documenting it.
+    """
+    write_skill(
+        isolated_runtime,
+        "browser-harness",
+        description="Drive a browser and take screenshots.",
+        body="Use CDP to click, type and capture.",
+    )
+    hub = hub_with_documents(
+        {
+            "browser-harness": {
+                "command": "browser-harness",
+                "description": "Direct browser control via CDP.",
+            }
+        }
+    )
+
+    async with Client(hub) as client:
+        found = await call(client, "tool_search", {"query": "browser screenshots"})
+        listed = await client.call_tool("list_tools", {})
+
+    assert "skill:browser-harness" in found["text"]
+    assert "cli:browser-harness" in found["text"], "and the command beside it"
+    # ...and neither is a tool, so neither is in the model's list: findable and
+    # callable are two different things.
+    assert not [name for name in names(listed.data) if ":" in name]
+
+
+@pytest.mark.asyncio
+async def test_a_skill_dropped_in_later_is_findable_at_once(
+    isolated_runtime: Path,
+) -> None:
+    """Installing a skill is dropping a directory in, and the README says so.
+
+    A row written only at the hub's start would make a new playbook *readable*
+    and *unfindable* at the same time — the folder is read on every call and the
+    catalogue would not be — so a search mirrors first.  A merge of an unchanged
+    folder writes nothing, which is what makes it affordable.
+    """
+    hub = hub_with_documents()
+
+    async with Client(hub) as client:
+        before = await call(client, "tool_search", {"query": "browser"})
+        write_skill(isolated_runtime, "browser-harness", description="Drive a browser.")
+        after = await call(client, "tool_search", {"query": "browser"})
+
+        # And a deleted one stops being a hit: the merge's other half.
+        shutil.rmtree(isolated_runtime / "skills" / "browser-harness")
+        gone = await call(client, "tool_search", {"query": "browser"})
+
+    assert "skill:browser-harness" not in before["text"]
+    assert "skill:browser-harness" in after["text"]
+    assert "skill:browser-harness" not in gone["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_switched_off_command_is_a_row_that_says_so() -> None:
+    """A `cli:` entry mirrors its own `enabled` flag, and keeps mirroring it.
+
+    The one family whose status the *config* decides, which is why a merge may
+    write one: `enabled: false` is a fact about the file, not a state a
+    connection could be in.  A re-merge must not undo it — a mirror that
+    re-enabled what the operator switched off would do it on every search.
+    """
+    hub = hub_with_documents(
+        {
+            "yt-dlp": {
+                "command": "yt-dlp",
+                "description": "Download video from 1000+ sites.",
+            },
+            "iflow": {"command": "iflow", "description": "Off.", "enabled": False},
+        }
+    )
+
+    async with Client(hub) as client:
+        found = await call(client, "tool_search", {"query": ""})
+        again = await call(client, "tool_search", {"query": ""})
+
+    assert "cli:yt-dlp" in found["text"]
+    assert "cli:iflow" in found["text"] and "NOT USABLE: disabled" in found["text"]
+    assert "NOT USABLE: disabled" in again["text"], "still off after a re-merge"
+
+
+@pytest.mark.asyncio
+async def test_a_document_answers_for_itself_when_it_is_called(
+    isolated_runtime: Path,
+) -> None:
+    """A search result invites a call, so both families answer like adults.
+
+    The model read the name in a search result and tried it.  What it must not
+    get is the answer the routing gives for a *server* that has gone away
+    ("not a server this hub is configured with any more") — neither of these
+    ever had one, and the step that does reach the thing is one sentence away.
+    """
+    write_skill(isolated_runtime, "browser-harness", description="Drive a browser.")
+    hub = hub_with_documents(
+        {"yt-dlp": {"command": "yt-dlp", "description": "Download video."}}
+    )
+
+    async with Client(hub) as client:
+        read = await call(client, "skill:browser-harness")
+        loaded = await call(
+            client, "func_tool_load", {"names": ["skill:browser-harness"]}
+        )
+        command = await call(client, "cli:yt-dlp")
+        cli_load = await call(client, "func_tool_load", {"names": ["cli:yt-dlp"]})
+
+    assert read["ok"] is False
+    assert "skill_use(name='browser-harness')" in read["text"]
+    assert loaded["ok"] is False and "no load state" in loaded["text"]
+    assert "a playbook, read with skill_use" in loaded["text"]
+
+    assert command["ok"] is False
+    assert "nothing here runs one yet" in command["text"]
+    assert "a command already installed" in cli_load["text"]
+
+
 # --- what the model may call --------------------------------------------------
 
 
@@ -204,12 +352,19 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
     assert row["loaded"] == 3, "a plugin's tools are in the model's list"
 
 
-def write_skill(data_dir: Path, name: str = "one") -> Path:
+def write_skill(
+    data_dir: Path,
+    name: str = "one",
+    *,
+    description: str = "d",
+    body: str = "The body.",
+) -> Path:
     """One skill on disk, in the `skills/` a bare `scan()` looks in."""
     folder = data_dir / "skills" / name
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: d\n---\n\nThe body.\n", encoding="utf-8"
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
     )
     return folder
 

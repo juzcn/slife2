@@ -206,14 +206,25 @@ SERVER_NAME = "slife2-toolhub"
 #: has to remember a list of its own.
 CONFIG_KEY = "toolhub"
 
-#: The category — and the config `kind` — of a tool that is *ours*, which is
-#: what `slife2.db.PLUGIN` spells for the catalogue's own `category` column.
-#: One word in two modules rather than one import: the hub must not import a
-#: server (see `slife2.config`), and the db is one.  It is written down twice
-#: because it is a fact about the *system* — a plugin is a server slife2 starts
-#: — and it is what `model_name` reads to decide whether a name carries its
-#: server or is the whole of what the model says.
+#: The catalogue's vocabulary, in the three words this process has to say out
+#: loud: the category — and the config `kind` — of a tool that is *ours*
+#: (`slife2.db.PLUGIN`), and the two categories nothing is connected to
+#: (`slife2.db.SKILL`, `slife2.db.CLI`).  Spelled in two modules rather than
+#: imported for the reason the config gives: the hub must not import a server,
+#: and the db is one.  They are facts about the *system* — a plugin is a server
+#: slife2 starts, a skill is a document, a command is a program already
+#: installed — and `model_name` reads the first to decide whether a name carries
+#: its server or is the whole of what the model says.
 PLUGIN = "plugin"
+SKILL = "skill"
+CLI = "cli"
+
+#: Where the two document families come from, as catalogue sources.  These are
+#: the only rows mirrored from something that is not a connection — a folder and
+#: a config section — which is why they are also the only rows whose *status* is
+#: the mirror's to write (`slife2.db._plan`).
+SKILLS_SOURCE = "skills"
+CLI_SOURCE = "cli"
 
 #: The two tools this process serves a *model* to manage its own tool list.
 #: Named here because they are also what the hub will not let go of: see
@@ -1057,7 +1068,7 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
         },
         "category": {
             "type": "string",
-            "enum": ["plugin", "mcp", "rest", "skill"],
+            "enum": ["plugin", "mcp", "rest", "skill", "cli"],
             "description": "One kind of tool only.",
         },
         "source_id": {
@@ -1147,6 +1158,97 @@ FUNC_TOOL_UNLOAD_DESCRIPTION = (
 )
 
 
+def document_rows(config: Config) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    """The two families nothing has a connection behind, as catalogue rows.
+
+    **Why a skill and a `cli:` entry are rows at all**: `tool_search` is how the
+    model finds something it does not already have, and the search reads the
+    catalogue — so a playbook nobody catalogued is a playbook only a model that
+    already knew its name could read.  v1 mirrored both the same way, and the
+    port keeps its three decisions:
+
+    * **The row name is namespaced** (`skill:browser-harness`).  A name is a
+      row's identity, and the collision is not hypothetical — this config has
+      `browser-harness` as a `cli:` entry *and* as the skill that documents it.
+      The prefix also tells a reader which of the two a hit is, and its
+      `remote_name` carries what to call instead: for a skill the argument
+      `skill_use` takes, for a command the program's name.
+    * **A skill's `schema` is the whole document.**  A playbook *is* its
+      documentation, so the text is what the semantic leg ranks, and "drive a
+      browser" reaching `skill:browser-harness` is the entire point of the row.
+      It is stored as the document `skill_use` would hand back, so what a search
+      ranks and what a call returns are the same text.
+    * **The status is the source's own**, and this is the pair of categories
+      where a mirror may write one: a `cli:` entry that is switched off is
+      `disabled`, and a `SKILL.md` that cannot be read is `error` — the model is
+      better told the thing exists and is broken than not told at all.
+
+    Neither family has a load state, and the store seeds `n/a` for both: a skill
+    is read with `skill_use` and a command is run, so "loaded" would be a promise
+    about a step that does not exist.  That is also what keeps these rows out of
+    the model's tool list — the gate is the function categories — so being
+    findable and being callable stay two different things.
+    """
+    documents: list[dict[str, Any]] = []
+    for skill in skills.scan():
+        try:
+            text, status = skills.document(skill), "enabled"
+        except OSError:
+            # Unreadable is a state of the *row*, not a reason to leave it out:
+            # the folder said the skill is installed, and a search that found
+            # nothing would send the model looking for a file the operator
+            # believes is there.
+            text, status = "", "error"
+        documents.append(
+            {
+                "name": f"{SKILL}:{skill.name}",
+                "description": skill.description,
+                "remote_name": skill.name,
+                "schema": text,
+                "status": status,
+            }
+        )
+
+    commands = [
+        {
+            "name": f"{CLI}:{entry.name}",
+            "description": entry.description,
+            "remote_name": entry.command,
+            # What a search can match on: the invocation and how to get it.  The
+            # description is the operator's sentence about what it does; this is
+            # everything else the entry knows, and `install` is the line that
+            # matters when the command is not on `PATH`.
+            "schema": "\n".join(
+                part for part in (entry.command, entry.install) if part
+            ),
+            "status": "enabled" if entry.enabled else "disabled",
+        }
+        for entry in config.cli.values()
+    ]
+
+    return [
+        (SKILLS_SOURCE, SKILL, documents),
+        (CLI_SOURCE, CLI, commands),
+    ]
+
+
+async def mirror_documents(catalogue: Catalogue, config: Config) -> None:
+    """Record both document families, each as its own source's whole list.
+
+    **A merge, so a deleted skill stops being a hit** — the purge half is the
+    reason this is one call per family rather than a row at a time.
+
+    **Asked again before every search**, which is the cost of the promise the
+    README makes about skills: dropping a directory into `<data>/skills/` is the
+    whole of installing one, and a row that appeared only at the next hub start
+    would make a new playbook readable and unfindable at the same time.  A
+    mirror of an unchanged folder plans no writes at all — the comparison is the
+    merge's, and this is one loopback to the db for it.
+    """
+    for source, category, rows in document_rows(config):
+        await catalogue.merge(source, category, rows)
+
+
 def local_tools(
     config: Config,
     catalogue: Catalogue,
@@ -1209,6 +1311,10 @@ def local_tools(
         return await skills.use(arguments, environments=environments)
 
     async def search(arguments: dict[str, Any]) -> tuple[str, bool]:
+        # The folder is mirrored on the way in, because a search is exactly
+        # where a skill that arrived since the hub started has to be findable —
+        # see `mirror_documents`.  Nothing is written when nothing changed.
+        await mirror_documents(catalogue, config)
         found = await catalogue.search(
             query=str(arguments.get("query") or ""),
             category=str(arguments.get("category") or ""),
@@ -1448,6 +1554,28 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
+    """Why one of the two document families cannot be called, and what to do.
+
+    **A search result is an invitation to call the name in it**, so the two
+    families that are findable and not callable have to answer like grown-ups:
+    the model read the name, tried it, and is owed the step that actually
+    reaches the thing — `skill_use` for a playbook, and for a command the truth
+    that nothing runs one yet (DESIGN.md §9).
+    """
+    if str(row.get("category") or "") == SKILL:
+        return (
+            f"{name!r} is a playbook, not a tool: read it with "
+            f"skill_use(name={str(row.get('remote_name') or name.split(':', 1)[-1])!r})"
+        )
+    command = str(row.get("remote_name") or "")
+    return (
+        f"{name!r} is a command already installed on this machine"
+        + (f" ({command})" if command else "")
+        + " — nothing here runs one yet, so there is no tool to call"
+    )
+
+
 def _load_as_text(name: str, answer: Mapping[str, Any]) -> tuple[str, bool]:
     """What the db said about one load, said to a model.
 
@@ -1467,11 +1595,23 @@ def _load_as_text(name: str, answer: Mapping[str, Any]) -> tuple[str, bool]:
             False,
         )
     if outcome == "no_load_state":
-        return (
-            f"{name!r} has no load state: it is a document (a skill), read by "
-            f"calling it, not a tool to load",
-            False,
-        )
+        # The two document families, and the answer differs because what the
+        # model does next differs: a skill it reads with `skill_use`, and a
+        # command — installed, but not a tool — has nothing serving it yet
+        # (DESIGN.md §9).  Both are findable, which is the half that landed.
+        if name.startswith(f"{SKILL}:"):
+            what = (
+                f"it is a playbook, read with skill_use(name="
+                f"{name.split(':', 1)[1]!r}), not a tool to load"
+            )
+        elif name.startswith(f"{CLI}:"):
+            what = (
+                "it is a command already installed on this machine, not a tool "
+                "to load — nothing runs one yet"
+            )
+        else:
+            what = "it has nothing behind it that could be loaded"
+        return f"{name!r} has no load state: {what}", False
     if outcome == "disabled":
         return (
             f"{name!r} is switched off in the config, so it cannot be loaded — "
@@ -1770,11 +1910,14 @@ def build_server(
     async def start() -> None:
         """What the hub does before it serves anything.
 
-        **The plugins are asked for their tools, and the hub's own tools are
-        written down.**  Both are merges into the catalogue: the upstreams find
-        theirs by connecting, and this process's own four are known without
-        connecting to anything — so they are recorded here, once, and are rows
-        like every other tool from then on.
+        **The plugins are asked for their tools, and everything this process
+        already knows is written down.**  All three are merges into the
+        catalogue: the upstreams find theirs by connecting, this process's own
+        four are known without connecting to anything, and the skills and `cli:`
+        entries are known without connecting either — so they are recorded here,
+        once, and are rows like every other tool from then on.  The documents
+        are mirrored again before every search (`mirror_documents`), because
+        their source is a folder a person drops things into.
 
         Order matters once: this has to happen before the first `list_tools`, or
         the model's first answer would be missing the tool that finds tools.
@@ -1783,6 +1926,7 @@ def build_server(
         await catalogue.merge(
             CONFIG_KEY, category, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
+        await mirror_documents(catalogue, config)
         begin_connecting()
 
     @asynccontextmanager
@@ -1932,6 +2076,15 @@ def build_server(
             row = await catalogue.route(name)
         if row is None:
             return {"text": await unknown_tool(name), "ok": False}
+
+        if str(row.get("category") or "") in (SKILL, CLI):
+            # A row a search can find and a call cannot reach, which is the
+            # shape of both document families.  Said here rather than left to
+            # the branch below, whose answer ("not a server this hub is
+            # configured with any more") would be false: these have never had a
+            # server behind them, and the model reached this name by reading a
+            # search result that told it so.
+            return {"text": document_is_not_callable(name, row), "ok": False}
 
         source = str(row.get("source_id") or "")
         upstream = by_source(source)

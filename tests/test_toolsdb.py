@@ -48,13 +48,20 @@ def store_at(tmp_path, **kwargs) -> ToolStore:
     )
 
 
-def tool(name: str, description: str = "Does a thing.", schema: str = "") -> dict:
-    """One row of a source's tool list, in the shape the hub sends."""
+def tool(
+    name: str, description: str = "Does a thing.", schema: str = "", **extra
+) -> dict:
+    """One row of a source's tool list, in the shape the hub sends.
+
+    `extra` is for the two document families, whose rows may carry a `status`:
+    nothing else has a verdict of its own to send (`slife2.db._plan`).
+    """
     return {
         "name": name,
         "description": description,
         "remote_name": name.split("__", 1)[-1],
         "schema": schema,
+        **extra,
     }
 
 
@@ -429,6 +436,82 @@ def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
 
     injected = [row["name"] for row in store.injectable(["toolhub"])["tools"]]
     assert injected == ["_func_tool_unload", "tool_search"]
+
+
+def test_a_document_row_is_findable_and_never_injected(tmp_path) -> None:
+    """A skill and a `cli:` entry are rows, and they are not tools.
+
+    Both halves are the point.  The row exists so `tool_search` can reach a
+    playbook or a command the model would otherwise have to know the name of —
+    and it carries no load state (`n/a`), which is also what keeps it out of the
+    model's list: the gate is the function categories, so a row can be findable
+    without being callable.  Nothing is connected to either family, so nothing
+    could be "loaded" and nothing can be down.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "skills",
+        "skill",
+        [tool("skill:browser-harness", "Drive a browser.", schema="# Browser")],
+    )
+    merge(
+        store,
+        "cli",
+        "cli",
+        [tool("cli:yt-dlp", "Download video.", schema="yt-dlp")],
+    )
+
+    assert rows_in(store) == [
+        ("cli:yt-dlp", "enabled", "n/a"),
+        ("skill:browser-harness", "enabled", "n/a"),
+    ]
+    assert store.injectable(["skills", "cli"])["tools"] == []
+    assert merge(store, "cli", "cli", [])["purged"] == ["cli:yt-dlp"]
+
+
+def test_a_document_row_carries_its_own_verdict(tmp_path) -> None:
+    """The one family whose status comes from its source rather than from a link.
+
+    Every other row's status is the *runtime's*, because whether a server is up
+    is not something a config can say — and the merge re-enables what an older
+    config switched off, since a merge only runs for a source that answered.
+    For these two there is no link to answer, so the mirror is the authority:
+    a `cli:` entry with `enabled: false` is `disabled`, and a `SKILL.md` that
+    cannot be read is `error` (v1's `status_verdict`, in this build's words).
+
+    **And a re-merge must not undo it** — the mirror runs again before every
+    search, so "re-enable what the config switched off" would flip this row
+    back on several times a minute.
+    """
+    store = store_at(tmp_path)
+    off = {
+        "name": "cli:iflow",
+        "description": "Switched off.",
+        "remote_name": "iflow",
+        "schema": "iflow",
+        "status": "disabled",
+    }
+    unreadable = {
+        "name": "skill:broken",
+        "description": "",
+        "remote_name": "broken",
+        "schema": "",
+        "status": "error",
+    }
+    merge(store, "cli", "cli", [off])
+    merge(store, "skills", "skill", [unreadable])
+
+    assert rows_in(store) == [
+        ("cli:iflow", "disabled", "n/a"),
+        ("skill:broken", "error", "n/a"),
+    ]
+    merge(store, "cli", "cli", [off])
+    merge(store, "skills", "skill", [unreadable])
+    assert rows_in(store) == [
+        ("cli:iflow", "disabled", "n/a"),
+        ("skill:broken", "error", "n/a"),
+    ], "a mirror does not reconnect a document"
 
 
 def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:

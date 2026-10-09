@@ -361,9 +361,17 @@ rest-api:
 # The entry is the opt-in, exactly as an entry under `tools:` is: what is here
 # is what the model may be given, and there is no registry a model writes.
 #
+# Every entry is a row in the tool catalogue, named `cli:<name>`, so the model
+# finds it with `tool_search` by what it does rather than by its name.  Nothing
+# *runs* one yet (`func_tool_load` says so, and DESIGN.md §9 is the change that
+# would) — being findable is the half that landed, and a command is not a tool
+# that could be loaded either way.
+#
 # The matching shape for a *playbook* rather than a command is the `skills/`
 # directory beside this file — one directory per skill, each with a SKILL.md.
-# Same family, written to be read instead of run.
+# Same family, written to be read instead of run — and catalogued the same way,
+# as `skill:<name>`, which is how a search reaches a playbook by what it is
+# about.
 # ── What a skill is given ───────────────────────────────────────────────────
 # The playbooks in `skills/` are read, not run — but a playbook that says
 # "run scripts/search.py" is worth nothing if that script dies on a missing API

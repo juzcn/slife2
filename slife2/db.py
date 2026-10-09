@@ -1510,19 +1510,22 @@ PLUGIN = "plugin"
 
 FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
 
-#: The one category with nothing behind it: a skill is a document, read by the
-#: hub itself, and it has no connection that could be down and no load state to
-#: have.  Its row exists so that a search can find the playbook — the model
-#: still reads it with `skill_use`.
+#: The two categories **nothing is connected to**, and the two the model cannot
+#: load.  A skill is a document, read by the hub itself; a `cli:` entry is a
+#: program already on this machine.  Neither has a connection that could be down
+#: and neither has a load state to have — and both are rows all the same, because
+#: that is how `tool_search` reaches them: a playbook nobody catalogued is a
+#: playbook found only by a model that already knew its name (`skill_use` reads
+#: one, `toolhub`'s mirror writes them).
 SKILL = "skill"
+CLI = "cli"
 
 #: Everything the code can write, which is what the live table's `CHECK` must
-#: accept.  v1 also had `job` and `cli`, and a `plugin` that was a package of
-#: somebody's own code rather than a server; nothing writes `job` or `cli` here
-#: yet (`cli:` entries have no tool serving them — DESIGN.md §9), and adding one
+#: accept.  v1 also had `job`, and a `plugin` that was a package of somebody's
+#: own code rather than a server; nothing writes `job` here yet, and adding one
 #: later is free: the DDL is checked at open and a file that is not this build's
-#: is rebuilt rather than migrated.
-CATEGORIES = FUNCTION_CATEGORIES | {SKILL}
+#: is rebuilt rather than migrated — which is what adding `cli` did.
+CATEGORIES = FUNCTION_CATEGORIES | {SKILL, CLI}
 
 #: `tool.status` — the row's whole closed domain, and three MUTUALLY EXCLUSIVE
 #: values: a row is in exactly one of them, so an `error` row is never also an
@@ -1534,6 +1537,11 @@ CATEGORIES = FUNCTION_CATEGORIES | {SKILL}
 STATUS_ENABLED = "enabled"
 STATUS_DISABLED = "disabled"
 STATUS_ERROR = "error"
+
+#: The column's whole domain as a set, for the two places that ask membership
+#: rather than compare: the DDL check read at open, and a merged row that
+#: carries its own verdict (`_plan`).
+STATUSES = frozenset({STATUS_ENABLED, STATUS_DISABLED, STATUS_ERROR})
 
 #: `tool.load_status` — what the *model* decided, and the one thing in this file
 #: that is not derived from anything: every other column can be rebuilt by
@@ -1586,7 +1594,7 @@ _TOOL_COLUMNS = frozenset(
 #: the hub reads it as the db refusing one caller's data and carries on.
 _CHECKED_DOMAINS: dict[str, frozenset[str] | set[str]] = {
     "category": CATEGORIES,
-    "status": {STATUS_ENABLED, STATUS_DISABLED, STATUS_ERROR},
+    "status": STATUSES,
     "load_status": {LOADED, UNLOADED, NA},
 }
 
@@ -2040,12 +2048,24 @@ class ToolStore:
                     "remote_name": str(row.get("remote_name") or name),
                     "schema": str(row.get("schema") or NA) or NA,
                 }
+                # **A row may carry its own verdict.**  Every other row's status
+                # is the *runtime's* — `source_state` is the only writer, because
+                # whether a server is up is not something a config can say.  The
+                # two document families are the exception and the reason is the
+                # same fact twice: there is no connection to have a state, so
+                # the mirror is the authority.  A `cli:` entry that is switched
+                # off mirrors `disabled`; a `SKILL.md` that cannot be read
+                # mirrors `error`.
+                verdict = str(row.get("status") or "")
+                own_verdict = verdict in STATUSES
+                if own_verdict:
+                    fields["status"] = verdict
                 previous = existing.get(name)
                 if previous is None:
                     load_status = self._seed(category, source)
                     entry = {
                         **fields,
-                        "status": STATUS_ENABLED,
+                        "status": fields.get("status", STATUS_ENABLED),
                         "load_status": load_status,
                         # The list's stamp, and only that one: a row nobody has
                         # called yet has no call to record, and `''` is what
@@ -2073,7 +2093,12 @@ class ToolStore:
                     # price of an embedding call and a rewritten row.
                     if moved.keys() & {"description", "schema"}:
                         documents.append((name, tool_document(fields)))
-                if previous["status"] != STATUS_ENABLED:
+                # Except a row that stated its own: a merge re-enables what an
+                # older *config* switched off, and for these two families the
+                # config is the thing that just spoke — so re-enabling a
+                # `cli:` entry the operator has switched off would undo the
+                # setting on every search.
+                if previous["status"] != STATUS_ENABLED and not own_verdict:
                     reconnected.append(name)
                 if not moved and previous["status"] == STATUS_ENABLED:
                     skipped += 1
@@ -2202,12 +2227,14 @@ class ToolStore:
         A new row is the only thing this decides.  Discovery never puts a tool
         into the model's list by itself, and it never takes one out.
         """
-        if category == SKILL:
-            # A skill has no load state at all: it is a document the hub reads,
-            # not a tool behind a connection, so "not loaded yet" would be a
-            # promise about a step that does not exist — and `load_status='n/a'`
-            # is what `tool_search`'s own filter and the column's documentation
-            # both say a skill carries.
+        if category in (SKILL, CLI):
+            # Neither has a load state at all: a skill is a document the hub
+            # reads and a command is a program already installed, so "not loaded
+            # yet" would be a promise about a step that does not exist — and
+            # `load_status='n/a'` is what `tool_search`'s own filter and the
+            # column's documentation both say these two carry.  It is also what
+            # keeps them out of the model's list: the gate is the function
+            # categories, so a row can be findable without being callable.
             return NA
         if category == PLUGIN or source in self.autoload:
             return LOADED

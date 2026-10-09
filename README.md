@@ -171,9 +171,12 @@ connect to, because the program is already installed. It is written down so the
 model can be told it exists — and written *here*, in the operator's file,
 because an entry is the opt-in, exactly as an entry under `tools:` is. `install`
 is what a person is told when the command turns out not to be on `PATH`.
-**Nothing serves these entries yet**: the tool that does is the next change
-(DESIGN.md §9). The playbooks in `skills/` already have theirs — `skill_use`,
-above.
+**Every entry is a row in the tool catalogue** (`cli:yt-dlp`), so `tool_search`
+finds a command by what it does rather than by its name — being findable is the
+half that landed. **Nothing runs one yet**: the tool that does is the next
+change (DESIGN.md §9), and until then `func_tool_load` says exactly that. The
+playbooks in `skills/` are catalogued the same way and *are* readable —
+`skill_use`, above.
 
 A tool's name carries the server it came from when there is one to carry: an
 entry under `tools:` reaches the model as `{name}__{tool}` —
@@ -220,8 +223,10 @@ db's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
 
-The hub has three sources: the plugins, which it asks for a tool list the way
-it asks anybody; everything under `tools:`; and the tools it serves itself.
+The hub has five sources, and only the first two are anybody else's process: the
+plugins, which it asks for a tool list the way it asks anybody; everything under
+`tools:`; the tools it serves itself; the skills folder; and the `cli:` section.
+The last two are rows that are not tools at all.
 
 That third one is an exception, and it is narrow. **`skill_use`** is served by
 the hub itself, because a skill has no server behind it: it is a document in
@@ -235,6 +240,16 @@ privilege of this one. Skills are installed by putting a directory in that
 folder — the tool reads the disk on every call, so there is nothing to restart.
 `tool_search` and `func_tool_load` are the same kind of thing: the other two the
 hub serves itself.
+
+**A skill is also a row** (`skill:browser-harness`), and so is every `cli:`
+entry — which is what lets `tool_search` answer "what can I do about a browser"
+without the model already knowing to ask for `browser-harness` by name: the
+playbook's whole document is what the search indexes, and "drive a browser"
+reaching it is the entire point. The row is not a tool: it has no load state,
+it never enters the model's list, and calling it answers with the step that does
+reach the thing (`skill_use`) rather than a refusal. The name is namespaced
+because `browser-harness` is a command *and* the skill documenting it, and one
+name is one row.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
