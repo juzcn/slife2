@@ -1143,6 +1143,35 @@ where 55 of the 253 rows are browser or document tools: the embedding's
 neighbourhood is crowded and the exact token cuts through it. One case is not a
 trend, but it is the direction the theory predicts, and it is the reason both
 legs are still here.
+
+**The answer is a structure, and its first line is a verdict.** A page of the ten
+nearest rows is the same shape whether the catalogue can answer the question or
+cannot — which is the one thing the caller needs from it — so the answer says
+which: `Best match 0.73 by meaning`, or `Weak — nothing is above 0.55 by
+meaning`, or `Nothing here matches`. The floors are measurements: 36 queries the
+catalogue can answer have a best-on-page meaning no lower than 0.477, and 10 it
+cannot answer no higher than 0.512, so the two overlap in a 0.035 band and no
+single cutoff is exact. That is why there are three tiers and not one cut —
+whatever falls in the overlap is *said* rather than decided — and why nothing is
+filtered by them: a weak page still shows its rows. The rows are numbered at the
+left margin, which is also what keeps a ninety-line description from making the
+answer uncountable.
+
+**Every row carries the same two fields, and neither is the order.** `meaning
+0.73` is the cosine, one measurement for every row on the page — including the
+rows the meaning leg never returned, which `ToolStore._meaning_of` reads out of
+the vectors the index already holds; a row the *words* found used to carry no
+number at all, so the row the caller named outright read as the weakest thing
+there. `matched your words` is the other half and is not a score: it is certain
+where a cosine is graded, and it is the one piece of evidence no cutoff can
+express, because a row can be named exactly whatever it scores — `pandoc` scores
+0.514 against the row *named* `mcp-pandoc`, and a threshold alone would answer
+"nothing here" to somebody who just said the tool's name.
+
+And the order is neither of them. It is by evidence, and the header says so in
+six words, because a column that does not run in order is a column a model will
+otherwise sort by — the same failure as an inverted score, reached from the other
+side.
 Both rows are the hub's own, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted — which is the hub's
 own three plus `skill_use`, the one entry there that a plugin serves
