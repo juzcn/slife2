@@ -1043,6 +1043,38 @@ async def test_a_keywords_only_search_reaches_the_leg_that_can_answer_it() -> No
 
 
 @pytest.mark.asyncio
+async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
+    """The answer is a structure, and its first line is a verdict.
+
+    A flat list of the ten nearest rows is the same shape whether this catalogue
+    can answer the question or cannot — and telling those apart is the one thing
+    a caller needs from it.  So both are asserted: a page that has an answer says
+    the number it found, and a page that has none says so instead of presenting
+    ten rows as though they were matches.
+
+    The numbering is asserted with them because it is what makes the rest
+    readable at all: a description may be ninety lines long (`_quoted` argues
+    why it is not cut), and a row is recognisable only because it starts at the
+    left margin with its own number.
+    """
+    hub = hub_with_documents({"x": {"command": "x", "description": "工具"}})
+    async with Client(hub) as client:
+        found = await call(client, "tool_search", {"keywords": [], "sentences": ["工具"]})
+        nothing = await call(
+            client, "tool_search", {"keywords": [], "sentences": ["trump"]}
+        )
+
+    assert found["text"].startswith("Best match 1.00 by meaning."), found["text"]
+    assert "Nothing here matches" in nothing["text"], nothing["text"]
+
+    rows = [line for line in found["text"].split("\n") if line[:1].isdigit()]
+    assert rows, "every row begins at the margin with its number"
+    for line in rows:
+        assert "meaning " in line, f"and carries its number: {line!r}"
+    assert "cli:x" in found["text"]
+
+
+@pytest.mark.asyncio
 async def test_a_search_says_how_to_load_what_it_found() -> None:
     """The hint belongs where a model asks about the mechanism: a result.
 

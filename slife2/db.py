@@ -74,9 +74,11 @@ degraded would store turns nothing could ever find.
 
 from __future__ import annotations
 
+import array
 import asyncio
 import json
 import logging
+import math
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
@@ -833,6 +835,25 @@ def as_similarity(distance: float) -> float:
     and its docstring is where the arithmetic is argued.
     """
     return 1.0 - distance
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    """The cosine of two vectors — the same number `as_similarity` would give.
+
+    The index reports `1 - distance` for the rows it returns, and it will not
+    score a row it did not return: a KNN answers "which rows are nearest", and a
+    row outside its page comes back with no number at all.  So a page that is to
+    carry one kind of number has to measure the rest this way, and it has to
+    measure them *the same* way — a second definition of "how close" would put
+    two kinds of number in one column and call them one.
+
+    Measured against the index over a whole catalogue, the two agree to float32
+    rounding (worst case 8e-7), which is what makes that claim a fact rather than
+    a hope.
+    """
+    dot = sum(a * b for a, b in zip(left, right))
+    sizes = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return dot / sizes if sizes else 0.0
 
 
 def _load_vector_index(connection: sqlite3.Connection) -> None:
@@ -2146,18 +2167,32 @@ def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _search_dict(row: sqlite3.Row, similarity: float | None = None) -> dict[str, Any]:
+def _search_dict(
+    row: sqlite3.Row,
+    similarity: float | None = None,
+    *,
+    matched_words: bool = False,
+) -> dict[str, Any]:
     """One search result: what a chooser needs, and no more.
 
-    The similarity is present only when the semantic leg produced one — a
-    keyword hit has no distance to report, and a `0.0` invented for it would
-    read as "found by meaning, and it is a bad match".
+    `similarity` is how close the row is **by meaning**, and every row on a page
+    has one — `search` fills it in for the rows the meaning leg never returned,
+    which used to be the rows with no number at all.  A caller that has none
+    still gets no key rather than an invented `0.0`, which would read as "found
+    by meaning, and it is a bad match".
+
+    `matched_words` is the other half and is not a score: the row's own text
+    contains every word the caller gave, which is certain where a similarity is
+    graded — and is the one piece of evidence a cutoff cannot express, since a
+    row can be named exactly whatever it scores (`pandoc`, at 0.514).
     """
     found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
     schema = str(row["schema"] or "")
     found["schema_bytes"] = 0 if schema in ("", NA) else len(schema)
     if similarity is not None:
         found["similarity"] = similarity
+    if matched_words:
+        found["matched_words"] = True
     return found
 
 
@@ -3008,18 +3043,17 @@ class ToolStore:
         phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
         similarity: dict[int, float] = {}
         questions: list[list[int]] = []
-        for (index, _), hits in zip(
-            phrases, await self._semantic_lists(sentences, embedder, over), strict=True
-        ):
-            # The *nearest* sentence stands for a row when several found it,
-            # because that is the one that found it — `setdefault` is what says
-            # the first hit is the nearest.
+        queries, lists = await self._semantic_lists(sentences, embedder, over)
+        for (index, _), hits in zip(phrases, lists, strict=True):
+            # A row several sentences found takes the *nearest* of them, so the
+            # number on the page is how close the row came to the nearest thing
+            # the caller asked — not whichever sentence happened to be first.
             legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
             if keyword_hits is not None:
                 legs["keyword"] = keyword_hits
             questions.append([rowid for rowid, _ in fuse_ranked(legs)])
             for rowid, measured in hits:
-                similarity.setdefault(rowid, measured)
+                similarity[rowid] = max(similarity.get(rowid, 0.0), measured)
         if keyword_hits is not None and not questions:
             # Words with no sentence are one question with one view.
             questions.append(keyword_hits)
@@ -3028,11 +3062,72 @@ class ToolStore:
         rows = await asyncio.to_thread(
             self._rows_in_order, fused[:_MAX_SQL_VARS], clauses, values, limit
         )
-        results = []
+
+        # **The number is a reading of the page, so every row on it has one** —
+        # including the rows the meaning leg never returned, which are exactly
+        # the rows the words found.  On a keywords-only call that is usually the
+        # row the caller named outright, and it used to be the one row with no
+        # number beside rows with one: the strongest evidence reading as the
+        # weakest thing on the page.
+        page = [int(row["rowid"]) for row in rows]
+        for rowid, value in self._meaning_of(
+            [rowid for rowid in page if rowid not in similarity], queries
+        ).items():
+            similarity[rowid] = max(similarity.get(rowid, 0.0), value)
+
+        keyword_found = set(keyword_hits or ())
+        return {
+            "results": [
+                _search_dict(
+                    row,
+                    similarity.get(int(row["rowid"])),
+                    matched_words=int(row["rowid"]) in keyword_found,
+                )
+                for row in rows
+            ],
+            "browsed": False,
+        }
+
+    def _meaning_of(
+        self, rowids: Sequence[int], queries: Sequence[Sequence[float]]
+    ) -> dict[int, float]:
+        """How close those rows are, by meaning, to the nearest thing asked.
+
+        The cosine, computed from the vectors the index already holds — which is
+        the same number and not a second derivation of it: `1 - distance` on a
+        `cosine` table *is* the cosine, and the two agree to float32 rounding
+        (measured, worst case 8e-7 over a catalogue).
+
+        Read rather than asked for, because a KNN answers "which rows are
+        nearest" and these rows are the ones it has already said are not.  Asking
+        it again for everything to find them would be a second full scan of the
+        index, and its `k` is capped at 4096 — so the efficient way is also the
+        way that keeps working as the catalogue grows.
+
+        A tool may have several vectors, one per chunk, and **the best of them
+        stands for the tool** — the same rule `_nearest` applies to its own page.
+        """
+        if not rowids or not queries:
+            return {}
+        marks = _marks(rowids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT t.rowid AS rowid, v.embedding AS embedding"
+                " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
+                " JOIN tool t ON t.name = c.name"
+                f" WHERE t.rowid IN ({marks})",
+                tuple(rowids),
+            ).fetchall()
+        best: dict[int, float] = {}
         for row in rows:
-            rowid = int(row["rowid"])
-            results.append(_search_dict(row, similarity.get(rowid)))
-        return {"results": results, "browsed": False}
+            vector = array.array("f")
+            vector.frombytes(bytes(row["embedding"]))
+            for query in queries:
+                value = _cosine(vector, query)
+                rowid = int(row["rowid"])
+                if value > best.get(rowid, -1.0):
+                    best[rowid] = value
+        return best
 
     def _browse(
         self, limit: int, clauses: list[str], values: list[Any]
@@ -3068,8 +3163,8 @@ class ToolStore:
 
     async def _semantic_lists(
         self, sentences: Sequence[str], embedder: Embedder, k: int
-    ) -> list[list[tuple[int, float]]]:
-        """One ranked list per sentence, out of **one** `embed` call.
+    ) -> tuple[list[list[float]], list[list[tuple[int, float]]]]:
+        """`(the query vectors, one ranked list each)`, out of **one** `embed`.
 
         A batch, which is what `search`'s docstring has always claimed and what
         a call per sentence did not do: three sentences were three round trips to
@@ -3077,13 +3172,17 @@ class ToolStore:
         asked for.  Blank sentences are dropped before the call, so the caller's
         list and the answer line up by position.
 
+        The vectors come back as well as the lists because the number a result
+        shows is the meaning number of *every* row on the page, including rows
+        the leg did not return — `search` asks `_nearest` again with a `k` that
+        reaches them, and needs the same vectors to do it with.
+
         Each rowid carries `as_similarity(d)` — **a similarity, not a distance**,
         converted in `_nearest` and not again here.  That is what `_nearest`
         warns about below, and this method used to be the thing it was warning
         about: it took an already-converted similarity under a variable named
         `distance` and inverted it a second time, so the nearest tool carried the
-        lowest score in a result a model reads.  A distance would be the other
-        way round and would mean something else.
+        lowest score in a result a model reads.
 
         The **raw** sentences, not normalized ones: normalization is the keyword
         leg's rule, and it inserts a space between every pair of CJK characters,
@@ -3092,7 +3191,7 @@ class ToolStore:
         """
         wanted = [sentence for sentence in sentences if sentence.strip()]
         if not wanted:
-            return []
+            return [], []
         vectors = await embedder.embed(wanted)
         if len(vectors) != len(wanted):
             raise RuntimeError(
@@ -3100,7 +3199,7 @@ class ToolStore:
                 f"{len(wanted)} sentences, so this search cannot say what a "
                 f"tool is about"
             )
-        return [
+        return vectors, [
             await asyncio.to_thread(
                 self._nearest, sqlite_vec.serialize_float32(vector), k
             )

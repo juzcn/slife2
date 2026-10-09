@@ -800,6 +800,39 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
+def test_a_row_the_meaning_leg_never_saw_still_carries_its_number(tmp_path) -> None:
+    """Every row on the page has a meaning number, including the ones words found.
+
+    A row the keyword leg matched and the meaning leg did not return had no
+    `similarity` key at all — so on a page of rows with a number, the row the
+    caller named outright was the one carrying none, and read as the weakest
+    thing there.  `ToolStore._meaning_of` measures those rows from the vectors the
+    index holds.
+
+    Nine rows hold the stub's `工具` and the tenth holds `计算`, so with `limit=2`
+    the meaning leg's page is four rows wide (`_TOOL_OVERFETCH`) and the row the
+    *words* matched is outside it — which is the only way to build the case at
+    all, since the words and the sentence have to point at different rows.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "many",
+        "mcp",
+        [tool(f"many__{index}", "工具") for index in range(9)]
+        + [tool("many__last", "计算")],
+    )
+
+    answer = asyncio.run(
+        store.search(keywords=["计算"], sentences=["工具"], embedder=EMBEDDER, limit=2)
+    )
+
+    scores = {row["name"]: row.get("similarity") for row in answer["results"]}
+    assert "many__last" in scores, "the row the words matched is on the page"
+    for name, value in scores.items():
+        assert isinstance(value, float), f"{name} came back with no number"
+
+
 def test_lists_that_answer_different_questions_do_not_borrow_from_each_other() -> None:
     """A row in two lists beats a row that is first in one — under the wrong rule.
 

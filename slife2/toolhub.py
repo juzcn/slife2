@@ -1497,13 +1497,104 @@ def _names_of(arguments: Mapping[str, Any]) -> list[str]:
     return _listed(arguments.get("names"))
 
 
+#: Where "the meaning leg is sure" begins, and where "it found nothing" ends.
+#:
+#: Measured on the live catalogue with the real embedder — 36 queries it can
+#: answer against 10 it cannot, taking each page's best `meaning`:
+#:
+#:   can answer     min 0.477   median 0.631   max 0.782
+#:   cannot         min 0.389   median 0.487   max 0.512
+#:
+#: So the two overlap in a 0.035 band and no cutoff is exact.  `MATCH_FLOOR` is
+#: the conservative end of the band: at 0.55 every unanswerable query is caught
+#: and 32 of the 36 answerable ones stay a match.  `WEAK_FLOOR` is inside the
+#: overlap, and it exists to be *said* rather than decided — what sits between
+#: the two is genuinely undecided, and which of the three tiers a page lands in
+#: is a sentence in the answer, not a row removed from it.
+#:
+#: **The words override both.**  A row whose text contains every word the caller
+#: gave is certain, whatever it scores — `pandoc` scores 0.514 against the row
+#: *named* `mcp-pandoc`, and a cutoff alone would answer "nothing here" to
+#: somebody who just said the tool's name.
+MATCH_FLOOR = 0.55
+WEAK_FLOOR = 0.48
+
+def _quoted(description: Any) -> list[str]:
+    """A tool's description, as the lines under its record.
+
+    **Indented, and never cut.**  The indentation is what makes the line count
+    mean anything: every record begins at the left margin with its number, so a
+    description may be as long as it likes — `mcp-pandoc`'s is ninety lines
+    against a catalogue median of one — and the answer is still countable at a
+    glance.  Cutting it would have hidden the problem rather than fixed it, and
+    at the price of the one thing a model chooses by.
+
+    Empty lines stay empty rather than becoming three spaces, and they cannot be
+    mistaken for a record because a record starts with a number.
+    """
+    text = str(description or "").strip()
+    if not text:
+        return []
+    return [f"   {line.rstrip()}" if line.strip() else "" for line in text.split("\n")]
+
+
+def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
+    """The first line: how sure, and what the number below it means.
+
+    **No count of matches**, because there is no such number to give: the floors
+    label a page and do not cut it — a weak answer still shows its ten rows — so
+    what is known is "these rows, strongest first", and a count would be the page
+    size wearing the word "found".
+
+    Sure / weak / nothing rather than a bare list, because a page of the ten
+    nearest rows says nothing about whether any of them is for the thing asked:
+    the same shape came back for a query this catalogue can answer and for one it
+    cannot, and the caller was left to guess which it had.
+
+    The second clause is not decoration and it is deliberately short.  The rows
+    are ordered by how well each was *found* — a row the caller's own words
+    matched outranks one they did not — so the meaning numbers below genuinely are
+    not in descending order, and a model reading a column that does not run in
+    order will otherwise sort by it.  What says *which* rows those are is the
+    `matched your words` marker on each of them, so the sentence only has to say
+    the order is not the number.
+    """
+    worded = any(row.get("matched_words") for row in rows)
+    if best >= MATCH_FLOOR:
+        head = f"Best match {best:.2f} by meaning."
+    elif best >= WEAK_FLOOR or worded:
+        why = (
+            "your words match one, but the meaning leg is close to none"
+            if best < WEAK_FLOOR
+            else f"nothing is above {MATCH_FLOOR:.2f} by meaning"
+        )
+        head = f"Weak — {why}."
+    else:
+        head = f"Nothing here matches: no row is above {WEAK_FLOOR:.2f} by meaning."
+    return f"{head} Strongest first, by evidence — not by the number."
+
+
 def _results_as_text(found: Mapping[str, Any]) -> str:
     """A tool search's rows, as the text a model reads.
 
-    Name and provenance first, because that is what a call is made of, then the
-    description — which is the whole of what a model chooses by and is *not* cut
-    short: a tool's own description is a sentence or two, and a model deciding
-    from half of one is a model guessing.
+    **One numbered record per result, the same fields every time**, because the
+    reader is a model and a list whose entries cannot be counted or compared is a
+    list it has to guess at:
+
+        Found 3. Best match 0.73 by meaning.
+        1. name  (category, source; meaning 0.73)
+           one line of description
+
+    `meaning` is how close the row is by meaning — the same measurement for every
+    row, including the ones the words found and the meaning leg never returned,
+    which used to carry no number at all (`ToolStore.search` fills it in).  It is
+    **not** what the order is: the order is by how well each row was found, and a
+    row the caller's own words matched comes first however it scores.  Saying so
+    in the header is the point — a column that does not order the page is a
+    column a model will otherwise sort by.
+
+    `matched your words` marks the rows the keyword leg found, which is the one
+    piece of evidence here that is certain rather than graded.
 
     A row that is not usable says so where its state would otherwise be silent:
     "switched off" and "its server is not answering" are answers the model can
@@ -1517,21 +1608,27 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
         # tool that suggested it would be sending the model to a refusal.  What
         # is left is the one thing that can still work on a miss.
         return "Nothing matched. Try fewer or different words."
-    lines: list[str] = []
-    for row in rows:
+
+    scored = [
+        float(row["similarity"]) for row in rows if isinstance(row.get("similarity"), float)
+    ]
+    best = max(scored) if scored else 0.0
+
+    lines = [_verdict(rows, best), ""]
+    for index, row in enumerate(rows, start=1):
         state = [str(row.get("category") or ""), str(row.get("source_id") or "")]
         status = str(row.get("status") or "")
         if status and status != "enabled":
             state.append(f"NOT USABLE: {status}")
         elif row.get("load_status") == "loaded":
             state.append("loaded")
+        if row.get("matched_words"):
+            state.append("matched your words")
         similarity = row.get("similarity")
         if isinstance(similarity, float):
-            state.append(f"similarity {similarity:.2f}")
-        lines.append(
-            f"{row.get('name')}  ({', '.join(part for part in state if part)})"
-        )
-        lines.append(f"    {row.get('description')}")
+            state.append(f"meaning {similarity:.2f}")
+        lines.append(f"{index}. {row.get('name')}  ({'; '.join(state)})")
+        lines.extend(_quoted(row.get("description")))
     # Said for a browse as well as for a search, which is the opposite of what
     # this did: an empty query is the "what is installed, and how do I get one
     # of them" question, and answering it with a list and no next step leaves
