@@ -37,7 +37,12 @@ from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
-from slife2.llm.server_common import build_llm_server, serve_backend
+from slife2.llm.server_common import (
+    ProviderClients,
+    build_llm_server,
+    read_int,
+    serve_backend,
+)
 from slife2.messages import Message, ToolSpec, Usage
 
 logger = logging.getLogger(__name__)
@@ -268,7 +273,7 @@ def build_request(
     return request
 
 
-def translate(event: Any) -> list[ProviderEvent]:
+def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderEvent]:
     """Turn one Responses stream event into provider events.
 
     Pure, and takes `Any` rather than the SDK's event union on purpose: it reads
@@ -313,7 +318,7 @@ def translate(event: Any) -> list[ProviderEvent]:
                 Chunk(
                     tool_call_deltas=(
                         ToolCallDelta(
-                            index=_int(event, "output_index"),
+                            index=read_int(event, "output_index"),
                             id=getattr(item, "call_id", None),
                             name=getattr(item, "name", None),
                         ),
@@ -329,7 +334,7 @@ def translate(event: Any) -> list[ProviderEvent]:
             Chunk(
                 tool_call_deltas=(
                     ToolCallDelta(
-                        index=_int(event, "output_index"),
+                        index=read_int(event, "output_index"),
                         arguments_delta=getattr(event, "delta", "") or "",
                     ),
                 )
@@ -339,6 +344,7 @@ def translate(event: Any) -> list[ProviderEvent]:
     elif kind == "response.completed":
         response = getattr(event, "response", None)
         _raise_on_error(response)
+        events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_stop_reason(response)))
 
@@ -348,6 +354,7 @@ def translate(event: Any) -> list[ProviderEvent]:
         # reason is carried through to the caller as the stop reason.
         response = getattr(event, "response", None)
         _raise_on_error(response)
+        events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_incomplete_reason(response)))
 
@@ -364,9 +371,38 @@ def translate(event: Any) -> list[ProviderEvent]:
     return events
 
 
-def _int(source: Any, attribute: str) -> int:
-    """Read an int attribute that may be absent or None."""
-    return int(getattr(source, attribute, 0) or 0)
+def _arguments_that_never_streamed(
+    response: Any, streamed: set[int] | None
+) -> list[ProviderEvent]:
+    """The arguments of a call whose deltas never came.
+
+    The accumulator is fed by `response.function_call_arguments.delta` and by
+    nothing else, so an endpoint that assembles the call and sends it whole
+    leaves the model calling a tool with `{}` — the call runs or errors on
+    empty input, and nothing anywhere says a thing was lost.  The item in the
+    completed response carries the whole string, so every index that never
+    streamed a delta is filled in from here.
+
+    The index is the item's **position in `output`**, which is how
+    `output_index` on the delta events is assigned; `streamed` is what the
+    caller has seen, and an index that did stream is left alone — appending the
+    whole string after its own deltas would concatenate it twice.
+    """
+    seen = streamed or set()
+    events: list[ProviderEvent] = []
+    for index, item in enumerate(getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "function_call" or index in seen:
+            continue
+        arguments = getattr(item, "arguments", "") or ""
+        if arguments:
+            events.append(
+                Chunk(
+                    tool_call_deltas=(
+                        ToolCallDelta(index=index, arguments_delta=str(arguments)),
+                    )
+                )
+            )
+    return events
 
 
 def _usage_event(response: Any) -> list[ProviderEvent]:
@@ -382,8 +418,8 @@ def _usage_event(response: Any) -> list[ProviderEvent]:
     return [
         Chunk(
             usage=Usage(
-                prompt_tokens=_int(raw, "input_tokens"),
-                completion_tokens=_int(raw, "output_tokens"),
+                prompt_tokens=read_int(raw, "input_tokens"),
+                completion_tokens=read_int(raw, "output_tokens"),
             )
         )
     ]
@@ -437,37 +473,19 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
     that moment, so a provider nobody calls never opens the OS keyring, and
     constructing a client outside a running event loop is not always safe.
     """
-    clients: dict[str, Any] = {}
 
-    def _provider(name: str) -> ProviderSettings:
-        try:
-            return providers[name]
-        except KeyError:
-            known = ", ".join(sorted(providers)) or "(none)"
-            raise RuntimeError(
-                f"{SERVER_NAME}: no provider {name!r} in this config (known: {known})"
-            ) from None
+    def sdk_client(provider: ProviderSettings, key: str) -> Any:
+        """The one per-protocol fact: which SDK class, and with what.
 
-    def _client(name: str) -> Any:
-        """The SDK client for one provider, each with its own key."""
-        client = clients.get(name)
-        if client is not None:
-            return client
-
-        provider = _provider(name)
-        key = provider.api_key
-        if not key or key.startswith("${"):
-            raise RuntimeError(
-                f"{SERVER_NAME}: the API key for provider {name!r} "
-                f"({provider.base_url!r}) did not resolve "
-                f"(config value {provider.api_key_ref!r}). Export it, or "
-                f"store it with `credstore set <NAME>`."
-            )
+        Imported here rather than at the top of the file for the reason this
+        whole arrangement exists — the module is importable, and a process that
+        serves nothing from it never loads the SDK.
+        """
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(base_url=provider.base_url, api_key=key)
-        clients[name] = client
-        return client
+        return AsyncOpenAI(base_url=provider.base_url, api_key=key)
+
+    clients = ProviderClients(providers, SERVER_NAME, sdk_client)
 
     async def stream(
         provider: str,
@@ -475,11 +493,22 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        settings = _provider(provider).model(model)
+        settings = clients.provider(provider).model(model)
         request = build_request(messages, tools, settings)
-        response = await _client(provider).responses.create(**request)
+        response = await clients.client(provider).responses.create(**request)
+        # Which calls streamed their arguments.  Kept here and not in
+        # `translate`, which stays a pure function of one event — see
+        # `_arguments_that_never_streamed`.
+        streamed: set[int] = set()
         async for event in response:
-            for out in translate(event):
+            for out in translate(event, streamed=streamed):
+                # One raw event produces both kinds — a usage chunk and a
+                # `Finish` — and `Finish` carries no deltas, so the union has
+                # to be narrowed before one is read off it.
+                if isinstance(out, Chunk):
+                    for delta in out.tool_call_deltas:
+                        if delta.arguments_delta:
+                            streamed.add(delta.index)
                 yield out
 
     return stream

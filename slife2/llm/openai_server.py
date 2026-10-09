@@ -21,7 +21,11 @@ from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
-from slife2.llm.server_common import build_llm_server, serve_backend
+from slife2.llm.server_common import (
+    ProviderClients,
+    build_llm_server,
+    serve_backend,
+)
 from slife2.messages import Message, ToolSpec, Usage
 
 logger = logging.getLogger(__name__)
@@ -82,9 +86,13 @@ def build_request(
     }
     if tools:
         request["tools"] = [t.to_wire() for t in tools]
-    if stream_usage:
-        # An OpenAI extension.  Some compatible servers reject it with a 400;
-        # the config has a switch for those.
+    if stream_usage and settings.stream_usage != "omit":
+        # An OpenAI extension.  Some compatible servers reject it with a 400,
+        # and `compat.stream_usage: omit` is the switch for those — per model,
+        # because whether the field is accepted is a fact about the endpoint and
+        # not about this process.  Sending it stays the default: without it the
+        # provider reports no token counts at all, which is what the status bar
+        # and the turn's own record are reading.
         request["stream_options"] = {"include_usage": True}
 
     # Only what was configured.  A gateway that rejects a temperature it did not
@@ -211,42 +219,19 @@ def _make_streamer(
     keyring, and constructing a client outside a running event loop is not
     always safe.
     """
-    clients: dict[str, Any] = {}
 
-    def _provider(name: str) -> ProviderSettings:
-        try:
-            return providers[name]
-        except KeyError:
-            known = ", ".join(sorted(providers)) or "(none)"
-            raise RuntimeError(
-                f"{SERVER_NAME}: no provider {name!r} in this config (known: {known})"
-            ) from None
+    def sdk_client(provider: ProviderSettings, key: str) -> Any:
+        """The one per-protocol fact: which SDK class, and with what.
 
-    def _client(name: str) -> Any:
-        """The SDK client for one provider, created on first use.
-
-        One client per provider, because each carries its own base_url and key.
-        Created lazily for the same reason the key is resolved lazily: a
-        provider nobody calls never has its keyring opened.
+        Imported here rather than at the top of the file for the reason this
+        whole arrangement exists — the module is importable, and a process that
+        serves nothing from it never loads the SDK.
         """
-        client = clients.get(name)
-        if client is not None:
-            return client
-
-        provider = _provider(name)
-        key = provider.api_key
-        if not key or key.startswith("${"):
-            raise RuntimeError(
-                f"{SERVER_NAME}: the API key for provider {name!r} "
-                f"({provider.base_url!r}) did not resolve "
-                f"(config value {provider.api_key_ref!r}). Export it, or "
-                f"store it with `credstore set <NAME>`."
-            )
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(base_url=provider.base_url, api_key=key)
-        clients[name] = client
-        return client
+        return AsyncOpenAI(base_url=provider.base_url, api_key=key)
+
+    clients = ProviderClients(providers, SERVER_NAME, sdk_client)
 
     async def stream(
         provider: str,
@@ -254,9 +239,9 @@ def _make_streamer(
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        settings = _provider(provider).model(model)
+        settings = clients.provider(provider).model(model)
         request = build_request(messages, tools, settings, stream_usage=stream_usage)
-        response = await _client(provider).chat.completions.create(**request)
+        response = await clients.client(provider).chat.completions.create(**request)
         async for event in response:
             for out in translate(event):
                 yield out

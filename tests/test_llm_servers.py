@@ -45,6 +45,8 @@ from openai.types.responses import (
 from slife2.config import ModelSettings
 from slife2.llm.anthropic_server import (
     DEFAULT_MAX_TOKENS,
+    as_delta,
+    normalised_stop,
     to_anthropic_blocks,
     to_anthropic_messages,
     to_anthropic_tools,
@@ -72,7 +74,7 @@ from slife2.llm.openai_server import (
 )
 from slife2.llm.server_common import ToolCallAccumulator, build_llm_server
 from slife2.llm.wire import decode_chunk
-from slife2.messages import Message, ToolCall, ToolSpec
+from slife2.messages import Message, ToolCall, ToolSpec, Usage
 
 pytestmark = pytest.mark.unit
 
@@ -259,7 +261,82 @@ def test_anthropic_usage_is_split_across_two_events_without_double_counting() ->
     assert usage_chunk.usage is not None
     assert usage_chunk.usage.prompt_tokens == 0
     assert usage_chunk.usage.completion_tokens == 22
-    assert finish == Finish(stop_reason="tool_use")
+    # Said the way every backend says it — `slife2.llm.openai_responses_server`
+    # normalises too, and `TurnResult.stop_reason` is read by the status line
+    # and by `send_message`'s result, where two backends telling one story
+    # different words is a caller branching on the backend it chose.
+    assert finish == Finish(stop_reason="tool_calls")
+
+
+def test_anthropic_cached_prompt_tokens_are_counted() -> None:
+    """`input_tokens` is the uncached part, and the cache fields are the rest.
+
+    A gateway with prompt caching on reports the cached prefix in two fields of
+    its own, so counting only `input_tokens` undercounts the prompt by the whole
+    of the cache — silently, because the number that comes out still looks like
+    a plausible prompt size.
+    """
+    event = RawMessageStartEvent.model_validate(
+        {
+            "type": "message_start",
+            "message": {
+                "id": "m",
+                "type": "message",
+                "role": "assistant",
+                "model": "x",
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 900,
+                    "cache_read_input_tokens": 4000,
+                },
+            },
+        }
+    )
+
+    (chunk,) = anthropic_translate(event)
+
+    assert chunk.usage is not None
+    assert chunk.usage.prompt_tokens == 11 + 900 + 4000
+
+
+def test_anthropic_output_tokens_are_a_running_total() -> None:
+    """The field is cumulative, and what the accumulator is given must not be.
+
+    One `message_delta` is what the API sends, and a gateway that sends several
+    repeats the running total in each.  Added up as they arrive, a two-delta
+    stream would report twice the tokens the turn produced — in the number the
+    status bar shows and the turn's own row records as the bill.
+    """
+    counted, seen = as_delta(Chunk(usage=Usage(completion_tokens=22)), 0)
+    assert counted.usage == Usage(completion_tokens=22)
+    assert seen == 22
+
+    counted, seen = as_delta(Chunk(usage=Usage(completion_tokens=30)), seen)
+    assert counted.usage == Usage(completion_tokens=8), "the difference, not the total"
+    assert seen == 30
+
+    counted, seen = as_delta(Chunk(usage=Usage(completion_tokens=30)), seen)
+    assert counted.usage is None, "a repeated total has nothing to add"
+    assert seen == 30
+
+
+def test_anthropic_stop_reasons_speak_the_shared_vocabulary() -> None:
+    """Every reason this protocol sends, in the words the system uses.
+
+    The rest of the world reads `stop_reason` without knowing which backend
+    answered: the loop decides whether to continue on `tool_calls`, and a
+    reason this build has not heard of is passed through rather than folded
+    into "stop" — a fact about the model, not a gap to paper over.
+    """
+    assert normalised_stop("end_turn") == "stop"
+    assert normalised_stop("stop_sequence") == "stop"
+    assert normalised_stop("tool_use") == "tool_calls"
+    assert normalised_stop("max_tokens") == "length"
+    assert normalised_stop("pause_turn") == "pause_turn"
 
 
 def test_anthropic_forwards_thinking_as_its_own_kind() -> None:
@@ -510,7 +587,7 @@ def test_responses_completion_with_a_function_call_says_tool_calls() -> None:
     the output, so that a caller comparing stop reasons across backends is not
     told a different story by this one.
     """
-    (finish,) = responses_translate(
+    events = responses_translate(
         _completed(
             output=[
                 {
@@ -522,7 +599,42 @@ def test_responses_completion_with_a_function_call_says_tool_calls() -> None:
             ]
         )
     )
-    assert finish == Finish(stop_reason="tool_calls")
+
+    assert Finish(stop_reason="tool_calls") in events
+
+
+def test_responses_fills_in_arguments_that_never_streamed() -> None:
+    """An endpoint that sends the call whole must not leave the model with `{}`.
+
+    The accumulator is fed by the argument *deltas* and by nothing else, so a
+    call that arrives complete — which some endpoints do — would run on empty
+    input, or fail on it, with nothing anywhere saying a thing was lost.  The
+    item in the terminal response carries the whole string, so it is read from
+    there for any index that never streamed one.
+    """
+    event = _completed(
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "calc",
+                "arguments": '{"e": "6*7"}',
+            }
+        ]
+    )
+
+    assert responses_translate(event) == [
+        Chunk(
+            tool_call_deltas=(ToolCallDelta(index=0, arguments_delta='{"e": "6*7"}'),)
+        ),
+        Finish(stop_reason="tool_calls"),
+    ]
+
+    # An index that *did* stream is left alone: the whole string appended after
+    # its own deltas would be the same arguments twice.
+    assert responses_translate(event, streamed={0}) == [
+        Finish(stop_reason="tool_calls")
+    ]
 
 
 def test_responses_an_incomplete_response_keeps_its_reason() -> None:
@@ -972,6 +1084,32 @@ async def test_stream_chat_is_listed_as_a_tool() -> None:
 # thing.  A test that only checked the values would miss the whole point.
 
 
+def test_openai_stream_usage_is_asked_for_unless_a_gateway_refuses_it() -> None:
+    """The one compat knob whose default is *send*, and why.
+
+    Usage arrives only because it was asked for, so an absent value has to mean
+    send — unlike `compat.store`, where an absent value leaves the endpoint's
+    own default in place and that is the right one.  `omit` is the escape hatch
+    for a gateway that rejects the extension with a 400, which is the whole
+    reason the knob exists: without it such a gateway is unusable with no
+    workaround at all.
+    """
+    plain = ModelSettings(model="m")
+    request = openai_build_request([], [], plain, stream_usage=True)
+    assert request["stream_options"] == {"include_usage": True}
+
+    omitted = ModelSettings(model="m", stream_usage="omit")
+    assert "stream_options" not in openai_build_request(
+        [], [], omitted, stream_usage=True
+    )
+
+    # The knob is per model, and the parameter is the server's own switch: a
+    # call that asked for nothing is not given a field back by a model setting.
+    assert "stream_options" not in openai_build_request(
+        [], [], plain, stream_usage=False
+    )
+
+
 def test_openai_sends_only_what_was_configured() -> None:
     bare = ModelSettings(model="m")
     request = openai_build_request(
@@ -1063,11 +1201,29 @@ def test_anthropic_drops_sampling_when_thinking_is_on() -> None:
 
 
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
-    """A model that spends everything thinking returns nothing."""
+    """A model that spends everything thinking returns nothing.
+
+    The API requires `budget_tokens` to be *strictly* smaller than
+    `max_tokens`, so the floor matters as much as the share: a 1024-token model
+    is the case where `max(1024, half)` equals the cap exactly, and every call
+    would be a 400.
+    """
     request = anthropic_build_request(
         [], [], ModelSettings(model="m", reasoning=True, max_tokens=2000)
     )
     assert request["thinking"]["budget_tokens"] < 2000
+
+    floored = anthropic_build_request(
+        [], [], ModelSettings(model="m", reasoning=True, max_tokens=1024)
+    )
+    assert floored["thinking"]["budget_tokens"] < 1024
+
+    # Too small to reason in at all: asked for, and declined rather than sent
+    # as a request the endpoint is certain to refuse.
+    tiny = anthropic_build_request(
+        [], [], ModelSettings(model="m", reasoning=True, max_tokens=1)
+    )
+    assert "thinking" not in tiny
 
 
 def test_responses_sends_only_what_was_configured() -> None:

@@ -214,8 +214,10 @@ def decode(message: str) -> TurnEvent | None:
     """Decode a progress notification's `message` back into a turn event.
 
     Returns None when `message` is not one of ours, rather than raising.  Some
-    other MCP server — or a future version of this one — may report plain
-    progress text, and the TUI renders that verbatim instead of dying on it.
+    other MCP server — or a future version of this one — may report progress
+    this build has no word for, and the caller drops it: a progress stream is
+    display, so an unreadable line is a line not shown rather than a turn that
+    dies or an answer invented out of a log message.
     """
     try:
         payload = json.loads(message)

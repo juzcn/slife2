@@ -56,8 +56,12 @@ def encode_chunk(chunk: Chunk) -> str:
 def decode_chunk(message: str) -> Chunk | None:
     """Decode a progress notification's `message` back into a chunk.
 
-    Returns None for anything that is not one of ours — the LLM server may also
-    report plain progress text, and the caller renders that verbatim.
+    `None` for anything that is not one of ours, and the caller drops it: a
+    progress message this build cannot read is somebody else's — a future
+    version of the server, or a peer on the same stream — and rendering it as
+    the model's answer would be inventing an answer out of a log line.  The
+    sentinel is what makes that safe rather than a crash, and dropping is the
+    whole of what it is for.
     """
     try:
         payload = json.loads(message)

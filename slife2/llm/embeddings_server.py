@@ -36,6 +36,7 @@ from slife2.config import (
     find_config_path,
     load,
 )
+from slife2.llm.server_common import unresolved_key
 from slife2.mcp_server import (
     configure_logging,
     house_server,
@@ -99,22 +100,10 @@ class EmbeddingClient:
     def __init__(self, provider: EmbeddingProviderSettings) -> None:
         self.provider = provider
         self._client: Any = None
-        self._dimension = 0
-        self._max_chars = 0
 
     @property
     def _known(self) -> tuple[int, int] | None:
         return _KNOWN_MODELS.get(self.provider.model)
-
-    @property
-    def _dimension_is_known(self) -> bool:
-        """Whether the width is a fact rather than a guess.
-
-        The distinction decides whether a probe is still worth sending.  A
-        guessed width that happens to be wrong produces the silent failure this
-        module exists to prevent, so only the table counts as knowing.
-        """
-        return self._known is not None
 
     def client(self) -> Any:
         """The SDK client, created on first use.
@@ -128,14 +117,7 @@ class EmbeddingClient:
         if self._client is not None:
             return self._client
 
-        key = self.provider.api_key
-        if not key or key.startswith("${"):
-            raise RuntimeError(
-                f"{SERVER_NAME}: the API key for embedding provider "
-                f"{self.provider.name!r} ({self.provider.base_url!r}) did not "
-                f"resolve (config value {self.provider.api_key_ref!r}). Export "
-                f"it, or store it with `credstore set <NAME>`."
-            )
+        key = unresolved_key(SERVER_NAME, self.provider.name, self.provider)
         from openai import AsyncOpenAI
 
         self._client = AsyncOpenAI(
@@ -178,13 +160,23 @@ class EmbeddingClient:
 
         # Nothing left but to ask, with the cheapest question there is: one
         # character, whose vector is the width.
-        (vector,) = await self.embed(["."])
+        answer = await self.embed(["."])
+        if len(answer) != 1 or not answer[0]:
+            # Named rather than left to `(vector,) = ...`, whose failure is a
+            # bare ValueError about unpacking that says neither which endpoint
+            # nor which model answered it — and a zero-length vector would
+            # otherwise be accepted as a width of zero, which is the silent
+            # failure this whole ladder exists to prevent.
+            raise RuntimeError(
+                f"{SERVER_NAME}: {self.provider.name!r} answered the probe with "
+                f"{len(answer)} vector(s) for one input; cannot read a width "
+                f"for {self.provider.model!r} from {self.provider.base_url!r}"
+            )
+        width = len(answer[0])
         logger.info(
-            "%s: width %d measured with a probe embedding",
-            self.provider.model,
-            len(vector),
+            "%s: width %d measured with a probe embedding", self.provider.model, width
         )
-        return len(vector)
+        return width
 
     async def _listed_dimension(self) -> int:
         """The width the endpoint reports for its model, if it reports one.

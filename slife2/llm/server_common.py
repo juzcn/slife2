@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -193,6 +193,93 @@ async def stream_chat_impl(
         await ctx.report_progress(reported, None, encode_chunk(chunk))
 
     return builder.build().to_wire()
+
+
+def read_int(source: Any, attribute: str) -> int:
+    """Read an int attribute that may be absent, `None`, or a string.
+
+    Two adapters need this and had a byte-identical copy each — the fields it
+    reads (`input_tokens`, `output_index`) are the protocol's own and are
+    consistent about being optional, and the `or 0` is what makes a field the
+    SDK left as `None` a zero rather than a `TypeError` in the middle of a
+    stream.
+    """
+    return int(getattr(source, attribute, 0) or 0)
+
+
+class ProviderClients:
+    """The SDK clients of one process, one per configured provider, on first use.
+
+    **The three wire adapters need the same two things and differ in one.**  A
+    provider looked up by the name a caller passed, with a message naming the
+    ones that do exist; and a client built once and kept, because each carries
+    its own `base_url` and key.  The only per-protocol fact is which SDK class
+    is constructed, and that is the callable this takes.
+
+    It is here rather than written out three times because everything *around*
+    that one difference is advice a person acts on: the unresolved-key message
+    says to export the variable or `credstore set` it, and three copies of a
+    sentence like that are three places for it to drift apart.  The fourth
+    adapter — embeddings — has one provider rather than a table, so it keeps
+    its own cache and shares `unresolved_key` instead.
+
+    Lazy for the reason the key is: a provider nobody calls never opens the OS
+    keyring, and constructing a client outside a running event loop is not
+    always safe.
+    """
+
+    def __init__(
+        self,
+        providers: Mapping[str, ProviderSettings],
+        server_name: str,
+        make_client: Callable[[ProviderSettings, str], Any],
+    ) -> None:
+        self._providers = providers
+        self._server = server_name
+        self._make_client = make_client
+        self._clients: dict[str, Any] = {}
+
+    def provider(self, name: str) -> ProviderSettings:
+        """The named provider, or the error that says which ones there are."""
+        try:
+            return self._providers[name]
+        except KeyError:
+            known = ", ".join(sorted(self._providers)) or "(none)"
+            raise RuntimeError(
+                f"{self._server}: no provider {name!r} in this config (known: {known})"
+            ) from None
+
+    def client(self, name: str) -> Any:
+        """The SDK client for one provider, created on first use."""
+        client = self._clients.get(name)
+        if client is not None:
+            return client
+        provider = self.provider(name)
+        key = unresolved_key(self._server, name, provider)
+        client = self._make_client(provider, key)
+        self._clients[name] = client
+        return client
+
+
+def unresolved_key(server_name: str, name: str, provider: Any) -> str:
+    """The provider's key, or the error naming the reference that did not resolve.
+
+    A `${VAR}` the config could not resolve is left **verbatim** rather than
+    emptied (`slife2.config`), which is what makes the `startswith("${")` test
+    meaningful: the value reaching here is either a key or the literal
+    reference, and saying which reference is the whole of what a person needs
+    to fix it.  Handing the literal to the SDK instead produces a 401 that says
+    nothing about which `${VAR}` is missing.
+    """
+    key = provider.api_key
+    if key and not key.startswith("${"):
+        return key
+    raise RuntimeError(
+        f"{server_name}: the API key for provider {name!r} "
+        f"({provider.base_url!r}) did not resolve "
+        f"(config value {provider.api_key_ref!r}). Export it, or "
+        f"store it with `credstore set <NAME>`."
+    )
 
 
 def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:

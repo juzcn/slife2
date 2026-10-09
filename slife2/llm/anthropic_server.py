@@ -25,11 +25,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
-from slife2.llm.server_common import build_llm_server, serve_backend
+from slife2.llm.server_common import (
+    ProviderClients,
+    build_llm_server,
+    read_int,
+    serve_backend,
+)
 from slife2.messages import Message, ToolSpec, Usage
 
 logger = logging.getLogger(__name__)
@@ -196,7 +202,19 @@ def thinking_parameter(
     """
     if not settings.reasoning or settings.thinking in ("omit", "disabled"):
         return None
-    budget = max(1024, int(max_tokens * THINKING_BUDGET_SHARE))
+    # Clamped below `max_tokens`, not merely floored at 1024: the API refuses a
+    # budget that is not smaller than the cap, so a model configured with
+    # `max_tokens: 1024` or less would 400 on every call — asking for reasoning
+    # and then leaving it no room to answer in.  `max(1024, ..)` alone gives
+    # exactly that at the floor.
+    budget = min(max(1024, int(max_tokens * THINKING_BUDGET_SHARE)), max_tokens - 1)
+    if budget <= 0:
+        logger.warning(
+            "%s: max_tokens=%d is too small to reason in; thinking is off",
+            settings.model,
+            max_tokens,
+        )
+        return None
     return {"type": "enabled", "budget_tokens": budget}
 
 
@@ -295,24 +313,80 @@ def translate(event: Any) -> list[ProviderEvent]:
         message = getattr(event, "message", None)
         usage = getattr(message, "usage", None)
         if usage is not None:
-            events.append(Chunk(usage=Usage(prompt_tokens=_int(usage, "input_tokens"))))
+            # `input_tokens` is the *uncached* part of the prompt: the cached
+            # prefix is reported in two fields of its own, and a gateway with
+            # prompt caching on would otherwise undercount the prompt by the
+            # whole of it — silently, because the number still looks plausible.
+            events.append(
+                Chunk(
+                    usage=Usage(
+                        prompt_tokens=read_int(usage, "input_tokens")
+                        + read_int(usage, "cache_creation_input_tokens")
+                        + read_int(usage, "cache_read_input_tokens")
+                    )
+                )
+            )
 
     elif kind == "message_delta":
         usage = getattr(event, "usage", None)
         if usage is not None:
             events.append(
-                Chunk(usage=Usage(completion_tokens=_int(usage, "output_tokens")))
+                Chunk(usage=Usage(completion_tokens=read_int(usage, "output_tokens")))
             )
         stop_reason = getattr(getattr(event, "delta", None), "stop_reason", None)
         if stop_reason:
-            events.append(Finish(stop_reason=str(stop_reason)))
+            events.append(Finish(stop_reason=normalised_stop(str(stop_reason))))
 
     return events
 
 
-def _int(source: Any, attribute: str) -> int:
-    """Read an int attribute that may be absent or None."""
-    return int(getattr(source, attribute, 0) or 0)
+#: This protocol's stop reasons, in the vocabulary the rest of the system
+#: speaks.  `slife2.llm.openai_responses_server` normalises for the same
+#: reason: `TurnResult.stop_reason` reaches the TUI's status line and
+#: `send_message`'s result, and a caller comparing two backends must not be
+#: told a different story by one of them.
+_STOP_REASONS = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+}
+
+
+def normalised_stop(reason: str) -> str:
+    """One of this protocol's reasons, said the way every backend says it.
+
+    A reason this build has not heard of is passed through rather than mapped
+    to something familiar: it is a fact about the model, and folding it into
+    "stop" would hide exactly the case worth seeing.
+    """
+    return _STOP_REASONS.get(reason, reason)
+
+
+def as_delta(chunk: Chunk, seen: int) -> tuple[Chunk, int]:
+    """Turn a *cumulative* output count into the difference, and remember it.
+
+    Anthropic reports `output_tokens` in `message_delta` as the total for the
+    message so far, and the shared accumulator adds every `Usage` it is handed
+    (`slife2.llm.server_common`).  That is right for exactly one delta, which is
+    what the API sends today — and wrong for a gateway that emits several, each
+    repeating the running total, where the turn would report two or three times
+    the tokens it produced.  The number is not decorative: it is what the status
+    bar shows, what the turn's row records as the bill, and what the budget's
+    arithmetic reads.
+
+    So the running total is turned into a difference at the stream, where the
+    previous value is known, and the accumulator goes on being a sum.  Returns
+    the chunk to yield and the total to carry.
+    """
+    if chunk.usage is None:
+        return chunk, seen
+    total = chunk.usage.completion_tokens
+    if total <= seen:
+        # A repeated or decreasing total, which no correct stream produces —
+        # nothing to add, and the running total is left where it was.
+        return replace(chunk, usage=None), seen
+    return replace(chunk, usage=Usage(completion_tokens=total - seen)), total
 
 
 def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
@@ -322,37 +396,19 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
     that moment, so a provider nobody calls never opens the OS keyring, and
     constructing a client outside a running event loop is not always safe.
     """
-    clients: dict[str, Any] = {}
 
-    def _provider(name: str) -> ProviderSettings:
-        try:
-            return providers[name]
-        except KeyError:
-            known = ", ".join(sorted(providers)) or "(none)"
-            raise RuntimeError(
-                f"{SERVER_NAME}: no provider {name!r} in this config (known: {known})"
-            ) from None
+    def sdk_client(provider: ProviderSettings, key: str) -> Any:
+        """The one per-protocol fact: which SDK class, and with what.
 
-    def _client(name: str) -> Any:
-        """The SDK client for one provider, each with its own key."""
-        client = clients.get(name)
-        if client is not None:
-            return client
-
-        provider = _provider(name)
-        key = provider.api_key
-        if not key or key.startswith("${"):
-            raise RuntimeError(
-                f"{SERVER_NAME}: the API key for provider {name!r} "
-                f"({provider.base_url!r}) did not resolve "
-                f"(config value {provider.api_key_ref!r}). Export it, or "
-                f"store it with `credstore set <NAME>`."
-            )
+        Imported here rather than at the top of the file for the reason this
+        whole arrangement exists — the module is importable, and a process that
+        serves nothing from it never loads the SDK.
+        """
         from anthropic import AsyncAnthropic
 
-        client = AsyncAnthropic(api_key=key, base_url=provider.base_url)
-        clients[name] = client
-        return client
+        return AsyncAnthropic(api_key=key, base_url=provider.base_url)
+
+    clients = ProviderClients(providers, SERVER_NAME, sdk_client)
 
     async def stream(
         provider: str,
@@ -360,11 +416,22 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        settings = _provider(provider).model(model)
+        settings = clients.provider(provider).model(model)
         request = build_request(messages, tools, settings)
-        response = await _client(provider).messages.create(**request)
+        response = await clients.client(provider).messages.create(**request)
+        produced = 0
         async for event in response:
             for out in translate(event):
+                # `isinstance`, because one raw event produces *both* kinds:
+                # `message_delta` yields a usage chunk and a `Finish`, and the
+                # second has no `usage` at all — reading it on the union is an
+                # AttributeError in the middle of a stream, on every turn.
+                if (
+                    isinstance(out, Chunk)
+                    and out.usage is not None
+                    and out.usage.completion_tokens
+                ):
+                    out, produced = as_delta(out, produced)
                 yield out
 
     return stream
