@@ -1539,27 +1539,25 @@ def _quoted(description: Any) -> list[str]:
 
 
 def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
-    """The first line: how sure, and what the number below it means.
+    """The first line: how sure, and how the rows below are ordered.
 
     **No count of matches**, because there is no such number to give: the floors
     label a page and do not cut it — a weak answer still shows its ten rows — so
-    what is known is "these rows, strongest first", and a count would be the page
-    size wearing the word "found".
+    what is known is "these rows", and a count would be the page size wearing the
+    word "found".
 
     Sure / weak / nothing rather than a bare list, because a page of the ten
     nearest rows says nothing about whether any of them is for the thing asked:
     the same shape came back for a query this catalogue can answer and for one it
     cannot, and the caller was left to guess which it had.
 
-    The second clause is not decoration and it is deliberately short.  The rows
-    are ordered by how well each was *found* — a row the caller's own words
-    matched outranks one they did not — so the meaning numbers below genuinely are
-    not in descending order, and a model reading a column that does not run in
-    order will otherwise sort by it.  What says *which* rows those are is the
-    `matched your words` marker on each of them, so the sentence only has to say
-    the order is not the number.
+    The second clause says what orders the page, in one clause, because the order
+    is two rules and only one of them is visible as a number: the rows the
+    caller's own words matched come first — that evidence is certain where a
+    cosine is graded — and the rest are by meaning.  A model that assumed one
+    rule would misread a page that has both.
     """
-    worded = any(row.get("matched_words") for row in rows)
+    worded = sum(1 for row in rows if row.get("matched_words"))
     if best >= MATCH_FLOOR:
         head = f"Best match {best:.2f} by meaning."
     elif best >= WEAK_FLOOR or worded:
@@ -1571,7 +1569,9 @@ def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
         head = f"Weak — {why}."
     else:
         head = f"Nothing here matches: no row is above {WEAK_FLOOR:.2f} by meaning."
-    return f"{head} Strongest first, by evidence — not by the number."
+    if worded:
+        return f"{head} Your words matched {worded} of these; the rest are by meaning."
+    return f"{head} Closest first by meaning."
 
 
 def _results_as_text(found: Mapping[str, Any]) -> str:
@@ -1587,11 +1587,12 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
 
     `meaning` is how close the row is by meaning — the same measurement for every
     row, including the ones the words found and the meaning leg never returned,
-    which used to carry no number at all (`ToolStore.search` fills it in).  It is
-    **not** what the order is: the order is by how well each row was found, and a
-    row the caller's own words matched comes first however it scores.  Saying so
-    in the header is the point — a column that does not order the page is a
-    column a model will otherwise sort by.
+    which used to carry no number at all (`ToolStore.search` fills it in).  It
+    orders the page, within the rows the header's second clause separates: words
+    first, then meaning, each descending.  So the column a reader sees is the
+    column that ordered it, which is the one property this format has to keep — a
+    number that does not order the page is a number a model will sort by and be
+    wrong about.
 
     `matched your words` marks the rows the keyword leg found, which is the one
     piece of evidence here that is certain rather than graded.

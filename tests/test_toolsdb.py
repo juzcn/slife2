@@ -28,7 +28,6 @@ from slife2.db import (
     STATUS_ERROR,
     UNLOADED,
     ToolStore,
-    fuse_by_best_rank,
     fuse_ranked,
 )
 from tests.fakes import StubEmbedder
@@ -834,30 +833,25 @@ def test_a_row_the_meaning_leg_never_saw_still_carries_its_number(tmp_path) -> N
 
 
 def test_lists_that_answer_different_questions_do_not_borrow_from_each_other() -> None:
-    """A row in two lists beats a row that is first in one — under the wrong rule.
+    """Why the questions are *union*ed and the page sorted, not rank-fused.
 
     `fuse_ranked` sums `1/(k+rank)` over its lists, and that is right when they
     are one question asked twice: a row both legs found is evidence about *that*
     question.  Given two different questions it inverts the answer, and not
     marginally — a row present in both scores at least `1/(k+40) + 1/(k+40)`
     = 0.0200, where a row that is *first* in one of them scores `1/(k+1)`
-    = 0.0164.  So `20`, second in both lists, is the sum's first answer and the
-    best placement's last.
+    = 0.0164.  So `20`, second in both lists, is that sum's first answer.
 
-    Both spellings are asserted, because the point of the second is the first:
-    whoever reaches for `fuse_ranked` on several sentences should meet this
-    test's name rather than a search that answers a question nobody asked.
+    Nothing calls `fuse_ranked` with two questions — `ToolStore.search` fuses
+    within a question and unions across them — so this test is the *reason* that
+    is the shape, kept where somebody reaching for `fuse_ranked` on several
+    sentences will meet it.
     """
     one, two, both = 10, 20, 30
 
     assert next(iter(fuse_ranked({"a": [one, both], "b": [two, both]})))[0] == both, (
         "the sum rewards agreeing across questions"
     )
-    assert fuse_by_best_rank([[one, both], [two, both]]) == [
-        (one, 1),
-        (two, 1),
-        (both, 2),
-    ], "and the best placement does not"
 
 
 def test_a_second_question_does_not_demote_what_the_first_one_found(tmp_path) -> None:

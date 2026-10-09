@@ -697,37 +697,6 @@ def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, f
     return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
 
 
-def fuse_by_best_rank(lists: Sequence[Sequence[int]]) -> list[tuple[int, int]]:
-    """One entry per id, ordered by the best rank it reached in any list.
-
-    **For lists that are answers to different questions.**  `fuse_ranked` sums
-    `1/(k+rank)` over its lists, which is right when they are one question asked
-    twice — a row both legs found is evidence about that question — and wrong
-    when they are not, because then agreeing means nothing.  And the difference
-    is arithmetic, not taste: with two lists, a row present in *both* scores at
-    least `1/(k+40) + 1/(k+40)` = 0.0200, while a row that is *first* in one of
-    them scores `1/(k+1)` = 0.0164.  So a row that placed badly in both outranks
-    every row that placed well in either — which is what "the second sentence
-    demoted the first sentence's answer" is, measured.
-
-    The best rank instead: `min` over a growing set of lists can only fall, so
-    **another question is another chance and can never cost a row an earlier one
-    already found**.  That is the promise the second entry in `sentences` is
-    documented as making, and this is the rule that keeps it.  Ties fall to the
-    earlier list, so the order a caller wrote its questions in is their priority.
-
-    Returns `(id, the rank it was ordered by)` — the shape `fuse_ranked` returns,
-    with a rank where that one has a score.  The two numbers are not comparable.
-    """
-    best: dict[int, tuple[int, int]] = {}
-    for position, ids in enumerate(lists):
-        for rank, row_id in enumerate(ids, start=1):
-            if row_id not in best or rank < best[row_id][0]:
-                best[row_id] = (rank, position)
-    order = sorted(best.items(), key=lambda item: item[1])
-    return [(row_id, rank) for row_id, (rank, _) in order]
-
-
 def _time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
     """`(clauses, params)` for a `created_at` window.
 
@@ -2982,20 +2951,25 @@ class ToolStore:
         words go to `keywords` and meaning goes to `sentences`, either may be
         empty, and the fusion is the same one it always was.
 
-        Two legs and one fusion, the same shape as a turn search and for the
-        same reason: `bm25` is unbounded and depends on the corpus, a cosine
-        distance depends on the model, and a rank is comparable by construction.
-        A tool both legs found outranks one only one of them did.
+        **The fusion decides the shortlist; the page is ordered by what the caller
+        can see.**  Within one question the two legs are fused by rank, for the
+        reason a turn search fuses its own: `bm25` is unbounded and depends on the
+        corpus, a cosine depends on the model, and a rank is comparable by
+        construction — so a row both legs found outranks one only one of them did.
+        Across questions there is no such evidence, and the page order is not the
+        fusion's anyway: it is *the words first, then the meaning*, both of which
+        are on the page for the reader to check.  Ranking across questions instead
+        gave each of them an alternating half of the page, so a second question
+        the caller appended cost the first one five of its ten rows.
 
         **Several sentences are several *questions*, not one longer query.**  Not
         one string glued together, because that dilutes the vector; and not
-        several lists under one fusion either, which is what this did and what it
-        got wrong — see `fuse_by_best_rank`, where the arithmetic is, and where
-        the rule that replaces it is argued.  What a caller can then rely on is
-        one thing, and it is the one a second entry promises: **another question
-        is another chance to be found, and cannot cost a row that an earlier one
-        already found.**  They are one `embed` call whatever there are of them;
-        the model is asked for a batch.
+        several lists under one fusion either.  What a caller can rely on is that
+        **another question is another chance to be found, and cannot cost a row
+        that an earlier one already found** — which the ordering above is what
+        makes true, since adding a question can only add rows to the shortlist and
+        a row's place no longer depends on which question found it.  They are one
+        `embed` call whatever there are of them; the model is asked for a batch.
 
         **Both empty is a browse, not an empty answer.**  Nothing asks for the
         whole catalogue by accident, and a list of what exists is how a model or
@@ -3032,56 +3006,75 @@ class ToolStore:
                 values,
             )
 
-        # **One list per question, and the words belong to every one of them.**
-        # `keywords` is what the caller has in mind, so where there is a sentence
-        # it is that sentence's other leg and is fused into that question — a row
-        # both legs found is evidence *about that question*.  Across questions
-        # there is no such evidence, which is what `fuse_by_best_rank` is for and
-        # why the words are not also a list of their own: they are the same
-        # request for every sentence, so a fourth copy of them would be four
-        # votes for whatever they alone found.
+        # **The shortlist, one list per question.**  `keywords` is what the caller
+        # has in mind, so where there is a sentence it is that sentence's other
+        # leg and is fused into that question — a row both legs found is evidence
+        # *about that question* — and `fuse_ranked` is what orders that list.  The
+        # questions are then unioned and the whole shortlist is ordered once,
+        # below, by a rule the caller can read off the page.
         phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
-        similarity: dict[int, float] = {}
-        questions: list[list[int]] = []
+        meaning: dict[int, float] = {}
+        shortlist: list[int] = []
+        seen: set[int] = set()
         queries, lists = await self._semantic_lists(sentences, embedder, over)
         for (index, _), hits in zip(phrases, lists, strict=True):
-            # A row several sentences found takes the *nearest* of them, so the
-            # number on the page is how close the row came to the nearest thing
-            # the caller asked — not whichever sentence happened to be first.
             legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
             if keyword_hits is not None:
                 legs["keyword"] = keyword_hits
-            questions.append([rowid for rowid, _ in fuse_ranked(legs)])
+            for rowid, _ in fuse_ranked(legs):
+                if rowid not in seen:
+                    seen.add(rowid)
+                    shortlist.append(rowid)
+            # A row several sentences found takes the *nearest* of them, so the
+            # number is how close the row came to the nearest thing the caller
+            # asked for — not whichever sentence happened to be looked at first.
             for rowid, measured in hits:
-                similarity[rowid] = max(similarity.get(rowid, 0.0), measured)
-        if keyword_hits is not None and not questions:
+                meaning[rowid] = max(meaning.get(rowid, 0.0), measured)
+        if keyword_hits is not None and not shortlist:
             # Words with no sentence are one question with one view.
-            questions.append(keyword_hits)
+            shortlist = list(dict.fromkeys(keyword_hits))
 
-        fused = [rowid for rowid, _ in fuse_by_best_rank(questions)]
-        rows = await asyncio.to_thread(
-            self._rows_in_order, fused[:_MAX_SQL_VARS], clauses, values, limit
-        )
-
-        # **The number is a reading of the page, so every row on it has one** —
-        # including the rows the meaning leg never returned, which are exactly
-        # the rows the words found.  On a keywords-only call that is usually the
-        # row the caller named outright, and it used to be the one row with no
-        # number beside rows with one: the strongest evidence reading as the
-        # weakest thing on the page.
-        page = [int(row["rowid"]) for row in rows]
+        # **Every row of the shortlist gets its number**, not only the rows the
+        # meaning leg returned — those are exactly the rows the words found, and
+        # they are about to be shown first.  They used to be the only rows with no
+        # number at all, so the strongest evidence on the page read as the
+        # weakest thing on it.
         for rowid, value in self._meaning_of(
-            [rowid for rowid in page if rowid not in similarity], queries
+            [rowid for rowid in shortlist if rowid not in meaning], queries
         ).items():
-            similarity[rowid] = max(similarity.get(rowid, 0.0), value)
+            meaning[rowid] = max(meaning.get(rowid, 0.0), value)
 
-        keyword_found = set(keyword_hits or ())
+        # **The page is ordered by two things the caller can see.**  The words
+        # first, because a row whose own text contains them is certain where a
+        # cosine is graded, and the cosines cannot separate a cluster at all:
+        # `set_table_column_width` and `..._widths` measure 0.63 and 0.62, `v0`
+        # and `v0_1` both 0.66 — only the word match knows which was named.  Then
+        # by meaning, descending.
+        #
+        # Ordered *here* rather than by the fusion's ranks, which is what this
+        # did: ranking across questions gave each of them an alternating half of
+        # the page, so a second question the caller appended cost the first one
+        # five of its ten rows — measured, a row at rank 5 of question one came
+        # back at rank 9, under four rows of a question it was unrelated to.
+        # The sort is **stable and carries no id in its key**, so rows whose
+        # meaning is equal keep the order the fusion gave them: where the number
+        # cannot decide, the evidence does, rather than whichever rowid sorts
+        # first.  That is also what makes a tie fall back to what this did before
+        # there was a number to order by.
+        worded = set(keyword_hits or ())
+        ordered = sorted(
+            shortlist,
+            key=lambda rowid: (rowid not in worded, -meaning.get(rowid, 0.0)),
+        )
+        rows = await asyncio.to_thread(
+            self._rows_in_order, ordered, clauses, values, limit
+        )
         return {
             "results": [
                 _search_dict(
                     row,
-                    similarity.get(int(row["rowid"])),
-                    matched_words=int(row["rowid"]) in keyword_found,
+                    meaning.get(int(row["rowid"])),
+                    matched_words=int(row["rowid"]) in worded,
                 )
                 for row in rows
             ],
