@@ -237,6 +237,30 @@ class StubEmbedder:
         return vectors
 
 
+async def keep_the_context(
+    agent: str, subagent: str, model: str, messages: list[Any], prompt: str
+) -> str:
+    """A discriminator that answers "keep what is in hand" — `{}`.
+
+    **The context plugin's other real seam, and the one that is easy to leave
+    open.**  `build_server` takes `ask`, and an un-injected one is a *real model
+    call*; these tests take their addresses from the config, so a plugin built
+    without it reaches whatever is listening on the model server's port — which,
+    on a machine with the daemons up, is a real provider.  What the rebuild then
+    does is up to that model, and `{"context": "clear"}` empties the list: the
+    next turn runs on its own message and nothing else, so a test asserting that
+    the context survives fails for a reason that has nothing to do with the
+    server under test.  Intermittent, because the answer is.
+
+    `{}` and not a failure: "a decision that asks for exactly what is in hand
+    rebuilds nothing at all" is the behaviour those tests are written against,
+    and it is the same default `Replies` falls back to in
+    `tests/test_context_server.py`, which varies the *answer* rather than the
+    seam.
+    """
+    return "{}"
+
+
 @dataclass
 class FailingEmbedder:
     """An embedding endpoint that is down.
@@ -299,7 +323,9 @@ def plugin_transports(
         if name == "builtins":
             return lambda settings: build_builtins(config)
         if name == "context":
-            return lambda settings: build_context(config, embedder=StubEmbedder())
+            return lambda settings: build_context(
+                config, embedder=StubEmbedder(), ask=keep_the_context
+            )
         if name == "skills-server":
             return lambda settings: build_skills(config)
         if name == "cli-server":

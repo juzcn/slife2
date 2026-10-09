@@ -30,7 +30,13 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from fakes import FakeBackend, ScriptedTurn, StubEmbedder, text_turn
+from fakes import (
+    FakeBackend,
+    ScriptedTurn,
+    StubEmbedder,
+    keep_the_context,
+    text_turn,
+)
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -86,7 +92,9 @@ async def context():
     """
     from slife2.context_server import build_server as build_context
 
-    async with Client(build_context(default_config(), embedder=StubEmbedder())) as client:
+    async with Client(
+        build_context(default_config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as client:
         yield client
 
 
@@ -216,7 +224,9 @@ async def test_the_server_exposes_two_tools(context, hub) -> None:
     and one way to start over.
     """
     async with Client(
-        build_server(config(), context_client=context, hub_client=hub, backend=FakeBackend())
+        build_server(
+            config(), context_client=context, hub_client=hub, backend=FakeBackend()
+        )
     ) as client:
         tools = await client.list_tools()
     assert [t.name for t in tools] == ["send_message", "transcript", "reset"]
@@ -379,7 +389,9 @@ async def test_a_loop_remembers_what_was_said_to_it(context, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     await send(server, "one")
     await send(server, "two")
@@ -419,7 +431,9 @@ async def test_one_server_serves_two_loops_without_mixing_them(context, hub) -> 
 
             return Stream(chunks=chunks(), result=result())
 
-    server = build_server(config(), context_client=context, hub_client=hub, backend=EchoBackend())
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=EchoBackend()
+    )
     async with Client(server) as first, Client(server) as second:
         one, two = await asyncio.gather(
             first.call_tool("send_message", {"agent": "jack", "prompt": "alpha"}),
@@ -446,7 +460,9 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="worker")),
         ScriptedTurn(result=StreamChatResult(text="main again")),
     )
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     await send(server, "one", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
@@ -476,7 +492,9 @@ async def test_reset_starts_the_conversation_over(context, hub) -> None:
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
     )
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     await send(server, "one")
     assert (await reset(server)).data["reset"]
@@ -545,7 +563,9 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
         text_turn("slow answer", delay=0.15),
         text_turn("second answer"),
     )
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     first = asyncio.create_task(send(server, "one"))
     # The first turn has begun only once the backend has been asked for a
@@ -575,7 +595,9 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
 async def test_a_cancelled_message_leaves_the_lock_free(context, hub) -> None:
     """A caller that goes away while queued is not a lock held forever."""
     backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     first = asyncio.create_task(send(server, "one"))
     await wait_for_streams(backend)
@@ -611,7 +633,9 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     model is sent is the only thing that actually matters.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     interrupted = asyncio.create_task(send(server, "one"))
     await wait_for_streams(backend)
@@ -639,7 +663,9 @@ async def test_an_interrupted_turn_is_still_recorded(
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
-    async with Client(build_context(config(), embedder=StubEmbedder())) as context_client:
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
         server = build_server(
             config(), backend=backend, context_client=context_client, hub_client=hub
         )
@@ -688,7 +714,9 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
             self.calls.append((list(messages), list(tools)))
             raise RuntimeError("the provider answered 500")
 
-    async with Client(build_context(config(), embedder=StubEmbedder())) as context_client:
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
         server = build_server(
             config(), backend=Refusing(), context_client=context_client, hub_client=hub
         )
@@ -758,7 +786,11 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
         name = kwargs.get("name", "")
         opened.append(name)
         if name == CONTEXT_SERVER_NAME:
-            client = Client(build_context(default_config(), embedder=StubEmbedder()))
+            client = Client(
+                build_context(
+                    default_config(), embedder=StubEmbedder(), ask=keep_the_context
+                )
+            )
         else:
             assert name == TOOLHUB_SERVER_NAME
             client = Client(
@@ -824,8 +856,12 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         ),
     )
 
-    async with Client(build_context(cfg, embedder=StubEmbedder())) as context_client:
-        server = build_server(cfg, backend=backend, context_client=context_client, hub_client=hub)
+    async with Client(
+        build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            cfg, backend=backend, context_client=context_client, hub_client=hub
+        )
         await send(server, "what is 2+2?", agent="jack", channel="human")
 
     jack = db_dir() / "jack.turn.db"
@@ -953,7 +989,9 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
                 embedder=StubEmbedder(),
             )
         ) as hub_client,
-        Client(build_context(cfg, embedder=StubEmbedder())) as context_client,
+        Client(
+            build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+        ) as context_client,
     ):
         server = build_server(
             cfg, backend=backend, context_client=context_client, hub_client=hub_client
@@ -1032,7 +1070,9 @@ async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
             )
         },
     )
-    server = build_server(vision, context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        vision, context_client=context, hub_client=hub, backend=backend
+    )
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
     sent = backend.calls[0][0][-1]
@@ -1042,7 +1082,9 @@ async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_are_refused_by_a_model_that_cannot_read_them(context, hub) -> None:
+async def test_images_are_refused_by_a_model_that_cannot_read_them(
+    context, hub
+) -> None:
     """Dropping an attachment somebody made is worse than saying no.
 
     The config listing only `text` under `input` is the config saying so, and
@@ -1066,7 +1108,10 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(context, hub)
     with pytest.raises(Exception, match="cannot read images"):
         await send(
             build_server(
-                text_only, context_client=context, hub_client=hub, backend=answering("ok")
+                text_only,
+                context_client=context,
+                hub_client=hub,
+                backend=answering("ok"),
             ),
             "look",
             images=["data:image/png;base64,AAAA"],
@@ -1339,7 +1384,9 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
     from every provider, and nothing inside the process can show that.
     """
     backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
-    server = build_server(config(), context_client=context, hub_client=hub, backend=backend)
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
 
     async with over_http(server) as url:
         async with Client(url) as client:
