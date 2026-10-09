@@ -89,47 +89,42 @@ def build_server(config: Config) -> FastMCP:  # noqa: ARG001 - house signature
     """
     mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
 
+    # The smallest tool there is, and the one to copy when adding another: a
+    # plain function, a decorator, a signature FastMCP turns into the schema,
+    # and a docstring that becomes the description.  **Which is why that
+    # docstring is written for a model and not for a reader of this file** —
+    # the same standing every tool below has, and the reason their arguments
+    # rather than their history live in the text.
     @mcp.tool(meta=FOR_THE_MODEL)
     def echo(text: str) -> str:
         """Say it back, unchanged.
 
-        The smallest possible builtin, and the one to copy when adding the next:
-        a plain function, a decorator, a signature FastMCP turns into the schema
-        the model sees, and a docstring that becomes the tool's description.
-
-        It is also useful for what it does — a tool that cannot fail is how you
-        find out whether tool calling works at all.
-
         Args:
-            text: Anything at all.
-
-        Returns:
-            The same text.
+            text: The text to return.
         """
         return text
 
+    # UTC only, and deliberately: accepting an IANA zone would mean
+    # `zoneinfo.ZoneInfo("Asia/Shanghai")`, which raises on a Windows machine
+    # with no `tzdata` installed — a dependency dragged in to answer a question
+    # the model can do arithmetic on.
     @mcp.tool(meta=FOR_THE_MODEL)
     def now() -> str:
         """Current date and time in UTC, ISO 8601.
 
-        Deliberately takes no timezone.  Accepting an IANA zone would mean
-        `zoneinfo.ZoneInfo("Asia/Shanghai")`, which raises on a Windows machine
-        with no `tzdata` package installed — so the tool would drag in a
-        dependency to answer a question the model can do arithmetic on.  UTC has
-        no such problem.
+        Always UTC: it takes no timezone.
         """
         return datetime.now(UTC).isoformat()
 
+    # Two spellings of one argument, and not for tidiness: a model that writes
+    # the long form should get an answer rather than an argument error.
     @mcp.tool(meta=FOR_THE_MODEL)
     def calc(e: str = "", expression: str = "") -> str:
         """Evaluate an arithmetic expression, e.g. '2 + 2 * 3'.
 
         Args:
-            e: The expression to evaluate.  Terse, because it is the common call
-                and the model writes it more often.
-            expression: The same argument under a longer name.  Two spellings is
-                not tidiness — it is that a model which writes the long form
-                should get an answer rather than an argument error.
+            e: The expression to evaluate.
+            expression: The same argument under a longer name; either will do.
 
         Returns:
             The result, as text.

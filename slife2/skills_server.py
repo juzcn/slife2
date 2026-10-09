@@ -194,13 +194,11 @@ def build_server(config: Config) -> FastMCP:
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
     async def skill_use(name: str) -> str:
         """Read a skill: a playbook kept on this machine, written to be followed
-        rather than called. A skill carries the procedure for one kind of job
-        along with the details that are easy to get wrong — the commands, the
-        paths, the order. Read one before starting that job instead of working it
-        out from scratch. The name is the one the skill goes by; if it is not
-        installed, the answer says what is, and if the skill needs an API key or
-        a program that is not there, the answer says that too — before you act on
-        instructions that would fail.
+        rather than called.
+
+        A skill carries the procedure for one kind of job and the details that
+        are easy to get wrong — the commands, the paths, the order.  Read it
+        before starting that job.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
@@ -209,7 +207,8 @@ def build_server(config: Config) -> FastMCP:
             The playbook, preceded by one line saying what the paths in it are
             relative to — a skill's own paths are relative to its directory —
             and, when the skill declares requirements, a line saying whether
-            they are met and how to supply what is missing.
+            they are met and how to supply what is missing.  For a name that is
+            not installed, the answer lists the ones that are.
         """
         text, ok = await skills.use(name, environments=environments)
         if not ok:

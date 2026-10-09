@@ -356,6 +356,13 @@ def build_server(
             )
         return found
 
+    # This docstring is the model's description, so it says what the tool
+    # answers and nothing about why it is shaped this way.  The two arguments
+    # that reasoning belongs to, kept here instead: **a bound narrows what you
+    # see and never decides it** — a default window would hide turns with
+    # nothing saying they were hidden, which is the one thing a browse must not
+    # do — and **there is no argument naming whose memory to read**, because a
+    # model that could name one could read somebody else's.
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_list(
         ctx: Context,
@@ -366,20 +373,15 @@ def build_server(
     ) -> dict[str, Any]:
         """Browse what was said before, newest first, one line per turn.
 
-        The way back into a conversation you were not in, or were in long enough
-        ago to have lost: when each turn was, what was asked, what was answered,
-        and the id to read the whole of it with `turn_read`.  Both messages come
-        back cut short — enough to tell whether this is the turn you wanted, not
-        enough to be the turn itself.
+        Each line carries `turn_id`, when the turn was, what was asked and what
+        was answered, both cut short — enough to tell whether this is the turn
+        you want, not enough to be the turn.  Read the whole of one with
+        `turn_read`.
 
-        Neither bound is required, and neither has a default window: leaving
-        both out browses the newest turns.  A bound narrows what you see and
-        never decides it — a default range would hide turns with nothing saying
-        they were hidden, which is the one thing a browse must not do.
+        Your own history only: no argument names whose memory to read.
 
-        Your own history, and only your own: there is no argument naming whose
-        memory to read, because a model that could name one could read somebody
-        else's.
+        Both bounds are optional and neither has a default, so leaving both out
+        browses the newest turns.
 
         Args:
             since: Lower bound on when the turn was written — an ISO date or
@@ -422,7 +424,8 @@ def build_server(
 
         Everything that happened in it, in the order it happened: what the user
         said, every assistant message, the tool calls and what they answered.
-        Your own history, like `turn_list` — an id only resolves inside it.
+
+        Your own history, like `turn_list`: an id only resolves inside it.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.
