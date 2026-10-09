@@ -1104,20 +1104,37 @@ the keyword leg alone, and none of the 36 now returns nothing — where nine did
 The words were never the poorer text; they never reached the leg that could
 answer them.
 
-**Two sentences are two questions, and are fused as two questions.** The rule is
-`fuse_by_best_rank`: a row is ordered by the best rank it reached in *any* of
-them, and agreeing across two unrelated questions earns nothing. That is not a
-preference, it is arithmetic. `fuse_ranked` sums `1/(k+rank)` over its lists,
-which is right for one question asked twice — the keyword leg and the meaning leg
-of the same request, where a row both found is evidence — and inverted for two:
-a row present in *both* sentences' lists scores at least `1/(k+40) + 1/(k+40)`
-= 0.0200 where a row that is *first* in one scores `1/(k+1)` = 0.0164, so
-mediocre-in-both outranks first-in-one. Measured on the live catalogue, two
-sentences on unrelated subjects put the first question's first answer at
-**rank 10**, below chrome-devtools rows neither question had ranked above
-thirtieth; the best-rank rule gives it **rank 3**. The words belong to every
-question — they are the same request for each — so they are fused into each
-question's list rather than standing as one of their own.
+**Two sentences are two questions, and the page is not the fusion's to order.**
+Ranking *across* questions is wrong twice over, and the second way is the one
+that took two tries to see. `fuse_ranked` sums `1/(k+rank)` over its lists, which
+is right for one question asked twice — the keyword leg and the meaning leg of the
+same request, where a row both found is evidence — and inverted for two: a row
+present in *both* sentences' lists scores at least `1/(k+40) + 1/(k+40)` = 0.0200
+where a row that is *first* in one scores `1/(k+1)` = 0.0164, so mediocre-in-both
+outranks first-in-one. Ordering by the best rank *any* question gave instead fixes
+that and is still wrong: it hands each question an alternating half of the page,
+so a second question the caller appended costs the first one five of its ten rows.
+Measured on the live catalogue, appending an unrelated second sentence to a
+question moved that question's fifth answer from **rank 5 to rank 9**, under four
+rows of a question it had nothing to do with — while the second sentence's own
+rows measured 0.544 and below against the first's 0.551 and up.
+
+So the questions are **unioned into a shortlist and the page is ordered by what
+the caller can see**: the rows the caller's own words matched first, then by
+meaning, descending. Measured benefit, the report's own pair: with the second
+sentence appended the page becomes **identical to the single-sentence page**, the
+second question contributing nothing, because every one of its rows scores below
+every one of the first's. And the ordering is no longer a second thing the answer
+has to explain — the number on each row is the number that placed it, within the
+tier the header names.
+
+**The words come first because the cosines cannot separate a cluster at all.**
+`set_table_column_width` and `..._widths` measure 0.63 and 0.62; `v0` and `v0_1`
+both 0.66. Nothing in the meaning leg can tell which of a pair was named — only
+the word match can, and that is the one piece of evidence here that is certain
+rather than graded. The words belong to every question — they are the same request
+for each — so they are fused into each question's list rather than standing as one
+of their own.
 
 Two things about the measurement are worth carrying forward, because both look
 like language problems and neither is. **A sentence kills the keyword leg in
@@ -1168,10 +1185,10 @@ express, because a row can be named exactly whatever it scores — `pandoc` scor
 0.514 against the row *named* `mcp-pandoc`, and a threshold alone would answer
 "nothing here" to somebody who just said the tool's name.
 
-And the order is neither of them. It is by evidence, and the header says so in
-six words, because a column that does not run in order is a column a model will
-otherwise sort by — the same failure as an inverted score, reached from the other
-side.
+And the order is that number, in the two tiers the header names. A column that
+does not run in order is a column a model will sort by and be wrong about — the
+same failure as an inverted score, reached from the other side — so the number
+had to become the order rather than sit beside it.
 Both rows are the hub's own, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted — which is the hub's
 own three plus `skill_use`, the one entry there that a plugin serves
