@@ -133,10 +133,10 @@ def _config_with_every_protocol():
     path.write_text(
         """
 providers:
-  a: {api: openai-completions, models: [{model: m}]}
-  b: {api: openai-completions, models: [{model: n}]}
-  c: {api: anthropic-messages, models: [{model: o}]}
-  d: {api: openai-responses, models: [{model: p}]}
+  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}
+  b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n}]}
+  c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o}]}
+  d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p}]}
 default: a/m
 """,
         encoding="utf-8",
@@ -158,7 +158,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
     """A server for a protocol nobody uses holds nobody's key."""
     path = tmp_path / "one.yaml"
     path.write_text(
-        "providers:\n  a: {api: openai-completions, models: [{model: m}]}\n",
+        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}\n",
         encoding="utf-8",
     )
     names = [spec.name for spec in launcher.specs(load(path))]
@@ -174,7 +174,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
 
 def test_the_agent_server_takes_no_provider() -> None:
     spec = next(s for s in launcher.specs(default_config()) if s.name == "agent")
-    assert "--provider" not in launcher._argv(spec, Path("slife2.yaml"))
+    assert "--provider" not in launcher._argv(spec)
 
 
 def test_every_peer_the_agent_reaches_starts_before_it() -> None:
@@ -266,7 +266,7 @@ def test_a_spawned_server_is_told_where_the_data_directory_is(
     spec = next(
         s for s in launcher.specs(default_config()) if s.name.startswith("llm:")
     )
-    argv = launcher._argv(spec, None)
+    argv = launcher._argv(spec)
 
     assert "--data-dir" in argv
     given = argv[argv.index("--data-dir") + 1]
@@ -286,6 +286,28 @@ def test_a_registered_server_is_reused_and_nothing_is_spawned(
     outcome = launcher.ensure(SPEC)
     assert outcome.status is Status.RUNNING
     assert outcome.ok
+
+
+def test_status_reads_the_record_the_way_down_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server answering with no record of ours was started by hand.
+
+    `down` refuses to stop it for exactly that reason, so `status` calling the
+    same process merely "running" is two commands disagreeing about one
+    process — and the "(not started by slife2)" branch in the CLI's output was
+    unreachable, which is how the disagreement stayed invisible.
+    """
+    monkeypatch.setattr(launcher, "probe", lambda *a, **k: True)
+    monkeypatch.setattr(launcher, "specs", lambda config: [SPEC])
+
+    (hand_started,) = launcher.statuses(default_config())
+    assert hand_started.status is Status.UNMANAGED
+    assert "not started by slife2" in hand_started.detail
+
+    _register(SPEC)
+    (ours,) = launcher.statuses(default_config())
+    assert ours.status is Status.RUNNING
 
 
 def test_a_server_started_by_another_config_is_still_shared(
@@ -379,7 +401,7 @@ def test_the_spawn_command_uses_this_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`sys.executable -m`, not the console script: same venv, no PATH needed."""
-    argv = launcher._argv(SPEC, Path("D:/x/slife2.yaml"))
+    argv = launcher._argv(SPEC)
     assert argv[0] == sys.executable
     assert argv[1:3] == ["-m", "slife2.llm.openai_server"]
     assert "--data-dir" in argv

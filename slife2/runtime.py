@@ -234,10 +234,20 @@ def read_claim(name: str) -> AgentClaim | None:
 
 
 def write_claim(claim: AgentClaim) -> None:
+    """Claim an agent name, atomically.
+
+    Temporary-and-rename like `write_record`, and for the same reason: this is
+    the file two instances race over — `--agent` is exclusive, and the loser is
+    decided by what it reads here — so a reader that catches a half-written
+    claim does not compare against a name, it fails to parse one and takes the
+    name for free.  The window is small and the failure is exactly the one this
+    file exists to prevent.
+    """
+    path = agent_claim_path(claim.name)
+    tmp = path.with_suffix(".tmp")
     with contextlib.suppress(OSError):
-        agent_claim_path(claim.name).write_text(
-            json.dumps(asdict(claim), indent=2), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(asdict(claim), indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def clear_claim(name: str) -> None:
@@ -264,7 +274,19 @@ class ClientRecord:
 
     @property
     def path(self) -> Path:
-        return _clients_dir() / f"{self.pid}-{self.agent or 'client'}.json"
+        """The file naming this client, with the agent name digested.
+
+        Not the name itself, which arrives from `--agent` on a command line and
+        is only conservative *by the db's rule* — `slife2.db` replaces what it
+        cannot put in a filename.  A name this property did not sanitise would
+        be a record `live_clients`' `*.json` glob never returns: on Windows the
+        colon in `a:b` makes the write an alternate data stream, on POSIX a
+        slash makes it fail outright, and `register_client` suppresses the
+        `OSError` either way.  The instance would then be uncounted, and the
+        last client out would stop the shared servers underneath it.  The name
+        is in the record's own body, which is where every reader takes it from.
+        """
+        return _clients_dir() / f"{self.pid}-{agent_key(self.agent)}.json"
 
 
 def _clients_dir() -> Path:
@@ -304,6 +326,15 @@ def live_clients() -> list[ClientRecord]:
                 path.unlink(missing_ok=True)
             continue
 
+        # Lenient where `same_process` is strict, and deliberately: the two
+        # ask different questions.  This one asks "may the servers stay up for
+        # this client?", and the wrong answer is stopping them under somebody
+        # who is still working — so a record with no token to compare takes the
+        # live pid at its word, where `same_process` would refuse to prove
+        # anything.  That is the price of a token source being unavailable on
+        # this host: a record left by a killed client whose pid was then reused
+        # keeps the servers alive a little longer than it should, which costs a
+        # daemon nobody is using rather than a session somebody is in.
         if pid_alive(record.pid) and (
             not record.start_token
             or process_start_token(record.pid) == record.start_token
@@ -375,13 +406,22 @@ def _start_token_windows(pid: int) -> str | None:
     try:
         created = wintypes.FILETIME()
         exited = wintypes.FILETIME()
-        kernel32.GetProcessTimes(
+        ok = kernel32.GetProcessTimes(
             handle,
             ctypes.byref(created),
             ctypes.byref(exited),
             ctypes.byref(wintypes.DWORD()),
             ctypes.byref(wintypes.DWORD()),
         )
+        if not ok:
+            # ctypes does not raise on a Win32 call that failed, and a FILETIME
+            # left at zero is the constant "0000000000000000" — which two
+            # different failed lookups would share, so `same_process` would
+            # "prove" a match between unrelated pids.  `None` is the honest
+            # answer, and it is the unsafe direction that is being avoided.
+            return None
+        if not created.dwHighDateTime and not created.dwLowDateTime:
+            return None
         return f"{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
     except OSError:
         return None
@@ -604,8 +644,11 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
       escape hatch beats failing to start.
 
     Also `cwd` is set away from the repository: a daemon must not hold a working
-    directory open, and `--config` is absolute, so moving it cannot change which
-    config the child reads.
+    directory open.  Which config the child reads is decided by the absolute
+    `--data-dir` its caller passes, since that is the argument that actually
+    reaches a server — and it has to be absolute for exactly this reason:
+    `slife2.launcher._argv` resolves it, and a relative one would be re-resolved
+    against the `cwd` set here.
     """
     log = log_path(url)
     _truncate_if_huge(log)
@@ -670,10 +713,19 @@ def terminate(pid: int, *, grace: float = 5.0) -> bool:
     else:
         import signal
 
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            # `start_new_session=True` made the child a process-group leader, so
-            # the group reaches anything it spawned in turn.
-            os.killpg(pid, signal.SIGTERM)
+        # The group, not only the process, so that what a server spawned in
+        # turn goes with it — `spawn` sets `start_new_session=True`, which is
+        # what makes the child a group leader.  Checked rather than assumed: a
+        # server started by hand writes its own record, and a pid that is not
+        # a group leader makes `killpg` raise ESRCH (suppressed, so `down`
+        # would report a failure while the daemon kept running) — or, worse,
+        # signal whatever unrelated group happens to own that number.
+        if os.getpgid(pid) == pid:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGTERM)
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGTERM)
 
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:

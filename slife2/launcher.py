@@ -287,11 +287,11 @@ def probe(spec: ServerSpec, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
 
     try:
         return asyncio.run(_probe_async(spec, timeout))
-    except Exception:
+    except Exception:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
         return False
 
 
-def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
+def _argv(spec: ServerSpec) -> list[str]:
     """The command that starts a server.
 
     `sys.executable -m` rather than the console script: it guarantees the daemon
@@ -319,7 +319,12 @@ def _argv(spec: ServerSpec, config_path: Path | None) -> list[str]:
     # this process, which read the config it was pointed at, believes otherwise.
     # The symptom is a server that starts fine and immediately reports a config
     # it does not have.
-    argv += ["--data-dir", str(data_dir())]
+    # `.resolve()` is the load-bearing half of "the resolved directory".  The
+    # child is spawned with its working directory set to `<data>/runtime`, so a
+    # relative `--data-dir rel/chk` — from the flag or from `SLIFE2_DATA_DIR` —
+    # would be re-resolved *underneath that*, pointing the child at a directory
+    # that has no config in it while this process reads the one it was given.
+    argv += ["--data-dir", str(data_dir().resolve())]
     return argv
 
 
@@ -347,6 +352,12 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
             # We own a process that has never served anything, so cleaning it up
             # is unambiguous.  A server that *had* served would be someone's.
             terminate(proc.pid)
+            # Reaped, because nothing else will: `Popen` holds the child's exit
+            # status until somebody waits, and on POSIX a process nobody waits
+            # for is a zombie for the life of the waiter — which here is the
+            # whole session, since the launcher runs until the TUI exits.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5.0)
             raise StartFailed(
                 f"{spec.name} did not answer within {READY_TIMEOUT_SECONDS:.0f}s",
                 tail_log(spec.url),
@@ -378,7 +389,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
             if tcp_listening(spec.host, spec.port):
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
-            proc = spawn(_argv(spec, config_path), url=spec.url)
+            proc = spawn(_argv(spec), url=spec.url)
             _wait_ready(spec, proc)
             # The record is written by the server itself, not here: it is the
             # only party that knows which config it read, and that is what
@@ -386,8 +397,13 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
             return Outcome(spec, Status.STARTED, read_record(spec.url))
     except StartFailed as exc:
         return Outcome(spec, Status.FAILED, detail=f"{exc}\n{exc.log_tail}".strip())
-    except TimeoutError as exc:
-        return Outcome(spec, Status.FAILED, detail=str(exc))
+    except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
+        # `spawn` can fail before there is anything to probe: the log file
+        # cannot be opened, or both `Popen` attempts are refused.  Every other
+        # path here reports a server's outcome rather than raising, and this
+        # was the one that did not — so a start failure arrived as a traceback
+        # out of `slife2 run` instead of the line naming the server and why.
+        return Outcome(spec, Status.FAILED, detail=f"{type(exc).__name__}: {exc}")
 
 
 def _reuse(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
@@ -491,7 +507,23 @@ def statuses(config: Config) -> list[Outcome]:
     results = []
     for spec in specs(config):
         if probe(spec):
-            results.append(_reuse(spec))
+            # The same reading `stop` makes, and it has to be the same one: a
+            # server answering with no record of ours was started by hand, so
+            # `status` calling it merely "running" while `down` refuses to stop
+            # it is two commands disagreeing about one process.  The
+            # `UNMANAGED` branch in `slife2 status`'s output — "(not started by
+            # slife2)" — existed and could never be reached without this.
+            record = read_record(spec.url)
+            if record is None:
+                results.append(
+                    Outcome(
+                        spec,
+                        Status.UNMANAGED,
+                        detail="no record; not started by slife2",
+                    )
+                )
+            else:
+                results.append(_reuse(spec))
         elif tcp_listening(spec.host, spec.port):
             results.append(
                 Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
