@@ -131,7 +131,19 @@ BACKEND_PREFIX = "llm:"
 
 #: How long a server may take to answer after being spawned.  Generous enough
 #: for a cold import of a provider SDK, short enough to be a deadline.
-READY_TIMEOUT_SECONDS = 30.0
+#:
+#: **Ninety, and the number was raised from thirty by measurement.**  Every
+#: server here imports the MCP stack before it can serve anything, and that
+#: import is most of the budget: `import slife2.toolhub` costs 5.8s in a process
+#: of its own and 15-17s each when nine of them are started at once, on a
+#: four-core machine with nothing else running.  Thirty was below that floor, so
+#: the deadline was being decided by how busy the launcher had made the machine
+#: rather than by whether a server was coming up — and the one that lost was
+#: `toolhub`, which starts last (it waits on seven plugins; see `NEEDS`) and does
+#: the most before it serves (a catalogue index, then ten plugin asks): starved
+#: past 26s before it logged its first line, killed about a second short.  A
+#: deadline has to clear the floor before it means anything.
+READY_TIMEOUT_SECONDS = 90.0
 
 #: How long to wait for one `tools/list`.  Long enough that a slow but real
 #: server is not misread as absent.
@@ -736,12 +748,20 @@ def _stop_one(spec: ServerSpec) -> Outcome:
 
     if not same_process(record):
         clear_record(spec.url)
+        # `same_process` is False for two situations, and they are not the same
+        # sentence.  A pid that is simply gone is the common one — a launcher
+        # that killed a server which never became ready leaves exactly this
+        # record, and so does a machine that was rebooted — while a pid that
+        # belongs to somebody else is the one the start token exists to catch.
+        # Calling the first "pid reused" asserts something nobody checked, in
+        # the one line a reader gets when a server did not stop.
+        why = "the process is gone" if not pid_alive(record.pid) else "pid reused"
         return Outcome(
             spec,
             Status.STOPPED,
             detail=(
                 f"record points at pid {record.pid}, which is no longer "
-                f"{spec.name} (pid reused); left alone"
+                f"{spec.name} ({why}); left alone"
             ),
         )
 

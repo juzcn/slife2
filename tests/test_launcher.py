@@ -793,5 +793,34 @@ def test_stop_leaves_a_reused_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None
     assert runtime.read_record(SPEC.url) is None  # the stale record is gone
 
 
+def test_stop_calls_a_record_whose_process_is_gone_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other reading of the same check, and the one a failed start leaves.
+
+    A launcher that kills a server which never became ready leaves a record
+    naming a pid that is not there any more.  Nothing was recycled, and the
+    report says so instead of repeating the explanation next door.
+    """
+    runtime.write_record(
+        runtime.ServerRecord(
+            name=SPEC.name,
+            url=SPEC.url,
+            pid=999_999,
+            start_token="a-token-nothing-is-holding",
+        )
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(
+        launcher, "terminate", lambda pid, **k: killed.append(pid) or True
+    )
+
+    outcomes = launcher.stop(_config_with_only_deepseek())
+    assert killed == []
+    assert any("the process is gone" in o.detail for o in outcomes)
+    assert not any("pid reused" in o.detail for o in outcomes)
+    assert runtime.read_record(SPEC.url) is None
+
+
 def _config_with_only_deepseek() -> Config:
     return default_config()
