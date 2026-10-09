@@ -1185,6 +1185,31 @@ def test_anthropic_enables_thinking_for_a_reasoning_model() -> None:
     assert "thinking" not in anthropic_build_request([], [], omitted)
 
 
+def test_anthropic_sampling_rides_in_extra_body() -> None:
+    """The SDK no longer *types* `temperature`, so it cannot be an argument.
+
+    `anthropic` 1.11's `messages.create` has neither `temperature` nor `top_p`
+    — they went when the first-party API stopped accepting them — so a model
+    entry that configures one used to raise a `TypeError` from this process on
+    every call: a message about a keyword, before anything was sent, with
+    nothing naming the model that was misconfigured.  `extra_body` is the
+    hatch a field the SDK no longer types reaches the wire through, and what
+    the config asked for is what the provider is asked for.
+
+    Measured against `api.deepseek.com/anthropic` (`anthropic-messages`, a
+    gateway): the typed form raises, this one answers.
+    """
+    settings = ModelSettings(model="m", temperature=0.7, top_p=1.0)
+    request = anthropic_build_request([], [], settings)
+    assert request["extra_body"] == {"temperature": 0.7, "top_p": 1.0}
+    assert "temperature" not in request, "the top level is what the SDK types"
+
+    # Only what was configured, and nothing at all when nothing was.
+    one = anthropic_build_request([], [], ModelSettings(model="m", temperature=0.3))
+    assert one["extra_body"] == {"temperature": 0.3}
+    assert "extra_body" not in anthropic_build_request([], [], ModelSettings(model="m"))
+
+
 def test_anthropic_drops_sampling_when_thinking_is_on() -> None:
     """The real API rejects temperature and top_p alongside thinking.
 
@@ -1198,6 +1223,44 @@ def test_anthropic_drops_sampling_when_thinking_is_on() -> None:
     assert "thinking" in request
     assert "temperature" not in request
     assert "top_p" not in request
+    assert "extra_body" not in request, "dropped, not moved to the hatch"
+
+
+def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
+    """Every key this module builds is one `messages.create` accepts.
+
+    The bug this pins is the one that shipped: a request body is assembled as a
+    dict and handed to the SDK as `**kwargs`, so a key the SDK does not have is
+    a `TypeError` at the call site — invisible to a test that only reads the
+    dict, and fatal on every call.  Comparing the built request against the
+    *installed* signature is what makes that class of drift fail here instead
+    of in a conversation, and it needs no endpoint: the signature is the whole
+    fact.
+    """
+    import inspect
+
+    from anthropic.resources.messages import AsyncMessages
+
+    accepted = set(inspect.signature(AsyncMessages.create).parameters)
+    settings = ModelSettings(
+        model="m",
+        temperature=0.7,
+        top_p=0.9,
+        max_tokens=8000,
+        reasoning=True,
+        thinking="omit",
+    )
+    request = anthropic_build_request(
+        [
+            Message(role="system", content="be brief"),
+            Message(role="user", content="hi"),
+        ],
+        [ToolSpec(name="t", description="d", parameters={"type": "object"})],
+        settings,
+    )
+
+    assert set(request) - accepted == set(), "a key the SDK would refuse"
+    assert {"system", "tools", "extra_body"} <= set(request), "and it is not empty"
 
 
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:

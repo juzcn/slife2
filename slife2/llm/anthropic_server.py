@@ -239,18 +239,37 @@ def build_request(
         request["tools"] = to_anthropic_tools(tools)
 
     # Only what was configured: `None` means say nothing, not "use a default".
-    if settings.temperature is not None:
-        request["temperature"] = settings.temperature
-    if settings.top_p is not None:
-        request["top_p"] = settings.top_p
+    #
+    # **Sampling rides in `extra_body`, and that is not a style choice.**  The
+    # SDK's typed surface dropped `temperature` and `top_p` when the first-party
+    # API stopped accepting them — `anthropic` 1.11's `messages.create` has
+    # neither — so passing one as an argument is a `TypeError` raised *here*,
+    # before anything is sent, on every call of every conversation, with a
+    # message about a keyword rather than about the model.  Through `extra_body`
+    # the configured value reaches the wire, which is the whole of what this
+    # function promises: a provider that refuses sampling answers in its own
+    # words, naming the field, and one that accepts it — every gateway a
+    # `anthropic-messages` entry in this config can point at — behaves exactly as
+    # it did before.  Measured against `api.deepseek.com/anthropic`: the typed
+    # form raises before the request is built, the `extra_body` form answers.
+    sampling = {
+        field: value
+        for field, value in (
+            ("temperature", settings.temperature),
+            ("top_p", settings.top_p),
+        )
+        if value is not None
+    }
 
     thinking = thinking_parameter(settings, max_tokens)
     if thinking is not None:
         request["thinking"] = thinking
-        # A thinking budget must leave room for an answer, and this endpoint
-        # rejects temperature and top_p alongside extended thinking.
-        request.pop("temperature", None)
-        request.pop("top_p", None)
+        # A thinking budget must leave room for an answer, and sampling is what
+        # this endpoint rejects alongside extended thinking — so it is dropped
+        # where it is collected rather than sent and refused.
+        sampling = {}
+    if sampling:
+        request["extra_body"] = sampling
     return request
 
 
