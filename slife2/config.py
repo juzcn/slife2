@@ -176,6 +176,10 @@ DEFAULT_AGENT = "slife2"
 AGENT_SERVER_NAME = "slife2-agent"
 DB_SERVER_NAME = "slife2-db"
 BUILTINS_SERVER_NAME = "slife2-builtins"
+MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
+RESTAPI_TOOLS_SERVER_NAME = "slife2-restapi-tools"
+SKILLS_SERVER_NAME = "slife2-skills"
+CLI_SERVER_NAME = "slife2-cli"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 
@@ -189,11 +193,30 @@ DB_KEY = "db"
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  The order is the order the
 #: launcher starts them in — see `slife2.config.Config.plugins` — and two of
-#: these positions are load-bearing: `builtins` before `toolhub`, because the hub
-#: asks it for a tool list and the answer to a first turn should not be "not
+#: these positions are load-bearing: every server the hub asks for tools comes
+#: before `toolhub`, because the answer to a first turn should not be "not
 #: connected yet"; and `embeddings` before `db`, because the db's startup sync
 #: asks it for a dimension and then for every vector its index is missing.
-LOCAL_SERVERS = ("embeddings", "db", "builtins", "toolhub", "agent")
+#:
+#: `skills-server` and `cli-server` are the two families with nothing to connect
+#: to — a folder of playbooks and a list of programs already installed.  They are
+#: plugins all the same, because a family's rows and the tool that reads them
+#: belong to the process that owns the family, and because both have a
+#: model-facing tool still to come (DESIGN.md §9).  Their keys carry the suffix
+#: because the *catalogue sources* they publish under are `skills` and `cli`,
+#: which are also their config sections' names — and a source's rows must not
+#: share an id with the tools of the server that publishes them.
+LOCAL_SERVERS = (
+    "embeddings",
+    "db",
+    "builtins",
+    "skills-server",
+    "cli-server",
+    "mcp-tools",
+    "restapi-tools",
+    "toolhub",
+    "agent",
+)
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -627,11 +650,16 @@ class Config:
     #: name -> where it listens, keyed by `"agent"` and by each `api` in use.
     servers: dict[str, ServerSettings] = field(default_factory=dict)
     providers: dict[str, ProviderSettings] = field(default_factory=dict)
-    #: The external tool servers the toolhub connects to, from both `tools:` and
-    #: `rest-api:` — one mapping, because the hub connects to one kind of thing
-    #: and the difference between the two sections is how an entry is written,
-    #: not what it becomes.  `ToolServerSettings.kind` keeps the provenance.
+    #: Other people's MCP servers, from `tools:`.  Held by `slife2-mcp-tools`,
+    #: which declares each entry to the hub as a source of its own.
     tools: dict[str, ToolServerSettings] = field(default_factory=dict)
+
+    #: REST APIs, from `rest-api:`, already expanded into the stdio command that
+    #: serves each one.  A section of its own and a mapping of its own, read by
+    #: `slife2-restapi-tools` — the two are one *mechanism*, which is why the
+    #: entries look identical here, but they are two places an operator writes
+    #: down a server, and a plugin reads the section it owns.
+    rest_apis: dict[str, ToolServerSettings] = field(default_factory=dict)
     #: The programs already on this machine that the model may be told about,
     #: from `cli:`.  A third kind of source beside the plugins and the tool
     #: servers, and the only one with no connection in it at all.
@@ -727,25 +755,15 @@ class Config:
         used = {p.api for p in self.providers.values()}
         return [api for api in API_BACKENDS if api in used]
 
-    def tool_servers(self) -> list[ToolServerSettings]:
-        """The external tool servers the hub should connect to, in file order.
-
-        **One accessor, because "disabled is not connected" has to be one rule.**
-        The launcher and the hub both ask this question — the first to decide
-        whether there is anything to connect at all, the second to decide what to
-        connect — and two spellings of `enabled` is how an entry ends up started
-        by one and skipped by the other.
-        """
-        return [server for server in self.tools.values() if server.enabled]
-
     def cli_tools(self) -> list[CliToolSettings]:
         """The `cli:` entries the model may be given, in file order.
 
-        The same accessor shape as :meth:`tool_servers`, and for the same
-        reason: `enabled` is one rule, and two spellings of it is how an entry
-        ends up written down by one reader and skipped by another.  A disabled
-        entry stays in the file — which is the point of the switch, and the
-        reason this returns a filtered list rather than the mapping.
+        The same accessor shape the `tools:` section had, before it became a
+        plugin's to read: `enabled` is one rule, and two spellings of it is how
+        an entry ends up written down by one reader and skipped by another.  Like
+        those, a disabled entry stays in the file — which is the point of the
+        switch, and the reason this returns a filtered list rather than the
+        mapping.
         """
         return [tool for tool in self.cli.values() if tool.enabled]
 
@@ -786,6 +804,21 @@ def default_config() -> Config:
             # not special to the hub, which asks every plugin above for a
             # tool list and keeps the ones marked for the model.
             "builtins": ServerSettings(port=8030),
+            # The two families that are not tools but have to be findable, each
+            # owned by the process that owns its config section: the playbooks
+            # in `<data>/skills/` (`slife2.skills_server`) and the programs the
+            # config's `cli:` section records as installed (`slife2.cli_server`).
+            # They publish catalogue rows rather than tools, and the hub is what
+            # merges them — see `slife2.mcp_server.CATALOGUE_ROWS`.
+            "skills-server": ServerSettings(port=8031),
+            "cli-server": ServerSettings(port=8032),
+            # And the two whose whole job is somebody else's servers: the
+            # `tools:` section (`slife2.mcp_tools`) and the `rest-api:` one
+            # (`slife2.restapi_tools`).  They hold the connections the toolhub
+            # used to hold, and declare what they hold to it — the hub keeps the
+            # tool *set* and no link to anybody.
+            "mcp-tools": ServerSettings(port=8033),
+            "restapi-tools": ServerSettings(port=8034),
             # The model's tools, and the only process that holds a tool server's
             # credentials.  It has two sources: every plugin above, and
             # everything under `tools:` in the config file.
@@ -911,10 +944,25 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         ),
     )
 
+    # **A name in both sections is refused rather than resolved**, and this is
+    # the only place both are known: each is read by the plugin that owns it, so
+    # neither can check the other.  Both would become one entry called
+    # `{name}__{tool}` in the model's tool list, so which of the two won would be
+    # invisible at every point a person could look.
+    tools = _mcp_servers(raw)
+    rest_apis = _rest_servers(raw)
+    for name in rest_apis:
+        if name in tools:
+            raise ConfigError(
+                f"rest-api.{name}: already configured under `tools:`; the two "
+                f"would collide as tool names"
+            )
+
     return Config(
         servers=servers,
         providers=providers,
-        tools=_tools(raw),
+        tools=tools,
+        rest_apis=rest_apis,
         cli=_cli_tools(raw),
         skills=_skills(raw),
         agent=agent,
@@ -1028,32 +1076,31 @@ OPENAPI_SERVER_URL = "SERVER_URL_OVERRIDE"
 OPENAPI_API_KEY = "API_KEY"
 
 
-def _tools(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
-    """Both tool sections, as one mapping of upstreams.
+def _mcp_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
+    """The `tools:` section, as upstreams: an MCP server written out."""
+    return {
+        str(name): _tool_server(spec, str(name))
+        for name, spec in _mapping(raw.get("tools"), "tools").items()
+    }
 
-    `tools:` is an MCP server written out; `rest-api:` is a REST API written
-    out, and is *expanded* here into the stdio command that serves it.  After
-    this function there is only the first kind, which is what keeps the hub from
-    having to know that REST exists.
 
-    A name in both sections is refused rather than resolved.  Both would become
-    one entry called `{name}__{tool}` in the model's tool list, so which of the
-    two won would be invisible at every point a person could look.
+def _rest_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
+    """The `rest-api:` section, as upstreams: a REST API *expanded* into one.
+
+    `spec:` becomes the `uvx mcp-openapi-proxy` command that serves it, which is
+    done here rather than by the plugin that holds it: turning a declarative
+    entry into a runnable command is the config layer's business, and a plugin
+    that did it would have to learn a second entry shape to validate.
+
+    **The two sections are checked against each other and kept apart.**  Both
+    would become one entry called `{name}__{tool}` in the model's tool list, so a
+    name in both is refused rather than resolved — and they are two mappings
+    rather than one because each is read by the plugin that owns it.
     """
-    result: dict[str, ToolServerSettings] = {}
-
-    for name, spec in _mapping(raw.get("tools"), "tools").items():
-        result[str(name)] = _tool_server(spec, str(name))
-
-    for name, spec in _mapping(raw.get("rest-api"), "rest-api").items():
-        if str(name) in result:
-            raise ConfigError(
-                f"rest-api.{name}: already configured under `tools:`; the two "
-                f"would collide as tool names"
-            )
-        result[str(name)] = _rest_api(spec, str(name))
-
-    return result
+    return {
+        str(name): _rest_api(spec, str(name))
+        for name, spec in _mapping(raw.get("rest-api"), "rest-api").items()
+    }
 
 
 def _tool_server(raw: Any, name: str) -> ToolServerSettings:
@@ -1391,6 +1438,7 @@ __all__ = [
     "API_BACKENDS",
     "API_SERVER_NAMES",
     "BUILTINS_SERVER_NAME",
+    "CLI_SERVER_NAME",
     "DB_SERVER_NAME",
     "DB_KEY",
     "DEFAULT_AGENT",
@@ -1398,6 +1446,9 @@ __all__ = [
     "EmbeddingProviderSettings",
     "EmbeddingsSettings",
     "LOCAL_SERVERS",
+    "MCP_TOOLS_SERVER_NAME",
+    "RESTAPI_TOOLS_SERVER_NAME",
+    "SKILLS_SERVER_NAME",
     "TOOLHUB_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",

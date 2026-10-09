@@ -24,17 +24,13 @@ from fastmcp.tools import Tool
 
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
+from slife2.gateway import flatten, make_client, mcp_config, proxied_name, sanitise
+from slife2.mcp_server import LIST_SOURCES
 from slife2.toolhub import (
     MAX_LOAD_NAMES,
     PLUGIN,
     Catalogue,
-    Upstream,
-    flatten,
-    make_client,
-    mcp_config,
     model_name,
-    proxied_name,
-    sanitise,
 )
 from slife2.toolhub import (
     build_server as build_hub,
@@ -123,7 +119,7 @@ def hub_for(
         # a testable one: a trim is how the eviction *order* is observed from
         # outside, and the order is only visible when something is over the cap.
         config = replace(config, tool_load=ToolLoadSettings(threshold=threshold))
-    wired = plugin_transports(config, connected)
+    wired = plugin_transports(config, connected, kwargs.get("client_factory"))
     return build_hub(config, transports=wired, **kwargs)
 
 
@@ -333,12 +329,14 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "builtins"
     }
     assert ours == {"echo", "now", "calc"}
-    # Three sources, and each is a real one: the builtins are a plugin, the
-    # db offers the model its two history tools (they carry the mark), and the
-    # third is this process's own — `tool_search`, `func_tool_load`, `skill_use`.
+    # Four sources, and each is a real one: the builtins are a plugin, the db
+    # offers the model its two history tools (they carry the mark), the skills
+    # server offers `skill_use`, and the last is this process's own —
+    # `tool_search`, `func_tool_load` and `_func_tool_unload`.
     assert {tool["server"] for tool in listed.data["tools"]} == {
         "builtins",
         "db",
+        "skills-server",
         "toolhub",
     }
 
@@ -370,14 +368,41 @@ def write_skill(
 
 
 @pytest.mark.asyncio
-async def test_a_local_tool_is_served_by_the_hub_itself(isolated_runtime: Path) -> None:
-    """No server behind it, so no connection and no row in `servers()`.
+async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
+    """The set-level tools, and why they are the ones that stayed.
 
-    A skill is a document on this machine: there is nothing for the hub to
-    connect to, nothing a hop could reach, and the directory is one the hub is
-    already holding.  The name says as much — `skill_use`, not
-    `{server}__{tool}` — and the answer is the file, read at the moment of the
-    call rather than snapshotted when the hub started.
+    `tool_search`, `func_tool_load` and `_func_tool_unload` are questions about
+    the *whole* catalogue — what exists, what the model is holding, what the
+    budget takes back — so the process that owns the set answers them and no
+    plugin can.  Their names carry no server because there is none to name:
+    they are functions in this process, and the row says so.
+    """
+    async with Client(hub_for()) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        reported = await hub.call_tool("servers", {})
+
+    served_here = {
+        tool["name"] for tool in listed.data["tools"] if tool["server"] == "toolhub"
+    }
+    assert served_here == {"tool_search", "func_tool_load", "_func_tool_unload"}
+    search = next(one for one in listed.data["tools"] if one["name"] == "tool_search")
+    assert search["tool"] == "tool_search"
+    assert "query" in search["parameters"]["properties"]
+    # It is a source of tools and not a tool server: there is no connection
+    # here for `servers()` to report on.
+    assert "toolhub" not in {row["name"] for row in reported.data["servers"]}
+
+
+@pytest.mark.asyncio
+async def test_a_skill_is_served_by_its_own_plugin(isolated_runtime: Path) -> None:
+    """A family with nothing to connect to, served by the process that owns it.
+
+    A skill is a document on this machine — no address, no protocol, nothing a
+    hop could reach — and the folder it lives in is the config section's other
+    half.  Both belong to the skills server rather than to the hub, which is
+    what `skills-server` in the `server` field says; the name is still bare
+    (`skill_use`, not `{server}__{tool}`), because a plugin is one of ours and
+    the model choosing it has no use for which process answers.
     """
     write_skill(isolated_runtime)
     async with Client(hub_for()) as hub:
@@ -392,9 +417,7 @@ async def test_a_local_tool_is_served_by_the_hub_itself(isolated_runtime: Path) 
 
     assert "skill_use" in names(listed.data)
     tool = next(one for one in listed.data["tools"] if one["name"] == "skill_use")
-    # This process's own tool, catalogued as this process's: the folder it reads
-    # is not a source of tools, and the row says who serves it.
-    assert tool["server"] == "toolhub"
+    assert tool["server"] == "skills-server"
     assert tool["tool"] == "skill_use"
     assert "name" in tool["parameters"]["properties"]
 
@@ -402,9 +425,12 @@ async def test_a_local_tool_is_served_by_the_hub_itself(isolated_runtime: Path) 
     assert answer["text"].rstrip().endswith("The body.")
     assert later["ok"] is True
 
-    # It is a source of tools and not a tool server, and `servers()` is about
-    # what has a connection — there is none here to report on.
-    assert "skills" not in {row["name"] for row in reported.data["servers"]}
+    # The plugin is a server and `servers()` reports it; the *catalogue source*
+    # its rows are filed under is not, because a source is not a connection.
+    rows = {row["name"]: row for row in reported.data["servers"]}
+    assert rows["skills-server"]["state"] == "ready"
+    assert rows["skills-server"]["required"] is True
+    assert "skills" not in rows
 
 
 @pytest.mark.asyncio
@@ -418,6 +444,171 @@ async def test_a_local_tool_that_says_no_is_a_refusal(isolated_runtime: Path) ->
 
     assert answer["ok"] is False
     assert "one" in answer["text"], "the answer names what does exist"
+
+
+# --- what a plugin may declare -------------------------------------------------
+
+
+def declaring(answer: dict[str, Any]) -> FastMCP:
+    """A plugin that answers `list_sources` with exactly what it is handed."""
+    server = FastMCP("declaring")
+
+    @server.tool(name=LIST_SOURCES)
+    def list_sources() -> dict[str, Any]:
+        """Declare whatever the test said to."""
+        return answer
+
+    return server
+
+
+def one_source(**overrides: Any) -> dict[str, Any]:
+    """A declaration of one source, with whatever the test is about overridden."""
+    source: dict[str, Any] = {
+        "name": "somewhere",
+        "category": "cli",
+        "enabled": True,
+        "up": True,
+        "rows": [{"name": "cli:thing", "description": "d", "status": "enabled"}],
+    }
+    source.update(overrides)
+    return {"sources": [source]}
+
+
+async def declared(hub: Client) -> str:
+    """What the catalogue holds, as the text a browse answers with."""
+    found = await call(hub, "tool_search", {"query": "", "limit": 200})
+    return str(found["text"])
+
+
+def as_cli_server(answer: dict[str, Any]) -> dict[str, Any]:
+    """The wiring that makes a plugin under test be the one that declares."""
+    return {"cli-server": lambda settings: declaring(answer)}
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_declares_the_sources_it_holds() -> None:
+    """The rows land under the source the *plugin* named — not under the
+    plugin's own name, which is the whole reason a source's health can be about
+    a connection without its documents being about one."""
+    async with Client(hub_for(connected=as_cli_server(one_source()))) as hub:
+        rows = await declared(hub)
+
+    assert "cli:thing" in rows
+
+
+@pytest.mark.asyncio
+async def test_a_declared_source_is_not_the_plugins_own_name() -> None:
+    """A source's status is written across every row it owns, so a plugin that
+    filed what it holds under its own name would have it marked broken whenever
+    the plugin faltered."""
+    answer = one_source(name="cli-server")
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        rows = await declared(hub)
+
+    assert "cli:thing" not in rows
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_may_not_declare_the_category_the_hub_owns() -> None:
+    """**`plugin` means *the servers slife2 starts*, and only this process mints
+    one.**
+
+    That is the category whose rows the audience gate decides about, so a plugin
+    able to declare one could put an unmarked tool in the model's list — which is
+    exactly what the gate exists to stop.  It is refused, and the refusal is what
+    keeps `slife2.audience` the only way in for a plugin's own tools.
+    """
+    answer = one_source(
+        category="plugin", rows=[{"name": "sneaky", "status": "enabled"}]
+    )
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        rows = await declared(hub)
+
+    assert "sneaky" not in names(listed.data)
+    assert "sneaky" not in rows
+
+
+@pytest.mark.parametrize("category", ["mcp", "rest", "skill", "cli"])
+@pytest.mark.asyncio
+async def test_the_other_categories_are_what_a_plugin_is_for(category: str) -> None:
+    """Every category but `plugin` is declarable, and that is a deliberate
+    widening of what `catalogue_rows` allowed.
+
+    What it does *not* move is a trust boundary: these rows are the operator's
+    configuration — somebody else's servers, a folder of playbooks, a list of
+    commands — which this process merged with no mark at all before, having read
+    the same config.  What it does buy is that the two ways a plugin reaches the
+    model stay apart: its own tools by `tools/list`, gated; what it *holds*, by
+    declaration, where the entry is the opt-in.
+    """
+    answer = one_source(category=category)
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        rows = await declared(hub)
+
+    assert "cli:thing" in rows
+
+
+@pytest.mark.asyncio
+async def test_a_switched_off_source_is_declared_but_not_merged() -> None:
+    """`enabled: false` is the operator's switch, and merging is what must not
+    happen.
+
+    A plugin cannot list what it does not connect to, so a switched-off entry has
+    no rows to declare — and an *empty* list is the one thing it must not send
+    either, because a merge is the whole truth about a source and would purge
+    exactly the rows this system keeps on purpose.  So it declares the source and
+    withholds the list, and the hub writes the state instead: what was already in
+    the catalogue stays, saying there is a tool for this and somebody turned it
+    off.
+    """
+    answer = one_source(enabled=False, up=False, rows=None, name="nowhere")
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        reported = await hub.call_tool("servers", {})
+        rows = await declared(hub)
+
+    assert "cli:thing" not in rows, "nothing was merged, so nothing was inserted"
+    assert "nowhere" not in {one["name"] for one in reported.data["servers"]}, (
+        "a source that is not connected is not a server with a state"
+    )
+    assert "cli:thing" not in names(listed.data)
+
+
+@pytest.mark.asyncio
+async def test_only_one_of_ours_may_declare() -> None:
+    """Somebody else's server defining `list_sources` gets nothing.
+
+    The hub asks every entry under `tools:` for a tool list and takes all of it,
+    so discovery by name would otherwise hand a stranger the one channel into the
+    catalogue that the audience gate does not filter.
+    """
+    async with Client(
+        hub_for(connected={"stranger": lambda settings: declaring(one_source())})
+    ) as hub:
+        rows = await declared(hub)
+
+    assert "cli:thing" not in rows
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
+    """The refresh runs on the search path, so it may not wait for anybody.
+
+    `begin_connecting` starts an attempt rather than awaiting one, and a source
+    that is not up is skipped: the rows it published last time are still in the
+    catalogue, and the next search asks again.  A `settle` here — five seconds,
+    for a plugin that may never answer — would put a start-up inside the one
+    call a model makes while it is stuck.
+    """
+
+    def refuses_to_start(settings: ToolServerSettings) -> Any:
+        raise FileNotFoundError("no such program: slife2-skills")
+
+    async with Client(hub_for(connected={"skills-server": refuses_to_start})) as hub:
+        found = await call(hub, "tool_search", {"query": "turn"})
+
+    assert found["ok"] is True
 
 
 def plugin_with_two_kinds_of_tool() -> FastMCP:
@@ -952,9 +1143,9 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         reported = await hub.call_tool("servers", {})
 
     # The builtins are still there, and the model simply has fewer tools.  So
-    # is the hub's own three, which never depended on anybody connecting — and
-    # `_func_tool_unload` is *not* one of them: it is the harness's tool, and
-    # the gate keeps it out of the model's list however the catalogue holds it.
+    # is everything the hub serves itself, which never depended on anybody
+    # connecting — including `_func_tool_unload`, the one `_`-prefixed name a
+    # model sees, because the harness's trim is recorded as a call to it.
     # Found by whose they are rather than by the shape of the name, which no
     # longer says it: a broken entry's `broken__anything` would have passed for
     # one of ours under the old filter.
@@ -962,10 +1153,15 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "toolhub"
     }
     assert served_here == {
-        "skill_use",
         "tool_search",
         "func_tool_load",
         "_func_tool_unload",
+    }
+    # And `skill_use`, which used to be one of those and is now a plugin's.
+    assert "skill_use" in {
+        tool["name"]
+        for tool in listed.data["tools"]
+        if tool["server"] == "skills-server"
     }
     assert "now" in names(listed.data)
     assert "broken__anything" not in names(listed.data)
@@ -1171,59 +1367,47 @@ async def _never_connect() -> Client:  # pragma: no cover - never reached
 
 
 @pytest.mark.asyncio
-async def test_a_changed_tool_list_is_read_again() -> None:
-    """What the peer's `tools/list_changed` leads to, without the notification.
-
-    Nothing polls: the listing is dropped and the next ask re-reads it — which
-    is also what makes the source stop counting as *live* for one ask, so its
-    rows are out of the model's list until it has answered again.
-    """
-    recorded = RecordingCatalogue()
-    upstream = Upstream(
-        ToolServerSettings(name="fake", command="in-memory"),
-        transport=lambda settings: upstream_server(),
-        catalogue=recorded,
-    )
-    assert await upstream.ready() is True
-    assert upstream.attempt is None
-    assert recorded.merges[0][0] == "fake", "the listing went to the catalogue"
-
-    upstream.invalidate()
-    assert upstream.snapshot()["state"] != "ready"
-
-    assert await upstream.ready() is True
-    assert upstream.snapshot()["state"] == "ready"
-    assert len(recorded.merges) == 2, "the second ask re-listed and re-merged"
-    await upstream.close()
-
-
-@pytest.mark.asyncio
 async def test_a_slow_connect_is_not_cancelled_by_the_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bug a live run against a real endpoint found, and the reason `settle`
-    uses `asyncio.wait` rather than a timeout around a gather.
+    """The bug a live run against a real endpoint found, and the reason the
+    waiting is an `asyncio.wait` rather than a timeout around a gather.
 
     Giving up on *waiting* for a connection is not a reason to stop making it:
-    the gather spelling cancels the attempt it was waiting on, which left the
-    upstream `idle` with no error and no tools — the one state that describes
+    the gather spelling cancels the attempt it was waiting on, which leaves the
+    connection `idle` with no error and no tools — the one state that describes
     nothing at all.
+
+    The wait is the *family's* now, since it is the family that holds the link to
+    the entry under test: the hub's own `settle` is about its links to the
+    plugins, and a plugin answers `list_sources` whether or not its entries have
+    come up yet.
     """
-    monkeypatch.setattr("slife2.toolhub.LIST_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("slife2.toolfamily.LIST_SETTLE_SECONDS", 0.05)
 
     class Slow(FakeClient):
         async def __aenter__(self) -> FakeClient:
             await asyncio.sleep(0.2)
             return self
 
-    def make(transport: Any, handler: Any) -> FakeClient:
+    def make(transport: Any, handler: Any) -> Any:
+        # Fake only for the entry under test, recognised by the marker its
+        # transport returned: this factory now reaches the *plugin* too, and a
+        # hub whose client to `mcp-tools` were a fake would have a plugin that
+        # declares nothing.
+        if transport is not UNUSED:
+            return make_client(transport, handler)
         return Slow()
 
     async with Client(hub_for(connected={"fake": unused}, client_factory=make)) as hub:
+        # The first ask is answered while the connect is still in flight, which
+        # is the point: a declaration says "not up yet" rather than holding the
+        # ask open, and the attempt keeps running in the background.
         early = await hub.call_tool("servers", {})
-        assert early.data["servers"][0]["state"] == "connecting"
+        assert "fake" in {one["name"] for one in early.data["servers"]}
 
-        # The attempt was left alone, so it finishes on its own.
+        # The attempt was left alone, so it finishes on its own — and the next
+        # ask is the one that finds it.
         await asyncio.sleep(0.3)
         listed = await hub.call_tool("list_tools", {})
 

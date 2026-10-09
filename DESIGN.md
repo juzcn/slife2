@@ -36,6 +36,10 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub
   │                                 ├── :8030/mcp ──▶ slife2-builtins   (`echo`, `now`, `calc`)
+  │                                 ├── :8031/mcp ──▶ slife2-skills     (`skill_use`, the playbooks)
+  │                                 ├── :8032/mcp ──▶ slife2-cli        (the `cli:` entries, as rows)
+  │                                 ├── :8033/mcp ──▶ slife2-mcp-tools  (holds the `tools:` entries)
+  │                                 ├── :8034/mcp ──▶ slife2-restapi-tools (holds the `rest-api:` ones)
   │                                 └── MCP ──▶    external tool servers, and REST via a proxy
   ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai             (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
@@ -49,7 +53,9 @@ holds the connection.
 
 **One plugin, one job, and the granularity is deliberate.**  A model backend
 speaks one wire protocol; the db keeps turns; the hub is where the tools come
-from; the agent loop runs turns.  A provider is a row in a backend's config
+from; skills reads the playbooks, cli owns the command registry, and mcp-tools
+and restapi-tools hold the servers those two sections name; the agent loop runs
+turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
 process *does*, not in how many there are.  The count in the diagram is what one
@@ -60,7 +66,10 @@ The builtins being a server of their own is the same rule applied to the one
 place it looks like overkill: they have no credential and no network, and they
 are still behind the hub, because "where the tools come from" is a job and a
 plugin that is sometimes the answer to it is a plugin with a branch in it.
-See §8.
+`slife2-cli` is that rule taken one step further — a family with no connection,
+no tool and nothing but rows to publish — and the reason is the same in both
+directions: a job belongs to the process that does it, and a process that has
+one is a process that can grow the tool the family is missing. See §8.
 
 The two OpenAI entries are the point worth checking, because they look like
 duplication and are not.  **Responses is a different wire format, not a flag on
@@ -589,30 +598,51 @@ Three load-bearing details:
 
 ## 8. The toolhub
 
-**Where the model's tools come from, and the only process that holds their
-credentials.** It is a port of v1's `mcp-gateway`, and the shape that survived
-the port is the whole of it:
+**Where the model's tools come from, and the one process that decides it.** It
+is a port of v1's `mcp-gateway` with one thing moved out of it, and the shape
+that survived the port is the whole of the rest:
 
 ```
 slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins              (ours; `builtins`, `db`, …)
-                          list_tools        └──▶  external tool servers (stdio or http)
+                          list_tools        └──▶  sources they declare   (their servers, their rows)
                           call_tool
                           servers
 ```
 
-**Two sources, and the hub is the only thing that knows both.** The *plugins*
-are the servers slife2 starts — `Config.plugins()`, which is also what the
-launcher starts, so there is no list of them here to go stale. The *tool servers*
-are everybody else's, from `tools:` and `rest-api:`. Which source a tool came
-from is not what decides who may call it; which *caller* it is for does, and that
-is said on the tool itself (`slife2.audience`) rather than in its name, in the
-config, or in the hub. A plugin's tools belong to that plugin's own code
-until one of them declares itself the model's — `remember` writes into any
-agent's database and `send_message` drives another conversation, and those are
-exactly the tools a model would reach for if it could read their descriptions —
-while an entry under `tools:` needs no mark, because the operator opted in by
-writing it down. The default is the safe half on purpose: a forgotten mark costs
-a tool that is absent, not a tool that is dangerous.
+**What the hub owns is the set, and it owns all of it.** Which tools exist, what
+the model is holding, what a name resolves to, what the budget takes back, and
+who may call what — every one of those is a question about the *whole* list, so
+it is answered in one place or it is answered twice and differently. What the hub
+does not own any more is a *connection*: the servers under `tools:` and
+`rest-api:` are held by the two plugins named after those sections, and the hub
+is told about them. `slife2.gateway` is the link itself — connect, list, call,
+say whether it is answering — and it knows no catalogue, no category and no
+config section, which is what lets one implementation serve the hub and both
+families.
+
+**Two ways in, and they are not the same kind of claim.** A *plugin's own tools*
+arrive by `tools/list` and have to declare themselves the model's
+(`slife2.audience`), because they belong to that plugin's code — `remember`
+writes into any agent's database and `send_message` drives another conversation,
+and those are exactly the tools a model would reach for if it could read their
+descriptions. What a plugin *holds* arrives by declaration instead, and is not
+gated, because it is the operator's configuration: a `tools:` entry, a playbook,
+a command. The entry is the opt-in; there was never a mark to forget. So the
+default is still the safe half — a forgotten mark costs a tool that is absent,
+not a tool that is dangerous — and the rule that keeps the two apart is that a
+declaration may not use the category `plugin`, which means *the servers slife2
+starts*, the one the gate decides about.
+
+**Which makes a source something a plugin owns rather than something the hub
+holds.** A source — `arxiv`, `skills`, `cli` — is a name, a category, its rows,
+and two facts about it: whether the operator switched it off and whether it is
+answering. The hub merges the rows, gates them by category, counts them and
+routes by them, exactly as it did when it held the connection; what changed is
+that it asks who holds one rather than being the one who does. **The price is
+freshness**, and it is the price of anything over a wire: the answer is as old as
+the last declaration, which is why declarations are refreshed wherever liveness
+is read and why a plugin that holds sources and cannot answer for them fails the
+list rather than quietly contributing none.
 
 **A call can say who it is on behalf of, and the hub passes that on without
 reading it.** The db is the case that needs it: the model may browse its own
@@ -629,12 +659,16 @@ business passing those on). §5 has the rest.
 `servers`; it sees the tools themselves, by the names below. That
 indirection is what keeps the hub's surface constant: a server coming and going
 changes what the model may call without changing anything about the hub's own
-protocol. `skill_use`, `tool_search`, `func_tool_load` and `_func_tool_unload`
-are the four tools this process serves *to a model*, and they are not part of
-that API — they are a source of tools like any other, which is why they appear
-in the list and not in the protocol. The fourth is the odd one and has both: the
-model gets it as a tool, and the harness gets it on the API, because the trim is
-the one thing here that is *recorded* — see the budget, below.
+protocol. `tool_search`, `func_tool_load` and `_func_tool_unload` are the three
+tools this process serves *to a model*, and they are not part of that API — they
+are a source of tools like any other, which is why they appear in the list and
+not in the protocol. They are what is left when everything with a server behind
+it moved out, and what is left is exactly the set-level work: which tools exist,
+what the model is holding, and what the budget takes back are questions about the
+whole catalogue, so the process that owns the set answers them and no plugin can.
+The third is the odd one and has both: the model gets it as a tool, and the
+harness gets it on the API, because the trim is the one thing here that is
+*recorded* — see the budget, below.
 
 **A name carries a server only where it has to, and for ours it never does.**
 `now`, `calc`, `turn_read` and `tool_search` are slife2's tools, and
@@ -663,27 +697,49 @@ would be the one place the tool table has a branch in it. What the hop costs is
 one loopback call per model call; what it buys is that "where the tools come
 from" has one answer and no exceptions.
 
-**One kind of tool has no server behind it, and the hub serves those.** A skill
-is a document in `<data>/skills/` and `skill_use` reads it: no process, no
-protocol, no address, nothing a hop could reach — and the folder is one the hub
-is already holding. A server invented to wrap one `read_text` is not uniformity,
-it is a process that exists to be connected to. So the rule is stated by what it
-excludes: **everything with a server behind it goes through the one code path**
-— the builtins included, which is why they stay where they are — and the tools
-the hub serves itself are the other path. They are named as themselves
-(`skill_use`), which is the rule above reached from the other side: what a name
-can carry is a *server*, and the hub's own tools have none to name while a
-plugin's would name slife2 itself. The list is still one list, assembled in one
-place, with one naming rule; what varies is only whether a name resolves to a
-connection or to a function in this process.
+**Two families are not tools, and they got servers of their own.** A skill is a
+document in `<data>/skills/` and a `cli:` entry is a program already installed:
+neither is anything a call could reach, and for a while that was the argument for
+keeping them out of a process — the hub read the folder itself and mirrored the
+config's own section. That was defensible while the families were two
+row-builders and one `read_text`, and it stopped being defensible for two
+reasons. The first is that it put the hub in charge of two config sections that
+belong to somebody else's job, which is not the job the hub is the only one who
+can do. The second is what is next: both families have a **model-facing tool
+still to come** (§9 — `skill_list`, and one tool per `cli:` entry that runs a
+command as an argv rather than through a shell), and a tool needs a server to be
+served from. So `slife2-skills` and `slife2-cli` are plugins like any other,
+each owning its section, and the rule that survives is the one worth having:
+**everything with a server behind it goes through the one code path**, and a
+source that owns rows which are not tools *publishes* them.
 
-**Two families are rows without being tools, and that is the whole of what a
-search needed.** A playbook and a `cli:` entry have no connection, no load state
-and no call — but `tool_search` reads the catalogue, so a skill the catalogue
-does not hold is a skill only a model that already knew its name could read, and
-finding out what is installed is the question a search exists to answer. v1
-mirrored both the same way (`sync_category`) and this port keeps its decisions,
-because each one is load-bearing:
+**A source publishes rows; the hub merges them, and the hub is still the only
+writer.** One tool on the plugin's API — `catalogue_rows`, unmarked and so
+invisible to the model — answers with the source's whole list, and the hub
+merges it exactly as it merges the tools a `tools/list` returned:
+
+* **The whole list, so a deleted skill stops being a hit.** A merge reads an
+  absent name as a row the source no longer has, which is the half that makes
+  removing a directory the whole of uninstalling one.
+* **Asked again before every search**, because the folder is the install: a
+  skill dropped in must not be readable and unfindable at the same time. A
+  publication of an unchanged folder plans no writes, and a source that is not
+  answering is skipped rather than waited for — the rows it published last time
+  are still in the catalogue, so a late plugin costs freshness and nothing else.
+* **Only one of ours may publish, and only into the categories nothing connects
+  to.** A published row is merged *without* passing the audience gate — that is
+  what publishing is — so the permission has to come from somewhere else, and it
+  comes from the two facts that already mean "ours": `required` on the upstream,
+  which is what a plugin is, and a closed pair of categories (`skill`, `cli`),
+  because a source able to name its own category could offer the model
+  `remember`.
+* **The rows are filed under a source that is not the server's own name.** A
+  source's *verdict* is written across every row it owns, so a plugin holding
+  both its own tool and its documents would mark every playbook broken whenever
+  its process faltered — and a document row has no connection a verdict could
+  come from. `skills-server` serves; `skills` is what its rows are filed under.
+
+What is left of v1's `sync_category`, and each piece is load-bearing:
 
 * **The row name is namespaced** — `skill:browser-harness`, `cli:yt-dlp` — and
   the collision is not hypothetical: this config has `browser-harness` as a
@@ -694,41 +750,38 @@ because each one is load-bearing:
   browser" reach the playbook: the semantic leg ranks the text, and a playbook
   *is* its documentation. `cli:` rows carry the invocation and the `install`
   line for the same reason.
-* **The mirror writes the status** — a `cli:` entry is `disabled` when the
+* **The publisher writes the status** — a `cli:` entry is `disabled` when the
   config says so, an unreadable `SKILL.md` is `error` — because there is no
   connection whose state a verdict could come from. That is the one family where
   a merge may write `status`, and the one family a re-merge must *not* re-enable:
-  the mirror runs again before every search, so "a source that answered is
+  the rows are published again before every search, so "a source that answered is
   enabled again" would flip a switched-off command back on several times a
   minute.
-* **It is a merge, not a row at a time**, so a deleted skill stops being a hit —
-  and it runs before every search rather than once at start, because the folder
-  is the install: a skill dropped in must not be readable and unfindable at the
-  same time. A mirror of an unchanged folder plans no writes, which is what
-  makes that affordable.
 
 Neither family has a load state (`n/a`), and that is also what keeps them out of
 the model's list — the gate is the function categories — so **findable and
 callable stay two different things**. The model will still call one, because a
 search result is an invitation to call the name in it; the answer says what to
 do instead (`skill_use` for a playbook, and for a command the truth that nothing
-runs one yet).
+runs one yet). Those sentences are the hub's, keyed on the row's *category* —
+which is the db's vocabulary rather than knowledge of the family, and cheaper
+than a per-source template the hub would have to hold and keep.
 
-**A credential is not a server, and skills have them.** baidu-search's header
-declares `BAIDU_API_KEY`, and the playbook's first instruction runs a script that
-dies without it — so a skill that "needs nothing" was the wrong thing to say,
-and the first version of this paragraph said it. What makes a source local is
-that there is no *process* to connect to, and that is still true: the key is
-resolved by the config's own secret chain (`skills:` in `slife2.yaml`, shell then
-credstore), held by this process, and handed to whatever runs the skill's
-commands — which is the same arrangement the tool servers have, where the hub is
-also the only process holding the key. What a skill cannot be is a reason to
-start a server: nothing about a declared key needs an address, a protocol or a
-connection that can fail. So the boundary is drawn where it can be tested — *is
-there something to connect to* — rather than where it cannot — *does this need a
-secret*. `skill_use` reads the declaration rather than ignoring it: a model told
-which key is missing, before it acts, is the difference between a skill that
-does not work and a skill that does not work silently.
+**A credential is held by the process that needs it, and that is a plugin.**
+baidu-search's header declares `BAIDU_API_KEY`, and the playbook's first
+instruction runs a script that dies without it — so a skill that "needs nothing"
+was the wrong thing to say, and the first version of this paragraph said it.
+What that paragraph got wrong was the conclusion: it argued that a credential is
+not a server, which is true, and that a skill is therefore not a server's
+business, which does not follow. A declared key needs *one process that knows
+the answer*, and the resolution is the config's own secret chain (`skills:` in
+`slife2.yaml`, shell then credstore). That process is now `slife2-skills`, which
+holds what the chain resolved for exactly the reason the hub holds a tool
+server's headers and nothing else does: one process knows, and nothing about a
+declared key needs an address or a protocol. `skill_use` reads the declaration
+rather than ignoring it, so a model told which key is missing — before it acts —
+is the difference between a skill that does not work and a skill that does not
+work silently.
 
 **A tool list is one thing and it has one owner.** Provenance (whose tool is
 this), the naming rule that keeps two servers' `search` apart, and — the first
@@ -786,7 +839,8 @@ a load takes effect one step later **inside the same turn** — v1 needed a turn
 boundary for that. `tool_search` is the way in and `func_tool_load` is the way
 through; both are the hub's own rows, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted (`skill_use` is the
-third). A plugin's tools start loaded, because a model that has quietly lost
+third, and it is the one entry there that a plugin serves). A plugin's tools
+start loaded, because a model that has quietly lost
 `now` and `calc` is the failure this section is built around; a server's do not
 unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
@@ -835,28 +889,40 @@ one the source dropped is deleted, one whose columns moved is updated, and one
 already identical is left alone. A steady state therefore writes nothing at all,
 which is what makes asking before every model call affordable.
 
-**A plugin is not an upstream, and the difference is a flag.** Everything
-under `tools:` is somebody else's and optional; a plugin is started by slife2,
-so a hub that cannot read its tool list *refuses to list anything* — because a
-model that has quietly lost `now` and `calc` is a failure nobody can see, and a
-shorter tool list is exactly what that failure looks like. It is one `required`
-flag on the connection rather than a branch in the tool table, and it is read
-twice: for that failure rule, and for whether the server's tools have to declare
-themselves the model's. The builtins are the worked example of it being ordinary
-— the URL, the connection, the snapshot, the naming and the mark are all
-arxiv's, or would be if arxiv had anything to declare.
+**Every connection the hub holds is one of ours, and that is a rule rather
+than a coincidence.** A hub that cannot read a plugin's tool list *refuses to
+list anything* — because a model that has quietly lost `now` and `calc` is a
+failure nobody can see, and a shorter tool list is exactly what that failure
+looks like. That rule is what the `required` flag used to carry, and it now
+carries the other half of the same fact: the only links this process holds are
+the ones it is allowed to be strict about, because everything else is behind a
+plugin that declares what it holds and can be reported without failing a turn.
+The builtins are the worked example of it being ordinary — the URL, the
+connection and the mark are all `mcp-tools`'s, or would be if the builtins were
+somebody else's. And the one thing a declaration cannot say is `plugin`, which is
+the category of exactly these: a plugin may not mint a source meaning *the
+servers slife2 starts*, because that is the category whose rows the audience gate
+decides about.
 
 There is deliberately no list of "plugins worth asking". The hub asks all of
 them, including the three model backends and the agent server, which have
 nothing to offer: which tools a server has is not knowable without asking, and a
 second list is a list that goes stale the first time somebody adds a tool.
 
-**REST APIs are not a second mechanism.** A `rest-api:` entry is expanded *by
-the config layer* into the stdio command that serves it — `uvx mcp-openapi-proxy`
-with the environment it reads — so what reaches the hub is an ordinary upstream
-and nothing in the hub knows that REST exists. That wrapper is v1's, kept because
-it is what the ecosystem publishes and because writing an OpenAPI-to-tools
-converter here would be a large feature that is wrong in interesting ways.
+**REST APIs are not a second mechanism, and `restapi-tools` is not a second
+implementation.** A `rest-api:` entry is expanded *by the config layer* into the
+stdio command that serves it — `uvx mcp-openapi-proxy` with the environment it
+reads — so what reaches `slife2-restapi-tools` is an ordinary stdio server and
+nothing outside the config layer knows that REST exists. The two family plugins
+are the same code over two sections, which is the honest consequence: what is
+REST-specific is the *entry* — a spec, a base URL, a key — and the expansion that
+turns it into a command, and both of those are the config layer's. That wrapper
+is v1's, kept because it is what the ecosystem publishes and because writing an
+OpenAPI-to-tools converter here would be a large feature that is wrong in
+interesting ways. Splitting the two sections into two plugins anyway is about
+ownership rather than mechanism: each is a place an operator writes a server
+down, and a family that owns its section is one whose next change has somewhere
+to land.
 
 What was deliberately **not** ported: v1's `mcp_set`/`mcp_remove` tools, which
 let the model write its own `tools.yaml`. slife2's config is one file read by
@@ -903,11 +969,13 @@ Named so they are decisions rather than oversights:
   unbounded wait — and a wait longer than the timeout closes the stream and
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
-- **The tool that runs a `cli:` entry.** The entry is a row now (§8's mirror),
-  so a search finds the command by what it does — but nothing executes one, and
-  `func_tool_load` says so in as many words ("a command already installed on
-  this machine … nothing runs one yet"). Those entries are `tools.yaml`'s other
-  half served: what a call would do is the change, not the row.
+- **The tool that runs a `cli:` entry.** The entry is a row now (§8's
+  publication), so a search finds the command by what it does — but nothing
+  executes one, and `func_tool_load` says so in as many words ("a command
+  already installed on this machine … nothing runs one yet"). Those entries are
+  `tools.yaml`'s other half served: what a call would do is the change, not the
+  row — and where it goes is now decided, because the family has a process:
+  `slife2-cli`, the plugin whose only job today is publishing the rows.
 - **A word to the model about the loaded set.** `tool_search` and
   `func_tool_load` explain themselves in their own descriptions and nothing else
   does. v1 also carried a per-turn prompt saying how many tools were loaded;
@@ -936,7 +1004,8 @@ Named so they are decisions rather than oversights:
   and the only one that could hold a per-tool policy without the agent learning
   what a tool server is.
 - **Skills, and the CLI registry.** v1 had two families that were never quite
-  tools, and slife2 has neither. A **skill** is a playbook: a directory with a
+  tools, and each is now a plugin of its own (§8). A **skill** is a playbook: a
+  directory with a
   `SKILL.md` that the model reads on demand (`skill_list` → `skill_use`) instead
   of calling, which is progressive disclosure and worked. The **`cli:` section**
   is a registry of programs already on the machine — `yt-dlp`, a browser
@@ -944,7 +1013,7 @@ Named so they are decisions rather than oversights:
   a third family that was never ported either. **The reading half has landed**:
   `cli:` in `slife2.yaml`, parsed and refused when an entry names no command;
   `<data>/skills/` becoming the folder a skill is installed by dropping in; and
-  `skill_use`, which the hub serves itself (§8) and which reads one playbook by
+  `skill_use`, which `slife2-skills` serves (§8) and which reads one playbook by
   name — its header for the name and the description, and its whole body after
   one line saying what the paths in it are relative to. With it, the credential
   half: a skill declares in its own header what it needs (`requires.env`,
@@ -956,7 +1025,9 @@ Named so they are decisions rather than oversights:
   editing its own configuration, which is `mcp_set` wearing a different hat, and
   a skill is installed by putting a directory in a folder. What is next is the
   rest of the reading family — `skill_list`, the half a model uses to find the
-  name it then reads, and one tool per `cli:` entry. That last one is
+  name it then reads, and one tool per `cli:` entry; each lands in the plugin
+  that already owns its section, which is why those plugins exist before their
+  tools do. That last one is
   the family's real decision and it is made: an entry becomes **a tool the
   operator's own config gave the model**, run as an argv rather than through a
   shell so that the arguments a model invents cannot become commands it

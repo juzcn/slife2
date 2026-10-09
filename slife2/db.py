@@ -1830,8 +1830,6 @@ class ToolStore:
         path: Path,
         *,
         threshold: int,
-        autoload: Iterable[str] = (),
-        disabled: Iterable[str] = (),
         known: Iterable[str] = (),
     ) -> None:
         #: The most function tools the model may hold — see
@@ -1839,17 +1837,12 @@ class ToolStore:
         #: call because the count it bounds is a `SELECT COUNT(*)` over these
         #: rows: the budget and the rows it applies to live in one place.
         self.threshold = max(1, int(threshold))
-        #: Sources whose tools are wanted every turn: a plugin's (ours are
-        #: few and the model is expected to have them) and an entry the operator
-        #: marked `autoload: true`.  Such a row starts *loaded* and is never
-        #: evicted, which is v1's rule for the same two cases.
-        self.autoload = frozenset(str(name) for name in autoload)
-        #: Sources the config switches off.  Their rows are `disabled` rather
-        #: than `error` — off is not down — and being switched off is what they
-        #: stay, however many times this file is opened.
-        self.disabled = frozenset(str(name) for name in disabled)
-        #: Every source the config names at all, which is what the boot pass
-        #: needs to tell a stale row from a slow one: see `reset`.
+        #: Every source this process can name at all, which is what the boot
+        #: pass needs to tell a stale row from a slow one: see `reset`.  It is
+        #: the *peers* — the plugins slife2 starts — and nothing else, because
+        #: every other source is held by one of them and named over the wire:
+        #: see `merge`'s `autoload` and `evict`'s, which is where the other two
+        #: facts the config used to supply now arrive.
         self.known = frozenset(str(name) for name in known)
         self.path = path
         self._ensure_schema()
@@ -1929,6 +1922,7 @@ class ToolStore:
         rows: Sequence[Mapping[str, Any]],
         *,
         embedder: Embedder,
+        autoload: bool = False,
     ) -> dict[str, Any]:
         """Merge one source's whole tool list into the catalogue.
 
@@ -1966,7 +1960,7 @@ class ToolStore:
                 input, and the second is a naming problem the caller can fix —
                 so it fails this source's list rather than the whole catalogue.
         """
-        plan = await asyncio.to_thread(self._plan, source, category, rows)
+        plan = await asyncio.to_thread(self._plan, source, category, rows, autoload)
         # Before anything is written: a vector needs a table, the table needs a
         # width, and only the embedder knows the width.  One read of `meta` once
         # it is there.
@@ -1985,7 +1979,11 @@ class ToolStore:
         return applied
 
     def _plan(
-        self, source: str, category: str, rows: Sequence[Mapping[str, Any]]
+        self,
+        source: str,
+        category: str,
+        rows: Sequence[Mapping[str, Any]],
+        autoload: bool = False,
     ) -> dict[str, Any]:
         """The difference between what a source offers and what is stored.
 
@@ -2062,7 +2060,7 @@ class ToolStore:
                     fields["status"] = verdict
                 previous = existing.get(name)
                 if previous is None:
-                    load_status = self._seed(category, source)
+                    load_status = self._seed(category, autoload)
                     entry = {
                         **fields,
                         "status": fields.get("status", STATUS_ENABLED),
@@ -2212,7 +2210,7 @@ class ToolStore:
             "skipped": int(plan["skipped"]),
         }
 
-    def _seed(self, category: str, source: str) -> str:
+    def _seed(self, category: str, autoload: bool) -> str:
         """What a tool's load state is when it is first seen.
 
         **Ours are loaded; somebody else's are on demand.**  A plugin's tools
@@ -2236,7 +2234,7 @@ class ToolStore:
             # keeps them out of the model's list: the gate is the function
             # categories, so a row can be findable without being callable.
             return NA
-        if category == PLUGIN or source in self.autoload:
+        if category == PLUGIN or autoload:
             return LOADED
         return UNLOADED
 
@@ -2284,20 +2282,25 @@ class ToolStore:
         connection.execute(f"DELETE FROM tool WHERE name IN ({marks})", list(names))
 
     def set_source_state(self, source: str, state: str) -> int:
-        """Record the runtime's verdict on one source: `enabled` or `error`.
+        """Record the verdict on one source: `enabled`, `error` or `disabled`.
 
-        Called when the hub has just listed a source, and when a link failed or
-        a connect would not start.  It is a *verdict* and not a connection
-        state: what it says is whether the tool list is in hand, which is the
-        only thing either side can act on.
+        Called when a source has answered, when a link failed or a connect would
+        not start — and, since the process that holds a source is the one that
+        reads the section it was configured in, when the operator has switched it
+        off.  It is a *verdict* and not a connection state: what it says is
+        whether the thing behind those rows is reachable, which is the only thing
+        either side can act on.
 
-        **It never touches a switched-off source.**  `disabled` is the config's
-        answer and this is the runtime's; a server the operator turned off
-        cannot become `error` because somebody tried to reach it, and one that
-        comes back cannot resurrect a row the config switched off.
+        **It never touches a switched-off source.**  `disabled` is a standing
+        answer and the other two are about *now*: a server the operator turned
+        off cannot become `error` because somebody tried to reach it, and one
+        that comes back cannot resurrect a row the config switched off — which is
+        why that arm is in the `WHERE` and not up to the caller.
         """
-        if state not in (STATUS_ENABLED, STATUS_ERROR):
-            raise ValueError(f"{state!r} is not a verdict; use enabled or error")
+        if state not in (STATUS_ENABLED, STATUS_ERROR, STATUS_DISABLED):
+            raise ValueError(
+                f"{state!r} is not a verdict; use enabled, error or disabled"
+            )
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE tool SET status = ? WHERE source_id = ? AND status != ?",
@@ -2310,33 +2313,25 @@ class ToolStore:
 
         A verdict is a statement about *now*, and this file outlives the process
         that wrote it, so some of what it holds is about a moment that has
-        passed.  Two of those the config can speak to on its own:
+        passed.  One of those this process can speak to on its own: a source
+        **it cannot name at all** is `error`, whatever wrote its rows not being
+        something this file can be asked about any more.
 
-        * a source it **switches off** is `disabled`, not `error` — off is not
-          down, and the order of the two statements below is the guard that keeps
-          the two apart: the config's arm moves its rows out of the way first,
-          and the runtime's arm only ever moves an `enabled` row;
-        * a source the config **no longer names at all** is `error`: whatever
-          wrote its rows is not something this file can be asked about any more.
+        **Everything else is left alone, deliberately.**  A source this process
+        can name is one the hub is about to ask about, and whether it is
+        answering is the hub's to say — it is the party that asks, and it writes
+        the verdict when a source answers, when one is switched off and when a
+        link fails.  Marking those rows `error` here would be this file guessing
+        at a fact it cannot observe, and the guess would be visible: a db
+        restarted under a running hub would report every tool as unusable while
+        the model was still holding and calling them.
 
-        **Everything else is left alone, deliberately.**  A source the config
-        still names is one the hub is about to connect to, and whether it is
-        answering is the hub's to say — it is the party holding the connections,
-        and it writes the verdict when it lists, and again when a link fails.
-        Marking those rows `error` here would be this file guessing at a fact it
-        cannot observe, and the guess would be visible: a db restarted under a
-        running hub would report every tool as unusable while the model was
-        still holding and calling them.
+        **Which is why the sources a plugin holds read as `error` here**, in the
+        window between this running and the hub's first declaration: this process
+        cannot name them, and they are not reachable by anybody *yet*.  The
+        declaration writes the truth over it a moment later.
         """
         with self._connect() as connection:
-            switched_off = 0
-            if self.disabled:
-                cursor = connection.execute(
-                    f"UPDATE tool SET status = ? WHERE status != ?"
-                    f" AND source_id IN ({_marks(self.disabled)})",
-                    (STATUS_DISABLED, STATUS_DISABLED, *sorted(self.disabled)),
-                )
-                switched_off = int(cursor.rowcount)
             marks = _marks(self.known)
             cursor = connection.execute(
                 f"UPDATE tool SET status = ? WHERE status = ?"
@@ -2344,7 +2339,7 @@ class ToolStore:
                 + (f" AND source_id NOT IN ({marks})" if self.known else ""),
                 (STATUS_ERROR, STATUS_ENABLED, *sorted(self.known)),
             )
-        return {"error": int(cursor.rowcount), "disabled": switched_off}
+        return {"error": int(cursor.rowcount)}
 
     def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Flip one row's load state, and say what happened.
@@ -2448,7 +2443,9 @@ class ToolStore:
             ).fetchall()
         return {"tools": [_tool_dict(row) for row in rows]}
 
-    def evict(self, sources: Sequence[str]) -> list[str]:
+    def evict(
+        self, sources: Sequence[str], *, autoload: Iterable[str] = ()
+    ) -> list[str]:
         """Trim the loaded set to `threshold`, least recently *used* first.
 
         **Use, with the load as the fallback, and not the load alone.**  The
@@ -2500,9 +2497,10 @@ class ToolStore:
                 return []
             values = list(live)
             protected = f"category IN ({_in_list({PLUGIN})})"
-            if self.autoload:
-                protected += f" OR source_id IN ({_marks(self.autoload)})"
-                values.extend(sorted(self.autoload))
+            wanted = frozenset(str(name) for name in autoload)
+            if wanted:
+                protected += f" OR source_id IN ({_marks(wanted)})"
+                values.extend(sorted(wanted))
             # `MAX` of the two stamps: the newer event wins, so a call outranks
             # a later load and a load outranks an earlier one.  Both columns are
             # `''` for "never", which sorts below every timestamp — so a row

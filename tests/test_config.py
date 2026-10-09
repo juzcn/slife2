@@ -86,7 +86,11 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     from slife2.config import (
         AGENT_SERVER_NAME,
         API_SERVER_NAMES,
+        BUILTINS_SERVER_NAME,
+        CLI_SERVER_NAME,
         DB_SERVER_NAME,
+        EMBEDDINGS_SERVER_NAME,
+        SKILLS_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
 
@@ -94,11 +98,44 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
         AGENT_SERVER_NAME
     )
     assert importlib.import_module("slife2.db_server").SERVER_NAME == DB_SERVER_NAME
+    assert importlib.import_module("slife2.builtins").SERVER_NAME == (
+        BUILTINS_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.skills_server").SERVER_NAME == (
+        SKILLS_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.cli_server").SERVER_NAME == CLI_SERVER_NAME
     assert importlib.import_module("slife2.toolhub").SERVER_NAME == (
         TOOLHUB_SERVER_NAME
     )
+    assert importlib.import_module("slife2.llm.embeddings_server").SERVER_NAME == (
+        EMBEDDINGS_SERVER_NAME
+    )
     for api, module in API_BACKENDS.items():
         assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]
+
+
+def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
+    """`skill_use` is served by a plugin and refused by the hub.
+
+    The name crosses a process boundary — `slife2-skills` serves the tool, and
+    `slife2.toolhub` keeps it on the list the model cannot unload, because the
+    playbooks are what every session is meant to reach for — so it is written
+    twice.  This is what notices when one side is renamed and the other is not,
+    and the failure it prevents is silent in both directions: a hub spelling a
+    name nothing serves protects nothing, and a server renamed out from under
+    the hub hands the model a tool it can throw away.
+    """
+    from slife2 import skills
+    from slife2.skills_server import CONFIG_KEY, SOURCE
+    from slife2.toolhub import ALWAYS_LOADED, SKILL_USE
+
+    assert SKILL_USE == skills.USE_TOOL
+    assert SKILL_USE in ALWAYS_LOADED
+
+    # And the two ids a published row must keep apart: the source is what the
+    # catalogue files the rows under and the key is what the launcher starts.
+    assert SOURCE != CONFIG_KEY
 
 
 # --- providers and models ----------------------------------------------------
@@ -500,12 +537,13 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
 
 
 def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
-    """Nothing downstream knows that REST exists.
+    """The config layer is where a declarative entry becomes a runnable command.
 
-    The entry becomes an ordinary stdio upstream here, which is what lets the
-    hub have one mechanism instead of two.
+    The entry becomes an ordinary stdio upstream here, so the plugin that holds
+    it — `slife2-restapi-tools` — sees the same shape as one under `tools:`, and
+    the hub sees a source like any other.  Two sections and one mechanism.
     """
-    server = load(write(tmp_path, TOOLS)).tools["registry"]
+    server = load(write(tmp_path, TOOLS)).rest_apis["registry"]
     assert server.kind == "rest"
     assert (server.transport, server.command) == ("stdio", "uvx")
     assert server.args == ("mcp-openapi-proxy",)
@@ -522,7 +560,7 @@ def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
             "rest-api:\n  mine:\n    command: uvx\n    args: [--from, my-proxy, run]\n",
         )
     )
-    assert config.tools["mine"].args == ("--from", "my-proxy", "run")
+    assert config.rest_apis["mine"].args == ("--from", "my-proxy", "run")
 
 
 def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
@@ -558,9 +596,17 @@ def test_a_name_in_both_sections_is_refused(tmp_path) -> None:
 
 
 def test_a_disabled_entry_is_configured_but_not_connected(tmp_path) -> None:
+    """`enabled: false` is read here and *acted on* by the plugin that holds it.
+
+    There is no accessor that filters them any more, and that is the point: what
+    a switched-off entry means is a question for the family it was written in —
+    it declares the source without rows and the hub marks it `disabled`, which is
+    what keeps the row in the catalogue saying "there is a tool for this and
+    somebody turned it off".
+    """
     config = load(write(tmp_path, TOOLS))
     assert "off" in config.tools, "still in the file, and still readable"
-    assert "off" not in [server.name for server in config.tool_servers()]
+    assert config.tools["off"].enabled is False
 
 
 def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:

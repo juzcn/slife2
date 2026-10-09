@@ -81,6 +81,33 @@ logger = logging.getLogger(__name__)
 #: contract; this is only its shape.
 ClientId = tuple[str, str]
 
+#: The tool a plugin serves when it holds **sources** of its own — the ones it
+#: connects to on the operator's behalf, and the ones that are not tools at all.
+#: The plugin answers with the whole of what it holds and the hub merges it,
+#: which is what keeps one writer of the tool table, one place where "a name is a
+#: row's identity" is decided, and one process holding a connection to the db.
+#:
+#: **A source is a name, and everything about it that is not its rows**: which
+#: category it is, whether the operator switched it off, whether it is answering
+#: now, what it is for, and how it is reached.  Those are the facts the hub used
+#: to read off a connection of its own, and they are what `servers()` reports —
+#: so the plugin that holds the connection is the one that has to say them.
+#:
+#: **It is not a tool for the model**, and the hub enforces what follows from
+#: that rather than trusting it: only a plugin slife2 starts may declare, and the
+#: category `plugin` — *the servers slife2 starts* — is refused, so that this
+#: channel cannot be used to offer the model a tool the audience mark never saw.
+LIST_SOURCES = "list_sources"
+
+#: How the hub runs a tool of a source it does not hold a connection to.
+#:
+#: A declared source's rows are merged by the hub and its calls are run by the
+#: plugin that declared it — which is what keeps the hub the only thing that
+#: knows the *set*, without making it the only thing that can reach a server.
+#: The far end's own tool name travels with the call (`remote_name`), and the
+#: caller's identity is forwarded on through, exactly as the hub forwards it.
+CALL_SOURCE = "call_source"
+
 
 def describe(client: ClientId) -> str:
     """A client id as one readable token, for a log line.

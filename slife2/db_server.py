@@ -278,17 +278,19 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         nonlocal catalogue, catalogue_ready
         store = catalogue
         if store is None:
+            # **The config decides one thing here now, and that is the budget.**
+            # Which sources are wanted every turn, which are switched off and
+            # which are named at all used to be read off `config.tools` — a
+            # section this process has no business in, and one that belongs to
+            # the plugin holding those servers.  So `autoload` arrives with each
+            # merge and with each eviction, the operator's switch arrives as a
+            # row's own status, and what is left for the boot pass is the names
+            # of our own peers: the set slife2 starts.
             store = await _on_thread(
                 ToolStore,
                 tools_db(),
                 threshold=config.tool_load.threshold,
-                autoload=frozenset(
-                    name for name, entry in config.tools.items() if entry.autoload
-                ),
-                disabled=frozenset(
-                    name for name, entry in config.tools.items() if not entry.enabled
-                ),
-                known=frozenset(config.tools) | frozenset(config.plugins()),
+                known=frozenset(config.plugins()),
             )
             catalogue = store
         if not catalogue_ready:
@@ -526,7 +528,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     @mcp.tool
     async def tool_merge(
-        source: str, category: str, tools: list[dict[str, Any]]
+        source: str,
+        category: str,
+        tools: list[dict[str, Any]],
+        autoload: bool = False,
     ) -> dict[str, Any]:
         """Merge one source's whole tool list into the catalogue.
 
@@ -560,7 +565,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 and it fails this source's list, not the whole catalogue.
         """
         store = await catalogue_store()
-        return await store.merge(source, category, tools, embedder=await embeddings())
+        return await store.merge(
+            source, category, tools, embedder=await embeddings(), autoload=autoload
+        )
 
     @mcp.tool
     async def tool_source_state(source: str, state: str) -> dict[str, Any]:
@@ -602,7 +609,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         return await _on_thread(store.injectable, sources)
 
     @mcp.tool
-    async def tool_evict(sources: list[str]) -> dict[str, Any]:
+    async def tool_evict(
+        sources: list[str], autoload: list[str] | None = None
+    ) -> dict[str, Any]:
         """Trim the loaded set to `tool_load.threshold`, least recently used first.
 
         **Used**, which is the stamp `tool_touch` writes, and not merely when
@@ -625,7 +634,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             reports.  Empty when the list was already within it.
         """
         store = await catalogue_store()
-        return {"unloaded": await _on_thread(store.evict, sources)}
+        return {
+            "unloaded": await _on_thread(store.evict, sources, autoload=autoload or [])
+        }
 
     @mcp.tool
     async def tool_route(name: str) -> dict[str, Any]:

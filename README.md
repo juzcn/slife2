@@ -79,6 +79,10 @@ without passing an argument:
 uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-toolhub          # the model's tools,          :8020
 uv run slife2-builtins         # echo, now, calc,            :8030
+uv run slife2-skills           # the playbooks,              :8031
+uv run slife2-cli              # the cli: registry,          :8032
+uv run slife2-mcp-tools        # holds the tools: servers,   :8033
+uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-db               # turns and their two indexes, :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -123,11 +127,20 @@ a turn read back a month later still says which picture it was about.
 ## Tools
 
 The model's tool list — the ones slife2 ships and the ones other people run —
-comes from **`slife2-toolhub`**, which is also the only process that holds a tool
-server's credentials. It draws from three kinds of place — our own plugins,
-the sections below, and the one thing that has no server behind it at all — and
-never from a list written down beside it. What the model is *handed* is the part
-of that it has loaded, which is the section after the config:
+is decided by **`slife2-toolhub`**, and it is the only process that decides it.
+It is not the process that *reaches* any of those servers: `tools:` is held by
+`slife2-mcp-tools` and `rest-api:` by `slife2-restapi-tools`, each of which
+declares what it holds — the source, its tools, whether it is answering — and the
+hub merges the rows, gates them, names them and routes the calls back. A plugin
+contributes the same way whether it fronts somebody else's server or has no
+connection at all: a playbook and a command are declared rows too, which is how
+they are findable without being callable.
+
+**The credentials live with the connections**, so a tool server's key is held by
+the plugin that holds its entry — `SERPER_API_KEY` by `slife2-mcp-tools`, a
+provider key by the model server that needs it, `BAIDU_API_KEY` by
+`slife2-skills`. What the model is *handed* is the part of the list it has
+loaded, which is the section after the config:
 
 ```yaml
 # The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
@@ -175,8 +188,14 @@ is what a person is told when the command turns out not to be on `PATH`.
 finds a command by what it does rather than by its name — being findable is the
 half that landed. **Nothing runs one yet**: the tool that does is the next
 change (DESIGN.md §9), and until then `func_tool_load` says exactly that. The
-playbooks in `skills/` are catalogued the same way and *are* readable —
-`skill_use`, above.
+rows are published by **`slife2-cli`**, a plugin whose only job today is that —
+which is why it exists before its tool does: one tool per entry is a tool the
+model calls, and a tool needs a server to be served from.
+
+The playbooks in `skills/` are catalogued the same way and *are* readable —
+`skill_use`, which **`slife2-skills`** serves. It is a plugin for the same
+reason, and it holds what the `skills:` section resolved, because a skill that
+declares `requires.env` needs one process that knows the answer.
 
 A tool's name carries the server it came from when there is one to carry: an
 entry under `tools:` reaches the model as `{name}__{tool}` —
@@ -223,23 +242,27 @@ db's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
 
-The hub has five sources, and only the first two are anybody else's process: the
-plugins, which it asks for a tool list the way it asks anybody; everything under
-`tools:`; the tools it serves itself; the skills folder; and the `cli:` section.
-The last two are rows that are not tools at all.
+The hub has three sources. Two are processes: the **plugins** slife2 starts,
+which it asks for a tool list the way it asks anybody and for the catalogue rows
+they publish, and everything under **`tools:`**, which is other people's servers.
+The third is the hub itself.
 
-That third one is an exception, and it is narrow. **`skill_use`** is served by
-the hub itself, because a skill has no server behind it: it is a document in
-`<data>/skills/`, and the tool reads it — `skill_use(name="browser-harness")`
-returns that skill's `SKILL.md`, with the folder it lives in in front of it so
-the paths in the body mean something. No process, no credential, no address, and
-nothing a connection could tell you about it; a server wrapping one `read_text`
-would exist only to be connected to. Its name says as much: `skill_use`, with no
-server in front of it — which is how every one of our tools is named, and not a
-privilege of this one. Skills are installed by putting a directory in that
-folder — the tool reads the disk on every call, so there is nothing to restart.
-`tool_search` and `func_tool_load` are the same kind of thing: the other two the
-hub serves itself.
+That third one is what is left over, and it is exactly the set-level work.
+**`tool_search`, `func_tool_load` and `_func_tool_unload`** are served by the hub
+because each is a question about the *whole* catalogue — what exists, what the
+model is holding, what the budget takes back — so the process that owns the set
+answers it and no plugin can. Their names carry no server because there is none
+to name, which is how every one of our tools is named.
+
+**`skill_use`** is not one of them any more: **`slife2-skills`** serves it, and
+`slife2-cli` owns the `cli:` section. Both are plugins like any other, for a
+reason that is easier to see from the other end — each family has a
+model-facing tool still to come (DESIGN.md §9), and a tool needs a server to be
+served from. A skill is a document in `<data>/skills/` and the tool reads it:
+`skill_use(name="browser-harness")` returns that skill's `SKILL.md`, with the
+folder it lives in in front of it so the paths in the body mean something.
+Skills are installed by putting a directory in that folder — the tool reads the
+disk on every call, so there is nothing to restart.
 
 **A skill is also a row** (`skill:browser-harness`), and so is every `cli:`
 entry — which is what lets `tool_search` answer "what can I do about a browser"
@@ -250,6 +273,13 @@ it never enters the model's list, and calling it answers with the step that does
 reach the thing (`skill_use`) rather than a refusal. The name is namespaced
 because `browser-harness` is a command *and* the skill documenting it, and one
 name is one row.
+
+**A family publishes its rows and the hub merges them.** `slife2-skills` and
+`slife2-cli` answer `catalogue_rows` with their whole list — which is what makes
+a deleted skill stop being a hit — and the hub merges it exactly as it merges
+the tools a server listed. So the hub stays the only writer of the catalogue,
+and every source is asked again before every search, which is why dropping a
+directory into `skills/` is found at once and not at the next restart.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
@@ -350,9 +380,16 @@ slife2/
 ├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
 │                     #   a listed tool as one the loop can run, and the trim
 │                     #   the harness makes before a turn is saved
-├─ toolhub.py         # slife2-toolhub: the model's tools, the servers behind
-│                     #   them, and the credentials they need — the tool *set*,
-│                     #   not the tool record (that is db.py's)
+├─ gateway.py        # the link to a server somebody else runs: connect, list,
+│                     #   call, and say whether it is answering — no catalogue,
+│                     #   no category, no config (no I/O of its own)
+├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
+│                     #   is shared: hold, declare, route a call back
+├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section, held
+├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, held
+├─ toolhub.py         # slife2-toolhub: the model's tools and the *set* they
+│                     #   belong to — the naming rule, the gate, the budget, and
+│                     #   the calls, which it routes to whoever holds the source
 ├─ loop.py            # AgentLoop.run_turn — the turn algorithm
 ├─ textindex.py       # how a turn becomes searchable text, and how a query
 │                     #   becomes a MATCH (no I/O)
@@ -367,6 +404,10 @@ slife2/
 │                     #   model's hands and one conversation out of another's
 ├─ skills.py          # the `skills/` folder: a playbook's header, its
 │                     #   `requires` block, and what `skill_use` answers with
+├─ skills_server.py   # slife2-skills: `skill_use`, and the catalogue rows a
+│                     #   search finds a playbook by
+├─ cli_server.py      # slife2-cli: the `cli:` section as catalogue rows — one
+│                     #   per entry, and no tools at all yet
 ├─ db_server.py       # slife2-db: `remember`, the model's `turn_list` and
 │                     #   `turn_read`, the `tool_*` catalogue API the hub calls,
 │                     #   and the startup pass that brings every index up to date

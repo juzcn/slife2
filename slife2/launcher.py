@@ -33,9 +33,13 @@ from slife2.config import (
     API_BACKENDS,
     API_SERVER_NAMES,
     BUILTINS_SERVER_NAME,
+    CLI_SERVER_NAME,
     DB_SERVER_NAME,
     EMBEDDINGS_SERVER_NAME,
     LOCAL_SERVERS,
+    MCP_TOOLS_SERVER_NAME,
+    RESTAPI_TOOLS_SERVER_NAME,
+    SKILLS_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
 )
@@ -83,6 +87,17 @@ from slife2.runtime import (
 AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 DB_SERVER = ("slife2.db_server", DB_SERVER_NAME, "remember")
 BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
+#: The two plugins whose families are not tools: a folder of playbooks and a
+#: list of programs already installed.  Their identifying tool is what the
+#: fallback check looks for when a server reports no name of its own, so it has
+#: to be one they certainly serve — `cli-server` offers the model nothing at
+#: all, and `catalogue_rows` is the one tool it has.
+SKILLS_SERVER = ("slife2.skills_server", SKILLS_SERVER_NAME, "skill_use")
+CLI_SERVER = ("slife2.cli_server", CLI_SERVER_NAME, "list_sources")
+#: The two that hold somebody else's servers, and identify themselves by the
+#: tool they hold them *with*: neither offers the model anything.
+MCP_TOOLS = ("slife2.mcp_tools", MCP_TOOLS_SERVER_NAME, "list_sources")
+RESTAPI_TOOLS = ("slife2.restapi_tools", RESTAPI_TOOLS_SERVER_NAME, "list_sources")
 TOOLHUB_SERVER = ("slife2.toolhub", TOOLHUB_SERVER_NAME, "list_tools")
 #: Not a chat backend, though it lives beside them: it speaks the OpenAI
 #: protocol's `/embeddings` and nothing else, is configured under `embeddings:`
@@ -94,6 +109,10 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
     "db": DB_SERVER,
     "builtins": BUILTINS_SERVER,
+    "skills-server": SKILLS_SERVER,
+    "cli-server": CLI_SERVER,
+    "mcp-tools": MCP_TOOLS,
+    "restapi-tools": RESTAPI_TOOLS,
     "toolhub": TOOLHUB_SERVER,
     "agent": AGENT_SERVER,
 }

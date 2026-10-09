@@ -39,13 +39,14 @@ EMBEDDER = StubEmbedder()
 
 
 def store_at(tmp_path, **kwargs) -> ToolStore:
-    """A catalogue with the defaults these tests want: room, and no autoload."""
-    return ToolStore(
-        tmp_path / "tools.db",
-        threshold=kwargs.pop("threshold", 100),
-        autoload=kwargs.pop("autoload", ()),
-        disabled=kwargs.pop("disabled", ()),
-    )
+    """A catalogue with the defaults these tests want: room to hold everything.
+
+    `autoload` and `disabled` are not here any more, and their absence is the
+    point: which sources are wanted every turn and which are switched off used to
+    be read off the config at construction, and both arrive with the *merge* now
+    — `autoload` as an argument, the switch as a row's own status.
+    """
+    return ToolStore(tmp_path / "tools.db", threshold=kwargs.pop("threshold", 100))
 
 
 def tool(
@@ -65,9 +66,23 @@ def tool(
     }
 
 
-def merge(store: ToolStore, source: str, category: str, rows: list[dict]) -> dict:
-    """One source's list, merged.  The embedder is a parameter of the real call."""
-    return asyncio.run(store.merge(source, category, rows, embedder=EMBEDDER))
+def merge(
+    store: ToolStore,
+    source: str,
+    category: str,
+    rows: list[dict],
+    *,
+    autoload: bool = False,
+) -> dict:
+    """One source's list, merged.  The embedder is a parameter of the real call.
+
+    `autoload` travels with the merge now rather than with the store's
+    construction: the operator's `autoload: true` lives in the section a plugin
+    owns, so the plugin states it and the hub passes it on.
+    """
+    return asyncio.run(
+        store.merge(source, category, rows, embedder=EMBEDDER, autoload=autoload)
+    )
 
 
 def rows_in(store: ToolStore) -> list[tuple]:
@@ -344,29 +359,39 @@ def test_the_boot_pass_withdraws_only_what_the_config_cannot_justify(tmp_path) -
     ]
 
 
-def test_a_source_the_config_switches_off_is_not_a_source_that_is_down(
+def test_a_source_that_is_switched_off_is_not_a_source_that_is_down(
     tmp_path,
 ) -> None:
-    """The distinction the column exists for, and the reason the order matters.
+    """The distinction the column exists for, and who writes which verdict.
 
-    The boot pass runs when a store is built — a store is a process that has
-    just started, and at that moment nothing is connected — and the config's arm
-    runs first: it takes its rows out of the way, and only then does the
-    runtime's arm move what is left.  Off is a decision, with nothing wrong
-    behind it; down is a verdict that will be withdrawn by itself.
+    **Off is a decision and down is a verdict**, and they arrive by different
+    roads now.  Which sources the operator switched off used to be read off the
+    config when the store was built; it comes as a *declaration* instead — the
+    plugin that owns the section states it, and its rows carry `status:
+    disabled` — which is the one status a merge writes from the row rather than
+    from the runtime.  Nothing about the runtime can overwrite it: `error` is
+    the word for a source that is not answering, and a switched-off one is not
+    answering because nobody asked it to.
     """
-    path = tmp_path / "tools.db"
-    first = ToolStore(path, threshold=100)
-    merge(first, "filesystem", "mcp", [tool("filesystem__read")])
-    assert rows_in(first)[0][1] == "enabled", "a source that answered is usable"
+    store = store_at(tmp_path)
+    merge(store, "filesystem", "mcp", [tool("filesystem__read")])
+    assert rows_in(store)[0][1] == "enabled", "a source that answered is usable"
 
-    store = ToolStore(path, threshold=100, disabled={"filesystem"})
+    # The switch: the row says so itself, which is the only way it arrives.
+    merge(
+        store,
+        "filesystem",
+        "mcp",
+        [{**tool("filesystem__read"), "status": STATUS_DISABLED}],
+    )
     assert rows_in(store)[0][1] == STATUS_DISABLED
 
-    # And the way back is the *merge*, not the boot pass: a source that lists
-    # its tools again is a source that is answering, and answering withdraws the
-    # verdict — which is what puts a server switched back on into the model's
-    # list.  The boot pass cannot know a config it was not given.
+    # And the runtime cannot talk it back on — off is not a connection state.
+    store.set_source_state("filesystem", STATUS_ERROR)
+    assert rows_in(store)[0][1] == STATUS_DISABLED
+
+    # The way back is the operator's, through the same door: a declaration that
+    # no longer says `disabled`.
     merge(store, "filesystem", "mcp", [tool("filesystem__read")])
     assert rows_in(store)[0][1] == "enabled"
 
@@ -379,11 +404,11 @@ def test_the_boot_pass_counts_what_it_moved(tmp_path) -> None:
     did not do.
     """
     store = ToolStore(tmp_path / "tools.db", threshold=100)
-    assert store.reset() == {"error": 0, "disabled": 0}
+    assert store.reset() == {"error": 0}
 
     merge(store, "arxiv", "mcp", [tool("arxiv__search"), tool("arxiv__other")])
-    assert store.reset() == {"error": 2, "disabled": 0}
-    assert store.reset() == {"error": 0, "disabled": 0}, "already said"
+    assert store.reset() == {"error": 2}
+    assert store.reset() == {"error": 0}, "already said"
 
 
 # --- the gate -----------------------------------------------------------------
@@ -521,9 +546,9 @@ def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
     it decides the same set the budget protects: a tool that starts loaded
     because somebody asked for it must not be evicted by the count either.
     """
-    store = store_at(tmp_path, autoload={"serper"})
+    store = store_at(tmp_path)
     merge(store, "builtins", "plugin", [tool("calc")])
-    merge(store, "serper", "mcp", [tool("serper__search")])
+    merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
 
     assert rows_in(store) == [
@@ -559,11 +584,18 @@ def test_loading_refuses_for_a_reason_and_not_with_a_shrug(tmp_path) -> None:
     order they are asked in matters: a tool can be loaded *and* unusable, and
     "already loaded" there would be a lie the model can see through.
     """
-    store = store_at(tmp_path, disabled={"filesystem"})
+    store = store_at(tmp_path)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
-    merge(store, "filesystem", "mcp", [tool("filesystem__read")])
+    # The switch is a row's own status, which is how it arrives now: the section
+    # it was written in belongs to a plugin, so the plugin states the verdict and
+    # the merge writes it.
+    merge(
+        store,
+        "filesystem",
+        "mcp",
+        [{**tool("filesystem__read"), "status": STATUS_DISABLED}],
+    )
     merge(store, "skills", "skill", [tool("skill:browser")])
-    store.reset()  # the boot pass is the only writer of `disabled`
     store.set_source_state("arxiv", STATUS_ERROR)
 
     assert store.set_load("nothing", LOADED)["outcome"] == "unknown"
@@ -619,14 +651,17 @@ def stamps(store: ToolStore, name: str) -> tuple[str, str]:
 def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> None:
     """Three candidates, and the two the system will not give up.
 
-    A plugin's tools and anything marked `autoload: true` are never victims:
+    A plugin's tools and anything the operator marked `autoload: true` are never
+    victims — and which sources those are is a *parameter* of the eviction now
+    rather than something this file read off the config when it opened, because
+    the section they were written in belongs to a plugin:
     the budget exists to stop somebody else's ninety tools crowding the request,
     not to take away a tool slife2 guarantees — a model that has quietly lost
     `now` and `calc` is the failure DESIGN.md §8 is built around.
     """
-    store = store_at(tmp_path, threshold=4, autoload={"serper"})
+    store = store_at(tmp_path, threshold=4)
     merge(store, "builtins", "plugin", [tool("calc")])
-    merge(store, "serper", "mcp", [tool("serper__search")])
+    merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
     merge(
         store,
         "arxiv",
@@ -639,7 +674,7 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
     stamp(store, "arxiv__also", "2026-01-02T00:00:00+00:00")
     stamp(store, "arxiv__new", "2026-01-03T00:00:00+00:00")
 
-    taken = store.evict(["builtins", "serper", "arxiv"])
+    taken = store.evict(["builtins", "serper", "arxiv"], autoload=["serper"])
 
     assert taken == ["arxiv__old"], "the oldest of the three, and only it"
     loaded = {row[0]: row[2] for row in rows_in(store)}
@@ -776,10 +811,14 @@ def test_an_empty_query_browses_and_the_filters_narrow(tmp_path) -> None:
     Browsing is how "what is installed" and "what is switched off" become
     answerable — a row that cannot be found by text is still a row.
     """
-    store = store_at(tmp_path, disabled={"filesystem"})
+    store = store_at(tmp_path)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
-    merge(store, "filesystem", "mcp", [tool("filesystem__read")])
-    store.reset(), "the boot pass is what writes `disabled`"
+    merge(
+        store,
+        "filesystem",
+        "mcp",
+        [{**tool("filesystem__read"), "status": STATUS_DISABLED}],
+    )
     browsed = asyncio.run(store.search("", embedder=EMBEDDER))
     assert browsed["browsed"] is True
     assert [row["name"] for row in browsed["results"]] == [

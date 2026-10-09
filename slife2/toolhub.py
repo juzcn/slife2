@@ -157,7 +157,14 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,7 +174,6 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.client.messages import MessageHandler
 from fastmcp.exceptions import ToolError
 
-from slife2 import skills
 from slife2.audience import for_the_model, forwarded_client, request_meta
 from slife2.config import (
     DB_KEY,
@@ -177,7 +183,18 @@ from slife2.config import (
     find_config_path,
     load,
 )
+from slife2.gateway import (
+    ClientFactory,
+    Connection,
+    abandon,
+    make_client,
+    mcp_config,
+    proxied_name,
+    sanitise,
+)
 from slife2.mcp_server import (
+    CALL_SOURCE,
+    LIST_SOURCES,
     close_server,
     configure_logging,
     house_server,
@@ -187,7 +204,7 @@ from slife2.mcp_server import (
     tool_payload,
 )
 from slife2.paths import data_dir
-from slife2.toolclient import SEPARATOR, UpstreamTool
+from slife2.toolclient import UpstreamTool
 
 logger = logging.getLogger(__name__)
 
@@ -218,19 +235,35 @@ CONFIG_KEY = "toolhub"
 PLUGIN = "plugin"
 SKILL = "skill"
 CLI = "cli"
+MCP = "mcp"
+REST = "rest"
 
-#: Where the two document families come from, as catalogue sources.  These are
-#: the only rows mirrored from something that is not a connection — a folder and
-#: a config section — which is why they are also the only rows whose *status* is
-#: the mirror's to write (`slife2.db._plan`).
-SKILLS_SOURCE = "skills"
-CLI_SOURCE = "cli"
+#: The categories a plugin may **declare** a source under — everything except
+#: `plugin`, which means *the servers slife2 starts* and is the category whose
+#: rows the audience gate decides about.  Refusing it is what keeps the two ways
+#: a plugin can reach the model from being confused with each other: its own
+#: tools arrive by `tools/list` and have to declare themselves the model's, while
+#: what it *holds* is the operator's configuration, where the entry is the
+#: opt-in and there was never a mark to forget.
+#:
+#: So a declaration cannot mint a `plugin` source, and a declared source's name
+#: may not collide with an upstream's either — which `Upstream.declare` checks
+#: against what this process is actually connected to.
+DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST})
 
 #: The two tools this process serves a *model* to manage its own tool list.
 #: Named here because they are also what the hub will not let go of: see
 #: `ALWAYS_LOADED`.
 TOOL_SEARCH = "tool_search"
 FUNC_TOOL_LOAD = "func_tool_load"
+
+#: The tool that reads a playbook, which **`slife2-skills` serves and this
+#: process does not**.  Spelled here rather than imported from `slife2.skills`,
+#: because a name crossing a process boundary is spelled on both sides and the
+#: hub has no other business with the module — `tests/test_config.py` holds the
+#: two spellings together.  What the hub uses it for is the one thing that is
+#: still the hub's: not letting the model throw it away (see `ALWAYS_LOADED`).
+SKILL_USE = "skill_use"
 
 #: The trim, and the only name here with **two callers**.  The leading
 #: underscore is the convention — **a name beginning with `_` is a harness
@@ -245,17 +278,23 @@ FUNC_TOOL_LOAD = "func_tool_load"
 #: `build_server`'s `_func_tool_unload`.
 FUNC_TOOL_UNLOAD = "_func_tool_unload"
 
-#: What this process guarantees: **the four tools it serves a model**.  Always
-#: available, never evicted, and never unloaded — the three that find, load and
-#: trim are how a tool list is managed at all, so a budget that could take them
-#: away would leave the model holding a set it cannot change, and `skill_use`
-#: reads the playbooks every session is meant to reach for.
+#: What a model may not take out of its own list.  The three this process
+#: serves are how a tool list is managed at all — a budget that could take them
+#: away would leave the model holding a set it cannot change — and the fourth is
+#: `skill_use`, which reads the playbooks every session is meant to reach for.
+#:
+#: **It lives in a plugin and is still on this list.**  The budget would never
+#: evict it either way (a plugin's rows are exempt, `slife2.db.evict`), so what
+#: this adds is the other half: the model naming it in `_func_tool_unload` and
+#: being obeyed.  One string is cheaper than a column the row would have to
+#: carry to say "the system needs me", and the name it must match is
+#: `slife2.skills.USE_TOOL`.
 ALWAYS_LOADED = frozenset(
     {
         TOOL_SEARCH,
         FUNC_TOOL_LOAD,
         FUNC_TOOL_UNLOAD,
-        skills.USE_TOOL,
+        SKILL_USE,
     }
 )
 
@@ -271,16 +310,6 @@ INSTRUCTIONS = (
     "are connected. This server is called by the agent, not by a model: the "
     "tools it lists are what the agent offers onwards."
 )
-
-#: How long to wait for one upstream to answer `tools/list` after connecting.
-#: Generous, because a stdio server may be an `npx` invocation that has to fetch
-#: itself the first time, and a deadline that fires during that leaves a tool
-#: server permanently absent when it was only slow.
-CONNECT_TIMEOUT_SECONDS = 60.0
-
-#: How long a tool may run.  Long: a tool is a real action somewhere else, and
-#: the alternative to waiting is a call the model cannot tell was cut off.
-CALL_TIMEOUT_SECONDS = 300.0
 
 #: How long the *first* ask for a tool list waits for connects already in
 #: flight, and it is a compromise between two silences.
@@ -299,30 +328,6 @@ LIST_SETTLE_SECONDS = 5.0
 #: turn boundary, so a list longer than the budget holds is one the next trim
 #: takes back at the price of embedding everything in it.
 MAX_LOAD_NAMES = 50
-
-
-def sanitise(part: str) -> str:
-    """A name a provider will accept as a tool name.
-
-    Providers restrict tool names to letters, digits, underscore and hyphen, and
-    reject the whole request over one that is not — so a single upstream tool
-    called `read.file` would otherwise 400 every turn of every conversation, with
-    a message about the tool list that names no server.  Replacing the character
-    is the cheap half of the fix; the other half is that the upstream's own name
-    is kept beside it (`UpstreamTool.tool`), because this one can no longer be
-    used to address the far end.
-
-    Length is deliberately not trimmed.  A provider's limit is real, but
-    truncation has to invent a rule for what happens when two names truncate to
-    the same string, and a collision would silently point a tool call at the
-    wrong tool — a worse failure than a request the provider refuses loudly.
-    """
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in part)
-
-
-def proxied_name(server: str, tool: str) -> str:
-    """What the model calls somebody else's tool: `server__tool`."""
-    return f"{sanitise(server)}{SEPARATOR}{sanitise(tool)}"
 
 
 def model_name(server: str, tool: str, category: str) -> str:
@@ -350,87 +355,6 @@ def model_name(server: str, tool: str, category: str) -> str:
     if category == PLUGIN:
         return sanitise(tool)
     return proxied_name(server, tool)
-
-
-def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
-    """One upstream, in the shape an MCP client takes.
-
-    The standard `mcpServers` document, which is the ecosystem's own config
-    format rather than one invented here — so a block copied out of another
-    tool's documentation works after the names are checked, and `auth:` and the
-    other keys this build does not implement still reach the SDK.
-
-    `cwd` is the fallback working directory for a stdio server.  It matters
-    because an entry is likely to name a path, and `.` has to mean something:
-    the daemon's own working directory is its runtime folder, which is nobody's
-    idea of where their files are.
-    """
-    entry: dict[str, Any] = {}
-    if settings.url:
-        entry["url"] = settings.url
-        entry["transport"] = "http"
-        if settings.headers:
-            entry["headers"] = dict(settings.headers)
-    else:
-        entry["command"] = settings.command
-        entry["args"] = list(settings.args)
-        entry["transport"] = "stdio"
-        entry["cwd"] = settings.cwd or cwd
-        if settings.env:
-            entry["env"] = dict(settings.env)
-    return {"mcpServers": {settings.name: entry}}
-
-
-#: How a client is built from a transport and a message handler.  A seam rather
-#: than a generality: the rebuild-once rule below is about a link that dies
-#: *during a call*, and nothing about a real transport can be made to fail on
-#: demand from a test.
-ClientFactory = Callable[[Any, MessageHandler], Client]
-
-
-def make_client(transport: Any, handler: MessageHandler) -> Client:
-    """The real client: both timeouts pinned to the ones this module chose."""
-    return Client(
-        transport,
-        message_handler=handler,
-        init_timeout=CONNECT_TIMEOUT_SECONDS,
-        timeout=CONNECT_TIMEOUT_SECONDS,
-    )
-
-
-def flatten(content: Any) -> str:
-    """A call result's content blocks as text.
-
-    Text is joined; anything else is *described* rather than dropped, because a
-    model can act on knowing that an image came back and cannot act on silence.
-    A result with no blocks at all comes back as a note saying so, so that an
-    empty string is never mistaken for "the tool returned nothing".
-    """
-    blocks = content if isinstance(content, list) else [content]
-    parts: list[str] = []
-    for block in blocks:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-            continue
-        mime = getattr(block, "mime_type", None) or "unknown type"
-        payload = getattr(block, "data", None)
-        size = f", {len(payload)} characters" if isinstance(payload, str) else ""
-        parts.append(f"[{type(block).__name__}: {mime}{size}]")
-    return "\n".join(parts) or "(the tool returned nothing)"
-
-
-async def _abandon(client: Client) -> None:
-    """Let go of a client that was never handed to anyone.
-
-    A `close` that raises must not replace the failure being reported, and that
-    goes double here: this runs on the error path and on the way out of a
-    cancellation.  One function rather than a method, because two owners reach
-    it — an upstream that could not establish, and the catalogue closure that
-    could not enter.
-    """
-    with contextlib.suppress(Exception):
-        await client.__aexit__(None, None, None)
 
 
 class CatalogueUnavailable(ConnectionError):
@@ -520,12 +444,28 @@ class Catalogue:
         return await client.call_tool(tool, arguments)
 
     async def merge(
-        self, source: str, category: str, tools: Sequence[Mapping[str, Any]]
+        self,
+        source: str,
+        category: str,
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        autoload: bool = False,
     ) -> dict[str, Any]:
-        """Record a source's whole tool list.  See `slife2.db.ToolStore.merge`."""
+        """Record a source's whole tool list.  See `slife2.db.ToolStore.merge`.
+
+        `autoload` travels with the merge because the db can no longer read it:
+        it is the operator's `autoload: true`, which lives in the section the
+        plugin that holds the source owns — so the plugin says it and the hub
+        passes it on, exactly as liveness is passed on.
+        """
         return await self._call(
             "tool_merge",
-            {"source": source, "category": category, "tools": list(tools)},
+            {
+                "source": source,
+                "category": category,
+                "tools": list(tools),
+                "autoload": autoload,
+            },
         )
 
     async def source_state(self, source: str, state: str) -> None:
@@ -541,9 +481,18 @@ class Catalogue:
         """
         return await self._call("tool_injectable", {"sources": list(sources)})
 
-    async def evict(self, sources: Sequence[str]) -> list[str]:
-        """Trim the loaded set to the configured budget; name what it took out."""
-        found = await self._call("tool_evict", {"sources": list(sources)})
+    async def evict(
+        self, sources: Sequence[str], *, autoload: Iterable[str] = ()
+    ) -> list[str]:
+        """Trim the loaded set to the configured budget; name what it took out.
+
+        `autoload` is the set of sources the budget may never touch, and it comes
+        from the declarations for the same reason the flag above does: the db
+        cannot read the sections those sources were configured in.
+        """
+        found = await self._call(
+            "tool_evict", {"sources": list(sources), "autoload": list(autoload)}
+        )
         unloaded = found.get("unloaded")
         return [str(name) for name in unloaded] if isinstance(unloaded, list) else []
 
@@ -594,35 +543,126 @@ class Catalogue:
             self._client = None
 
 
-class _Watching(MessageHandler):
-    """Tells its upstream when the peer says its tool list has changed.
+def _unpacked(text: str, ok: bool) -> tuple[str, bool]:
+    """A delegated call's answer, unpacked into the shape this call returns.
 
-    The whole point is that nothing polls: a server that grows a tool says so,
-    the snapshot is dropped, and the next turn's `list_tools` re-reads it.  This
-    is what "health is a tool list, not a connection" costs — a flag and a
-    callback, rather than a per-server state machine.
+    A plugin reports a call the way the hub does — `text` and `ok` — and MCP
+    carries one result, so it arrives as JSON in a string.  Undoing that here is
+    what keeps a delegated call indistinguishable from a direct one to every
+    caller above this line, and a plugin that answered with something else is
+    reported as the failure it is rather than passed on as text nobody can read.
+    """
+    if not ok:
+        return text, False
+    try:
+        answer = json.loads(text)
+    except ValueError:
+        return f"the plugin answered with something that is not a result: {text}", False
+    if not isinstance(answer, dict) or "text" not in answer:
+        return f"the plugin answered without a result: {text}", False
+    return str(answer.get("text") or ""), bool(answer.get("ok"))
+
+
+def _server_row(
+    *,
+    name: str,
+    kind: str,
+    transport: str,
+    state: str,
+    counts: Mapping[str, int] | None,
+    autoload: bool,
+    description: str,
+    error: str,
+    required: bool,
+) -> dict[str, Any]:
+    """One row of `servers()`, for a source whichever way the hub reaches it.
+
+    **One shape, because it is one question.**  "Why is my tool missing" has to
+    read the same whether the answer is a plugin, an entry under `tools:` that
+    this process connects to, or a source a plugin holds on its behalf — and two
+    builders of the same row is how the third one ends up missing a field.
+    """
+    return {
+        "name": name,
+        "kind": kind,
+        "transport": transport,
+        "state": state,
+        #: What it last offered, and how much of that the model has now.  A
+        #: source with ninety tools and none loaded is a healthy server the model
+        #: has not asked anything of — and that is a different answer from a
+        #: server that has stopped offering them.
+        "tools": int((counts or {}).get("tools", 0)),
+        "loaded": int((counts or {}).get("loaded", 0)),
+        #: Wanted every turn: its tools start loaded and are never evicted
+        #: (`autoload` in the config, or `required`, which means the same thing
+        #: for our own servers).
+        "autoload": autoload,
+        "description": description,
+        "error": error,
+        #: Ours rather than somebody else's: the answer to "why did a whole turn
+        #: fail over a server that was merely down".
+        "required": required,
+    }
+
+
+@dataclass(frozen=True)
+class DeclaredSource:
+    """One source a plugin holds, as the plugin itself describes it.
+
+    The facts the hub used to read off a connection of its own — whether it is
+    switched off, whether it is answering, what it is for, how it is reached —
+    which is why a plugin that holds the connection is the one that has to say
+    them.  Nothing here is a tool: the rows are in the catalogue, and this is
+    what `servers()` reports beside them.
     """
 
-    def __init__(self, changed: Callable[[], None]) -> None:
-        self._changed = changed
+    name: str
+    category: str
+    enabled: bool
+    up: bool
+    autoload: bool
+    error: str
+    description: str
+    transport: str
 
-    async def on_tool_list_changed(self, message: Any) -> None:
-        logger.debug("the peer says its tool list changed: %s", message)
-        self._changed()
+    def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
+        """This source's row in `servers()`."""
+        if self.up:
+            state = "ready"
+        elif self.error:
+            state = "failed"
+        else:
+            # Declared, enabled and not answering, with nothing to say about it:
+            # an entry whose plugin has it but has not reached it yet.
+            state = "connecting"
+        return _server_row(
+            name=self.name,
+            kind=self.category,
+            transport=self.transport,
+            state=state,
+            counts=counts,
+            autoload=self.autoload,
+            description=self.description,
+            error=self.error,
+            # Nothing a plugin holds is one slife2 starts: those are the hub's
+            # own direct upstreams, and `required` is what that means.
+            required=False,
+        )
 
 
 class Upstream:
-    """One external tool server, and the connection this process keeps to it.
+    """One source of tools this process reaches directly, and what it means.
 
-    **The connection is kept, not opened per call.**  For an HTTP server that is
-    a handshake saved; for a stdio one it is everything, because the process
-    behind it takes seconds to start and spawning it per tool call would make a
-    tool call take seconds.
+    **The link is `slife2.gateway`'s and the meaning is this class's.**  What
+    lives here is everything the gateway deliberately does not know: that a
+    plugin's tools have to declare themselves the model's before the model is
+    given them, that a listing becomes catalogue rows, and that a source which
+    stops answering has a verdict written against the rows it left behind.
 
-    **State is a snapshot plus an error, not a state machine.**  A server is
-    either usable — meaning its tool list is in hand — or it is not, and in the
-    second case the useful fact is what it said the last time we asked.  What v1
-    calls `tools_ok` falls out of that rather than being tracked separately.
+    **Recorded, not kept.**  An upstream holds a connection and a verdict and no
+    tool table: what it last listed is a fact about the catalogue, and a second
+    copy here would be a second thing to keep in step — which is what replaced
+    the snapshot this class used to keep.
 
     Everything here is safe to call concurrently: the agent asks for the tool
     list while a turn that is already running is calling a tool.
@@ -638,14 +678,8 @@ class Upstream:
         required: bool = False,
     ) -> None:
         self.settings = settings
-        self._transport = transport
-        #: Where this server's tools are *recorded*.  An upstream holds a
-        #: connection and a verdict and no tool table: what it last listed is a
-        #: fact about the catalogue, and a second copy here would be a second
-        #: thing to keep in step — which is what replaced the snapshot this
-        #: class used to keep.
+        #: Where this server's tools are *recorded*.
         self._catalogue = catalogue
-        self._make_client = client_factory or make_client
         #: **Ours, rather than somebody else's.**  An optional upstream that
         #: cannot be reached is a tool the model does not have; a required one
         #: that cannot be reached is this system coming apart, and `list_tools`
@@ -654,19 +688,27 @@ class Upstream:
         #: is read twice: for that failure rule, and for whether this server's
         #: tools have to ask before the model is given them (`_offered`).
         self.required = required
-        self._client: Client | None = None
-        self._error = ""
-        self._ready = False
-        self._lock = asyncio.Lock()
-        #: The attempt in flight, if any.  Held so that a caller can wait for it
-        #: and so that a second one is never started alongside it.
-        self._attempt: asyncio.Task[None] | None = None
+        #: **Whether this source publishes catalogue rows**, which is a fact
+        #: about the listing and not a second copy of it: the one tool name
+        #: `LIST_SOURCES` either is or is not in what the server offered.  See
+        #: `declare`, which is the only thing that reads it.
+        self._declares = False
+        #: The source names it declared last time, so that one it has stopped
+        #: holding can be marked stale — see `declare`.
+        self._declared: set[str] = set()
         #: Verdicts written without waiting for them.  Held for the reason
         #: `slife2.server.server.detach` holds its own: a task nothing
         #: references can be collected before it runs, and its failure is
         #: otherwise only ever reported as a warning about a task nobody
         #: awaited.
         self._verdicts: set[asyncio.Task[None]] = set()
+        self._connection = Connection(
+            settings,
+            transport=transport,
+            client_factory=client_factory,
+            on_listed=self._listed,
+            on_failed=self._failed,
+        )
 
     # --- what the hub reports ------------------------------------------------
 
@@ -683,7 +725,7 @@ class Upstream:
         server that is down contributes nothing without the db having to know
         anything about connections — see `Catalogue.injectable`.
         """
-        return self._ready
+        return self._connection.usable
 
     def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
         """This server's row in `servers()`, and in a log line.
@@ -693,133 +735,72 @@ class Upstream:
         looked up here because this method is also the one `list_tools` uses for
         its error message, on a path where the catalogue has already been asked.
         """
-        if self._ready:
-            state = "ready"
-        elif self._attempt is not None and not self._attempt.done():
-            state = "connecting"
-        else:
-            state = "failed" if self._error else "idle"
-        return {
-            "name": self.settings.name,
-            "kind": self.settings.kind,
-            "transport": self.settings.transport,
-            "state": state,
-            #: What it last offered, and how much of that the model has now.  A
-            #: source with ninety tools and none loaded is a healthy server the
-            #: model has not asked anything of — and that is a different answer
-            #: from a server that has stopped offering them.
-            "tools": int((counts or {}).get("tools", 0)),
-            "loaded": int((counts or {}).get("loaded", 0)),
-            #: Wanted every turn: this server's tools start loaded and are never
-            #: evicted (`autoload` in the config, or `required` below, which
-            #: means the same thing for our own servers).
-            "autoload": self.settings.autoload or self.required,
-            "description": self.settings.description,
-            "error": self._error,
-            #: Ours rather than somebody else's: the answer to "why did a whole
-            #: turn fail over a server that was merely down".
-            "required": self.required,
-        }
-
-    # --- the connection ------------------------------------------------------
+        return _server_row(
+            name=self.settings.name,
+            kind=self.settings.kind,
+            transport=self.settings.transport,
+            state=self._connection.state,
+            counts=counts,
+            autoload=self.settings.autoload or self.required,
+            description=self.settings.description,
+            error=self._connection.error,
+            required=self.required,
+        )
 
     def connecting(self) -> None:
-        """Start a connect attempt unless one is running or one has succeeded.
+        """Start a connect attempt, unless one is running or one has succeeded.
 
         Separate from `ready` because the common case — a healthy server — must
         not await anything, and separate from the connect itself so that the
         callers who only want the list can start one and move on.
         """
-        if self._ready:
-            return
-        if self._attempt is not None and not self._attempt.done():
-            return
-        self._attempt = asyncio.create_task(self._establish())
+        self._connection.connecting()
 
     @property
     def attempt(self) -> asyncio.Task[None] | None:
         """The connect in flight, if there is one — for a caller that wants to
         wait on attempts it did not start."""
-        return None if self._attempt is None or self._attempt.done() else self._attempt
+        return self._connection.attempt
 
     async def ready(self) -> bool:
         """Whether the link is usable, starting one and waiting if it is not."""
-        if self._ready:
-            return True
-        self.connecting()
-        attempt = self._attempt
-        if attempt is not None:
-            # Shielded because another caller may be waiting on the same task,
-            # and a cancellation here is about *this* caller giving up rather
-            # than about the connection being unwanted.
-            with contextlib.suppress(Exception):
-                await asyncio.shield(attempt)
-        return self._ready
+        return await self._connection.ready()
 
-    async def _establish(self) -> None:
-        """Get to a tool list, connecting first if there is no connection yet.
+    # --- what the gateway hands over ------------------------------------------
 
-        Both steps are here because both can be the thing that failed, and the
-        answer to either is the same: keep the error, drop the link, and let the
-        next ask try again.
+    async def _listed(self, listed: list[Any]) -> None:
+        """One listing, recorded — the half the gateway will not do.
+
+        **The tools go to the catalogue and are not kept here.**  What came back
+        is the whole truth about this source, so it is merged — added, updated,
+        deleted, or left alone — and this process's own copy of it is nothing at
+        all: `list_tools` reads the catalogue and `call_tool` routes through it,
+        which is what makes the row the one place a tool is described.
+
+        Both failures here end the same way for this source and differently for
+        the system.  A *catalogue* that is not answering is a plugin gone, and it
+        is raised: it must not be reported as "that tool server is broken",
+        because the next ask would then look in the wrong place.  A db that
+        answered and *refused* — a name another source owns, say — is this
+        source's list that cannot be recorded, so it is this source that is
+        unusable until it is fixed.
         """
-        async with self._lock:
-            if self._ready:
-                return
-            if self._client is None:
-                # Everything, including building the transport, is inside the
-                # `try`: an entry FastMCP refuses — a malformed URL, a key it
-                # does not know — raises here, and that is a *server* that
-                # cannot be reached rather than a hub with a hole in it.
-                client: Client | None = None
-                try:
-                    client = self._make_client(
-                        self._transport(self.settings),
-                        _Watching(self.invalidate),
-                    )
-                    await client.__aenter__()
-                except asyncio.CancelledError:
-                    # Only a shutdown cancels an attempt (see `settle`), and a
-                    # half-entered client would hold a connection nobody owns.
-                    if client is not None:
-                        await _abandon(client)
-                    raise
-                except Exception as exc:  # noqa: BLE001 - every connect failure is this server's, and is reported
-                    # `str(exc)` for a stdio server is usually the child's own
-                    # last words, which is the only place they are readable —
-                    # there is no console for it to have printed to.
-                    if client is not None:
-                        await _abandon(client)
-                    self._fail(exc)
-                    return
-                self._client = client
-            await self._relist()
-
-    async def _relist(self) -> None:
-        """Ask for a tool list and record it, or fail this source.
-
-        **The listing goes to the catalogue and is not kept here.**  What came
-        back is the whole truth about this source, so it is merged — added,
-        updated, deleted, or left alone — and the hub's own copy of it is
-        nothing at all: `list_tools` reads the catalogue and `call_tool` routes
-        through it, which is what makes the row the one place a tool is
-        described.
-
-        Both failures below end the same way for this source and differently for
-        the system.  A *transport* failure is this server's problem, and it is
-        recorded as such.  A *catalogue* that is not answering is a plugin
-        gone, and it is raised: it must not be reported as "that tool server is
-        broken", because the next ask would then look in the wrong place.
-        """
-        client = self._client
-        if client is None:  # pragma: no cover - only reachable after `_fail`
-            return
-        try:
-            listed = await client.list_tools()
-        except Exception as exc:  # noqa: BLE001 - a listing that threw is this source being unusable
-            await self.disconnect()
-            self._fail(exc)
-            return
+        #: Read off the *raw* listing and not off `offered`: this is the one tool
+        #: a source has that the model must never be given, so the audience gate
+        #: is exactly what removes it from the filtered list.  A bool and not a
+        #: set of names, for the reason this class keeps no tool list at all —
+        #: the question `publish` asks is a yes-or-no about one name.
+        #:
+        #: **`required` is half the answer**, and the half that is not about the
+        #: listing.  A published row is merged without passing the audience gate
+        #: — that is what publishing *is* — so the permission has to come from
+        #: somewhere else, and "slife2 starts this server" is the only thing here
+        #: that means *ours*.  Somebody else's server that happens to define a
+        #: tool with this name gets nothing, which matters because the hub takes
+        #: every tool an entry under `tools:` offers.
+        self._declares = self.required and any(
+            getattr(tool, "name", "") == LIST_SOURCES for tool in listed
+        )
         offered = self._offered(listed)
         try:
             await self._catalogue.merge(
@@ -828,17 +809,12 @@ class Upstream:
                 [_row_of(self.settings.name, tool) for tool in offered],
             )
         except CatalogueUnavailable:
-            await self.disconnect()
+            await self._connection.disconnect()
             raise
         except Exception as exc:  # noqa: BLE001 - the db refused this source's list, which is this source's problem
-            # The db answered and refused: a name another source owns, say.  That
-            # is this source's list that cannot be recorded, so it is this
-            # source that is unusable until it is fixed.
-            await self.disconnect()
-            self._fail(exc)
+            await self._connection.disconnect()
+            self._connection.fail(exc)
             return
-        self._error = ""
-        self._ready = True
         # Both counts, because the interesting number when a tool is missing is
         # the one that says the server had it all along.
         logger.info(
@@ -849,49 +825,7 @@ class Upstream:
             self.settings.transport,
         )
 
-    def _offered(self, listed: list[Any]) -> list[UpstreamTool]:
-        """The tools of one listing the model may be given.
-
-        **Ours have to ask, and the answer is no until they do**
-        (`slife2.audience`).  A plugin's tools belong to that plugin's own
-        code until one says otherwise, because the ones that would leak —
-        `remember`, which writes into any agent's database, `send_message`,
-        which drives another conversation — are exactly the ones a model would
-        reach for if it could read their descriptions.  Somebody else's tools do
-        not ask: the operator asked by writing the entry down.
-
-        `required` is the flag this reads, and it is not a coincidence.  It means
-        "slife2 starts this server", and a server we start is one whose tools are
-        ours to decide about — which is why nothing under `tools:` sets it.
-        """
-        if not self.required:
-            return [_advertise(self.settings, tool) for tool in listed]
-        return [
-            _advertise(self.settings, tool)
-            for tool in listed
-            if for_the_model(getattr(tool, "meta", None))
-        ]
-
-    def invalidate(self) -> None:
-        """Forget the tool list, keeping the connection.
-
-        Called from the peer's own `tools/list_changed`, and from there only:
-        a call that failed at the transport takes `disconnect` instead, because
-        what has to go in that case is the link and not merely the answer.
-        Named apart from it for that reason — the socket is usually fine and
-        only the listing changed, and re-entering the transport on a
-        notification would restart every stdio server that ever renames a tool.
-
-        Forgetting it means the source is no longer *live*, so its rows stop
-        being injected until the next ask re-lists it — which is what "the
-        snapshot is dropped" has always meant, and it is the same flag: what a
-        caller gets from the catalogue is the tools of the sources whose lists
-        are in hand.
-        """
-        if self._ready:
-            self._ready = False
-
-    def _fail(self, exc: Exception) -> None:
+    def _failed(self, _exc: Exception) -> None:
         """This source is unusable, and the catalogue is told so.
 
         The verdict is recorded on the rows rather than only held here, which is
@@ -904,14 +838,11 @@ class Upstream:
         is itself the failure, and the next `list_tools` says so in its own
         words.  A bookkeeping call must not replace the reason this one failed.
         """
-        self._ready = False
-        self._error = f"{type(exc).__name__}: {exc}".strip()
-        logger.warning("%s is not usable: %s", self.settings.name, self._error)
         try:
             verdict = asyncio.get_running_loop().create_task(
                 self._catalogue.source_state(self.settings.name, "error")
             )
-        except RuntimeError:  # pragma: no cover - `_fail` is reached from an await
+        except RuntimeError:  # pragma: no cover - a failure is reached from an await
             # No loop to write on.  The verdict is the catalogue's next-start
             # problem, and nothing here may replace the reason this failed.
             return
@@ -934,13 +865,31 @@ class Upstream:
                 "the verdict on %s was not recorded: %s", self.settings.name, failure
             )
 
-    async def disconnect(self) -> None:
-        """Drop the connection, keeping the configuration and the error."""
-        client, self._client = self._client, None
-        self._ready = False
-        if client is not None:
-            with contextlib.suppress(Exception):
-                await client.__aexit__(None, None, None)
+    def _offered(self, listed: list[Any]) -> list[UpstreamTool]:
+        """The tools of one listing the model may be given.
+
+        **Ours have to ask, and the answer is no until they do**
+        (`slife2.audience`).  A plugin's tools belong to that plugin's own code
+        until one says otherwise, because the ones that would leak —
+        `remember`, which writes into any agent's database, `send_message`,
+        which drives another conversation — are exactly the ones a model would
+        reach for if it could read their descriptions.
+
+        **This is the only way into the model's list that asks.**  A source the
+        operator configured arrives by declaration instead, and is not gated,
+        because the entry in the config is the opt-in — see `Upstream.declare`.
+        """
+        # **And there is no other case any more.**  A source the operator
+        # configured is not an upstream of this process — a plugin holds it and
+        # declares it, and what it declares was never gated, because the entry
+        # in the config is the opt-in.  So every tool that arrives here by
+        # `tools/list` belongs to a plugin's own code, and every one of them
+        # has to ask.
+        return [
+            _advertise(self.settings, tool)
+            for tool in listed
+            if for_the_model(getattr(tool, "meta", None))
+        ]
 
     # --- a call --------------------------------------------------------------
 
@@ -950,80 +899,147 @@ class Upstream:
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
-        """Run one of this server's tools, returning `(text, ok)`.  Never raises.
+        """Run one of this server's tools.  See `slife2.gateway.Connection`."""
+        return await self._connection.call(tool, arguments, meta)
 
-        `tool` is **the far end's own name for it**, which is not the name the
-        model used: the advertised name is sanitised and carries the server in
-        front of it, and only the catalogue row knows both.  The hub asks for
-        the row and hands this the half that addresses the far end.
+    async def declare(self) -> list[DeclaredSource]:
+        """Hand over the sources this plugin holds, and record what they are.
 
-        **One rebuild, and only for a transport failure.**  A peer that answered
-        and refused — an unknown tool, bad arguments, a permission it will not
-        grant — has said something the model should read, and rebuilding the
-        link would only repeat it.  A link that died mid-call is the one case
-        where trying again is not superstition, and it is tried exactly once:
-        a server that is down must not turn every call into two timeouts.
+        **A second kind of thing a plugin can offer, beside its own tools.**  A
+        plugin that fronts somebody else's servers holds *sources*: the entries
+        the operator wrote down, each with its own name, its own tools and its
+        own health.  So does one whose family is not a tool at all — a skill is a
+        document and a `cli:` entry is a command, and `tool_search` reads the
+        catalogue, so a family no row describes is a family only a model that
+        already knew a name could find.
 
-        `meta` is the caller's identity, carried across unchanged.  This process
-        does not read it and could not: one hub serves every conversation in the
-        system over one connection, so whose behalf a call is on is a fact only
-        the far end can act on — see `slife2.audience`.
+        **The hub merges; the plugin does not write.**  That is the whole reason
+        this is a call and not a connection from the plugin to the db: one writer
+        of the tool table, one place where two sources' claim on a name is
+        settled, and one process holding a catalogue connection.
+
+        **Asked only of a plugin that is already usable, and only of one of
+        ours.**  Usable is what keeps it off the session path — `start()` runs
+        per session and `tool_search` per search, and neither may wait for a
+        connect; a plugin that is not up yet contributes nothing and is asked
+        again on the next ask, and the rows it declared last time are still in
+        the catalogue, so a late plugin is a delay rather than a loss.  Ours is
+        the permission: see `_listed`, which is where `_declares` is decided.
+
+        **A plugin that serves this tool and cannot answer it is a fault**, and
+        it is raised as one.  A family that quietly contributed no sources would
+        take every one of its tools out of the model's list without anything
+        reporting a failure — which is precisely the invisible break the
+        required-plugin rule exists to prevent.
+
+        Returns:
+            One `DeclaredSource` per source it holds, which is the hub's address
+            book for calls it cannot make itself — and what `servers()` reports.
         """
-        if not await self.ready():
-            return f"{self.settings.name} is not connected: {self._error}", False
-
-        result = await self._call_once(tool, arguments, meta)
-        if result is not None:
-            return result
-
-        logger.info("%s: rebuilding the link and retrying %s", self.settings.name, tool)
-        await self.disconnect()
-        if not await self.ready():
-            return f"{self.settings.name} is not connected: {self._error}", False
-        result = await self._call_once(tool, arguments, meta)
-        if result is None:
-            return f"{self.settings.name} is not connected: {self._error}", False
-        return result
-
-    async def _call_once(
-        self,
-        tool: str,
-        arguments: dict[str, Any],
-        meta: dict[str, Any] | None = None,
-    ) -> tuple[str, bool] | None:
-        """One attempt.  `None` means the transport failed, not the tool."""
-        client = self._client
-        if client is None:
-            return None
-        try:
-            result = await client.call_tool(
-                tool,
-                arguments,
-                timeout=CALL_TIMEOUT_SECONDS,
-                # The SDK would otherwise raise for a tool that reported an
-                # error, and this is the half of the contract that says a
-                # refusal is a value: the difference between "the tool said no"
-                # and "the link is gone" is exactly what the two branches below
-                # are, and collapsing them would rebuild the link every time a
-                # model passed a bad argument.
-                raise_on_error=False,
-                # The caller's identity, forwarded rather than interpreted.  A
-                # hub is a proxy, and this is the one thing it passes on that
-                # did not come from the model.
-                meta=meta,
+        if not self._connection.usable or not self._declares:
+            return []
+        text, ok = await self.call(LIST_SOURCES, {})
+        if not ok:
+            raise ConnectionError(
+                f"{self.settings.name} is not answering ({text or 'no answer'})"
             )
-        except Exception as exc:  # noqa: BLE001 - a call that threw is a transport failure, and returns None
-            logger.warning("%s: calling %s failed: %s", self.settings.name, tool, exc)
-            self._error = f"{type(exc).__name__}: {exc}".strip()
+        try:
+            answer = json.loads(text)
+        except ValueError as exc:
+            raise ConnectionError(
+                f"{self.settings.name} answered with something that is not JSON"
+            ) from exc
+        held = answer.get("sources")
+        if not isinstance(held, list):
+            raise ConnectionError(
+                f"{self.settings.name} answered without a list of sources"
+            )
+        declared = [one for raw in held if (one := await self._record(raw)) is not None]
+        # **A source it used to hold and does not any more.**  The entry was
+        # taken out of the section, and its rows have to stop claiming to work —
+        # so what is left of it is marked the way a server that is gone is.  This
+        # and the db's own boot pass between them cover both moments an entry can
+        # be removed: while slife2 is running, and while it was not.
+        for source in self._declared - {one.name for one in declared}:
+            await self._catalogue.source_state(source, "error")
+        self._declared = {one.name for one in declared}
+        return declared
+
+    async def _record(self, raw: Any) -> DeclaredSource | None:
+        """One declared source: checked, merged if it is answering, reported.
+
+        The three cases are the whole of the rule, and each is what a source's
+        state means rather than a special case: what is **up** is merged, so its
+        rows are the truth about it; what is **down** is not merged but marked,
+        because a plugin cannot list what it cannot reach and merging an empty
+        list would purge exactly the rows this system keeps on purpose; and what
+        the operator **switched off** is marked `disabled` and is the one state
+        the runtime never overwrites.
+        """
+        if not isinstance(raw, dict):
             return None
-        return flatten(result.content), not result.is_error
+        name = str(raw.get("name") or "")
+        category = str(raw.get("category") or "")
+        enabled = bool(raw.get("enabled", True))
+        up = enabled and bool(raw.get("up"))
+        error = str(raw.get("error") or "")
+        if not name or category not in DECLARABLE_CATEGORIES:
+            # **The audience gate is not renegotiable over this channel.**  A
+            # source that could name its own category could offer the model
+            # `remember`: a function category under a live source is exactly what
+            # `injectable` answers with.  Refused rather than clamped — a plugin
+            # asking for this is either confused or lying, and both are worth a
+            # line in the log.
+            logger.warning(
+                "%s: may not declare %r as %r (known: %s)",
+                self.settings.name,
+                name,
+                category,
+                "/".join(sorted(DECLARABLE_CATEGORIES)),
+            )
+            return None
+        if name == self.settings.name:
+            # The old rule, kept: a source's verdict is written across every row
+            # it owns, so a plugin that filed its held sources under its own name
+            # would have its documents marked broken whenever it faltered.
+            logger.warning(
+                "%s: may not declare a source under its own name", self.settings.name
+            )
+            return None
+        rows = raw.get("rows")
+        if up and isinstance(rows, list):
+            try:
+                await self._catalogue.merge(
+                    name, category, rows, autoload=bool(raw.get("autoload"))
+                )
+            except CatalogueUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the db refused these rows, which is this source's problem
+                logger.warning(
+                    "%s: the rows of %r were refused: %s", self.settings.name, name, exc
+                )
+                up, error = False, str(exc)
+        if not enabled:
+            await self._catalogue.source_state(name, "disabled")
+        elif not up:
+            await self._catalogue.source_state(name, "error")
+        return DeclaredSource(
+            name=name,
+            category=category,
+            enabled=enabled,
+            up=up,
+            autoload=bool(raw.get("autoload")),
+            error=error,
+            description=str(raw.get("description") or ""),
+            transport=str(raw.get("transport") or ""),
+        )
+
+    async def disconnect(self) -> None:
+        """Drop the connection, keeping the configuration and the error."""
+        await self._connection.disconnect()
 
     async def close(self) -> None:
-        if self._attempt is not None:
-            self._attempt.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._attempt
-        await self.disconnect()
+        await self._connection.close()
 
 
 @dataclass(frozen=True)
@@ -1158,139 +1174,46 @@ FUNC_TOOL_UNLOAD_DESCRIPTION = (
 )
 
 
-def document_rows(config: Config) -> list[tuple[str, str, list[dict[str, Any]]]]:
-    """The two families nothing has a connection behind, as catalogue rows.
-
-    **Why a skill and a `cli:` entry are rows at all**: `tool_search` is how the
-    model finds something it does not already have, and the search reads the
-    catalogue — so a playbook nobody catalogued is a playbook only a model that
-    already knew its name could read.  v1 mirrored both the same way, and the
-    port keeps its three decisions:
-
-    * **The row name is namespaced** (`skill:browser-harness`).  A name is a
-      row's identity, and the collision is not hypothetical — this config has
-      `browser-harness` as a `cli:` entry *and* as the skill that documents it.
-      The prefix also tells a reader which of the two a hit is, and its
-      `remote_name` carries what to call instead: for a skill the argument
-      `skill_use` takes, for a command the program's name.
-    * **A skill's `schema` is the whole document.**  A playbook *is* its
-      documentation, so the text is what the semantic leg ranks, and "drive a
-      browser" reaching `skill:browser-harness` is the entire point of the row.
-      It is stored as the document `skill_use` would hand back, so what a search
-      ranks and what a call returns are the same text.
-    * **The status is the source's own**, and this is the pair of categories
-      where a mirror may write one: a `cli:` entry that is switched off is
-      `disabled`, and a `SKILL.md` that cannot be read is `error` — the model is
-      better told the thing exists and is broken than not told at all.
-
-    Neither family has a load state, and the store seeds `n/a` for both: a skill
-    is read with `skill_use` and a command is run, so "loaded" would be a promise
-    about a step that does not exist.  That is also what keeps these rows out of
-    the model's tool list — the gate is the function categories — so being
-    findable and being callable stay two different things.
-    """
-    documents: list[dict[str, Any]] = []
-    for skill in skills.scan():
-        try:
-            text, status = skills.document(skill), "enabled"
-        except OSError:
-            # Unreadable is a state of the *row*, not a reason to leave it out:
-            # the folder said the skill is installed, and a search that found
-            # nothing would send the model looking for a file the operator
-            # believes is there.
-            text, status = "", "error"
-        documents.append(
-            {
-                "name": f"{SKILL}:{skill.name}",
-                "description": skill.description,
-                "remote_name": skill.name,
-                "schema": text,
-                "status": status,
-            }
-        )
-
-    commands = [
-        {
-            "name": f"{CLI}:{entry.name}",
-            "description": entry.description,
-            "remote_name": entry.command,
-            # What a search can match on: the invocation and how to get it.  The
-            # description is the operator's sentence about what it does; this is
-            # everything else the entry knows, and `install` is the line that
-            # matters when the command is not on `PATH`.
-            "schema": "\n".join(
-                part for part in (entry.command, entry.install) if part
-            ),
-            "status": "enabled" if entry.enabled else "disabled",
-        }
-        for entry in config.cli.values()
-    ]
-
-    return [
-        (SKILLS_SOURCE, SKILL, documents),
-        (CLI_SOURCE, CLI, commands),
-    ]
-
-
-async def mirror_documents(catalogue: Catalogue, config: Config) -> None:
-    """Record both document families, each as its own source's whole list.
-
-    **A merge, so a deleted skill stops being a hit** — the purge half is the
-    reason this is one call per family rather than a row at a time.
-
-    **Asked again before every search**, which is the cost of the promise the
-    README makes about skills: dropping a directory into `<data>/skills/` is the
-    whole of installing one, and a row that appeared only at the next hub start
-    would make a new playbook readable and unfindable at the same time.  A
-    mirror of an unchanged folder plans no writes at all — the comparison is the
-    merge's, and this is one loopback to the db for it.
-    """
-    for source, category, rows in document_rows(config):
-        await catalogue.merge(source, category, rows)
-
-
 def local_tools(
-    config: Config,
     catalogue: Catalogue,
     live_sources: Callable[[], list[str]],
+    refresh_published: Callable[[], Awaitable[None]],
+    autoload_sources: Callable[[], list[str]],
 ) -> list[LocalTool]:
-    """What this process serves a model itself: the four it can manage tools with.
+    """What this process serves a model itself: the three it manages tools with.
 
-    **Read a skill** — `skill_use`, which is v1's pinned reader and the read
-    half of that family.  The directory it reads is `<data>/skills/`, and it is
-    read on every call rather than snapshotted: there is no connection to keep
-    and nothing to keep in step, so dropping a skill into the folder is the
-    whole of installing one.
+    **These are the set-level tools, and that is why they are here.**  Which
+    tools exist, which of them the model is holding, and what the budget takes
+    back are all questions about the *whole* catalogue — so the process that
+    owns the set answers them, and no plugin can.  Everything a model can
+    *call*, other than these, is somebody else's server: a plugin's tool or
+    `{server}__{tool}` for an entry under `tools:`.  What the hub kept when
+    `skill_use` moved out is exactly this remainder, and the remainder is the
+    reason `LocalTool` still exists at all.
 
-    **Find a tool** — `tool_search`, the hybrid search over the catalogue.  The
-    hub serves it rather than the db for the reason it serves `skill_use`: the
-    model's tool list is this process's surface, and a name the model calls is
-    one of ours — these, or a plugin's — or `{server}__{tool}` for somebody
-    else's.  What the tool *does* is the db's:
-    the two legs, the fusion and the filters all happen there, and this half
-    only turns rows into text a model reads.
+    **Find a tool** — `tool_search`, the hybrid search over the catalogue.  What
+    it *does* is the db's: the two legs, the fusion and the filters all happen
+    there, and this half turns rows into text a model reads.
 
     **Load one** — `func_tool_load`, whose answer is likewise the db's verdict
     phrased for a model.
 
-    **Trim the list** — `_func_tool_unload`, the fourth, and the one of the four
-    with a second caller.  With no names it is the *budget*: the agent server
-    calls it that way at a turn boundary, the least recently used tools over
-    `tool_load.threshold` go, and the answer names them.  With names it is the
-    model saying what it is done with, which is v1's meta tool.  Being a tool
-    the *model* has is also what makes the harness's trim recordable: it is
-    written into the conversation as a pair under this name, so the name has to
-    be one the model's tool list declares — `_func_tool_unload` argues that, and
-    it is the one caller that made this the fourth rather than the third.
+    **Trim the list** — `_func_tool_unload`, the one of the three with a second
+    caller.  With no names it is the *budget*: the agent server calls it that way
+    at a turn boundary, the least recently used tools over `tool_load.threshold`
+    go, and the answer names them.  With names it is the model saying what it is
+    done with, which is v1's meta tool.  Being a tool the *model* has is also
+    what makes the harness's trim recordable: it is written into the
+    conversation as a pair under this name, so the name has to be one the
+    model's tool list declares — `_func_tool_unload` argues that, and it is the
+    one caller that made this the third rather than the second.
 
-    The config is read *here* and once, because that is the one thing that is
-    not the folder's: what a skill is given is the operator's answer, resolved
-    when the hub started, and a `skills:` entry edited afterwards is a change
-    the next start picks up like every other config change.
+    `refresh_published` is handed in rather than reached for because a search is
+    where a family that publishes rows has to be current: dropping a directory
+    into `<data>/skills/` is the whole of installing a skill, and a row that
+    appeared only at the next hub start would make a new playbook readable and
+    unfindable at the same time.  See `Upstream.publish`.
     """
-    environments = {
-        name: dict(settings.env) for name, settings in config.skills.items()
-    }
 
     def _as_int(value: Any, default: int) -> int:
         """A number a model wrote, read as leniently as it is written.
@@ -1307,14 +1230,13 @@ def local_tools(
         except (TypeError, ValueError):
             return default
 
-    async def use_skill(arguments: dict[str, Any]) -> tuple[str, bool]:
-        return await skills.use(arguments, environments=environments)
-
     async def search(arguments: dict[str, Any]) -> tuple[str, bool]:
-        # The folder is mirrored on the way in, because a search is exactly
-        # where a skill that arrived since the hub started has to be findable —
-        # see `mirror_documents`.  Nothing is written when nothing changed.
-        await mirror_documents(catalogue, config)
+        # Every family that owns rows is asked for its list on the way in,
+        # because a search is exactly where something that arrived since the hub
+        # started has to be findable — see `Upstream.publish`.  Nothing is
+        # written when nothing changed, and nothing is waited for: a source that
+        # is not up yet is asked again on the next search.
+        await refresh_published()
         found = await catalogue.search(
             query=str(arguments.get("query") or ""),
             category=str(arguments.get("category") or ""),
@@ -1360,7 +1282,9 @@ def local_tools(
         depend on this list, this catalogue or this routing being in any
         particular state, and `_func_tool_unload` is where that is argued.
         """
-        found = await unload_tools(catalogue, live_sources(), _names_of(arguments))
+        found = await unload_tools(
+            catalogue, live_sources(), _names_of(arguments), autoload_sources()
+        )
         # Nothing it could not do is a success.  A refused name (one the system
         # works by) and an unknown one are both the model asking for something
         # that did not happen, which is what `ok` is for — the trim the harness
@@ -1370,16 +1294,6 @@ def local_tools(
         )
 
     return [
-        LocalTool(
-            tool=UpstreamTool(
-                name=skills.USE_TOOL,
-                server=CONFIG_KEY,
-                tool=skills.USE_TOOL,
-                description=skills.USE_DESCRIPTION,
-                parameters=dict(skills.USE_PARAMETERS),
-            ),
-            run=use_skill,
-        ),
         LocalTool(
             tool=UpstreamTool(
                 name=TOOL_SEARCH,
@@ -1414,7 +1328,10 @@ def local_tools(
 
 
 async def unload_tools(
-    catalogue: Catalogue, sources: Sequence[str], names: Sequence[str]
+    catalogue: Catalogue,
+    sources: Sequence[str],
+    names: Sequence[str],
+    autoload: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Take tools out of the model's list — the harness's trim.
 
@@ -1441,7 +1358,7 @@ async def unload_tools(
     """
     if not names:
         return {
-            "unloaded": await catalogue.evict(sources),
+            "unloaded": await catalogue.evict(sources, autoload=autoload),
             "refused": [],
             "not_loaded": [],
         }
@@ -1790,14 +1707,14 @@ def build_server(
             try:
                 await client.__aenter__()
             except asyncio.CancelledError:
-                await _abandon(client)
+                await abandon(client)
                 raise
             except Exception:
                 # A half-entered client holds a task group nothing owns, and
                 # the error that stopped it is the one worth reporting — so it
                 # is let go of here and raised, exactly as `_establish` does
                 # for an upstream.
-                await _abandon(client)
+                await abandon(client)
                 raise
             return client
         return await open_server(
@@ -1816,34 +1733,41 @@ def build_server(
     #: tools a server has is not knowable without asking, and a second list of
     #: "plugins worth asking" is a list that goes stale the first time
     #: somebody adds a tool.
+    #: **Ours, and only ours.**  Every one of these is a server slife2 starts,
+    #: which is why they are all `required` and why their tools have to declare
+    #: themselves the model's.  Somebody else's servers are not here at all: a
+    #: plugin holds those and *declares* them, and this process holds the set.
     upstreams: list[Upstream] = [
-        *(
-            Upstream(
-                plugin_settings(config, name),
-                transport=(transports or {}).get(name, default_transport),
-                catalogue=catalogue,
-                client_factory=client_factory,
-                required=True,
-            )
-            for name in config.plugins()
-            if name != CONFIG_KEY
-        ),
-        *(
-            Upstream(
-                settings,
-                transport=(transports or {}).get(settings.name, default_transport),
-                catalogue=catalogue,
-                client_factory=client_factory,
-            )
-            for settings in config.tool_servers()
-        ),
+        Upstream(
+            plugin_settings(config, name),
+            transport=(transports or {}).get(name, default_transport),
+            catalogue=catalogue,
+            client_factory=client_factory,
+            required=True,
+        )
+        for name in config.plugins()
+        if name != CONFIG_KEY
     ]
 
+    #: Every source a plugin declared, and which plugin holds it — the hub's
+    #: address book for calls it cannot make itself.  **Rebuilt from the
+    #: declarations on every refresh**, because a source is not a connection this
+    #: process keeps and there is nowhere else the fact could live.
+    held: dict[str, DeclaredSource] = {}
+    #: And who holds each one, which is the route a call takes.
+    holders: dict[str, Upstream] = {}
+
     def by_source(name: str) -> Upstream | None:
+        """Who to ask for one source: the connection we hold, or the plugin.
+
+        A direct upstream first, because those are the names this process is
+        configured with; a declared source name may not collide with one, so the
+        two can never disagree about who owns a name.
+        """
         for one in upstreams:
             if one.settings.name == name:
                 return one
-        return None
+        return holders.get(name)
 
     def live_sources() -> list[str]:
         """The sources whose tool lists are in hand, plus this one.
@@ -1853,18 +1777,83 @@ def build_server(
         the catalogue so that a server which is down contributes nothing without
         the db having to know anything about connections.
 
+        A *declared* source is live when the plugin that holds it says it is up,
+        which is the one part of this that now arrives over a wire rather than
+        from a connection of our own — see `refresh_declared`, which is why the
+        answer is as fresh as the last refresh and no fresher.
+
         The hub's own name is in the list because its tools have no connection
         that could be down: they are functions in this process, so its source is
         live whenever the process is.
         """
-        return [one.settings.name for one in upstreams if one.usable] + [CONFIG_KEY]
+        return (
+            [one.settings.name for one in upstreams if one.usable]
+            + [CONFIG_KEY]
+            + [one.name for one in held.values() if one.up]
+        )
+
+    async def refresh_declared() -> None:
+        """Ask every answering plugin for the sources it holds, and record them.
+
+        **Everything that is not one of our own connections is reached this
+        way**: somebody else's servers, a folder of playbooks, a list of
+        commands.  A search reads the catalogue, so a tool nobody declared a row
+        for is one only a model that already knew its name could call.
+
+        **Non-blocking by construction, because this is on the search path.**  A
+        plugin that is not up contributes nothing and is asked again next time;
+        `begin_connecting` is called first so that next time is sooner, and it
+        starts an attempt rather than waiting for one.  Waiting — even `settle`'s
+        bounded wait — would put a plugin's start-up time inside a `tool_search`,
+        which is the call a model makes while it is stuck.  What a plugin
+        declared last time is still in the catalogue, so a late one costs
+        freshness and nothing else.
+
+        **The two names that cannot be declared are checked here**, and only here
+        can they be: a source may not take a name this process is already
+        connected to, and two plugins may not claim one source between them —
+        a merge is the whole truth about a source, so two holders would each
+        purge the other's rows on every ask.
+        """
+        begin_connecting()
+        known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
+        held.clear()
+        holders.clear()
+        for upstream in upstreams:
+            if not upstream.usable:
+                continue
+            for one in await upstream.declare():
+                if one.name in known:
+                    logger.warning(
+                        "%s: %r is a name this hub is already connected under",
+                        upstream.settings.name,
+                        one.name,
+                    )
+                    continue
+                if one.name in holders:
+                    logger.warning(
+                        "%s: %r is already declared by %s",
+                        upstream.settings.name,
+                        one.name,
+                        holders[one.name].settings.name,
+                    )
+                    continue
+                known.add(one.name)
+                held[one.name] = one
+                holders[one.name] = upstream
 
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
     #: which it re-reads on every call.  `live_sources` is handed in because the
     #: trim asks the catalogue for what the model is *holding*, and only this
-    #: process knows which sources are answering.
-    local: list[LocalTool] = local_tools(config, catalogue, live_sources)
+    #: process knows which sources are answering; `refresh_declared` because a
+    #: search is where a plugin's declarations have to be current.
+    local: list[LocalTool] = local_tools(
+        catalogue,
+        live_sources,
+        refresh_declared,
+        lambda: [one.name for one in held.values() if one.autoload],
+    )
 
     def local_route(name: str) -> LocalTool | None:
         for one in local:
@@ -1911,23 +1900,27 @@ def build_server(
         """What the hub does before it serves anything.
 
         **The plugins are asked for their tools, and everything this process
-        already knows is written down.**  All three are merges into the
-        catalogue: the upstreams find theirs by connecting, this process's own
-        four are known without connecting to anything, and the skills and `cli:`
-        entries are known without connecting either — so they are recorded here,
-        once, and are rows like every other tool from then on.  The documents
-        are mirrored again before every search (`mirror_documents`), because
-        their source is a folder a person drops things into.
+        already knows is written down.**  The upstreams find theirs by
+        connecting, this process's own three are known without connecting to
+        anything, and what each plugin *holds* is asked for once every plugin
+        that answered is in hand.
 
-        Order matters once: this has to happen before the first `list_tools`, or
-        the model's first answer would be missing the tool that finds tools.
+        **The order is load-bearing twice.**  This process's own rows go first,
+        because this has to happen before the first `list_tools` — the model's
+        first answer would otherwise be missing the tools that find and load
+        tools.  And the declarations come last, because they arrive from a
+        plugin, so they cannot be asked for until the listing that says which
+        plugins have any is in hand: `settle`'s bounded wait is what lets a
+        plugin that is still starting be one of them, and one that is not is
+        asked again by the next ask (`refresh_declared`).
         """
         category = PLUGIN
         await catalogue.merge(
             CONFIG_KEY, category, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
-        await mirror_documents(catalogue, config)
         begin_connecting()
+        await settle()
+        await refresh_declared()
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -1989,8 +1982,15 @@ def build_server(
         # moment: a tool server that is still starting is left out of this
         # answer, and the alternative — waiting on it properly — would hold a
         # turn open for as long as an `npx` takes to install itself.
+        #
+        # The declarations are refreshed here as well as before a search, and it
+        # is not symmetry: `live_sources` is what this answer gates on, and it
+        # now comes from what a plugin last said rather than from a connection
+        # this process holds.  Without this, a source that had just gone down
+        # would keep its tools in the model's list for one more call.
         begin_connecting()
         await settle()
+        await refresh_declared()
 
         missing = [
             row
@@ -2071,8 +2071,16 @@ def build_server(
             # by `list_tools` a moment ago, so "unknown tool" is the wrong answer
             # for a link that is merely late — and this costs nothing in the
             # ordinary case, because a route that resolves is never asked twice.
+            #
+            # The declarations are refreshed here for the same reason and one
+            # more: `by_source` can only answer for a source a plugin has *told*
+            # us about, so a row written by a plugin that has not been asked
+            # since would otherwise fall through to "not a server this hub is
+            # configured with any more" — a false statement about a tool the
+            # operator wrote down.
             begin_connecting()
             await settle()
+            await refresh_declared()
             row = await catalogue.route(name)
         if row is None:
             return {"text": await unknown_tool(name), "ok": False}
@@ -2101,9 +2109,21 @@ def build_server(
                 "ok": False,
             }
 
-        text, ok = await upstream.call(
-            str(row.get("remote_name") or name), arguments, forwarded
-        )
+        remote = str(row.get("remote_name") or name)
+        if source in holders:
+            # **Declared, so somebody else holds the link.**  The hub owns the
+            # set and not the connection: what it knows is which plugin to ask,
+            # and the far end's own name for the tool travels with the call,
+            # because the plugin is not the one that named it.
+            text, ok = _unpacked(
+                *await upstream.call(
+                    CALL_SOURCE,
+                    {"source": source, "tool": remote, "arguments": arguments},
+                    forwarded,
+                )
+            )
+        else:
+            text, ok = await upstream.call(remote, arguments, forwarded)
         # Recency, for the budget — **and this is where it is learned**.  The
         # hub is not told which tools the model called: it is the process that
         # calls them, so the stamp belongs beside the call rather than on a
@@ -2184,7 +2204,12 @@ def build_server(
             has that name) and `not_loaded` (named but already out of the
             list), and `text`, the same thing said in a sentence.
         """
-        found = await unload_tools(catalogue, live_sources(), list(names or []))
+        found = await unload_tools(
+            catalogue,
+            live_sources(),
+            list(names or []),
+            [one.name for one in held.values() if one.autoload],
+        )
         return {**found, "text": _unload_as_text(found)}
 
     @mcp.tool
@@ -2213,13 +2238,33 @@ def build_server(
         # "why is my tool missing", and a server that failed to start a moment
         # ago reads as one that is still starting.  The states are different
         # problems and this is the tool that is supposed to tell them apart.
+        #
+        # **One row per source, whichever way the hub reaches it** — the plugins
+        # it connects to itself, and the sources those plugins hold on the
+        # operator's behalf.  That second kind is why this is still the answer to
+        # read: what a plugin fronts is a server in its own right, with its own
+        # health and its own error, and reporting the plugin in its place would
+        # hide exactly the thing a person came here looking for.
         begin_connecting()
         await settle()
+        await refresh_declared()
         counts = await catalogue.sources()
         return {
             "servers": [
-                upstream.snapshot(counts.get(upstream.settings.name))
-                for upstream in upstreams
+                *(
+                    upstream.snapshot(counts.get(upstream.settings.name))
+                    for upstream in upstreams
+                ),
+                # Two kinds of declared source are not reported, and neither is
+                # a gap: one the operator switched off is not connected, so there
+                # is no connection to have a state; and one with no transport has
+                # nothing to connect to at all — a folder of playbooks is a
+                # source of rows, not a server, and this answer is about servers.
+                *(
+                    one.snapshot(counts.get(one.name))
+                    for one in held.values()
+                    if one.enabled and one.transport
+                ),
             ]
         }
 
@@ -2233,13 +2278,12 @@ def main(argv: list[str] | None = None) -> int:
     config = load()
     settings = config.server(CONFIG_KEY)
     logger.info(
-        "serving %s on http://%s:%d%s (%d plugin(s), %d tool server(s))",
+        "serving %s on http://%s:%d%s (%d plugin(s) to ask)",
         SERVER_NAME,
         args.host or settings.host,
         args.port or settings.port,
         settings.path,
         len([name for name in config.plugins() if name != CONFIG_KEY]),
-        len(config.tool_servers()),
     )
     serve(
         build_server(config),

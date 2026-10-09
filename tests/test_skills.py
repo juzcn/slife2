@@ -277,8 +277,8 @@ async def test_use_says_whether_the_skill_can_actually_work(
         ),
         body="Run `scripts/go.py`.",
     )
-    before, ok = await use({"name": "one"})
-    after, _ = await use({"name": "one"}, environments={"one": {"BAIDU_API_KEY": "k"}})
+    before, ok = await use("one")
+    after, _ = await use("one", environments={"one": {"BAIDU_API_KEY": "k"}})
 
     assert ok
     assert "not configured" in before
@@ -294,7 +294,7 @@ async def test_use_says_whether_the_skill_can_actually_work(
 @pytest.mark.asyncio
 async def test_use_reads_one(root: Path) -> None:
     skill(root, "one", header="name: one\ndescription: d\n", body="Do it.")
-    text, ok = await use({"name": "one"})
+    text, ok = await use("one")
     assert ok
     assert text.endswith("Do it.")
 
@@ -304,7 +304,7 @@ async def test_use_names_what_is_installed_when_the_name_is_unknown(root: Path) 
     """The answer has to be actionable: the model guessed a name, and the way
     out is the list of the ones that exist."""
     skill(root, "one", header="name: one\n")
-    text, ok = await use({"name": "two"})
+    text, ok = await use("two")
     assert not ok
     assert "'two'" in text
     assert "one" in text
@@ -313,13 +313,13 @@ async def test_use_names_what_is_installed_when_the_name_is_unknown(root: Path) 
 @pytest.mark.asyncio
 async def test_use_says_so_when_nothing_is_installed() -> None:
     """No `skills/` at all is a fresh install, not an error."""
-    text, ok = await use({"name": "anything"})
+    text, ok = await use("anything")
     assert not ok
     assert "(none installed)" in text
 
 
 @pytest.mark.asyncio
 async def test_use_wants_a_name() -> None:
-    text, ok = await use({})
+    text, ok = await use("")
     assert not ok
     assert "name" in text

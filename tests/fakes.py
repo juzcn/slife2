@@ -242,7 +242,9 @@ class FailingEmbedder:
 
 
 def plugin_transports(
-    config: Config, overrides: Mapping[str, Any] | None = None
+    config: Config,
+    overrides: Mapping[str, Any] | None = None,
+    client_factory: Any = None,
 ) -> dict[str, Any]:
     """What a toolhub built from `config` needs to reach its own plugins.
 
@@ -253,27 +255,51 @@ def plugin_transports(
     come apart rather than a model with fewer tools.
 
     So a test that builds a hub stands each one up, the way the launcher does.
-    These are in-memory, and apart from `builtins` and `db` they offer the model
+    These are in-memory, and apart from the four below they offer the model
     nothing, which is what most plugins are: asking them is how "nothing for
     you" becomes a fact rather than an assumption.
 
-    **`db` is the real server**, because the hub is a client of it: the tool
-    catalogue lives there, and a stand-in with no `tool_*` tools would be a
-    catalogueless hub.  It runs over the same in-memory transport, on the
-    deterministic `StubEmbedder`, so a test gets the real merge, the real search
-    and the real budget with no embedding endpoint behind them.
+    **Four are the real servers**, because the hub is not merely a client of
+    them — each is the only process that knows something the hub has to ask
+    for.  `db` holds the catalogue, and a stand-in with no `tool_*` tools would
+    be a catalogueless hub; it runs on the deterministic `StubEmbedder`, so a
+    test gets the real merge, the real search and the real budget with no
+    embedding endpoint behind them.  `builtins`, `skills-server` and
+    `cli-server` are where every tool and row in a default config comes from,
+    and a `blank_plugin` in their place would leave the model with an empty
+    list and a search with nothing to find — which is a hub under test only if
+    what is being tested is a hub with no plugins.
 
     `overrides` replaces or adds a transport by name — a plugin the test
     wants to misbehave, or an entry under `tools:` it wants wired.
     """
     from slife2.builtins import build_server as build_builtins
+    from slife2.cli_server import build_server as build_cli
     from slife2.db_server import build_server as build_db
+    from slife2.mcp_tools import build_server as build_mcp_tools
+    from slife2.restapi_tools import build_server as build_restapi_tools
+    from slife2.skills_server import build_server as build_skills
 
     def for_plugin(name: str) -> Any:
         if name == "builtins":
             return lambda settings: build_builtins(config)
         if name == "db":
             return lambda settings: build_db(config, embedder=StubEmbedder())
+        if name == "skills-server":
+            return lambda settings: build_skills(config)
+        if name == "cli-server":
+            return lambda settings: build_cli(config)
+        if name == "mcp-tools":
+            # **The entries under `tools:` are reached through this one now**,
+            # so a test's fake upstreams are handed to it rather than to the hub
+            # — which is why `overrides` is keyed by entry name and lands here.
+            return lambda settings: build_mcp_tools(
+                config, transports=overrides, client_factory=client_factory
+            )
+        if name == "restapi-tools":
+            return lambda settings: build_restapi_tools(
+                config, transports=overrides, client_factory=client_factory
+            )
         return lambda settings: blank_plugin()
 
     transports: dict[str, Any] = {

@@ -102,17 +102,48 @@ servers:
     host: 127.0.0.1
     port: 8030
     path: /mcp
-  # The model's tools, and the only process that holds a tool server's
-  # credentials.  It has two sources and neither is listed here: every plugin
-  # above — asked like any other server, and handing over only the tools marked
-  # as the model's — and everything under `tools:` below.
+  # The playbooks: `<data>/skills/`, one directory per skill, each with a
+  # `SKILL.md`.  It serves `skill_use` — the tool that reads one — and one
+  # catalogue row per installed skill, so that a search finds a playbook by what
+  # it is for.  A skill is a document and not a tool, so the row is not
+  # callable; the tool that *is* is `skill_use`.
+  skills-server:
+    host: 127.0.0.1
+    port: 8031
+    path: /mcp
+  # The programs the `cli:` section below records as already on this machine.
+  # Nothing here runs one yet (see DESIGN.md §9): what this server serves today
+  # is one catalogue row per entry, so that a search finds a command by what it
+  # does.  Its key carries `-server` because `cli` is the catalogue source its
+  # rows belong to, and a source's rows cannot share an id with the tools of the
+  # server that publishes them.
+  cli-server:
+    host: 127.0.0.1
+    port: 8032
+    path: /mcp
+  # Other people's servers, held by the process that owns the section they are
+  # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
+  # the model anything — each holds its entries' connections and *declares* them
+  # to the hub, which merges the rows and routes the calls back.  What that buys
+  # is that the hub keeps the tool set and no link to anybody.
+  mcp-tools:
+    host: 127.0.0.1
+    port: 8033
+    path: /mcp
+  restapi-tools:
+    host: 127.0.0.1
+    port: 8034
+    path: /mcp
+  # The tool *set*: which tools the model may call, what they are named, what
+  # the budget takes back — and the only process that decides it.  It holds no
+  # connection to anybody's server, and reads no config section but this one.
   toolhub:
     host: 127.0.0.1
     port: 8020
     path: /mcp
 
 # ── External tool servers ───────────────────────────────────────────────────
-# Other people's MCP servers, connected to by the toolhub — which is why they
+# Other people's MCP servers, held by `slife2-mcp-tools` — which is why they
 # are `tools:` and not `servers:`.  The difference matters: `servers:` above is
 # *our* plugins, which slife2 starts, shares and stops, and a missing one is
 # a system that has come apart.  An entry here is somebody else's process; if it
@@ -146,7 +177,7 @@ servers:
 # and both go through the same chain as a provider key: ${VAR} resolves through
 # shell env -> credstore -> literal default.
 #
-# **Everything enabled here is connected when the hub starts**, so the list is
+# **Everything enabled here is connected when slife2 starts**, so the list is
 # the budget.  `enabled: false` is how a server stays configured without being
 # one of the processes at every start, and it is worth using: an entry that is
 # on is a process, a handshake, and its tools in every turn's list.

@@ -53,14 +53,15 @@ module only reads the *declaration* and reports it; the resolution is
 `slife2.config`'s, and injecting what it resolved is the business of whatever
 runs a skill's scripts (`DESIGN.md` §9 — nothing does yet).
 
-Why this is a module rather than part of the hub
-------------------------------------------------
+Why this is a module rather than part of the server
+---------------------------------------------------
 It is the reading half and nothing else: no FastMCP, no transport, no `_meta`,
-no idea that a tool list exists.  `slife2.toolhub` turns what is here into a
-tool — this file could be used by a `slife2 skills` listing tomorrow without a
-line changing, and the hub is free to be wrong about skills without the folder
-being wrong about itself.  It is also why the hub can serve these tools without
-a server behind them (DESIGN.md §8): there is nothing here to connect to.
+no idea that a tool list exists.  `slife2.skills_server` turns what is here into
+a tool and into catalogue rows — this file could be used by a `slife2 skills`
+listing tomorrow without a line changing, and a server is free to be wrong about
+skills without the folder being wrong about itself.  The split is the same one
+every server here keeps between what a call *does* and how it is served: nothing
+in this file would change if the tool were reached some other way.
 """
 
 from __future__ import annotations
@@ -88,33 +89,16 @@ MANIFEST = "SKILL.md"
 #: The frontmatter's delimiter, and the fence a skill's own header sits between.
 _FENCE = "---"
 
-#: What the model calls to read one, and what it is told the tool is for.
-#: Named `skill_use` because v1's name is the one that already appears in
-#: prompts and habits; a port that renamed it would be a port somebody has to
-#: relearn for nothing.
+#: What the model calls to read one.  Named `skill_use` because v1's name is the
+#: one that already appears in prompts and habits; a port that renamed it would
+#: be a port somebody has to relearn for nothing.
+#:
+#: The name lives here and the *tool* is served by `slife2.skills_server`, which
+#: takes its own name from this constant — and `slife2.toolhub` spells it too,
+#: because the hub will not let the model unload it.  A name that crosses a
+#: process boundary is spelled on both sides; `tests/test_config.py` holds the
+#: two spellings together.
 USE_TOOL = "skill_use"
-
-USE_DESCRIPTION = (
-    "Read a skill: a playbook kept on this machine, written to be followed "
-    "rather than called. A skill carries the procedure for one kind of job "
-    "along with the details that are easy to get wrong — the commands, the "
-    "paths, the order. Read one before starting that job instead of working it "
-    "out from scratch. The name is the one the skill goes by; if it is not "
-    "installed, the answer says what is, and if the skill needs an API key or a "
-    "program that is not there, the answer says that too — before you act on "
-    "instructions that would fail."
-)
-
-USE_PARAMETERS: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": "The skill's name, e.g. 'browser-harness'.",
-        }
-    },
-    "required": ["name"],
-}
 
 
 #: A value that is still a `${...}` reference after resolution — what
@@ -403,23 +387,27 @@ def document(skill: Skill, note: str = "") -> str:
 
 
 async def use(
-    arguments: dict[str, Any],
+    name: str,
     *,
     environments: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[str, bool]:
     """`skill_use` — read one skill.  Returns `(text, ok)`; never raises.
 
-    The body of the hub's tool, here rather than in `slife2.toolhub` because
-    this is the only part of it that knows what a skill is.  The hub knows how
-    to *advertise* a tool and how to route a call; what the call does is this
+    The body of the tool, here rather than in `slife2.skills_server` because
+    this is the only part of it that knows what a skill is.  A server knows how
+    to *advertise* a tool and how to answer a call; what the call does is this
     file's business, the same way an upstream's behaviour is its own server's.
 
     `environments` is the `skills:` section's resolved `env:` per skill, handed
     in rather than read here: what a skill *needs* is the skill's own business,
     and what it is *given* is the operator's.  This function is the place the
     two meet, and it is the only place that needs both.
+
+    A `(text, ok)` pair rather than a raise, because a skill that is not
+    installed and a `SKILL.md` that cannot be read are both answers a model
+    should read — the caller decides what a `False` means for its protocol.
     """
-    name = str(arguments.get("name") or "").strip()
+    name = name.strip()
     if not name:
         return "skill_use needs the name of a skill to read.", False
 
@@ -441,8 +429,6 @@ async def use(
 
 __all__ = [
     "MANIFEST",
-    "USE_DESCRIPTION",
-    "USE_PARAMETERS",
     "USE_TOOL",
     "Requirements",
     "Skill",
