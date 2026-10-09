@@ -11,11 +11,12 @@ may be slow, paid or down.  And a plugin honours the contract below, which is
 the part that is ours: what follows is not the protocol, it is what this project
 puts on top of it.
 
-Four processes here are MCP servers — the agent loop, the db, and one process
-per wire protocol — and they agree about more than they disagree about.
-What they agree on lives here rather than in whichever server was written first:
-how a server is started, how it records that it is here, and the two options
-that are pinned because flipping either is *silent*.
+Every one of our servers is an MCP server — the agent loop, the db, the hub, the
+builtins, the two families that declare rows, the two that hold somebody else's
+servers, and one process per wire protocol — and they agree about more than they
+disagree about.  What they agree on lives here rather than in whichever server
+was written first: how a server is started, how it records that it is here, and
+the two options that are pinned because flipping either is *silent*.
 
 It also holds the client half of the same question — :func:`identifies` and
 :func:`open_server` — because "is this server the one I think it is", "is it

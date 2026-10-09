@@ -63,7 +63,7 @@ class Held:
 
     The rows are built from the listing the gateway hands over — the entry's name
     in front of each tool's own (`proxied_name`) and the schema the far end
-    published — because that is what the hub merges, and building them here is
+    declared — because that is what the hub merges, and building them here is
     what lets a family answer "what do you hold" without asking anybody.
     """
 

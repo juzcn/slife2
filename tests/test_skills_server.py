@@ -56,7 +56,7 @@ def test_the_server_is_named_where_a_client_can_find_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_reader_is_the_one_marked_tool_and_the_publisher_is_not(
+async def test_the_reader_is_the_one_marked_tool_and_the_declaration_is_not(
     isolated_runtime: Path,
 ) -> None:
     """**The audience mark decides what the model may call**, and it is the only
@@ -64,8 +64,8 @@ async def test_the_reader_is_the_one_marked_tool_and_the_publisher_is_not(
 
     `skill_use` is the model's.  `list_sources` is the hub's, and it has to
     stay out of the model's list for the reason the whole gate exists: a tool
-    that publishes catalogue rows is a tool that could publish a category — and
-    a plugin able to name its own category could offer the model `remember`.
+    that declares rows is a tool that could declare a category — and a plugin
+    able to name its own category could offer the model `remember`.
     """
     skill(isolated_runtime, "one")
     async with Client(build_server(default_config())) as client:
@@ -82,7 +82,7 @@ async def test_the_reader_is_the_one_marked_tool_and_the_publisher_is_not(
 async def test_the_schema_is_read_off_the_signature(isolated_runtime: Path) -> None:
     """What the model sees is derived, which is why it cannot drift.
 
-    `skill_use` used to be a hand-written `USE_PARAMETERS` dict beside a
+    `skill_use` used to be a hand-written parameters dict beside a
     hand-written description, because the hub had no function to decorate.  Now
     it has one, and the argument it takes is the schema.
     """
@@ -149,8 +149,9 @@ async def test_a_declared_key_is_read_here_and_reported_before_the_model_acts(
     through the same chain as a provider key.  What the model is owed is the
     *difference* — told before it acts on instructions that would fail, rather
     than finding out when the commands fail.  The key is held by this process
-    for the same reason the hub holds a tool server's: one process knows the
-    answer, and nothing about a declared key needs an address or a protocol.
+    for the same reason `slife2-mcp-tools` holds a tool server's: one process
+    knows the answer, and nothing about a declared key needs an address or a
+    protocol.
     """
     monkeypatch.delenv("BAIDU_API_KEY", raising=False)
     folder = isolated_runtime / "skills" / "one"
@@ -177,7 +178,7 @@ async def test_a_declared_key_is_read_here_and_reported_before_the_model_acts(
     assert "not configured" in without.data
 
 
-# --- publishing rows ----------------------------------------------------------
+# --- declaring rows -----------------------------------------------------------
 
 
 def test_a_skill_is_a_row_whose_schema_is_the_document(isolated_runtime: Path) -> None:

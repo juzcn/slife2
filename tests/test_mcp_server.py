@@ -1,8 +1,9 @@
 """The shared MCP layer: identity, and the house rules every server applies.
 
 `identifies` is what decides whether a URL is pointing at the server we meant,
-and three plugins depend on it — the launcher, the agent loop's backend, and
-the TUI.  The tests here are split between the fake (which can say what was
+and every client in this system depends on it — the launcher, the agent loop,
+its model backends, the TUI, the db's hop to the embeddings plugin, and the
+hub's connections to the plugins it asks.  The tests here are split between the fake (which can say what was
 *not* asked) and a real server over the in-memory transport (which is the only
 thing that proves the name is really on the wire, since a fake can be told to
 report anything).

@@ -16,7 +16,7 @@ somebody else's folder is not that job.  The second is what is next: DESIGN.md
 model uses to find the name it then reads), and a model-facing tool needs a
 server to be served from.
 
-**This process does not write the catalogue.**  It answers `catalogue_rows` and
+**This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer, so the hub stays the only writer of the tool table,
 the only process holding a connection to the db, and the only place where two
 sources' claim on one name is settled (`slife2.mcp_server`).

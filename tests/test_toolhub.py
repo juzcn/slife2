@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 import types
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
 from slife2.gateway import flatten, make_client, mcp_config, proxied_name, sanitise
 from slife2.mcp_server import LIST_SOURCES
 from slife2.toolhub import (
+    LIST_SETTLE_SECONDS,
     MAX_LOAD_NAMES,
     PLUGIN,
     Catalogue,
@@ -82,14 +84,17 @@ def hub_for(
     configured but *not* wired, which is how the one test that spawns a real
     process gets a real transport.
 
-    **Every plugin is here, and only the builtins and the db are real.**  They
+    **Every plugin is here, and the ones with something to say are real.**  They
     are the servers slife2 starts, the hub asks each of them for a tool list, and
     it refuses to hand one out at all when one does not answer — which is what
     `test_a_plugin_that_is_not_answering_fails_the_list` is about, and not
     something every other test should have to trip over.  The db is real because
     the hub is a client of it: the tool catalogue is there, so a hub built here
     has a catalogue, which is what `connected={"db": refuses_to_start}` takes
-    away for the tests about that.
+    away for the tests about that; `skills-server`, `cli-server`, `mcp-tools` and
+    `restapi-tools` are real for the same reason — what they declare is what a
+    search finds.  Only a name nothing here knows falls through to a blank
+    plugin.
 
     **The tool servers below are `autoload: true`**, which is what a test wants
     them to be: these are servers whose tools are in the model's list, so a test
@@ -532,8 +537,7 @@ async def test_a_plugin_may_not_declare_the_category_the_hub_owns() -> None:
 @pytest.mark.parametrize("category", ["mcp", "rest", "skill", "cli"])
 @pytest.mark.asyncio
 async def test_the_other_categories_are_what_a_plugin_is_for(category: str) -> None:
-    """Every category but `plugin` is declarable, and that is a deliberate
-    widening of what `catalogue_rows` allowed.
+    """Every category but `plugin` is declarable, and the exclusion is the rule.
 
     What it does *not* move is a trust boundary: these rows are the operator's
     configuration — somebody else's servers, a folder of playbooks, a list of
@@ -596,19 +600,25 @@ async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
     """The refresh runs on the search path, so it may not wait for anybody.
 
     `begin_connecting` starts an attempt rather than awaiting one, and a source
-    that is not up is skipped: the rows it published last time are still in the
+    that is not up is skipped: the rows it declared last time are still in the
     catalogue, and the next search asks again.  A `settle` here — five seconds,
     for a plugin that may never answer — would put a start-up inside the one
-    call a model makes while it is stuck.
+    call a model makes while it is stuck, so the clock is the assertion: the
+    answer has to come back well inside that window.
     """
 
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("no such program: slife2-skills")
 
+    started = time.monotonic()
     async with Client(hub_for(connected={"skills-server": refuses_to_start})) as hub:
         found = await call(hub, "tool_search", {"query": "turn"})
+    elapsed = time.monotonic() - started
 
     assert found["ok"] is True
+    assert elapsed < LIST_SETTLE_SECONDS, (
+        "the search waited for a plugin that is not coming up"
+    )
 
 
 def plugin_with_two_kinds_of_tool() -> FastMCP:
@@ -1311,8 +1321,13 @@ async def test_a_call_that_dies_at_the_transport_is_retried_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_server_that_is_down_costs_two_timeouts_not_more() -> None:
-    """The other half of "once": a dead server must not be retried forever."""
+async def test_an_upstream_that_is_down_costs_two_timeouts_not_more() -> None:
+    """The other half of "once": a dead server must not be retried forever.
+
+    Named for the *upstream*, because `slife2.gateway` has this same test at the
+    link's own layer: this one is the hub's half — a `tools:` entry, reached
+    through the plugin that holds it.
+    """
     make, made = clients(dies=True)
 
     async with Client(hub_for(connected={"fake": unused}, client_factory=make)) as hub:
@@ -1323,7 +1338,7 @@ async def test_a_server_that_is_down_costs_two_timeouts_not_more() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_does_not_rebuild_the_link() -> None:
+async def test_an_upstream_refusal_does_not_rebuild_the_link() -> None:
     """The peer answered.  Rebuilding would only be told the same thing again."""
     make, made = clients(refuses=True)
 
@@ -1333,37 +1348,6 @@ async def test_a_refusal_does_not_rebuild_the_link() -> None:
     assert result["ok"] is False
     assert len(made) == 1, "a peer-reported error is not a transport failure"
     assert made[0].calls == 1
-
-
-class RecordingCatalogue(Catalogue):
-    """A catalogue that keeps what it was told, for the tests that drive one
-    `Upstream` on its own.
-
-    The hub always has a real catalogue behind it — `hub_for` stands the db
-    server up over the in-memory transport — and this is for the tests that
-    build a connection directly, where what is under test is the link's own
-    behaviour and what the rows say is somebody else's business.  It is a
-    `Catalogue` and not a stand-in object because that is the type the
-    connection takes; the connection it would open is never asked for.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(_never_connect)
-        self.merges: list[tuple[str, str, list[dict[str, Any]]]] = []
-        self.states: list[tuple[str, str]] = []
-
-    async def merge(
-        self, source: str, category: str, tools: Sequence[Mapping[str, Any]]
-    ) -> dict[str, Any]:
-        self.merges.append((source, category, [dict(tool) for tool in tools]))
-        return {"inserted": [str(tool["name"]) for tool in tools]}
-
-    async def source_state(self, source: str, state: str) -> None:
-        self.states.append((source, state))
-
-
-async def _never_connect() -> Client:  # pragma: no cover - never reached
-    raise AssertionError("this catalogue is a recorder; it opens nothing")
 
 
 @pytest.mark.asyncio

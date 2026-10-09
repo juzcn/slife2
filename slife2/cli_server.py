@@ -15,14 +15,14 @@ One tool per entry is a model-facing tool, and this is the process that will
 serve them.  Building it while the family is cheap beats bolting twenty tools
 onto the hub, which is supposed to hold the tool *set* and nothing else.
 
-**What it serves today is one row per entry and no tools at all.**  A plugin with
-nothing for the model is the ordinary case rather than a special one —
-`slife2-db`, `slife2-llm-embeddings` and the agent server are all the same — and
-it is what `catalogue_rows` is for: a search reads the catalogue, so an entry
-nobody wrote a row for is a command only a model that already knew its name
-could reach.
+**What it serves today is one row per entry and no tools at all.**  A plugin
+whose own tools are all our own code's is the ordinary case rather than a special
+one — `slife2-llm-embeddings` and the agent server are the same, and the db marks
+only `turn_list` and `turn_read` for the model — and it is what `list_sources` is
+for: a search reads the catalogue, so an entry nobody wrote a row for is a
+command only a model that already knew its name could reach.
 
-**This process does not write the catalogue.**  It answers `catalogue_rows` and
+**This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer — the arrangement `slife2.mcp_server` describes — so
 that the hub remains the only writer of the tool table, the only process holding
 a connection to the db, and the only place two sources' claim on one name is

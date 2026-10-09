@@ -4,9 +4,9 @@ One connection, held open, to one server: connect, list what it offers, call a
 tool, say whether it is answering.  That is the whole of it, and the point of the
 module is what it *does not* know — no catalogue, no category, no config section,
 no naming rule, no idea that a model exists.  A plugin that fronts somebody
-else's servers needs exactly this and nothing more, and so does the toolhub for
-the plugins it talks to, which is why it is a module both import rather than a
-copy in each.
+else's servers needs exactly this and nothing more (`slife2.toolfamily` is the
+rest of that plugin), and so does the toolhub for the plugins it talks to, which
+is why it is a module both import rather than a copy in each.
 
 **It returns; the caller records.**  This is the seam, and it is the reason the
 class is shaped the way it is.  What a tool list *means* — which of those tools

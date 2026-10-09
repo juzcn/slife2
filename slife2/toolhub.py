@@ -1,5 +1,4 @@
-"""slife2-toolhub — the model's tools, and the only process that holds their
-credentials.
+"""slife2-toolhub — the model's tools, and the one process that decides them.
 
 Every other plugin in this system is a place a capability comes from: a model
 backend speaks one wire protocol, the db keeps turns, the agent loop runs turns.
@@ -7,19 +6,26 @@ This one is where **the tools come from**, and it exists because tools are the
 one capability that has to reach *outside* the machine — to somebody else's MCP
 server, to a REST API, to a program that wants an API key in its environment.
 
-    slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  external tool servers
-                             list_tools                 (stdio or http)
-                             call_tool
-                             servers
-                             _func_tool_unload
-                                    │
+    slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins      (ours)
+                             list_tools                    │
+                             call_tool                     ├─ their own tools, by `tools/list`
+                             servers                       └─ what they declare: a `tools:` or
+                             _func_tool_unload                `rest-api:` entry, held and called
+                                    │                         by mcp-tools / restapi-tools
                                     └──MCP──▶  slife2-db  (the tool catalogue)
 
-**The key property is the same one the model backends have, pointed at tools.**
-A tool server's credentials are read by this process and by nothing else: the
-agent loop cannot leak a token it never had, and `grep` for a provider SDK in
-the agent's tree still finds nothing. Switching what tools the model has is
-editing a URL or a command in `slife2.yaml`, exactly as switching models is.
+**What this process owns is the set, and it owns all of it.**  Which tools
+exist, what the model is holding, what a name resolves to, what the budget takes
+back, and who may call what — every one of those is a question about the *whole*
+list, so it is answered in one place or it is answered twice and differently.
+What it does **not** own any more is a connection to anybody but our own plugins:
+the servers under `tools:` and `rest-api:` are held by `slife2-mcp-tools` and
+`slife2-restapi-tools`, which say what they hold and run a call back when this
+process asks.  The credential story is unchanged — a tool server's key lives in
+the process that reaches it, and the agent loop never sees one — but the process
+that holds it is the plugin that owns the config section, not this one.
+`slife2.gateway` is the link itself; `slife2.toolfamily` is the half that the two
+"hold somebody else's servers" plugins share.
 
 **The set is decided here and remembered there.**  Which tools exist, what they
 are called and who may call one is this process's to say; the rows, the load
@@ -29,30 +35,36 @@ module opens a database, and nothing in that one knows what a proxy name is —
 which is the same line the two plugins draw everywhere else, and the reason
 the next thing that needs the catalogue can have it.
 
-Three sources, one list
------------------------
-The tools come from three places, and this is the only thing that knows all of
-them.
+Two ways in, and they are not the same kind of claim
+----------------------------------------------------
+**A plugin's own tools** arrive by `tools/list` and have to declare themselves
+the model's (`slife2.audience`), because they belong to that plugin's code:
+`remember` writes into any agent's database and `send_message` drives another
+conversation, and those are exactly the tools a model would reach for if it
+could read their descriptions.  **What a plugin holds** arrives by declaration
+instead — one tool, `list_sources`, answering with a source's whole list — and is
+not gated, because it is the operator's configuration: a `tools:` entry, a
+playbook, a command.  The entry is the opt-in; there was never a mark to forget.
 
-**Plugins** are the servers slife2 starts — builtins, the db, the agent, a
-model backend — and each offers its tools to one of two callers.  `now` and
-`calc` are for the model; `remember` and `send_message` are for our own code,
-called at a moment the code already knows.  **Tool servers** are everybody
-else's, under `tools:` and `rest-api:`, and they are for the model by the simple
-fact that an operator wrote them down.  **Local tools** are neither: they are
-the ones with nothing behind them at all — a skill, which is a document in
-`<data>/skills/`, and the three that find and load tools — and the hub serves
-those itself, for the reason given below.
+Which makes a source something a plugin owns rather than something the hub
+holds.  A source — `arxiv`, `skills`, `cli` — is a name, a category, its rows,
+and two facts about it: whether the operator switched it off and whether it is
+answering.  The hub merges the rows, gates them by category, counts them and
+routes by them, exactly as it did when it held the connection itself; what
+changed is that it asks who holds one rather than being the one who does.  **The
+price is freshness**, and it is the price of anything over a wire: an answer is
+as old as the last declaration, which is why declarations are refreshed wherever
+liveness is read, and why a plugin that holds sources and cannot answer for them
+fails the list rather than quietly contributing none.
 
 Which source a tool came from is not what decides who may call it — which
 *caller* it is for does, and that is said on the tool itself (`slife2.audience`)
 rather than in its name, in this file, or in the config.  **A plugin's tools
 belong to that plugin's own code until one of them says otherwise**, so
-`remember` stays where it was and `now` carries the mark, while an entry under
-`tools:` needs no mark at all: the operator opted in by writing the entry.  The
-list of plugins is not written down here either — it is `Config.plugins()`,
-which is what the launcher starts, so the hub cannot drift from the set of
-processes that exist.
+`remember` stays where it was and `now` carries the mark, while a declared row
+needs no mark at all: declaring is the opt-in.  The list of plugins is not
+written down here either — it is `Config.plugins()`, which is what the launcher
+starts, so the hub cannot drift from the set of processes that exist.
 
 The list the model gets is not everything
 -----------------------------------------
@@ -85,25 +97,21 @@ in two places is a set that will disagree with itself.
 
 That is why `now` and `calc` are not served by this process but by
 `slife2-builtins`, which the hub reaches exactly as it reaches somebody else's
-arxiv server.  **Nothing that has a server behind it is served by this
-process.**  A builtin that took a shortcut would be the second mechanism this
-whole arrangement exists to avoid, and the first thing to drift: it would not be
-in `servers()`, it would not have a connection to fail, and it would not be a row
-in the catalogue the model's search reads.
+arxiv server — over the plugin that holds it.  **Nothing that has a server behind
+it is served by this process.**  A builtin that took a shortcut would be the
+second mechanism this whole arrangement exists to avoid, and the first thing to
+drift: it would not be in `servers()`, it would not have a connection to fail,
+and it would not be a row in the catalogue the model's search reads.
 
-One kind of tool has no server behind it, and is served here.  A **skill** is a
-document on this machine and `skill_use` reads it: no process, no credential, no
-protocol, no address — nothing a hop could reach, plus the fact that the hub
-already holds the directory it would be reading.  A server invented to hold one
-function whose whole body is a `read_text` is not uniformity, it is a second
-process that exists to be connected to.  The rule that survives is the one worth
-having, and it is the same rule: **everything with a server behind it is reached
-by exactly one code path** — the builtins included, which is why they stay where
-they are.  The hub's own tools are the other path, and they are named as
-themselves (`skill_use`) rather than `{server}__{tool}`, because there is no
-server to name — and neither are ours, for the neighbouring reason that the
-server is slife2: `now`, not `builtins__now`.  `model_name` is that rule and
-DESIGN.md §8 is the argument for it.
+`skill_use` used to be the exception, and it is one no longer: a skill is a
+document and `slife2-skills` serves it (`slife2.skills_server`), because a family
+that owns a config section *and* its own tool is a family whose next change has
+somewhere to land.  So the hub's own tools are exactly the set-level three —
+`tool_search`, `func_tool_load`, `_func_tool_unload` — and they are named as
+themselves rather than `{server}__{tool}`, because there is no server to name.
+Neither are ours for the neighbouring reason that the server is slife2: `now`,
+not `builtins__now`.  `model_name` is that rule and DESIGN.md §8 is the argument
+for it.
 
 They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
@@ -112,10 +120,12 @@ model may call, with no list of exceptions kept beside it here.
 REST APIs are not a second mechanism
 ------------------------------------
 A `rest-api:` entry is expanded *by the config layer* into the stdio command that
-serves it (`slife2.config._rest_api`), so what arrives here is an ordinary
-upstream.  Nothing in this module knows what REST is, which is the point: there
-is one kind of thing to connect to, and the wrapper people publish for OpenAPI
-is just how a REST API becomes one.
+serves it (`slife2.config._rest_api`), so what arrives at `slife2-restapi-tools`
+is an ordinary stdio server — the same kind of thing a `tools:` entry describes,
+held by the same code (`slife2.toolfamily`) and declared to this process the same
+way.  Nothing outside the config layer knows what REST is, which is the point:
+there is one kind of thing to connect to, and the wrapper people publish for
+OpenAPI is just how a REST API becomes one.
 
 What this deliberately does not do
 ----------------------------------
@@ -217,10 +227,10 @@ SERVER_NAME = "slife2-toolhub"
 #: about.
 #:
 #: It is also the name the hub's **own** tools are catalogued under.  They are
-#: this plugin's tools, served by this process: `tool_search`, the two
-#: loaders, and `skill_use`.  Being rows like everything else is what makes one
-#: query enough to answer "what may the model call", and it is why nothing here
-#: has to remember a list of its own.
+#: this plugin's tools, served by this process: `tool_search`, `func_tool_load`
+#: and `_func_tool_unload` — the set-level three, and nothing else.  Being rows
+#: like everything else is what makes one query enough to answer "what may the
+#: model call", and it is why nothing here has to remember a list of its own.
 CONFIG_KEY = "toolhub"
 
 #: The catalogue's vocabulary, in the three words this process has to say out
@@ -688,7 +698,7 @@ class Upstream:
         #: is read twice: for that failure rule, and for whether this server's
         #: tools have to ask before the model is given them (`_offered`).
         self.required = required
-        #: **Whether this source publishes catalogue rows**, which is a fact
+        #: **Whether this source declares catalogue rows**, which is a fact
         #: about the listing and not a second copy of it: the one tool name
         #: `LIST_SOURCES` either is or is not in what the server offered.  See
         #: `declare`, which is the only thing that reads it.
@@ -789,11 +799,11 @@ class Upstream:
         #: a source has that the model must never be given, so the audience gate
         #: is exactly what removes it from the filtered list.  A bool and not a
         #: set of names, for the reason this class keeps no tool list at all —
-        #: the question `publish` asks is a yes-or-no about one name.
+        #: the question `declare` asks is a yes-or-no about one name.
         #:
         #: **`required` is half the answer**, and the half that is not about the
-        #: listing.  A published row is merged without passing the audience gate
-        #: — that is what publishing *is* — so the permission has to come from
+        #: listing.  A declared row is merged without passing the audience gate
+        #: — that is what declaring *is* — so the permission has to come from
         #: somewhere else, and "slife2 starts this server" is the only thing here
         #: that means *ours*.  Somebody else's server that happens to define a
         #: tool with this name gets nothing, which matters because the hub takes
@@ -1046,13 +1056,14 @@ class Upstream:
 class LocalTool:
     """A tool the hub serves itself, because there is nothing else that could.
 
-    A skill is the case, and so are the three that find and load tools.  None of
-    them has a process to start, a credential to hold or an address to
-    configure: what an `Upstream` exists for — a connection — has nothing to
-    describe.  What is left is a name, the schema the model reads, and the body
-    that answers a call.
+    The three that find, load and trim tools are the case, and they are the whole
+    of it: each is a question about the *whole* catalogue, so the process that
+    owns the set answers it and no plugin can.  None of them has a process to
+    start, a credential to hold or an address to configure: what an `Upstream`
+    exists for — a connection — has nothing to describe.  What is left is a
+    name, the schema the model reads, and the body that answers a call.
 
-    **A local tool's name is its own**, `skill_use`, the way every tool of ours
+    **A local tool's name is its own**, `tool_search`, the way every tool of ours
     is (`model_name`) — and it is routed *before* the catalogue is asked, which
     is the part that is local to this class.  Being first is what makes a
     collision safe: somebody else's server may offer a tool of the same name,
@@ -1177,7 +1188,7 @@ FUNC_TOOL_UNLOAD_DESCRIPTION = (
 def local_tools(
     catalogue: Catalogue,
     live_sources: Callable[[], list[str]],
-    refresh_published: Callable[[], Awaitable[None]],
+    refresh_declared: Callable[[], Awaitable[None]],
     autoload_sources: Callable[[], list[str]],
 ) -> list[LocalTool]:
     """What this process serves a model itself: the three it manages tools with.
@@ -1185,11 +1196,11 @@ def local_tools(
     **These are the set-level tools, and that is why they are here.**  Which
     tools exist, which of them the model is holding, and what the budget takes
     back are all questions about the *whole* catalogue — so the process that
-    owns the set answers them, and no plugin can.  Everything a model can
-    *call*, other than these, is somebody else's server: a plugin's tool or
-    `{server}__{tool}` for an entry under `tools:`.  What the hub kept when
-    `skill_use` moved out is exactly this remainder, and the remainder is the
-    reason `LocalTool` still exists at all.
+    owns the set answers them, and no plugin can.  Everything else a model can
+    *call* is served by a plugin: bare-named when it is that plugin's own tool
+    (`now`), `{server}__{tool}` when it is an entry under `tools:`.  What the hub
+    kept when `skill_use` moved out to `slife2-skills` is exactly this remainder,
+    and the remainder is the reason `LocalTool` still exists at all.
 
     **Find a tool** — `tool_search`, the hybrid search over the catalogue.  What
     it *does* is the db's: the two legs, the fusion and the filters all happen
@@ -1208,11 +1219,11 @@ def local_tools(
     model's tool list declares — `_func_tool_unload` argues that, and it is the
     one caller that made this the third rather than the second.
 
-    `refresh_published` is handed in rather than reached for because a search is
-    where a family that publishes rows has to be current: dropping a directory
+    `refresh_declared` is handed in rather than reached for because a search is
+    where a family that declares rows has to be current: dropping a directory
     into `<data>/skills/` is the whole of installing a skill, and a row that
     appeared only at the next hub start would make a new playbook readable and
-    unfindable at the same time.  See `Upstream.publish`.
+    unfindable at the same time.  See `Upstream.declare`.
     """
 
     def _as_int(value: Any, default: int) -> int:
@@ -1233,10 +1244,10 @@ def local_tools(
     async def search(arguments: dict[str, Any]) -> tuple[str, bool]:
         # Every family that owns rows is asked for its list on the way in,
         # because a search is exactly where something that arrived since the hub
-        # started has to be findable — see `Upstream.publish`.  Nothing is
+        # started has to be findable — see `Upstream.declare`.  Nothing is
         # written when nothing changed, and nothing is waited for: a source that
         # is not up yet is asked again on the next search.
-        await refresh_published()
+        await refresh_declared()
         found = await catalogue.search(
             query=str(arguments.get("query") or ""),
             category=str(arguments.get("category") or ""),
@@ -1656,8 +1667,8 @@ def build_server(
 ) -> FastMCP:
     """Build the toolhub.
 
-    `transports` maps an upstream's configured name to something a `Client` can
-    be built from — the seam that lets a test drive the whole hub over in-memory
+    `transports` maps a plugin's configured name to something a `Client` can be
+    built from — the seam that lets a test drive the whole hub over in-memory
     servers, with no process and no port, while production builds a connection
     from the config entry.  `client_factory` is the narrower seam on top of it,
     for the tests that need a client which misbehaves.  There is no third: the
@@ -1665,11 +1676,11 @@ def build_server(
     which is the seam tests use and the one production uses.
 
     **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
-    `skill_use` are this plugin's, and the hub merges them into the catalogue
-    when it starts — so one query answers "what may the model call", with no
-    list of exceptions kept beside it.  What has a *body* is still only known
-    here: the row says what the tool is, and `local_route` says what running it
-    means.
+    `_func_tool_unload` are this plugin's, and the hub merges them into the
+    catalogue when it starts — so one query answers "what may the model call",
+    with no list of exceptions kept beside it.  What has a *body* is still only
+    known here: the row says what the tool is, and `local_route` says what
+    running it means.
 
     **This function is long and is not going to be split.**  Measured: of its
     455 lines, 202 are docstrings and 80 are blank or comment, leaving 173 lines
@@ -2024,11 +2035,12 @@ def build_server(
         second index to get wrong.
 
         A tool the hub serves itself — `tool_search`, `func_tool_load`,
-        `skill_use` — is answered here without leaving the process.  A proxied
-        one reaches its server through the connection this process keeps, and a
-        call is gated on there being something behind the name, never on the
-        load state: a name the model just found with `tool_search` is a name it
-        can use.
+        `_func_tool_unload` — is answered here without leaving the process.  A
+        plugin's tool reaches it over the connection this process keeps, and one
+        a plugin *declares* is routed through the plugin that holds it
+        (`call_source`); either way a call is gated on there being something
+        behind the name, never on the load state: a name the model just found
+        with `tool_search` is a name it can use.
 
         A call that is made on behalf of one conversation carries that
         conversation in its `_meta`, and it is forwarded unchanged to whichever

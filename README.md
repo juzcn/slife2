@@ -13,8 +13,9 @@ and they are the point of the whole thing:
 
 - **A key exists only inside the process that needs it.** A provider's API key
   lives in the LLM server that calls it; a tool server's token lives in the
-  toolhub that connects to it. The agent loop cannot leak either, because it
-  never has one.
+  plugin that holds that server — `slife2-mcp-tools` for `tools:`,
+  `slife2-restapi-tools` for `rest-api:`. The agent loop cannot leak either,
+  because it never has one.
 - **The agent loop imports no provider SDK.** Switching providers is changing a
   URL, and adding tools is adding an entry to a config file.
 
@@ -60,9 +61,10 @@ themselves stay shared.
 That database is where the model can look back. `turn_list` browses it — newest
 first, one line per turn, `since`/`until` taking an ISO date or a phrase a person
 would write (`yesterday`, `last month`, `3 days ago`), paged with
-`limit`/`offset` against a `total` — and `turn_read` returns one turn whole. Neither takes an `agent`: the
-call carries the conversation it is on behalf of, so a model reads its own
-history and nothing else, and no argument of its can change that.
+`limit`/`offset` against a `total` — and `turn_read` returns one turn whole.
+Neither takes an `agent`: the call carries the conversation it is on behalf of,
+so a model reads its own history and nothing else, and no argument of its can
+change that.
 
 Every turn is also **indexed twice as it is stored** — a keyword index over the
 text a turn is found by, and a vector index over what it was about — so a turn
@@ -176,8 +178,8 @@ tool_load:                              # how many tools the model may hold
 `command` starts a process and talks over its standard input; `url` connects to
 somebody else's over the network. A `rest-api` entry is the same thing said
 shorter — it is expanded into the `uvx mcp-openapi-proxy` invocation that serves
-it, so the hub has one mechanism rather than two. `${VAR}` resolves through the
-same chain as a provider key.
+it, so the plugin that holds it has one mechanism rather than two. `${VAR}`
+resolves through the same chain as a provider key.
 
 A `cli` entry is the odd one out: there is no process to start and no URL to
 connect to, because the program is already installed. It is written down so the
@@ -188,7 +190,7 @@ is what a person is told when the command turns out not to be on `PATH`.
 finds a command by what it does rather than by its name — being findable is the
 half that landed. **Nothing runs one yet**: the tool that does is the next
 change (DESIGN.md §9), and until then `func_tool_load` says exactly that. The
-rows are published by **`slife2-cli`**, a plugin whose only job today is that —
+rows are declared by **`slife2-cli`**, a plugin whose only job today is that —
 which is why it exists before its tool does: one tool per entry is a tool the
 model calls, and a tool needs a server to be served from.
 
@@ -207,9 +209,10 @@ tools are bare, and they are one namespace — two plugins cannot offer one name
 between them — which the catalogue refuses loudly rather than resolving.
 
 **What the model is handed is the tools it has loaded, not the tools that
-exist.** The list is re-read from the hub before *every model call*, and it
-holds `tool_search`, `func_tool_load` and `skill_use` plus whatever the model has
-loaded — a server with ninety tools costs nothing until one of them is wanted.
+exist.** The list is re-read from the hub before *every model call*, and it holds
+`tool_search`, `func_tool_load`, `_func_tool_unload` and `skill_use` plus
+whatever else the model has loaded — a server with ninety tools costs nothing
+until one of them is wanted.
 `tool_search` searches the whole catalogue by keyword *and* by meaning, one
 hybrid search; `func_tool_load` puts one or several names in the list, and they
 are there from the next step of the same turn. The catalogue is
@@ -242,12 +245,19 @@ db's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
 
-The hub has three sources. Two are processes: the **plugins** slife2 starts,
-which it asks for a tool list the way it asks anybody and for the catalogue rows
-they publish, and everything under **`tools:`**, which is other people's servers.
-The third is the hub itself.
+**The hub reaches our plugins, and it is *told* about everything else.** Two
+kinds of thing arrive at it. A plugin's **own tools** come from `tools/list`, the
+way it would answer anybody. A plugin's **sources** are declared instead: a
+`tools:` entry, a `rest-api:` entry, a playbook, a command — none of which the
+hub can reach — are answered for by the plugin that owns that section, in one
+call to `list_sources`, and the hub merges the rows and routes every call back to
+the plugin that holds them. So this process holds no connection to a server
+somebody else runs and no key belonging to one: `slife2-mcp-tools` and
+`slife2-restapi-tools` hold those, one connection per entry, and the hub owns the
+tool *set* and nothing else.
 
-That third one is what is left over, and it is exactly the set-level work.
+The hub's own tools are what is left over, and they are exactly the set-level
+work.
 **`tool_search`, `func_tool_load` and `_func_tool_unload`** are served by the hub
 because each is a question about the *whole* catalogue — what exists, what the
 model is holding, what the budget takes back — so the process that owns the set
@@ -274,10 +284,10 @@ reach the thing (`skill_use`) rather than a refusal. The name is namespaced
 because `browser-harness` is a command *and* the skill documenting it, and one
 name is one row.
 
-**A family publishes its rows and the hub merges them.** `slife2-skills` and
-`slife2-cli` answer `catalogue_rows` with their whole list — which is what makes
-a deleted skill stop being a hit — and the hub merges it exactly as it merges
-the tools a server listed. So the hub stays the only writer of the catalogue,
+**A family declares its rows and the hub merges them.** `slife2-skills` and
+`slife2-cli` answer `list_sources` with their whole list — which is what makes a
+deleted skill stop being a hit — and the hub merges it exactly as it merges the
+tools a server listed. So the hub stays the only writer of the catalogue,
 and every source is asked again before every search, which is why dropping a
 directory into `skills/` is found at once and not at the next restart.
 
@@ -309,7 +319,8 @@ belongs in the reader.
 
 `enabled: false` keeps an entry configured but never connects it, which is the
 lever worth knowing: everything enabled is a process at startup and its tools in
-every request. `slife2 down` takes the hub's child processes down with it.
+every request. `slife2 down` takes those a step further — a plugin it stops takes
+the child processes that plugin started with it.
 
 A plugin is required and everything in `tools:` is optional: the hub asks
 each plugin for a tool list, and one that cannot answer fails the turn rather
@@ -380,9 +391,9 @@ slife2/
 ├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
 │                     #   a listed tool as one the loop can run, and the trim
 │                     #   the harness makes before a turn is saved
-├─ gateway.py        # the link to a server somebody else runs: connect, list,
+├─ gateway.py         # the link to a server somebody else runs: connect, list,
 │                     #   call, and say whether it is answering — no catalogue,
-│                     #   no category, no config (no I/O of its own)
+│                     #   no category, no config
 ├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
 │                     #   is shared: hold, declare, route a call back
 ├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section, held
@@ -413,14 +424,15 @@ slife2/
 │                     #   and the startup pass that brings every index up to date
 │                     #   with the embedding model
 ├─ llm/
-│  ├─ base.py         # Chunk, Stream, LLMBackend  (no I/O)
-│  ├─ wire.py         # Chunk <-> progress payload (no I/O)
-│  ├─ client.py       # MCPBackend: the agent loop's only backend
-│  ├─ server_common.py# what the model servers share, incl. tool-call assembly
-│  ├─ embeddings_server.py # slife2-llm-embeddings       <- imports openai
-│  ├─ openai_server.py    # slife2-llm-openai             <- imports openai
-│  ├─ openai_responses_server.py # slife2-llm-openai-responses <- imports openai
-│  └─ anthropic_server.py # slife2-llm-anthropic          <- imports anthropic
+│  ├─ base.py                    # Chunk, Stream, LLMBackend  (no I/O)
+│  ├─ wire.py                    # Chunk <-> progress payload (no I/O)
+│  ├─ client.py                  # MCPBackend: the agent loop's only backend
+│  ├─ server_common.py           # what the model servers share, incl. tool-call
+│  │                             #   assembly
+│  ├─ embeddings_server.py       # slife2-llm-embeddings        <- imports openai
+│  ├─ openai_server.py           # slife2-llm-openai            <- imports openai
+│  ├─ openai_responses_server.py # slife2-llm-openai-responses  <- imports openai
+│  └─ anthropic_server.py        # slife2-llm-anthropic         <- imports anthropic
 ├─ server/server.py   # slife2-agent: FastMCP, the conversations and their two
 │                     #   tools, keyed by (agent, subagent)
 ├─ templates/system.j2# the system prompt the distribution ships

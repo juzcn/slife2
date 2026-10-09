@@ -15,8 +15,9 @@ with itself.  The cost is one loopback call per model call; the alternative is a
 second registry in the agent, kept in step by hand.
 
     builtins   the tools that ship with slife2, always configured
-    tools:     other people's MCP servers, connected by the same hub
-    rest-api:  other people's REST APIs, expanded into servers of the first kind
+    tools:     other people's MCP servers, held by slife2-mcp-tools
+    rest-api:  other people's REST APIs, expanded into servers of that kind
+               and held by slife2-restapi-tools
 
 Adding a tool is one function, and one mark
 -----------------------------

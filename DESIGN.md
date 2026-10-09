@@ -34,13 +34,14 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   ├── HTTP 127.0.0.1:8010/mcp ──▶ slife2-db                     (one SQLite file per agent)
   │                                 └── HTTP 127.0.0.1:8004/mcp ──▶ slife2-llm-embeddings
   │                                                                    (openai SDK, holds keys)
-  ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub
-  │                                 ├── :8030/mcp ──▶ slife2-builtins   (`echo`, `now`, `calc`)
-  │                                 ├── :8031/mcp ──▶ slife2-skills     (`skill_use`, the playbooks)
-  │                                 ├── :8032/mcp ──▶ slife2-cli        (the `cli:` entries, as rows)
-  │                                 ├── :8033/mcp ──▶ slife2-mcp-tools  (holds the `tools:` entries)
-  │                                 ├── :8034/mcp ──▶ slife2-restapi-tools (holds the `rest-api:` ones)
-  │                                 └── MCP ──▶    external tool servers, and REST via a proxy
+  ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
+  │                                 ├── :8030/mcp ──▶ slife2-builtins      (`echo`, `now`, `calc`)
+  │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
+  │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
+  │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
+  │                                 │                  └── MCP ──▶ external tool servers (stdio or http)
+  │                                 └── :8034/mcp ──▶ slife2-restapi-tools (holds the `rest-api:` ones)
+  │                                                    └── MCP ──▶ the OpenAPI proxy an entry expands into
   ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai             (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
   └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
@@ -49,7 +50,10 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
 The embeddings server hangs off the **db** rather than the agent, because the
 thing that needs a vector is the store's index and not the turn: a turn is
 written with its vector in one transaction, so the writer is the party that
-holds the connection.
+holds the connection. The two plugins at the bottom of the hub's branch are that
+rule pointed at somebody else's processes rather than at a file: `tools:` and
+`rest-api:` are config sections, and the plugin that owns a section is the one
+that holds the connections its entries describe (§8).
 
 **One plugin, one job, and the granularity is deliberate.**  A model backend
 speaks one wire protocol; the db keeps turns; the hub is where the tools come
@@ -60,14 +64,14 @@ rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
 process *does*, not in how many there are.  The count in the diagram is what one
 config uses, not a fixed number: a protocol no provider speaks is not started at
-all, and the hub is one process whether it fronts one tool server or twenty.
+all, and the hub is one process whether one plugin holds a source or twenty do.
 
 The builtins being a server of their own is the same rule applied to the one
 place it looks like overkill: they have no credential and no network, and they
 are still behind the hub, because "where the tools come from" is a job and a
 plugin that is sometimes the answer to it is a plugin with a branch in it.
 `slife2-cli` is that rule taken one step further — a family with no connection,
-no tool and nothing but rows to publish — and the reason is the same in both
+no tool and nothing but rows to declare — and the reason is the same in both
 directions: a job belongs to the process that does it, and a process that has
 one is a process that can grow the tool the family is missing. See §8.
 
@@ -82,9 +86,12 @@ Two properties fall out of this and are the reason for it:
 
 - **A provider API key exists only inside the model server process that needs
   it.** The agent loop cannot leak one because it never has one. The same holds
-  for tools, which is the second thing the hub buys: `SERPER_API_KEY` and
-  `GITHUB_TOKEN` are read by `slife2-toolhub` and exported into the environment
-  of a child process, and the agent that asks for the tool never sees either.
+  for tools, which is the second thing the arrangement buys: `SERPER_API_KEY` is
+  read by `slife2-mcp-tools` and `GITHUB_TOKEN` by `slife2-restapi-tools`, each
+  exported into the environment of a child process that plugin starts, and the
+  agent that asks for the tool never sees either. The hub decides what the model
+  may call and holds no key at all — which is the point of moving the connections
+  out of it.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
   switching providers is changing a URL. `grep -r "import openai\|import anthropic"
   slife2/` matches four files, all under `llm/` and all servers, each importing
@@ -603,10 +610,10 @@ is a port of v1's `mcp-gateway` with one thing moved out of it, and the shape
 that survived the port is the whole of the rest:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins              (ours; `builtins`, `db`, …)
-                          list_tools        └──▶  sources they declare   (their servers, their rows)
-                          call_tool
-                          servers
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins            (ours; `builtins`, `db`, …)
+                          list_tools        └──▶  what they declare   (their servers, their rows,
+                          call_tool                                   and the families that are
+                          servers                                      not servers at all)
 ```
 
 **What the hub owns is the set, and it owns all of it.** Which tools exist, what
@@ -711,10 +718,10 @@ command as an argv rather than through a shell), and a tool needs a server to be
 served from. So `slife2-skills` and `slife2-cli` are plugins like any other,
 each owning its section, and the rule that survives is the one worth having:
 **everything with a server behind it goes through the one code path**, and a
-source that owns rows which are not tools *publishes* them.
+source that owns rows which are not tools *declares* them.
 
-**A source publishes rows; the hub merges them, and the hub is still the only
-writer.** One tool on the plugin's API — `catalogue_rows`, unmarked and so
+**A source declares rows; the hub merges them, and the hub is still the only
+writer.** One tool on the plugin's API — `list_sources`, unmarked and so
 invisible to the model — answers with the source's whole list, and the hub
 merges it exactly as it merges the tools a `tools/list` returned:
 
@@ -723,12 +730,12 @@ merges it exactly as it merges the tools a `tools/list` returned:
   removing a directory the whole of uninstalling one.
 * **Asked again before every search**, because the folder is the install: a
   skill dropped in must not be readable and unfindable at the same time. A
-  publication of an unchanged folder plans no writes, and a source that is not
-  answering is skipped rather than waited for — the rows it published last time
+  declaration of an unchanged folder plans no writes, and a source that is not
+  answering is skipped rather than waited for — the rows it declared last time
   are still in the catalogue, so a late plugin costs freshness and nothing else.
-* **Only one of ours may publish, and only into the categories nothing connects
-  to.** A published row is merged *without* passing the audience gate — that is
-  what publishing is — so the permission has to come from somewhere else, and it
+* **Only one of ours may declare, and only into the categories nothing connects
+  to.** A declared row is merged *without* passing the audience gate — that is
+  what declaring is — so the permission has to come from somewhere else, and it
   comes from the two facts that already mean "ours": `required` on the upstream,
   which is what a plugin is, and a closed pair of categories (`skill`, `cli`),
   because a source able to name its own category could offer the model
@@ -750,11 +757,11 @@ What is left of v1's `sync_category`, and each piece is load-bearing:
   browser" reach the playbook: the semantic leg ranks the text, and a playbook
   *is* its documentation. `cli:` rows carry the invocation and the `install`
   line for the same reason.
-* **The publisher writes the status** — a `cli:` entry is `disabled` when the
-  config says so, an unreadable `SKILL.md` is `error` — because there is no
+* **The declaring plugin writes the status** — a `cli:` entry is `disabled` when
+  the config says so, an unreadable `SKILL.md` is `error` — because there is no
   connection whose state a verdict could come from. That is the one family where
   a merge may write `status`, and the one family a re-merge must *not* re-enable:
-  the rows are published again before every search, so "a source that answered is
+  the rows are declared again before every search, so "a source that answered is
   enabled again" would flip a switched-off command back on several times a
   minute.
 
@@ -776,9 +783,9 @@ not a server, which is true, and that a skill is therefore not a server's
 business, which does not follow. A declared key needs *one process that knows
 the answer*, and the resolution is the config's own secret chain (`skills:` in
 `slife2.yaml`, shell then credstore). That process is now `slife2-skills`, which
-holds what the chain resolved for exactly the reason the hub holds a tool
-server's headers and nothing else does: one process knows, and nothing about a
-declared key needs an address or a protocol. `skill_use` reads the declaration
+holds what the chain resolved for exactly the reason `slife2-mcp-tools` holds a
+tool server's headers and nothing else does: one process knows, and nothing
+about a declared key needs an address or a protocol. `skill_use` reads the declaration
 rather than ignoring it, so a model told which key is missing — before it acts —
 is the difference between a skill that does not work and a skill that does not
 work silently.
@@ -807,9 +814,11 @@ it is not, and in the second case the useful fact is what it said the last time
 we asked. There is no connection state machine and no timer: the listing goes to
 the catalogue when it arrives, the source stops counting as *live* when the peer
 says `tools/list_changed`, when a call fails at the transport, or when a connect
-fails, and the next ask re-lists it. **What the hub no longer holds is the tool
-list itself** — that is a row now, and the hub's `_ready` is a flag saying whose
-rows may be injected. §8's "the snapshot is dropped" survives as that flag.
+fails, and the next ask re-lists it. **What nobody holds any more is the tool
+list itself** — that is a row now, and the gateway's `_ready` is a flag saying
+whose rows may be injected (`Connection.usable`). "The snapshot is dropped"
+survives as that flag, and it is the same flag whether the connection is the
+hub's to a plugin or a family's to somebody else's server.
 
 **Two failures that look alike and are not.** The hub distinguishes a *transport*
 failure from a peer's *refusal*, and does opposite things with them. A refusal —
@@ -838,9 +847,11 @@ difference that matters: because the list is re-read before every *model call*,
 a load takes effect one step later **inside the same turn** — v1 needed a turn
 boundary for that. `tool_search` is the way in and `func_tool_load` is the way
 through; both are the hub's own rows, so they are found and loaded like anything
-else, and both are in the whitelist that is never evicted (`skill_use` is the
-third, and it is the one entry there that a plugin serves). A plugin's tools
-start loaded, because a model that has quietly lost
+else, and both are in the whitelist that is never evicted — which is the hub's
+own three plus `skill_use`, the one entry there that a plugin serves
+(`ALWAYS_LOADED`, and `_func_tool_unload` is the third of the hub's because the
+harness's trim is a pair under its name). A plugin's tools start loaded, because
+a model that has quietly lost
 `now` and `calc` is the failure this section is built around; a server's do not
 unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
@@ -905,7 +916,7 @@ servers slife2 starts*, because that is the category whose rows the audience gat
 decides about.
 
 There is deliberately no list of "plugins worth asking". The hub asks all of
-them, including the three model backends and the agent server, which have
+them, including the model backends a config uses and the agent server, which have
 nothing to offer: which tools a server has is not knowable without asking, and a
 second list is a list that goes stale the first time somebody adds a tool.
 
@@ -970,12 +981,12 @@ Named so they are decisions rather than oversights:
   cancels the turn, which is the very way a message gets lost. Nothing yet caps
   how many loops exist, and nothing bounds a loop's history.
 - **The tool that runs a `cli:` entry.** The entry is a row now (§8's
-  publication), so a search finds the command by what it does — but nothing
+  declaration), so a search finds the command by what it does — but nothing
   executes one, and `func_tool_load` says so in as many words ("a command
   already installed on this machine … nothing runs one yet"). Those entries are
   `tools.yaml`'s other half served: what a call would do is the change, not the
   row — and where it goes is now decided, because the family has a process:
-  `slife2-cli`, the plugin whose only job today is publishing the rows.
+  `slife2-cli`, the plugin whose only job today is declaring the rows.
 - **A word to the model about the loaded set.** `tool_search` and
   `func_tool_load` explain themselves in their own descriptions and nothing else
   does. v1 also carried a per-turn prompt saying how many tools were loaded;
@@ -1033,14 +1044,13 @@ Named so they are decisions rather than oversights:
   shell so that the arguments a model invents cannot become commands it
   invented. It is also what opens the approval question above — `yt-dlp` writes
   files — and §8 already says where that answer goes.
-- **A tool list that is too long.** Everything enabled in `tools:` is in every
-  model call's list, and the working config enables twenty servers — hundreds of
-  tools, which is a large request, a large bill, and a model choosing worse.
-  v1's answer was on-demand loading: a `tool_search` the model runs, then
-  `func_tool_load`, with `tool_load.threshold` (100 in v1's config) as the point
-  where tools start being evicted and `autoload: true` to exempt one. That is a
-  real feature and not a port, because it needs a catalog the hub does not have;
-  until then `enabled: false` is the lever, and it is a per-server one.
+- **A measurement of the tool budget.** This bullet used to name a missing
+  feature — everything enabled in `tools:` in every model call's list, with
+  `enabled: false` as the only lever. On-demand loading landed (§8, and the
+  README's own section): `tool_search`, `func_tool_load`, `tool_load.threshold`,
+  `autoload: true`. What is left is a measurement rather than a gap: nobody has
+  watched a real twenty-server config against the budget, and the threshold of
+  100 is still v1's number.
 - **Device-code OAuth for tool servers.** v1's gateway ran the whole RFC 8628
   flow, kept tokens in the OS keyring through `credstore`, and held the token
   beside the configured headers so a re-auth did not churn them. Not ported:

@@ -453,7 +453,7 @@ def message_text(content: Any) -> str:
 
     Two shapes, because a provider's wire has two: a plain string, and the list
     of parts an attachment forces.  A part that is not text is *named* rather
-    than dropped — `[image]` — for the reason `slife2.toolhub.flatten` describes:
+    than dropped — `[image]` — for the reason `slife2.gateway.flatten` describes:
     a reader can act on knowing an image was there, and cannot act on silence.
     """
     if isinstance(content, str):
@@ -1487,8 +1487,8 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #  model has loaded — is a property of the machine.
 #
 #  **The hub never reads this file.**  The catalogue is served over MCP by
-#  `slife2-db` (`tool_reconcile`, `tool_injectable`, `tool_search`, …) and the
-#  hub is a client of it, the way the hub is a client of every tool server:
+#  `slife2-db` (`tool_merge`, `tool_injectable`, `tool_search`, …) and the
+#  hub is a client of it, the way the hub is a client of every plugin:
 #  which tools exist is the hub's decision, what is known about them is this
 #  file's record, and neither process reaches into the other's half.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1511,12 +1511,12 @@ PLUGIN = "plugin"
 FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
 
 #: The two categories **nothing is connected to**, and the two the model cannot
-#: load.  A skill is a document, read by the hub itself; a `cli:` entry is a
-#: program already on this machine.  Neither has a connection that could be down
-#: and neither has a load state to have — and both are rows all the same, because
-#: that is how `tool_search` reaches them: a playbook nobody catalogued is a
-#: playbook found only by a model that already knew its name (`skill_use` reads
-#: one, `toolhub`'s mirror writes them).
+#: load.  A skill is a document, read by `slife2-skills`; a `cli:` entry is a
+#: program already on this machine, declared by `slife2-cli`.  Neither has a
+#: connection that could be down and neither has a load state to have — and both
+#: are rows all the same, because that is how `tool_search` reaches them: a
+#: playbook nobody catalogued is a playbook found only by a model that already
+#: knew its name (`skill_use` reads one; a row is what makes it findable).
 SKILL = "skill"
 CLI = "cli"
 

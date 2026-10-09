@@ -3,9 +3,9 @@
 Both travel out of band — beside the model rather than in it — and there are two
 of them because a tool call has two parties.  **The tool says who may call it**
 (`slife2/audience`, read from `tools/list`), and **the caller says who it is**
-(`slife2/client`, attached to the call), and neither is an argument a model
-writes.  The first section below is the tool's half; `CLIENT` and its readers
-are the caller's.
+(the other key in this module, attached to the call), and neither is an argument
+a model writes.  The first section below is the tool's half; `CLIENT` and its
+readers are the caller's.
 
 Who a tool is for, said on the tool itself.
 
@@ -16,14 +16,15 @@ by our own code at a moment the code already knows: `remember` after a turn,
 language model, which picks one by reading its description and calls it with
 arguments it invented.
 
-The toolhub is the one place that sees both — it reaches into the plugins we
-start and out to somebody else's arxiv server — and it has to tell them apart,
+The toolhub is the one place that sees both — every plugin's own tools arrive
+there by `tools/list`, and so does every row a plugin declares for a server
+somebody else runs — and it has to tell them apart,
 because handing a model `remember` is handing it a write into any agent's
 database, and handing it `send_message` is handing it another conversation.
 
 **Said on the tool, not in its name and not in a list in the config.**  A name is
 something the world rewrites: providers accept only letters, digits, underscore
-and hyphen, and `slife2.toolhub.sanitise` exists to make a name legal, so policy
+and hyphen, and `slife2.gateway.sanitise` exists to make a name legal, so policy
 hung on a name is policy hung on a sanitiser.  A list in the config is a second
 registry kept in step by hand, which is the thing the hub exists to avoid.
 

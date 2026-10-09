@@ -90,6 +90,8 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
         CLI_SERVER_NAME,
         DB_SERVER_NAME,
         EMBEDDINGS_SERVER_NAME,
+        MCP_TOOLS_SERVER_NAME,
+        RESTAPI_TOOLS_SERVER_NAME,
         SKILLS_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
@@ -105,6 +107,12 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
         SKILLS_SERVER_NAME
     )
     assert importlib.import_module("slife2.cli_server").SERVER_NAME == CLI_SERVER_NAME
+    assert importlib.import_module("slife2.mcp_tools").SERVER_NAME == (
+        MCP_TOOLS_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.restapi_tools").SERVER_NAME == (
+        RESTAPI_TOOLS_SERVER_NAME
+    )
     assert importlib.import_module("slife2.toolhub").SERVER_NAME == (
         TOOLHUB_SERVER_NAME
     )
@@ -133,7 +141,7 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
     assert SKILL_USE == skills.USE_TOOL
     assert SKILL_USE in ALWAYS_LOADED
 
-    # And the two ids a published row must keep apart: the source is what the
+    # And the two ids a declared row must keep apart: the source is what the
     # catalogue files the rows under and the key is what the launcher starts.
     assert SOURCE != CONFIG_KEY
 
@@ -674,10 +682,17 @@ def test_a_cli_entry_with_no_command_is_refused(tmp_path) -> None:
         load(write(tmp_path, "cli:\n  nothing:\n    description: does nothing\n"))
 
 
-def test_a_disabled_cli_entry_is_written_down_but_not_offered(tmp_path) -> None:
+def test_a_disabled_cli_entry_is_written_down_but_not_run(tmp_path) -> None:
+    """The switch is the plugin's to act on, not the config's to filter.
+
+    A switched-off entry is declared like any other and its rows carry
+    `disabled`, so "somebody turned this off" is a thing a search can say rather
+    than a silence — which is why there is no filtered view here.
+    """
     config = load(write(tmp_path, CLI))
-    assert "off" in config.cli, "still in the file, and still readable"
-    assert [tool.name for tool in config.cli_tools()] == ["yt-dlp", "harness"]
+    assert list(config.cli) == ["yt-dlp", "harness", "off"]
+    assert config.cli["off"].enabled is False
+    assert config.cli["yt-dlp"].enabled is True
 
 
 # --- skills: what a playbook is given -----------------------------------------
@@ -725,10 +740,9 @@ def test_no_skills_section_is_no_skills(tmp_path) -> None:
     assert default_config().skills == {}
 
 
-def test_no_cli_section_is_no_cli_tools(tmp_path) -> None:
+def test_no_cli_section_is_no_cli_entries(tmp_path) -> None:
     """Absent means empty, like every other section: a config written before
-    this existed still loads."""
+    this existed still loads, and it ships with no external command at all."""
     config = load(write(tmp_path, A_PROVIDER))
     assert config.cli == {}
-    assert config.cli_tools() == []
-    assert default_config().cli_tools() == []
+    assert default_config().cli == {}

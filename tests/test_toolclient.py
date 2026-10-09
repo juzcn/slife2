@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.tools import Tool
 
 from slife2.config import Config, ToolServerSettings, default_config
 from slife2.db_server import build_server as build_db
@@ -31,7 +30,7 @@ from slife2.toolclient import (
     unload_tools,
 )
 from slife2.toolhub import build_server as build_hub
-from slife2.tools import ToolFailed, ToolRegistry
+from slife2.tools import ToolRegistry
 from tests.fakes import StubEmbedder, plugin_transports
 
 pytestmark = pytest.mark.unit
@@ -255,12 +254,6 @@ async def test_a_hub_that_is_the_wrong_build_says_so() -> None:
     async with Client(hub) as client:
         with pytest.raises(ConnectionError, match="slife2 down"):
             await remote_tools(client)
-
-
-def test_tool_failed_and_an_ordinary_raise_are_rendered_differently() -> None:
-    """The one exception whose class name adds nothing to its message."""
-    assert issubclass(ToolFailed, Exception)
-    assert Tool.__name__ == "Tool"
 
 
 @pytest.mark.asyncio

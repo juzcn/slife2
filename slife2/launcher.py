@@ -8,9 +8,11 @@ an MCP server's own business.
 
 The decision that everything else follows from: **a probe is the only authority
 on whether a server is running.**  A listening port proves something is there; a
-record proves something was there once.  Only `tools/list` answering with the
-tool we expect proves that *our* server is up, which is why the record is never
-consulted for liveness and a stale one can never wedge a start.
+record proves something was there once.  Only a server that answers *as itself*
+proves that *our* server is up — its advertised name, from the handshake, or a
+tool it certainly serves when it reports no name (`slife2.mcp_server.identifies`)
+— which is why the record is never consulted for liveness and a stale one can
+never wedge a start.
 """
 
 from __future__ import annotations
@@ -91,7 +93,7 @@ BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
 #: list of programs already installed.  Their identifying tool is what the
 #: fallback check looks for when a server reports no name of its own, so it has
 #: to be one they certainly serve — `cli-server` offers the model nothing at
-#: all, and `catalogue_rows` is the one tool it has.
+#: all, and `list_sources` is the one tool it has.
 SKILLS_SERVER = ("slife2.skills_server", SKILLS_SERVER_NAME, "skill_use")
 CLI_SERVER = ("slife2.cli_server", CLI_SERVER_NAME, "list_sources")
 #: The two that hold somebody else's servers, and identify themselves by the
@@ -449,7 +451,7 @@ def _reuse(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
 def _conflict_detail(spec: ServerSpec) -> str:
     return (
         f"port {spec.port} is held by something that is not {spec.name} "
-        f"(no {spec.expected_tool!r} tool at {spec.url})"
+        f"(nothing calling itself {spec.expected_name!r} at {spec.url})"
     )
 
 

@@ -83,9 +83,10 @@ def test_no_config_is_no_rows(isolated_runtime: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_it_offers_the_model_nothing(tmp_path: Path) -> None:
-    """A plugin with no model-facing tools is the ordinary case — the db, the
-    embedder and the agent server are all the same — and it is what makes the
-    publisher's missing audience mark load-bearing rather than tidy."""
+    """A plugin with no model-facing tools is the ordinary case — the embedder is
+    the same, and so was the agent server until `send_message` was marked — and
+    it is what makes this one's missing audience mark load-bearing rather than
+    tidy."""
     async with Client(build_server(config_for(tmp_path))) as client:
         listed = [tool.name for tool in await client.list_tools()]
 
@@ -93,7 +94,7 @@ async def test_it_offers_the_model_nothing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_publisher_answers_the_whole_section(tmp_path: Path) -> None:
+async def test_the_declaring_plugin_answers_the_whole_section(tmp_path: Path) -> None:
     """The whole list rather than a difference: that is what makes a deleted
     entry stop being a hit, and what lets the hub be the only writer."""
     async with Client(build_server(config_for(tmp_path))) as client:

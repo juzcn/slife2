@@ -120,7 +120,7 @@ INSTRUCTIONS = (
     "returns one turn whole — which is the honest thing for a plugin that "
     "stores without judging. Both of those are the model's, and neither names an "
     "agent: they answer about the conversation the call came from. The same "
-    "plugin holds the tool catalogue, which is the toolhub's: the `tool_*` "
+    "plugin keeps the tool catalogue, which the toolhub decides: the `tool_*` "
     "tools record what tools exist and find them by keyword and by meaning."
 )
 
@@ -547,8 +547,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             source: The server or plugin these tools came from — the key
                 every row is owned by, and what `tool_injectable` filters on.
-            category: `plugin` (ours), `mcp` or `rest` (somebody else's).
-                A skill has no server behind it and is not merged by this.
+            category: `plugin` (ours), `mcp` or `rest` (somebody else's), or
+                `skill`/`cli` for a family that declares rows and has no
+                connection behind them.
             tools: One entry per tool: `name` (what the model calls, and the
                 row's identity — two sources cannot offer one), `description`,
                 `remote_name` (what the far end calls it, which differs when the
@@ -590,13 +591,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """The tools the model may be given now: loaded, and owned by a live source.
 
         **`sources` is the caller's, because liveness is the one thing a database
-        cannot know.**  Which servers are answering is a fact about the hub's
-        connections; this side has no way to ask, so the caller says which
-        sources it is holding a tool list from.
+        cannot know.**  Which sources are answering is a fact about the
+        connections the caller holds — the hub's own to the plugins, and the ones
+        the plugins hold on its behalf; this side has no way to ask, so the
+        caller says which sources it is holding a tool list from.
 
-        A name beginning with `_` is never in this answer: that is the harness's
-        own tool — see `_injectable_sql` in `slife2.db` — and the machinery calls
-        it, not the model.
+        A name beginning with `_` is the harness's own and is not in this answer —
+        with one exception, `_func_tool_unload`, which the model has too because
+        the harness's trim is recorded as a call to it.  See `_injectable_sql` in
+        `slife2.db`, which is where both halves of that rule are.
 
         **The budget is not applied here.**  Trimming the list is a turn-boundary
         decision and it has its own tool (`tool_evict`), because a gate that
@@ -687,7 +690,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             query: What to look for.  Empty browses, ordered by category and
                 name.
-            category: `plugin`, `mcp`, `rest` or `skill`; empty for any.
+            category: `plugin`, `mcp`, `rest`, `skill` or `cli`; empty for any.
             source_id: One owner's name; empty for any.
             status: `enabled`, `disabled` (the config switched it off) or
                 `error` (its source is not answering); empty for any.

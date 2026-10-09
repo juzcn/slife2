@@ -25,9 +25,10 @@ dependencies = [
     # is v1's credstore rather than a reimplementation.
     "credstore>=0.10.5",
     # Provider SDKs.  Imported *only* by the LLM server processes — one per wire
-    # protocol, so `openai` is now imported by two of them and `anthropic` by
-    # one: the TUI, the agent loop and every shared module stay free of both,
-    # which is the whole point of putting the backends behind MCP.
+    # protocol, plus the embeddings server, so `openai` is imported by three of
+    # them and `anthropic` by one: the TUI, the agent loop and every shared
+    # module stay free of both, which is the whole point of putting the backends
+    # behind MCP.
     "openai>=2.46.0",
     "anthropic>=1.2.0",
     "jinja2>=3.1.0",
@@ -36,7 +37,7 @@ dependencies = [
     # package rather than something a backend process holds.  A floor rather
     # than a pin like everything else here, but note that it is still alpha —
     # the DDL it accepts is probed at open time rather than assumed (see
-    # `slife2.db._vec_ddl`), and `distance_metric` and `float[N]` are the parts
+    # `slife2.db._vector_ddl`), and `distance_metric` and `float[N]` are the parts
     # of that alpha this project depends on.  Wheels are `py3-none-*` for every
     # platform CI builds on, so there is no interpreter-specific tag to match.
     "sqlite-vec>=0.1.9",

@@ -18,8 +18,8 @@ configuration has to answer:
             temperature: 0.7
             top_p: 1.0
 
-The other section worth reading here is `tools:` — the *external* MCP servers the
-toolhub connects to:
+The other section worth reading here is `tools:` — the *external* MCP servers,
+which the plugin that owns the section holds a connection to:
 
     tools:
       filesystem:
@@ -37,9 +37,9 @@ toolhub connects to:
 
 Note the two words that are one letter apart throughout this file: `servers:` is
 *our* plugins — the ones slife2 starts, shares and stops — while `tools:` is
-other people's, which the toolhub connects to as a client.  They are different
-things with different failure rules (`slife2.toolhub`), and this is the only
-place both are configured.
+other people's, which `slife2-mcp-tools` holds as a client and declares to the
+hub.  They are different things with different failure rules
+(`slife2.toolhub`), and this is the only place both are configured.
 
 And one section for a program that is neither, because it is already here:
 
@@ -51,18 +51,19 @@ And one section for a program that is neither, because it is already here:
 
 An entry names a command on this machine rather than a server to connect to:
 there is no process for slife2 to start, no URL, and nothing to keep alive — so
-it is not a `tools:` entry, and it is not a plugin either, because slife2 did
-not write it.  What it shares with both is the thing that matters here: **an
-entry is the operator's opt-in**, and this file is where the operator says it.
-That is v1's `cli:` section, ported as configuration.
+it is not a `tools:` entry, and nothing about it is a plugin either, because
+slife2 did not write it.  What it shares with both is the thing that matters
+here: **an entry is the operator's opt-in**, and this file is where the operator
+says it.  That is v1's `cli:` section, ported as configuration.
 
-**Nothing reads this section yet.**  What reads the *other* half of the same
-family has since landed: `skills/` is a playbook folder the toolhub reads
-(`skill_use`, DESIGN.md §8), and where a skill's key comes from is the `skills:`
-section below.  An entry *here* is still configuration and nothing else — the
-tool that runs one per `cli:` entry is the next change (DESIGN.md §9) — so what
-is settled for now is where an entry is written down and what it may say, which
-is what lets a config copied from v1 keep working when that tool lands.
+**`slife2-cli` reads this section**, and declares one catalogue row per entry
+(`cli:yt-dlp`) so that `tool_search` finds a command by what it does.  What is
+still missing is the tool that would *run* one — the row is declared and the
+entry is not yet a tool the model can call (DESIGN.md §9) — so what is settled
+for now is where an entry is written down and what it may say, which is what
+lets a config copied from v1 keep working when that tool lands.  The other half
+of the same family, `skills/`, is read by `slife2-skills`, which serves
+`skill_use`; where a skill's key comes from is the `skills:` section below.
 
 Three things are worth stating outright.
 
@@ -203,9 +204,9 @@ DB_KEY = "db"
 #: plugins all the same, because a family's rows and the tool that reads them
 #: belong to the process that owns the family, and because both have a
 #: model-facing tool still to come (DESIGN.md §9).  Their keys carry the suffix
-#: because the *catalogue sources* they publish under are `skills` and `cli`,
+#: because the *catalogue sources* they declare under are `skills` and `cli`,
 #: which are also their config sections' names — and a source's rows must not
-#: share an id with the tools of the server that publishes them.
+#: share an id with the tools of the server that declares them.
 LOCAL_SERVERS = (
     "embeddings",
     "db",
@@ -466,7 +467,7 @@ class AgentSettings:
 
 @dataclass(frozen=True)
 class ToolServerSettings:
-    """One external MCP server, as the toolhub needs to reach it.
+    """One external MCP server, as the plugin that holds it needs to reach it.
 
     **Two transports, and which one is a fact about the entry rather than a
     field.**  A `command` means a process we start and talk to over its standard
@@ -755,17 +756,13 @@ class Config:
         used = {p.api for p in self.providers.values()}
         return [api for api in API_BACKENDS if api in used]
 
-    def cli_tools(self) -> list[CliToolSettings]:
-        """The `cli:` entries the model may be given, in file order.
-
-        The same accessor shape the `tools:` section had, before it became a
-        plugin's to read: `enabled` is one rule, and two spellings of it is how
-        an entry ends up written down by one reader and skipped by another.  Like
-        those, a disabled entry stays in the file — which is the point of the
-        switch, and the reason this returns a filtered list rather than the
-        mapping.
-        """
-        return [tool for tool in self.cli.values() if tool.enabled]
+    # **There is no `cli_tools()` here, and there is no `tools()` beside it**,
+    # for the reason the `tools:` section's accessor went the same way: `enabled`
+    # is one rule, and a filtered view of a section is a second spelling of it
+    # kept by whoever does not read the section.  The reader is the plugin that
+    # owns the section — `slife2-cli`, `slife2-mcp-tools` — and a switched-off
+    # entry is a row it declares with `status: disabled`, which is not the same
+    # as an entry nobody wrote down.
 
 
 def default_config() -> Config:
@@ -808,8 +805,8 @@ def default_config() -> Config:
             # owned by the process that owns its config section: the playbooks
             # in `<data>/skills/` (`slife2.skills_server`) and the programs the
             # config's `cli:` section records as installed (`slife2.cli_server`).
-            # They publish catalogue rows rather than tools, and the hub is what
-            # merges them — see `slife2.mcp_server.CATALOGUE_ROWS`.
+            # They declare catalogue rows rather than tools, and the hub is what
+            # merges them — see `slife2.mcp_server.LIST_SOURCES`.
             "skills-server": ServerSettings(port=8031),
             "cli-server": ServerSettings(port=8032),
             # And the two whose whole job is somebody else's servers: the
@@ -819,9 +816,11 @@ def default_config() -> Config:
             # tool *set* and no link to anybody.
             "mcp-tools": ServerSettings(port=8033),
             "restapi-tools": ServerSettings(port=8034),
-            # The model's tools, and the only process that holds a tool server's
-            # credentials.  It has two sources: every plugin above, and
-            # everything under `tools:` in the config file.
+            # The model's tools, and the only process that decides what they
+            # are.  It holds no credential and no connection to anybody's
+            # server: every plugin above is asked for a tool list and for the
+            # sources it holds, and the two `*-tools` plugins above are the ones
+            # that reach the entries under `tools:` and `rest-api:`.
             "toolhub": ServerSettings(port=8020),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.

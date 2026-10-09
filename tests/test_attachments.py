@@ -78,7 +78,7 @@ def test_a_missing_file_is_reported_not_skipped(tmp_path) -> None:
 def test_a_remote_url_is_refused(tmp_path) -> None:
     """Fetching an address a prompt named is a request nobody made.
 
-    The plugin's job is to read a file the user already has.
+    This module's job is to read a file the user already has.
     """
     urls, complaints = extract("@https://example.test/a.png")
     assert urls == []

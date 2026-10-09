@@ -255,20 +255,22 @@ def plugin_transports(
     come apart rather than a model with fewer tools.
 
     So a test that builds a hub stands each one up, the way the launcher does.
-    These are in-memory, and apart from the four below they offer the model
+    These are in-memory, and apart from the six below they offer the model
     nothing, which is what most plugins are: asking them is how "nothing for
     you" becomes a fact rather than an assumption.
 
-    **Four are the real servers**, because the hub is not merely a client of
+    **Six are the real servers**, because the hub is not merely a client of
     them — each is the only process that knows something the hub has to ask
     for.  `db` holds the catalogue, and a stand-in with no `tool_*` tools would
     be a catalogueless hub; it runs on the deterministic `StubEmbedder`, so a
     test gets the real merge, the real search and the real budget with no
     embedding endpoint behind them.  `builtins`, `skills-server` and
     `cli-server` are where every tool and row in a default config comes from,
-    and a `blank_plugin` in their place would leave the model with an empty
-    list and a search with nothing to find — which is a hub under test only if
-    what is being tested is a hub with no plugins.
+    and `mcp-tools` and `restapi-tools` are where the entries under `tools:` and
+    `rest-api:` are reached and declared — a `blank_plugin` in any of their
+    places would leave the model with an empty list and a search with nothing to
+    find, which is a hub under test only if what is being tested is a hub with no
+    plugins.
 
     `overrides` replaces or adds a transport by name — a plugin the test
     wants to misbehave, or an entry under `tools:` it wants wired.
