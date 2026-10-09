@@ -213,7 +213,11 @@ async def test_a_skill_is_a_row_so_a_search_can_find_it(isolated_runtime: Path) 
     )
 
     async with Client(hub) as client:
-        found = await call(client, "tool_search", {"query": "browser screenshots"})
+        found = await call(
+            client,
+            "tool_search",
+            {"keywords": ["browser", "screenshots"], "sentences": []},
+        )
         listed = await client.call_tool("list_tools", {})
 
     assert "skill:browser-harness" in found["text"]
@@ -237,13 +241,19 @@ async def test_a_skill_dropped_in_later_is_findable_at_once(
     hub = hub_with_documents()
 
     async with Client(hub) as client:
-        before = await call(client, "tool_search", {"query": "browser"})
+        before = await call(
+            client, "tool_search", {"keywords": ["browser"], "sentences": []}
+        )
         write_skill(isolated_runtime, "browser-harness", description="Drive a browser.")
-        after = await call(client, "tool_search", {"query": "browser"})
+        after = await call(
+            client, "tool_search", {"keywords": ["browser"], "sentences": []}
+        )
 
         # And a deleted one stops being a hit: the merge's other half.
         shutil.rmtree(isolated_runtime / "skills" / "browser-harness")
-        gone = await call(client, "tool_search", {"query": "browser"})
+        gone = await call(
+            client, "tool_search", {"keywords": ["browser"], "sentences": []}
+        )
 
     assert "skill:browser-harness" not in before["text"]
     assert "skill:browser-harness" in after["text"]
@@ -259,19 +269,29 @@ async def test_a_switched_off_command_is_a_row_that_says_so() -> None:
     connection could be in.  A re-merge must not undo it — a mirror that
     re-enabled what the operator switched off would do it on every search.
     """
+    # Both descriptions carry the word the search is for, because that is now
+    # how two rows are seen in one answer: there is no browse to list them with.
     hub = hub_with_documents(
         {
             "yt-dlp": {
                 "command": "yt-dlp",
                 "description": "Download video from 1000+ sites.",
             },
-            "iflow": {"command": "iflow", "description": "Off.", "enabled": False},
+            "iflow": {
+                "command": "iflow",
+                "description": "Download nothing.",
+                "enabled": False,
+            },
         }
     )
 
     async with Client(hub) as client:
-        found = await call(client, "tool_search", {"query": ""})
-        again = await call(client, "tool_search", {"query": ""})
+        found = await call(
+            client, "tool_search", {"keywords": ["download"], "sentences": []}
+        )
+        again = await call(
+            client, "tool_search", {"keywords": ["download"], "sentences": []}
+        )
 
     assert "cli:yt-dlp" in found["text"]
     assert "cli:iflow" in found["text"] and "NOT USABLE: disabled" in found["text"]
@@ -485,10 +505,16 @@ def one_source(**overrides: Any) -> dict[str, Any]:
     return {"sources": [source]}
 
 
-async def declared(hub: Client) -> str:
-    """What the catalogue holds, as the text a browse answers with."""
-    found = await call(hub, "tool_search", {"query": "", "limit": 200})
-    return str(found["text"])
+async def found(hub: Client, query: str) -> str:
+    """What a search for *query* answers with.
+
+    The catalogue is read by *asking for something*, which is the whole of what
+    `tool_search` does now: it finds a tool by what it does and cannot
+    enumerate, so a test that wants to know whether a row exists asks for the
+    row — by its name, which is part of the text a row is found by.
+    """
+    answer = await call(hub, "tool_search", {"keywords": [query], "sentences": []})
+    return str(answer["text"])
 
 
 def as_cli_server(answer: dict[str, Any]) -> dict[str, Any]:
@@ -502,7 +528,7 @@ async def test_a_plugin_declares_the_sources_it_holds() -> None:
     plugin's own name, which is the whole reason a source's health can be about
     a connection without its documents being about one."""
     async with Client(hub_for(connected=as_cli_server(one_source()))) as hub:
-        rows = await declared(hub)
+        rows = await found(hub, "cli:thing")
 
     assert "cli:thing" in rows
 
@@ -514,7 +540,7 @@ async def test_a_declared_source_is_not_the_plugins_own_name() -> None:
     the plugin faltered."""
     answer = one_source(name="cli-server")
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
-        rows = await declared(hub)
+        rows = await found(hub, "cli:thing")
 
     assert "cli:thing" not in rows
 
@@ -534,7 +560,7 @@ async def test_a_plugin_may_not_declare_the_category_the_hub_owns() -> None:
     )
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
         listed = await hub.call_tool("list_tools", {})
-        rows = await declared(hub)
+        rows = await found(hub, "sneaky")
 
     assert "sneaky" not in names(listed.data)
     assert "sneaky" not in rows
@@ -554,7 +580,7 @@ async def test_the_other_categories_are_what_a_plugin_is_for(category: str) -> N
     """
     answer = one_source(category=category)
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
-        rows = await declared(hub)
+        rows = await found(hub, "cli:thing")
 
     assert "cli:thing" in rows
 
@@ -576,7 +602,7 @@ async def test_a_switched_off_source_is_declared_but_not_merged() -> None:
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
-        rows = await declared(hub)
+        rows = await found(hub, "cli:thing")
 
     assert "cli:thing" not in rows, "nothing was merged, so nothing was inserted"
     assert "nowhere" not in {one["name"] for one in reported.data["servers"]}, (
@@ -596,7 +622,7 @@ async def test_only_one_of_ours_may_declare() -> None:
     async with Client(
         hub_for(connected={"stranger": lambda settings: declaring(one_source())})
     ) as hub:
-        rows = await declared(hub)
+        rows = await found(hub, "cli:thing")
 
     assert "cli:thing" not in rows
 
@@ -618,7 +644,7 @@ async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
 
     started = time.monotonic()
     async with Client(hub_for(connected={"skills-server": refuses_to_start})) as hub:
-        found = await call(hub, "tool_search", {"query": "turn"})
+        found = await call(hub, "tool_search", {"keywords": ["turn"], "sentences": []})
     elapsed = time.monotonic() - started
 
     assert found["ok"] is True
@@ -788,7 +814,7 @@ async def test_a_servers_tools_are_on_demand_until_they_are_loaded() -> None:
 
         # Findable, though: the catalogue holds it and the search answers for
         # the whole of what is installed, not only what is in front of the model.
-        found = await call(hub, "tool_search", {"query": "echo"})
+        found = await call(hub, "tool_search", {"keywords": ["echo"], "sentences": []})
         assert "fake__echo" in found["text"]
         assert "func_tool_load" in found["text"], "and the answer says how to use it"
 
@@ -910,36 +936,84 @@ async def test_loading_too_many_names_at_once_is_refused_whole() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_browse_says_how_to_load_one() -> None:
-    """The empty query is the "what is installed, and how do I get one" question.
+async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
+    """A search finds a tool; it does not enumerate them.
 
-    Withholding the mechanism there withheld it exactly where a model asks
-    about it — the hint was appended only for a *search*, which is the case
-    where the model has already found its way to the mechanism.
+    An empty query used to be a *browse* — the answer to "what is installed" —
+    and that made this one tool do two jobs: finding a thing by what it does,
+    which ranks, and listing everything, which cannot.  The listing is a
+    different question with a different shape, so the search declines it and
+    says so, in a sentence that names the way back.
+
+    Both fields empty is the case the schema's `required` invites — a model can
+    fill one with `[]` — and it is refused rather than answered with a page,
+    which matters more than it looks: the request that produced this behaviour
+    in the wild was a model reading the catalogue ten rows at a time to answer
+    "what tools do you have".
     """
     async with Client(hub_for()) as hub:
-        answer = await call(hub, "tool_search", {})
+        omitted = await call(hub, "tool_search", {})
+        empty = await call(hub, "tool_search", {"keywords": [], "sentences": []})
+        blank = await call(
+            hub, "tool_search", {"keywords": ["  "], "sentences": ["\t"]}
+        )
 
-    assert answer["text"], "a browse answers with what is installed"
-    assert "func_tool_load" in answer["text"]
+    for answer in (omitted, empty, blank):
+        assert answer["ok"] is False, "nothing to look for is not a search"
+        assert "not a search" in answer["text"], "and it says why"
+        assert "ask for the list" in answer["text"], "and what to do instead"
 
 
 @pytest.mark.asyncio
-async def test_a_page_size_a_model_wrote_as_text_still_answers() -> None:
-    """A schema saying `integer` is not a promise about what arrives.
+async def test_the_two_inputs_go_to_the_two_legs() -> None:
+    """Words are matched exactly, sentences by meaning, and a row both found wins.
 
-    A model writes `"5"` for `limit` as readily as `5`, and the hub's own tools
-    are the one surface no framework validates: a server's tool is checked
-    against its schema before the body runs, while `tool_search` is a closure
-    called with a plain dict.  So the reading is this module's job, and the
-    failure it prevents is a `ValueError` escaping as an MCP error — a model
-    reading our traceback where it asked for a page.
+    **Splitting them is the point**, not two names for one string: the keyword
+    leg asks for every term it is handed, so a sentence would demand six words
+    at once and match nothing — which is most of why a sentence-shaped query was
+    really a semantic one.  A row the keyword leg found *and* the semantic leg
+    found outranks a row only one of them did, which is the fusion doing what it
+    is for.
+    """
+    hub = hub_with_documents(
+        {"yt-dlp": {"command": "yt-dlp", "description": "Download video."}}
+    )
+    async with Client(hub) as client:
+        # The word is in the row's own text, so the keyword leg answers alone...
+        word = await call(
+            client, "tool_search", {"keywords": ["video"], "sentences": []}
+        )
+        # ...and with no keyword at all, only meaning can find it.  The stub's
+        # vectors make a vocab-free sentence match everything, so what this
+        # asserts is that the *semantic* leg answered with no keyword given.
+        meaning = await call(
+            client, "tool_search", {"keywords": [], "sentences": ["download a video"]}
+        )
+        both = await call(
+            client,
+            "tool_search",
+            {"keywords": ["video"], "sentences": ["download a video"]},
+        )
+
+    assert "cli:yt-dlp" in word["text"] and word["ok"]
+    assert "cli:yt-dlp" in meaning["text"] and meaning["ok"]
+    assert "cli:yt-dlp" in both["text"] and both["ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_says_how_to_load_what_it_found() -> None:
+    """The hint belongs where a model asks about the mechanism: a result.
+
+    Withholding it there withheld it exactly where the question is — a model
+    reads a name in a result and wants it in its list.
     """
     async with Client(hub_for()) as hub:
-        found = await call(hub, "tool_search", {"query": "echo", "limit": "1"})
+        answer = await call(
+            hub, "tool_search", {"keywords": [], "sentences": ["run a command"]}
+        )
 
-    assert found["ok"] is True
-    assert found["text"], "the page came back rather than the parse failure"
+    assert answer["text"], "a hit answers with the rows it found"
+    assert "func_tool_load" in answer["text"]
 
 
 @pytest.mark.asyncio
@@ -970,7 +1044,9 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
         # The list first, as the agent asks for it before every model call —
         # which is also the moment a server's tools become catalogue rows.
         await first.call_tool("list_tools", {})
-        found = await call(first, "tool_search", {"query": "echo"})
+        found = await call(
+            first, "tool_search", {"keywords": ["echo"], "sentences": []}
+        )
         assert "fake__echo" in found["text"], "recorded while the server was up"
 
     # The same data directory, with the entry switched off: no connection, no
@@ -985,7 +1061,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
         build_hub(off, transports=plugin_transports(off), embedder=StubEmbedder())
     ) as hub:
         refused = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
-        found = await call(hub, "tool_search", {"query": "echo"})
+        found = await call(hub, "tool_search", {"keywords": ["echo"], "sentences": []})
 
     assert refused["ok"] is False
     assert "switched off" in refused["text"]

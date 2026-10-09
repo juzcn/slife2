@@ -203,6 +203,7 @@ from slife2.mcp_server import (
     serve,
 )
 from slife2.paths import data_dir, tools_db
+from slife2.textindex import terms
 from slife2.toolclient import UpstreamTool
 
 logger = logging.getLogger(__name__)
@@ -483,12 +484,14 @@ class Catalogue:
         return await self._off_loop((await self.store()).source_counts)
 
     async def search(self, **arguments: Any) -> dict[str, Any]:
-        """Both legs of a tool search, fused.  See `ToolStore.search`."""
+        """Both legs of a tool search, fused.  See `ToolStore.search`.
+
+        The two inputs travel separately because the legs want different things
+        (`ToolStore.search` argues it): the model's *words* are matched exactly
+        and its *sentences* by meaning.
+        """
         store = await self.store()
-        query = str(arguments.pop("query", "") or "")
-        return await store.search(
-            query, embedder=await self._embedder(), **arguments
-        )
+        return await store.search(embedder=await self._embedder(), **arguments)
 
     async def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Move one tool in or out of the model's list.
@@ -1060,53 +1063,77 @@ class LocalTool:
     run: Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]
 
 
-#: What `tool_search` takes.  `query` is required and may be **empty**, which
-#: browses rather than searching — v1's shape, and the reason it is required at
-#: all is that a search with no query is a different request from a search whose
-#: query was forgotten.
+#: How many rows one search answers with.
+#:
+#: The harness's number and not the model's, which is a change: `limit` used to
+#: be a parameter, so a model could ask for the whole catalogue a page at a time
+#: — and did.  What a search is for is finding *a* tool, and a page big enough to
+#: be a listing is the thing this tool stopped being.  `tool_search` finds by
+#: meaning; the tool that enumerates is a different tool, and it will own the
+#: question of how much of the catalogue fits in an answer.
+SEARCH_LIMIT = 10
+
+#: **Two inputs, because the two legs want different things, and nothing else.**
+#: `category`, `source_id`, `status`, `load_status` and `limit` used to be here,
+#: and five filters on a search is five ways to ask a question that is not "find
+#: me the tool that does this": narrowing to one server, or to the rows that are
+#: switched off, is *reading the catalogue* — a different job with a different
+#: answer shape (a list, with no ranking), and §9 of DESIGN says so.
+#:
+#: The single `query` that replaced them is gone too, and this is the reason:
+#: one string went to *both* legs, and the legs want opposite things from it.
+#: The keyword leg asks for every term it is handed, so a sentence — "take a
+#: screenshot of a web page" — demands six words at once and matches nothing;
+#: the semantic leg takes a phrase and is wasted on three loose words.  Measured
+#: on the live catalogue, splitting them is 20/20 against 18/20, and the two
+#: queries the single string missed are found by the two halves of the split
+#: (`work out 17 times 23` by a second sentence, `读一下这个网页的内容` by one
+#: written in English).  Both fields are `required` and either may be an empty
+#: array: a model made to answer both has said which one it means, and a field
+#: that may go unfilled is a leg that silently never runs.
 TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "query": {
-            "type": "string",
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
             "description": (
-                "What the tool is for, in words and phrases. Leave it empty to "
-                "browse what is installed instead."
+                "Words the tool's own text has to contain, one per entry — "
+                "'screenshot', 'pdf', 'sqlite'. Every one of them must be "
+                "there, so list few and make them count. Pass an empty array if "
+                "you have no words in mind: this is the exact-match half, and "
+                "guessing at words makes it find nothing."
             ),
         },
-        "category": {
-            "type": "string",
-            "enum": ["plugin", "mcp", "rest", "skill", "cli"],
-            "description": "One kind of tool only.",
-        },
-        "source_id": {
-            "type": "string",
-            "description": "One server's or plugin's tools only.",
-        },
-        "status": {
-            "type": "string",
-            "enum": ["enabled", "disabled", "error"],
+        "sentences": {
+            "type": "array",
+            "items": {"type": "string"},
             "description": (
-                "`disabled` is switched off in the config; `error` means the "
-                "thing that owns it is not answering."
+                "What you want to do, in your own words — one short sentence or "
+                "phrase per idea ('take a screenshot of a web page'). Matched by "
+                "meaning, not by wording, so this half works when you do not "
+                "know what anything is called. A second entry is a second "
+                "chance, not a longer query: 'calculate 17 * 23' beside "
+                "'arithmetic' finds the calculator that either one alone might "
+                "miss. Pass an empty array if you have no need described in "
+                "words."
             ),
         },
-        "load_status": {
-            "type": "string",
-            "enum": ["loaded", "unloaded", "n/a"],
-            "description": "`loaded` is what you already have in your tool list.",
-        },
-        "limit": {"type": "integer", "description": "How many results at most."},
     },
-    "required": ["query"],
+    # Both, and that is the design: the two legs want different inputs, so a
+    # model made to answer both has told the search which one it means — and a
+    # field that may go unfilled is a leg that silently never runs. An empty
+    # array is a real answer (that half does not apply), and both empty is the
+    # one refusal the tool has.
+    "required": ["keywords", "sentences"],
 }
 
 TOOL_SEARCH_DESCRIPTION = (
-    "Find a tool by what it does — by keyword and by meaning, in one search. "
-    "Your tool list holds only the tools you have loaded; this searches the "
-    "whole catalogue of everything installed, including tools whose server is "
-    "switched off or is not answering. Load what you need with func_tool_load. "
-    "An empty query lists what is installed."
+    "Find a tool by what it does. `keywords` matches the catalogue's own words "
+    "exactly, `sentences` matches by meaning — give both, either may be an empty "
+    "array. Your tool list holds only the tools you have loaded; this searches "
+    "the whole catalogue of everything installed, including tools whose server "
+    "is switched off or is not answering. Load what you need with func_tool_load."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
@@ -1207,21 +1234,6 @@ def local_tools(
     unfindable at the same time.  See `Upstream.declare`.
     """
 
-    def _as_int(value: Any, default: int) -> int:
-        """A number a model wrote, read as leniently as it is written.
-
-        A JSON schema saying `integer` is not a promise about what arrives: a
-        model sends `"10"` for `limit` as readily as `10`, and `int()` on
-        anything else raises — which would answer a tool call with an MCP error
-        instead of the sentence a model can act on.  A page size that cannot be
-        read is the default rather than a refusal, because there is nothing for
-        the model to correct: it asked for a page and it gets one.
-        """
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
     async def search(arguments: dict[str, Any]) -> tuple[str, bool]:
         # Every family that owns rows is asked for its list on the way in,
         # because a search is exactly where something that arrived since the hub
@@ -1229,13 +1241,31 @@ def local_tools(
         # written when nothing changed, and nothing is waited for: a source that
         # is not up yet is asked again on the next search.
         await refresh_declared()
+        # A keyword that holds no *term* — `"***"`, `"—"` — is dropped here
+        # rather than passed on: `match_expression` refuses such a thing with
+        # `EmptyQuery`, and an exception out of a tool call is an MCP error where
+        # the model needed a sentence it can act on.  What is left of the two
+        # lists is what the search is actually asked for.
+        keywords = [word for word in _listed(arguments.get("keywords")) if terms(word)]
+        sentences = _listed(arguments.get("sentences"))
+        if not keywords and not sentences:
+            # Refused rather than answered with everything, which is what this
+            # used to do: an empty query was a *browse*, and a browse is a list.
+            # A list is not a search — it has no ranking, it is as long as the
+            # catalogue, and a model that wanted one tool has to read all of
+            # them — so the tool that finds things by meaning declines to be the
+            # tool that enumerates, and there will be one that enumerates.
+            return (
+                "tool_search needs something to look for: `sentences` is what you "
+                "want to do ('take a screenshot of a page') and `keywords` is the "
+                "words a tool's own text would carry ('screenshot'). Give one of "
+                "them — both empty is not a search. To see everything that is "
+                "installed, ask for the list: no argument enumerates the "
+                "catalogue.",
+                False,
+            )
         found = await catalogue.search(
-            query=str(arguments.get("query") or ""),
-            category=str(arguments.get("category") or ""),
-            source_id=str(arguments.get("source_id") or ""),
-            status=str(arguments.get("status") or ""),
-            load_status=str(arguments.get("load_status") or ""),
-            limit=_as_int(arguments.get("limit"), 10),
+            keywords=keywords, sentences=sentences, limit=SEARCH_LIMIT
         )
         return _results_as_text(found), True
 
@@ -1402,22 +1432,34 @@ def _unload_as_text(found: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _names_of(arguments: Mapping[str, Any]) -> list[str]:
-    """The tool names one `func_tool_load` call is about.
+def _listed(given: Any) -> list[str]:
+    """One of `tool_search`'s two lists, as the list it should have been.
 
-    **One name or several, and a bare string is one name.**  The schema asks for
-    a list, because that is the shape every provider assembles reliably — but a
-    model that passes `"arxiv__search"` instead of `["arxiv__search"]` is asking
-    for exactly the same thing, and refusing it would be pedantry with a
-    round trip as the price.  Duplicates are dropped: loading a name twice is
-    one request.
+    The schema asks for arrays of strings, and a model that writes one bare
+    string instead of `["..."]` is asking for the same thing — `_names_of`
+    makes that argument for `func_tool_load`, and it holds here for the same
+    reason: refusing it would be pedantry with a round trip as the price.
+
+    Blank entries are dropped rather than kept: `[""]` is a *present* field
+    whose content is nothing, which the schema's `required` invites, and a
+    caller that filled both fields that way has given the search no term at all
+    — which is the one case the handler refuses.
     """
-    given = arguments.get("names")
     if isinstance(given, str):
         given = [given]
     if not isinstance(given, Sequence):
         return []
-    return [str(name) for name in dict.fromkeys(given) if str(name).strip()]
+    return [str(item) for item in dict.fromkeys(given) if str(item).strip()]
+
+
+def _names_of(arguments: Mapping[str, Any]) -> list[str]:
+    """The tool names one `func_tool_load` call is about.
+
+    `_listed` is the reading — one or several, a bare string understood,
+    duplicates and blanks dropped.  This exists to say *which* field of which
+    call it is read from, which is the part a reader of `_listed` cannot see.
+    """
+    return _listed(arguments.get("names"))
 
 
 def _results_as_text(found: Mapping[str, Any]) -> str:
@@ -1435,10 +1477,11 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
     """
     rows = found.get("results") or []
     if not rows:
-        return (
-            "Nothing matched. Try fewer or different words — or call tool_search "
-            "with an empty query to see what is installed."
-        )
+        # The advice this used to carry — "call tool_search with an empty query
+        # to see what is installed" — is gone with the browse it named, and a
+        # tool that suggested it would be sending the model to a refusal.  What
+        # is left is the one thing that can still work on a miss.
+        return "Nothing matched. Try fewer or different words."
     lines: list[str] = []
     for row in rows:
         state = [str(row.get("category") or ""), str(row.get("source_id") or "")]

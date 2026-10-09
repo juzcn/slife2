@@ -45,6 +45,7 @@ everything.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 #: The rule set's own version, and the lever that rebuilds what it governs.
 #:
@@ -164,16 +165,28 @@ def terms(query: str) -> list[str]:
     return found
 
 
-def match_expression(query: str) -> str:
-    """The FTS5 `MATCH` expression for a query: every term, quoted, ANDed.
+def match_expression(phrases: str | Sequence[str]) -> str:
+    """The FTS5 `MATCH` expression: every term of every phrase, quoted, ANDed.
+
+    One phrase or several, because a search may be given more than one: the
+    caller's *words* and its *sentences* are different inputs to the two legs —
+    this is the leg that wants the words — and either may arrive as a list.  The
+    terms of all of them are joined into one AND, which is the strictest reading
+    and the right one here: what the caller lists is what it says must be there,
+    so a looser match is the caller's to ask for by listing less.  It is the one
+    thing a *sentence* cannot do — "take a screenshot of a web page" asks for
+    all six of those words at once and so matches nothing — and the reason the
+    words are a separate input at all.
 
     Raises:
-        EmptyQuery: If the query holds no term at all.  Refused rather than
+        EmptyQuery: If there is no term in any of them.  Refused rather than
             answered: an empty `MATCH` pattern matches every row, so accepting
             one would make search an accidental browse, and browsing is what
             `turn_list` is for.
     """
-    found = terms(query)
+    found: list[str] = []
+    for phrase in [phrases] if isinstance(phrases, str) else phrases:
+        found.extend(term for term in terms(phrase) if term not in found)
     if not found:
-        raise EmptyQuery(f"no search term in {query!r}")
+        raise EmptyQuery(f"no search term in {phrases!r}")
     return " AND ".join(f'"{term}"' for term in found)

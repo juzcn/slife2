@@ -1066,7 +1066,41 @@ is the change that a catalogue buys, and it is v1's mechanism restored with one
 difference that matters: because the list is re-read before every *model call*,
 a load takes effect one step later **inside the same turn** — v1 needed a turn
 boundary for that. `tool_search` is the way in and `func_tool_load` is the way
-through; both are the hub's own rows, so they are found and loaded like anything
+through — and **what the way in takes has been narrowed twice**, which is what
+this paragraph is the record of.
+
+It took `category`, `source_id`, `status`, `load_status` and `limit`, and an empty
+`query` was a *browse*: five filters and a listing in one tool, which meant a
+model could (and did) read the catalogue ten rows at a time and call it
+searching. A search ranks; a listing has no ranking to give and is as long as the
+catalogue, so they are two answers and belong to two tools. The filters and the
+page size are gone — the listing is §9's next tool, and a search for *a* tool
+wants the top few.
+
+Then the one `query` that replaced them went too, because one string cannot serve
+both legs. The keyword leg asks for every term it is handed, so a sentence —
+"take a screenshot of a web page" — demands six words at once and matches
+nothing; the semantic leg takes a phrase and is wasted on three loose words. What
+is left is `keywords` and `sentences`, both required, either may be an empty
+array, and each goes to the leg shaped for it: words are matched exactly, meaning
+by meaning. Measured on the live catalogue — 253 tools, the real embedder — the
+split is **20/20 in the page against 18/20** for the single string, and the two
+it missed are found by the two halves of the split: `work out 17 times 23` by a
+second sentence, `读一下这个网页的内容` by one written in English. Every hit in
+the split is inside the top three, against three outside it before.
+
+Two things about that measurement are worth carrying forward, because both look
+like language problems and neither is. **A sentence kills the keyword leg in
+either language** (`take a screenshot of a web page` and `搜索一下附近的餐厅`
+both match nothing — the first six terms `AND`ed, the second one phrase of ten
+adjacent characters), which is why splitting the inputs rather than tuning the
+boolean was the fix. And **Chinese words were never the problem**: a CJK run is
+indexed character by character and queried as a *phrase*, so `搜索` finds the
+rows holding 搜索 and nothing else is needed — no stemming, no bigrams. What
+Chinese shares with English is the one real weakness left: a query in one language
+against a document in another is the semantic leg's alone, and it is the case
+that needed help.
+Both rows are the hub's own, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted — which is the hub's
 own three plus `skill_use`, the one entry there that a plugin serves
 (`ALWAYS_LOADED`, and `_func_tool_unload` is the third of the hub's because the
@@ -1180,6 +1214,13 @@ whose name is not declared is a request the backends refuse.
 
 Named so they are decisions rather than oversights:
 
+- **The listing tool, and the filters `tool_search` used to take.** §8 is the
+  argument for splitting them out; what is missing is the tool. "What is
+  installed" is a page of rows with no ranking — every tool, or one category, or
+  one server's, or the ones switched off — and it is what a model asks when it
+  wants to know what exists rather than find a thing. Nothing needs building on
+  the store's side: `ToolStore.search` still takes all five filters and still
+  browses on an empty query, which is where the tool will sit.
 - **Markdown rendering.** The transcript shows model output as plain text.
 - **`thinking` deltas, and the display decision has since been made.** Both SDKs
   expose them cheaply, and rendering a model's private reasoning as its *answer*

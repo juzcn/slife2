@@ -786,6 +786,24 @@ def _vector_ddl(dimension: int, table: str = "turn_vec") -> str:
     )
 
 
+def as_similarity(distance: float) -> float:
+    """A `vec0` distance as the *similarity* everything above this reads.
+
+    **One place, because there are two indexes.**  Both `turn_vec` and
+    `tool_vec` are declared `distance_metric=cosine`, so a distance is `1 -
+    cosine` and this is its inverse — and the two readers of that fact are a
+    thousand lines apart.  A caller that forgot it would hand a number whose
+    scale runs the other way to something that gates on it: `decisions.gate`
+    keeps what is *above* the floor, so a store offering distances would keep
+    the farthest candidates and drop the nearest, and the keyword leg's exempt
+    candidates would hide it.
+
+    Derived rather than assumed: `_vector_ddl` is where the metric is declared,
+    and its docstring is where the arithmetic is argued.
+    """
+    return 1.0 - distance
+
+
 def _load_vector_index(connection: sqlite3.Connection) -> None:
     """Load the extension into one connection, or say why nothing can work.
 
@@ -1575,7 +1593,7 @@ class TurnStore:
             ).fetchall()
         nearest: dict[int, float] = {}
         for row in rows:
-            nearest.setdefault(int(row["turn_id"]), 1.0 - float(row["distance"]))
+            nearest.setdefault(int(row["turn_id"]), as_similarity(row["distance"]))
         return list(nearest.items())
 
     def _records_in_order(
@@ -2878,8 +2896,9 @@ class ToolStore:
 
     async def search(
         self,
-        query: str,
         *,
+        keywords: Sequence[str] = (),
+        sentences: Sequence[str] = (),
         embedder: Embedder,
         limit: int = 10,
         category: str = "",
@@ -2887,17 +2906,33 @@ class ToolStore:
         status: str = "",
         load_status: str = "",
     ) -> dict[str, Any]:
-        """Tools matching `query`, best first — by keyword and by meaning.
+        """Tools matching the *words* and the *sentences* given, best first.
+
+        **Two inputs, because the two legs want different things**, and giving
+        them the same string was the one thing that could not work: the keyword
+        leg asks for every term it is handed, so a sentence — "take a screenshot
+        of a web page" — demands six words at once and matches nothing, which is
+        most of why a sentence-shaped search was really a semantic search.  The
+        words go to `keywords` and meaning goes to `sentences`, either may be
+        empty, and the fusion is the same one it always was.
 
         Two legs and one fusion, the same shape as a turn search and for the
         same reason: `bm25` is unbounded and depends on the corpus, a cosine
         distance depends on the model, and a rank is comparable by construction.
         A tool both legs found outranks one only one of them did.
 
-        **An empty query is a browse, not an empty answer.**  Nothing asks for
-        the whole catalogue by accident — the caller has to write no query —
-        and v1's rule is the useful one: a list of what exists is how a model or
-        a person finds out what a category holds.
+        **Several sentences are several *lists***, one per phrase, fused like the
+        legs are — not one string glued together.  That is the difference a
+        caller can feel: a sentence added to a longer one *dilutes* the vector it
+        joins, while a sentence added to a list is another chance to be found and
+        costs the others nothing.  They are one `embed` call whatever there are
+        of them; the model is asked for a batch.
+
+        **Both empty is a browse, not an empty answer.**  Nothing asks for the
+        whole catalogue by accident, and a list of what exists is how a model or
+        a person finds out what a category holds — which is why the store still
+        answers it, and why the tool does not (`tool_search` refuses it: a
+        listing is a different question with a different shape, §9 of DESIGN).
 
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is
@@ -2910,31 +2945,35 @@ class ToolStore:
             status=status,
             load_status=load_status,
         )
-        if not query.strip():
+        if not keywords and not any(s.strip() for s in sentences):
             rows = [
                 _search_dict(row)
                 for row in await asyncio.to_thread(self._browse, limit, clauses, values)
             ]
             return {"results": rows, "browsed": True}
 
-        expression = textindex.match_expression(query)
         over = min(limit * _TOOL_OVERFETCH, _MAX_SQL_VARS)
-        ranked = {
-            "keyword": await asyncio.to_thread(
-                self._keyword_hits, expression, over, clauses, values
-            ),
-            "semantic": await self._semantic_hits(query, embedder, over),
-        }
-        similarity = dict(ranked["semantic"])
-        fused = [
-            rowid
-            for rowid, _ in fuse_ranked(
-                {
-                    "keyword": ranked["keyword"],
-                    "semantic": [rowid for rowid, _ in ranked["semantic"]],
-                }
+        ranked: dict[str, list[int]] = {}
+        if keywords:
+            ranked["keyword"] = await asyncio.to_thread(
+                self._keyword_hits,
+                textindex.match_expression(list(keywords)),
+                over,
+                clauses,
+                values,
             )
-        ]
+        similarity: dict[int, float] = {}
+        for index, sentence in enumerate(sentences):
+            if not sentence.strip():
+                continue
+            # One phrase, one list, and the mapping the result rows read their
+            # similarity from: the *nearest* phrase is what a row is measured
+            # against, because that is the one that found it.
+            hits = await self._semantic_hits(sentence, embedder, over)
+            ranked[f"sentence:{index}"] = [rowid for rowid, _ in hits]
+            for rowid, measured in hits:
+                similarity.setdefault(rowid, measured)
+        fused = [rowid for rowid, _ in fuse_ranked(ranked)]
         rows = await asyncio.to_thread(
             self._rows_in_order, fused[:_MAX_SQL_VARS], clauses, values, limit
         )
@@ -2979,7 +3018,12 @@ class ToolStore:
     async def _semantic_hits(
         self, query: str, embedder: Embedder, k: int
     ) -> list[tuple[int, float]]:
-        """Rowids by vector distance, nearest first, with a similarity each.
+        """Rowids, nearest first, **with a similarity each** — not a distance.
+
+        The number is `as_similarity(v.distance)`, the same reading the turn
+        store makes of its own index, because from here up it is a similarity:
+        the row it rides on is shown to a model, and a similarity is the only
+        one of the two that means the same thing when it goes up.
 
         The **raw** query, not the normalized one: normalization is the keyword
         leg's rule, and it inserts a space between every pair of CJK characters,
@@ -3018,8 +3062,13 @@ class ToolStore:
             ).fetchall()
         nearest: dict[str, tuple[int, float]] = {}
         for row in rows:
+            # `as_similarity`, the same conversion the turn store makes, and it
+            # is not cosmetic that both make it: this one's number is printed in
+            # a search result a *model* reads, and a model told "similarity 0.30"
+            # for the nearest row and 0.70 for a worse one sorts them backwards.
             nearest.setdefault(
-                str(row["name"]), (int(row["rowid"]), float(row["distance"]))
+                str(row["name"]),
+                (int(row["rowid"]), as_similarity(row["distance"])),
             )
         return list(nearest.values())
 

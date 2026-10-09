@@ -778,16 +778,24 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     )
     merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
 
-    keyword = asyncio.run(store.search("screenshot", embedder=EMBEDDER))
+    keyword = asyncio.run(store.search(keywords=["screenshot"], embedder=EMBEDDER))
     assert keyword["results"][0]["name"] == "browser__open", (
         "the only row whose text holds the word"
     )
 
     # The stub's vocabulary is the four words it counts, and only one row's
     # document holds `测试` — so this is the semantic leg answering.
-    semantic = asyncio.run(store.search("测试", embedder=EMBEDDER))
+    semantic = asyncio.run(store.search(sentences=["测试"], embedder=EMBEDDER))
     assert semantic["results"][0]["name"] == "browser__open"
-    assert semantic["results"][0]["similarity"] > 0
+    # **A similarity and not a distance**, which the value pins because the two
+    # scales run opposite ways: the row's document holds two of the stub's words
+    # (`工具测试`) and the query one, so the cosine is 1/sqrt(2) ≈ 0.71 and a
+    # cosine distance would be 0.29.  The number is printed in a search result a
+    # model reads and handed to nothing that gates on it here, but the turn store
+    # converts its own (`decisions.gate` keeps what is *above* the floor) — so
+    # one store returning a distance is one store whose numbers mean the other
+    # thing.
+    assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
 def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None:
@@ -800,7 +808,7 @@ def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None
     store = store_at(tmp_path)
     merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
 
-    found = asyncio.run(store.search("keyword", embedder=EMBEDDER))
+    found = asyncio.run(store.search(keywords=["keyword"], embedder=EMBEDDER))
     assert [row["name"] for row in found["results"]] == ["arxiv__search"]
     assert found["results"][0]["schema_bytes"] == 0
 
@@ -819,14 +827,14 @@ def test_an_empty_query_browses_and_the_filters_narrow(tmp_path) -> None:
         "mcp",
         [{**tool("filesystem__read"), "status": STATUS_DISABLED}],
     )
-    browsed = asyncio.run(store.search("", embedder=EMBEDDER))
+    browsed = asyncio.run(store.search(embedder=EMBEDDER))
     assert browsed["browsed"] is True
     assert [row["name"] for row in browsed["results"]] == [
         "arxiv__search",
         "filesystem__read",
     ]
 
-    off = asyncio.run(store.search("", embedder=EMBEDDER, status=STATUS_DISABLED))
+    off = asyncio.run(store.search(embedder=EMBEDDER, status=STATUS_DISABLED))
     assert [row["name"] for row in off["results"]] == ["filesystem__read"]
     assert off["results"][0]["status"] == STATUS_DISABLED
 
