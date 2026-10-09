@@ -1104,6 +1104,21 @@ the keyword leg alone, and none of the 36 now returns nothing — where nine did
 The words were never the poorer text; they never reached the leg that could
 answer them.
 
+**Two sentences are two questions, and are fused as two questions.** The rule is
+`fuse_by_best_rank`: a row is ordered by the best rank it reached in *any* of
+them, and agreeing across two unrelated questions earns nothing. That is not a
+preference, it is arithmetic. `fuse_ranked` sums `1/(k+rank)` over its lists,
+which is right for one question asked twice — the keyword leg and the meaning leg
+of the same request, where a row both found is evidence — and inverted for two:
+a row present in *both* sentences' lists scores at least `1/(k+40) + 1/(k+40)`
+= 0.0200 where a row that is *first* in one scores `1/(k+1)` = 0.0164, so
+mediocre-in-both outranks first-in-one. Measured on the live catalogue, two
+sentences on unrelated subjects put the first question's first answer at
+**rank 10**, below chrome-devtools rows neither question had ranked above
+thirtieth; the best-rank rule gives it **rank 3**. The words belong to every
+question — they are the same request for each — so they are fused into each
+question's list rather than standing as one of their own.
+
 Two things about the measurement are worth carrying forward, because both look
 like language problems and neither is. **A sentence kills the keyword leg in
 either language** (`take a screenshot of a web page` and `搜索一下附近的餐厅`
