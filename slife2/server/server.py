@@ -153,7 +153,7 @@ class ProgressObserver:
         await self._ctx.report_progress(self._count, None, encode(event))
 
 
-@dataclass
+@dataclass(eq=False)
 class Pending:
     """A message submitted to a loop whose turn has not started yet.
 
@@ -161,6 +161,14 @@ class Pending:
     begins.  `AgentLoop.run_turn` re-reads the message list at every step, so a
     message appended early would be seen by the model mid-turn — steering that
     nobody asked for, arriving silently.
+
+    `eq=False` because the inbox is a queue of *submissions* and not of values.
+    `deque.remove` compares by equality, so the generated `__eq__` — which
+    compares `(prompt, images, channel)` — would make two callers who sent the
+    same text one entry: the first turn takes its own message out of the queue,
+    and its closing `remove` then takes the *other* caller's place in it, since
+    that entry is equal.  The count `MAX_QUEUED` guards would then fall below
+    the number of callers actually waiting, which is the bound's whole job.
     """
 
     prompt: str
@@ -656,6 +664,7 @@ def build_server(
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
+        nonlocal db_conn, hub_conn
         try:
             yield {}
         finally:
@@ -669,10 +678,18 @@ def build_server(
                 await close_server(client)
             clients.clear()
             model_backends.clear()
+            # Closed *and* forgotten, which is what `clients.clear()` above is
+            # for as well: this hook is not the process's lifetime over the
+            # in-memory transport, so a client left in place here is one the
+            # next session is handed already shut — every turn of it failing at
+            # its first hop.  Clearing is what lets `db()` and `hub()` open
+            # again.
             if db_owned and db_conn is not None:
                 await close_server(db_conn)
+                db_conn = None
             if hub_owned and hub_conn is not None:
                 await close_server(hub_conn)
+                hub_conn = None
 
             # `loops` is deliberately **not** cleared here.  It is state the
             # process owns, and this hook is not the process's lifetime: over
@@ -774,11 +791,22 @@ def build_server(
                     with contextlib.suppress(ValueError):
                         loop.inbox.remove(item)
                     await run_turn_into(loop, item, ProgressObserver(ctx), outcome)
-            except asyncio.CancelledError:
+            except BaseException:
+                # A turn that happened is recorded however it ended, and this
+                # is deliberately one clause rather than a handler per ending —
+                # see `remember_turn` for why the rule is written that way.  A
+                # provider that answered with a 500 is the case that made it
+                # matter: the same turn that leaves the user's message in the
+                # transcript must not leave it missing from the record, which
+                # is the failure a write conditional on *how* a turn ended
+                # produces.
+                #
+                # Detached for two reasons.  From a cancelled handler a plain
+                # await is cancelled again, which is the measurement `detach`
+                # records.  And on any other failure the store may be the very
+                # thing that is gone, where waiting on it would replace the
+                # error the caller needs to see with the one it caused.
                 if outcome.messages:
-                    # Our turn had started, so it happened, and a turn that
-                    # happened is recorded — see `remember_turn`.  Detached,
-                    # because a plain await here is cancelled again.
                     detach(record(loop, item, outcome))
                 raise
             else:

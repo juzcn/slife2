@@ -18,9 +18,11 @@ and two loops on one server never see each other.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import socket
 import sqlite3
+from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -35,7 +37,7 @@ from slife2.config import DEFAULT_AGENT, default_config
 from slife2.events import TurnEvent, decode
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import StreamChatResult, ToolCall, Usage
-from slife2.server.server import ProgressObserver, build_server
+from slife2.server.server import Pending, ProgressObserver, build_server
 
 pytestmark = pytest.mark.unit
 
@@ -507,6 +509,123 @@ async def test_an_interrupted_turn_is_still_recorded(
     stored = json.loads(rows[0][0])
     assert [m["role"] for m in stored] == ["user"]
     assert stored[0]["content"] == "one"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_turn_whose_model_call_failed_is_still_recorded(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """A failure is a way a turn ends, not a reason to lose it.
+
+    The cancel path is the case the rule was written for, and it is not the
+    only one: a provider that answers a 500 has already appended the user's
+    message to the conversation, so the next turn sends it and the transcript
+    shows it — which makes a missing row the same "conversation the database
+    has never heard of" the rule exists to prevent.  Recording is therefore
+    keyed on the turn having happened, not on how it ended.
+    """
+    from slife2.db_server import build_server as build_db
+    from slife2.paths import DATA_ENV_VAR, db_dir
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    class Refusing(FakeBackend):
+        """A model call that fails the way a provider's error does."""
+
+        def stream(self, messages, tools) -> Stream:
+            self.calls.append((list(messages), list(tools)))
+            raise RuntimeError("the provider answered 500")
+
+    async with Client(build_db(config(), embedder=StubEmbedder())) as db_client:
+        server = build_server(
+            config(), backend=Refusing(), db_client=db_client, hub_client=hub
+        )
+        with pytest.raises(Exception, match="500"):
+            await send(server, "one")
+        # The write is detached so that a store which is also gone cannot
+        # replace the failure the caller needs to see; give it a moment.
+        await asyncio.sleep(0.5)
+
+    rows = (
+        sqlite3.connect(db_dir() / f"{DEFAULT_AGENT}.turn.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user"]
+    assert stored[0]["content"] == "one"
+
+
+def test_two_identical_prompts_are_two_places_in_the_queue() -> None:
+    """The inbox holds submissions, not values.
+
+    `deque.remove` compares by equality, so a `Pending` that compared by its
+    fields would make two callers who sent the same text a single entry: the
+    turn that starts takes its own message out, and the removal on the way out
+    — a no-op for the entry it already took — then silently takes the place of
+    the caller still waiting behind it.  The queue would count fewer waiters
+    than it has, and `MAX_QUEUED`, whose whole job is to bound that wait, would
+    stop firing when it should.
+    """
+    first = Pending(prompt="same", images=[], channel="human")
+    second = Pending(prompt="same", images=[], channel="human")
+    queue: deque[Pending] = deque([first, second])
+
+    # What `send_message` does: once when the turn starts, once on the way out.
+    with contextlib.suppress(ValueError):
+        queue.remove(first)
+    with contextlib.suppress(ValueError):
+        queue.remove(first)
+
+    assert list(queue) == [second], "the waiting caller lost its place"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -> None:
+    """A client the lifespan closed is also a client it forgot.
+
+    FastMCP runs the lifespan once per client session over the in-memory
+    transport — `lifespan`'s own comment says so, and `send` reconnects on
+    every call — so a client left in `db_conn`/`hub_conn` after being closed is
+    one the next session is handed already shut, and every turn of that session
+    fails at its first hop.  No other test here notices, because every other
+    one injects its clients rather than letting the server own them.
+    """
+    from slife2.config import DB_SERVER_NAME, TOOLHUB_SERVER_NAME
+    from slife2.db_server import build_server as build_db
+    from slife2.paths import DATA_ENV_VAR
+    from slife2.server import server as server_module
+    from slife2.toolhub import build_server as build_hub
+    from tests.fakes import component_transports
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    opened: list[str] = []
+
+    async def open_ours(_url, **kwargs):
+        name = kwargs.get("name", "")
+        opened.append(name)
+        if name == DB_SERVER_NAME:
+            client = Client(build_db(default_config(), embedder=StubEmbedder()))
+        else:
+            assert name == TOOLHUB_SERVER_NAME
+            client = Client(
+                build_hub(
+                    default_config(),
+                    transports=component_transports(default_config()),
+                )
+            )
+        await client.__aenter__()
+        return client
+
+    monkeypatch.setattr(server_module, "open_server", open_ours)
+    server = build_server(
+        config(), backend=FakeBackend(text_turn("the answer"), text_turn("the answer"))
+    )
+
+    assert (await send(server, "one")).data["text"] == "the answer"
+    assert (await send(server, "two")).data["text"] == "the answer"
+    assert opened.count(DB_SERVER_NAME) == 2, "a session reused a closed client"
 
 
 # --- persistence -------------------------------------------------------------
