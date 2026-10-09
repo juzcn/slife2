@@ -1557,7 +1557,7 @@ def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
     cosine is graded — and the rest are by meaning.  A model that assumed one
     rule would misread a page that has both.
     """
-    worded = sum(1 for row in rows if row.get("matched_words"))
+    worded = sum(1 for row in rows if row.get("matched_in"))
     if best >= MATCH_FLOOR:
         head = f"Best match {best:.2f} by meaning."
     elif best >= WEAK_FLOOR or worded:
@@ -1635,8 +1635,17 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
             state.append(f"NOT USABLE: {status}")
         elif row.get("load_status") == "loaded":
             state.append("loaded")
-        if row.get("matched_words"):
+        matched = row.get("matched_in")
+        if matched == "line":
             state.append("matched your words")
+        elif matched == "rest":
+            # The words are in the row, just not in the two columns printed here
+            # — a tool's parameters, or a skill's whole playbook.  Naming which
+            # is what makes the mark checkable instead of mysterious.
+            state.append(
+                f"matched your words in its "
+                f"{'body' if str(row.get('category')) == SKILL else 'parameters'}"
+            )
         similarity = row.get("similarity")
         if isinstance(similarity, float):
             state.append(f"meaning {similarity:.2f}")

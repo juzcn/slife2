@@ -799,6 +799,43 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
+def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) -> None:
+    """`matched_in` is `line` or `rest`, and `rest` is the one that needed saying.
+
+    A row is indexed by five columns and a result line prints two of them, so a
+    row can carry `matched your words` with nothing in the printed text to check
+    it against — measured on the report's own call, `skill:browser-harness`
+    matched `read`/`file` through the playbook that rides in its `schema` column
+    while its description mentions neither.  A mark that cannot be checked is a
+    mark the reader has to take on faith, so the answer says which side it is.
+
+    The schema column is where this happens for a tool too — the parameters are
+    printed nowhere — which is why the test needs no skill to make the point.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "office",
+        "mcp",
+        [
+            tool("office__convert", "Transform a document.", schema='{"query": "工具"}'),
+            tool("office__other", "Transform a document."),
+        ],
+    )
+
+    # A sentence as well as the words, because the words alone shortlist only the
+    # rows they matched and the second row would not be on the page to check.
+    answer = asyncio.run(
+        store.search(keywords=["工具"], sentences=["a document"], embedder=EMBEDDER)
+    )
+    by_name = {row["name"]: row for row in answer["results"]}
+
+    assert by_name["office__convert"]["matched_in"] == "rest", (
+        "the word is in the parameters, which no line prints"
+    )
+    assert "matched_in" not in by_name["office__other"], "and a row the words missed"
+
+
 def test_a_row_the_meaning_leg_never_saw_still_carries_its_number(tmp_path) -> None:
     """Every row on the page has a meaning number, including the ones words found.
 

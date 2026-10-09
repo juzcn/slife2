@@ -1117,7 +1117,7 @@ def test_the_verdict_describes_the_two_tiers_and_never_a_rest_that_is_absent() -
     and the header still said "the rest are by meaning", describing a rest that
     was not there.
     """
-    worded = [{"matched_words": True}]
+    worded = [{"matched_in": "line"}]
     plain = [{}]
 
     assert "All of these matched your words" in str(_verdict(worded, 0.7))

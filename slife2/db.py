@@ -2140,7 +2140,7 @@ def _search_dict(
     row: sqlite3.Row,
     similarity: float | None = None,
     *,
-    matched_words: bool = False,
+    matched_in: str | None = None,
 ) -> dict[str, Any]:
     """One search result: what a chooser needs, and no more.
 
@@ -2150,18 +2150,21 @@ def _search_dict(
     still gets no key rather than an invented `0.0`, which would read as "found
     by meaning, and it is a bad match".
 
-    `matched_words` is the other half and is not a score: the row's own text
-    contains every word the caller gave, which is certain where a similarity is
-    graded — and is the one piece of evidence a cutoff cannot express, since a
-    row can be named exactly whatever it scores (`pandoc`, at 0.514).
+    `matched_in` is the other half and is not a score: the row's own text holds
+    every word the caller gave, which is certain where a similarity is graded —
+    and is the one piece of evidence a cutoff cannot express, since a row can be
+    named exactly whatever it scores (`pandoc`, at 0.514).  **`"line"` or
+    `"rest"` says whether those words are in the text the answer prints**, and
+    that is not a detail: a mark whose evidence is not on the page is a mark the
+    reader cannot check.
     """
     found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
     schema = str(row["schema"] or "")
     found["schema_bytes"] = 0 if schema in ("", NA) else len(schema)
     if similarity is not None:
         found["similarity"] = similarity
-    if matched_words:
-        found["matched_words"] = True
+    if matched_in is not None:
+        found["matched_in"] = matched_in
     return found
 
 
@@ -2996,14 +2999,11 @@ class ToolStore:
             return {"results": rows, "browsed": True}
 
         over = min(limit * _TOOL_OVERFETCH, _MAX_SQL_VARS)
+        expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
             keyword_hits = await asyncio.to_thread(
-                self._keyword_hits,
-                textindex.match_expression(list(keywords)),
-                over,
-                clauses,
-                values,
+                self._keyword_hits, expression, over, clauses, values
             )
 
         # **The shortlist, one list per question.**  `keywords` is what the caller
@@ -3069,17 +3069,61 @@ class ToolStore:
         rows = await asyncio.to_thread(
             self._rows_in_order, ordered, clauses, values, limit
         )
+
+        # **Where the words are, for the rows they matched** — the line shows two
+        # of the five columns a row is indexed by, so a row can be marked `matched
+        # your words` with nothing on the line to check it against: a skill's
+        # whole playbook rides in its `schema` column, and `skill:browser-harness`
+        # matches `read`/`file` through the body while its description says
+        # nothing about either.  A mark whose evidence cannot be seen is a mark
+        # that cannot be checked, so the answer says which side it is on.
+        page = [int(row["rowid"]) for row in rows]
+        inline = (
+            await asyncio.to_thread(self._matched_in_line, expression, page)
+            if worded
+            else set()
+        )
         return {
             "results": [
                 _search_dict(
                     row,
                     meaning.get(int(row["rowid"])),
-                    matched_words=int(row["rowid"]) in worded,
+                    matched_in=(
+                        None
+                        if int(row["rowid"]) not in worded
+                        else "line" if int(row["rowid"]) in inline else "rest"
+                    ),
                 )
                 for row in rows
             ],
             "browsed": False,
         }
+
+    def _matched_in_line(self, expression: str, rowids: Sequence[int]) -> set[int]:
+        """Which of those rows hold the words in the columns the line prints.
+
+        `{name description}` is what a result line shows; `category`, `source_id`
+        and `schema` are indexed and unshown, and `schema` is the one that carries
+        something substantial — a tool's parameters, or for a skill the whole
+        playbook (`tool_document` argues the column, and this is not the place it
+        is what it says).
+
+        The filter is a column-scoped `MATCH` rather than a token comparison in
+        Python: what counts as a word here is `unicode61`'s answer, and a second
+        implementation of that would disagree with the index at the edges — which
+        is the same reason `normalize` and `terms` are one module.
+        """
+        if not rowids:
+            return set()
+        with self._connect() as connection:
+            return {
+                int(row["rowid"])
+                for row in connection.execute(
+                    "SELECT f.rowid AS rowid FROM tool_fts f"
+                    f" WHERE tool_fts MATCH ? AND f.rowid IN ({_marks(rowids)})",
+                    (f"{{name description}} : ({expression})", *rowids),
+                )
+            }
 
     def _meaning_of(
         self, rowids: Sequence[int], queries: Sequence[Sequence[float]]
