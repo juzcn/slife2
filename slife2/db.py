@@ -695,6 +695,37 @@ def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, f
     return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
 
 
+def fuse_by_best_rank(lists: Sequence[Sequence[int]]) -> list[tuple[int, int]]:
+    """One entry per id, ordered by the best rank it reached in any list.
+
+    **For lists that are answers to different questions.**  `fuse_ranked` sums
+    `1/(k+rank)` over its lists, which is right when they are one question asked
+    twice — a row both legs found is evidence about that question — and wrong
+    when they are not, because then agreeing means nothing.  And the difference
+    is arithmetic, not taste: with two lists, a row present in *both* scores at
+    least `1/(k+40) + 1/(k+40)` = 0.0200, while a row that is *first* in one of
+    them scores `1/(k+1)` = 0.0164.  So a row that placed badly in both outranks
+    every row that placed well in either — which is what "the second sentence
+    demoted the first sentence's answer" is, measured.
+
+    The best rank instead: `min` over a growing set of lists can only fall, so
+    **another question is another chance and can never cost a row an earlier one
+    already found**.  That is the promise the second entry in `sentences` is
+    documented as making, and this is the rule that keeps it.  Ties fall to the
+    earlier list, so the order a caller wrote its questions in is their priority.
+
+    Returns `(id, the rank it was ordered by)` — the shape `fuse_ranked` returns,
+    with a rank where that one has a score.  The two numbers are not comparable.
+    """
+    best: dict[int, tuple[int, int]] = {}
+    for position, ids in enumerate(lists):
+        for rank, row_id in enumerate(ids, start=1):
+            if row_id not in best or rank < best[row_id][0]:
+                best[row_id] = (rank, position)
+    order = sorted(best.items(), key=lambda item: item[1])
+    return [(row_id, rank) for row_id, (rank, _) in order]
+
+
 def _time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
     """`(clauses, params)` for a `created_at` window.
 
@@ -2921,12 +2952,15 @@ class ToolStore:
         distance depends on the model, and a rank is comparable by construction.
         A tool both legs found outranks one only one of them did.
 
-        **Several sentences are several *lists***, one per phrase, fused like the
-        legs are — not one string glued together.  That is the difference a
-        caller can feel: a sentence added to a longer one *dilutes* the vector it
-        joins, while a sentence added to a list is another chance to be found and
-        costs the others nothing.  They are one `embed` call whatever there are
-        of them; the model is asked for a batch.
+        **Several sentences are several *questions*, not one longer query.**  Not
+        one string glued together, because that dilutes the vector; and not
+        several lists under one fusion either, which is what this did and what it
+        got wrong — see `fuse_by_best_rank`, where the arithmetic is, and where
+        the rule that replaces it is argued.  What a caller can then rely on is
+        one thing, and it is the one a second entry promises: **another question
+        is another chance to be found, and cannot cost a row that an earlier one
+        already found.**  They are one `embed` call whatever there are of them;
+        the model is asked for a batch.
 
         **Both empty is a browse, not an empty answer.**  Nothing asks for the
         whole catalogue by accident, and a list of what exists is how a model or
@@ -2953,27 +2987,44 @@ class ToolStore:
             return {"results": rows, "browsed": True}
 
         over = min(limit * _TOOL_OVERFETCH, _MAX_SQL_VARS)
-        ranked: dict[str, list[int]] = {}
+        keyword_hits: list[int] | None = None
         if keywords:
-            ranked["keyword"] = await asyncio.to_thread(
+            keyword_hits = await asyncio.to_thread(
                 self._keyword_hits,
                 textindex.match_expression(list(keywords)),
                 over,
                 clauses,
                 values,
             )
+
+        # **One list per question, and the words belong to every one of them.**
+        # `keywords` is what the caller has in mind, so where there is a sentence
+        # it is that sentence's other leg and is fused into that question — a row
+        # both legs found is evidence *about that question*.  Across questions
+        # there is no such evidence, which is what `fuse_by_best_rank` is for and
+        # why the words are not also a list of their own: they are the same
+        # request for every sentence, so a fourth copy of them would be four
+        # votes for whatever they alone found.
+        phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
         similarity: dict[int, float] = {}
-        for index, sentence in enumerate(sentences):
-            if not sentence.strip():
-                continue
-            # One phrase, one list, and the mapping the result rows read their
-            # similarity from: the *nearest* phrase is what a row is measured
-            # against, because that is the one that found it.
-            hits = await self._semantic_hits(sentence, embedder, over)
-            ranked[f"sentence:{index}"] = [rowid for rowid, _ in hits]
+        questions: list[list[int]] = []
+        for (index, _), hits in zip(
+            phrases, await self._semantic_lists(sentences, embedder, over), strict=True
+        ):
+            # The *nearest* sentence stands for a row when several found it,
+            # because that is the one that found it — `setdefault` is what says
+            # the first hit is the nearest.
+            legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
+            if keyword_hits is not None:
+                legs["keyword"] = keyword_hits
+            questions.append([rowid for rowid, _ in fuse_ranked(legs)])
             for rowid, measured in hits:
                 similarity.setdefault(rowid, measured)
-        fused = [rowid for rowid, _ in fuse_ranked(ranked)]
+        if keyword_hits is not None and not questions:
+            # Words with no sentence are one question with one view.
+            questions.append(keyword_hits)
+
+        fused = [rowid for rowid, _ in fuse_by_best_rank(questions)]
         rows = await asyncio.to_thread(
             self._rows_in_order, fused[:_MAX_SQL_VARS], clauses, values, limit
         )
@@ -3015,39 +3066,46 @@ class ToolStore:
             ).fetchall()
         return [int(row["rowid"]) for row in rows]
 
-    async def _semantic_hits(
-        self, query: str, embedder: Embedder, k: int
-    ) -> list[tuple[int, float]]:
-        """Rowids, nearest first, **with a similarity each** — not a distance.
+    async def _semantic_lists(
+        self, sentences: Sequence[str], embedder: Embedder, k: int
+    ) -> list[list[tuple[int, float]]]:
+        """One ranked list per sentence, out of **one** `embed` call.
 
-        The number is `as_similarity(v.distance)`, the same reading the turn
-        store makes of its own index, because from here up it is a similarity:
-        the row it rides on is shown to a model, and a similarity is the only
-        one of the two that means the same thing when it goes up.
+        A batch, which is what `search`'s docstring has always claimed and what
+        a call per sentence did not do: three sentences were three round trips to
+        the model, with the answer to each never looked at while the next was
+        asked for.  Blank sentences are dropped before the call, so the caller's
+        list and the answer line up by position.
 
-        **That conversion is `_nearest`'s, and this method must not repeat it.**
-        It used to: the value came back already a similarity, under a variable
-        named `distance`, and `1.0 - distance` inverted it a second time — so the
-        nearest tool carried the *lowest* score in a result a model reads, which
-        is the failure `_nearest` warns about two functions down.  The turn store
-        converts in its own KNN and passes the result straight up; this is the
-        same shape, and the rounding and the floor are all that is left here.
+        Each rowid carries `as_similarity(d)` — **a similarity, not a distance**,
+        converted in `_nearest` and not again here.  That is what `_nearest`
+        warns about below, and this method used to be the thing it was warning
+        about: it took an already-converted similarity under a variable named
+        `distance` and inverted it a second time, so the nearest tool carried the
+        lowest score in a result a model reads.  A distance would be the other
+        way round and would mean something else.
 
-        The **raw** query, not the normalized one: normalization is the keyword
+        The **raw** sentences, not normalized ones: normalization is the keyword
         leg's rule, and it inserts a space between every pair of CJK characters,
-        which is what makes them tokens there and is nonsense as text handed to
-        a model.
+        which is what makes them tokens there and is nonsense as text handed to a
+        model.
         """
-        vectors = await embedder.embed([query])
-        if len(vectors) != 1:
+        wanted = [sentence for sentence in sentences if sentence.strip()]
+        if not wanted:
+            return []
+        vectors = await embedder.embed(wanted)
+        if len(vectors) != len(wanted):
             raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for one "
-                f"query, so this search cannot say what a tool is about"
+                f"the embedding model answered {len(vectors)} vectors for "
+                f"{len(wanted)} sentences, so this search cannot say what a "
+                f"tool is about"
             )
-        nearest = await asyncio.to_thread(
-            self._nearest, sqlite_vec.serialize_float32(vectors[0]), k
-        )
-        return [(rowid, round(max(0.0, similarity), 4)) for rowid, similarity in nearest]
+        return [
+            await asyncio.to_thread(
+                self._nearest, sqlite_vec.serialize_float32(vector), k
+            )
+            for vector in vectors
+        ]
 
     def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, and the dedup it cannot do itself.

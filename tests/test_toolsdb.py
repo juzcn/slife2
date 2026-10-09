@@ -28,6 +28,8 @@ from slife2.db import (
     STATUS_ERROR,
     UNLOADED,
     ToolStore,
+    fuse_by_best_rank,
+    fuse_ranked,
 )
 from tests.fakes import StubEmbedder
 
@@ -796,6 +798,62 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     # one store returning a distance is one store whose numbers mean the other
     # thing.
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
+
+
+def test_lists_that_answer_different_questions_do_not_borrow_from_each_other() -> None:
+    """A row in two lists beats a row that is first in one — under the wrong rule.
+
+    `fuse_ranked` sums `1/(k+rank)` over its lists, and that is right when they
+    are one question asked twice: a row both legs found is evidence about *that*
+    question.  Given two different questions it inverts the answer, and not
+    marginally — a row present in both scores at least `1/(k+40) + 1/(k+40)`
+    = 0.0200, where a row that is *first* in one of them scores `1/(k+1)`
+    = 0.0164.  So `20`, second in both lists, is the sum's first answer and the
+    best placement's last.
+
+    Both spellings are asserted, because the point of the second is the first:
+    whoever reaches for `fuse_ranked` on several sentences should meet this
+    test's name rather than a search that answers a question nobody asked.
+    """
+    one, two, both = 10, 20, 30
+
+    assert next(iter(fuse_ranked({"a": [one, both], "b": [two, both]})))[0] == both, (
+        "the sum rewards agreeing across questions"
+    )
+    assert fuse_by_best_rank([[one, both], [two, both]]) == [
+        (one, 1),
+        (two, 1),
+        (both, 2),
+    ], "and the best placement does not"
+
+
+def test_a_second_question_does_not_demote_what_the_first_one_found(tmp_path) -> None:
+    """Another question is another chance, and costs the rows already found nothing.
+
+    The promise a second entry in `sentences` makes, and the one the store broke:
+    fused as if both questions were one, the first question's first answer came
+    back *below* rows that were merely mediocre in both lists — `fetch` at tenth
+    behind two chrome-devtools rows that neither question had ranked above
+    thirtieth.
+
+    The stub's vectors are orthogonal, so each question has exactly one row that
+    is genuinely nearest and the other at zero.  The second row is merged second
+    so that it carries the *higher* rowid, which is what the old tie-break —
+    a tie at `1/61 + 1/62` each, settled by the larger id — handed the win to.
+    """
+    store = store_at(tmp_path)
+    merge(store, "browser", "mcp", [tool("browser__tools", "工具")])
+    merge(store, "arxiv", "mcp", [tool("arxiv__papers", "测试")])
+
+    alone = asyncio.run(store.search(sentences=["工具"], embedder=EMBEDDER))
+    together = asyncio.run(
+        store.search(sentences=["工具", "测试"], embedder=EMBEDDER)
+    )
+
+    assert alone["results"][0]["name"] == "browser__tools", "the first question"
+    assert together["results"][0]["name"] == "browser__tools", (
+        "and the second question did not displace it"
+    )
 
 
 def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None:
