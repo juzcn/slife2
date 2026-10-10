@@ -493,6 +493,31 @@ common one is `{}` — **a decision that asks for exactly what is in hand rebuil
 nothing at all**, which is what keeps a call this expensive from being paid for
 nothing.
 
+**The query is words, and the instruction is where that is said.** The two legs
+want different things from one string: the words are matched exactly and are
+asked for *all at once* (`textindex.match_expression`), while the meaning leg
+reads whatever it is handed. So a sentence is a query with one leg switched off,
+and it is measured: on the live turn log — 17 turns, the real embedder — a
+sentence-shaped query fires the keyword leg **not once in 16**, and the log's own
+seventeen inputs are the same fact from the other side, sixteen of them reaching
+only the turn they were typed into. A word-shaped query fires it 10 times in 15
+and finds the target with it on 9 of those. The meaning leg is unharmed either
+way — a compact word list ranks the same as the sentence it was taken from
+(36/36 and the same MRR on the 130-tool catalogue, §8) — so naming the subject is
+the shape that keeps both halves working, and it gives up nothing.
+
+**And that shape is asked for in prose rather than in the store, because the
+recall is good either way.** Measured on the same log, the target came back in 32
+of 32 queries and was ranked first in 25, the meaning leg alone finding every one
+of them, and no page was emptied by `min_similarity`. The split `tool_search`
+uses — the words to the keyword leg, the sentences to the meaning leg — measured
+one row of rank in fifteen here; and the half of it that mattered most there (a
+keywords-only call reaching the meaning leg, 23/36 to 34/36, §8) is what a single
+query already does for turns, since `recall` hands its one string to both legs
+and a recall has exactly one question for `fuse_ranked` to fuse. So the template
+and `RECALL_REPLY` say what the query is and `slife2.db` is left alone: one row
+of rank is not worth a second field that every reply has to get right.
+
 **The decision is reported, because it is the one thing in a turn nobody sees.**
 `rebuild` answers with two counts — what survived of the turns in hand, and how
 many came back from the log — and the agent server turns them into a

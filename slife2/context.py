@@ -50,7 +50,10 @@ RECALL_REPLY: dict[str, Any] = {
         'none ("clear"), or the turn_ids to keep, e.g. [12, 15].'
     ),
     "recall": {
-        "query": "Search text. Omit for no search.",
+        "query": (
+            "Words and short phrases naming the subject, not the input. "
+            "Omit for no search."
+        ),
         "since": "Start of a period, in the grammar the turn headers use.",
         "until": "End of a period.",
         "anchor": (

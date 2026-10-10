@@ -24,9 +24,13 @@ What to recall from the turn log — "recall": leave it out for nothing, or fill
 in for one condition — a period (since / until), a query, or a query within a
 period.
 
-The "query" holds what turn recall needs — keywords, short phrases, or the full
-user input, in any combination — matched against the stored turns by a hybrid
-of full-text and semantic search.
+The "query" holds what turn recall needs — the words and short phrases that name
+the subject — matched against the stored turns by a hybrid of full-text and
+semantic search: the words exactly, the meaning by meaning. Name the subject
+rather than pasting the input in, because the words are asked for all at once: a
+sentence is matched only by a turn holding every term of it, while the meaning
+half reads the query as it stands either way. A pasted input is not refused; it
+is answered by meaning alone. "management school dean" is the shape.
 
 "since" and "until" take a date, or any of: today, yesterday, this week, last
 week, this month, last month, this year, last year, "N days ago", "N weeks ago",
