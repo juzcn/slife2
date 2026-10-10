@@ -86,6 +86,17 @@ def agent_key(name: str) -> str:
     return _digest(f"agent:{name}")
 
 
+def config_key(path: Path) -> str:
+    """The digest naming one config file's write lock.
+
+    Digested rather than the file's name, and for the reason the two above are:
+    a key reaches the OS as a file name (POSIX) or a mutex name (Windows), and a
+    path is neither.  Prefixed so a config file called like an endpoint cannot
+    share a lock with it — the same collision `agent_key` is spelled out against.
+    """
+    return _digest(f"config:{path}")
+
+
 def log_path(url: str) -> Path:
     return _sub("logs") / f"{endpoint_key(url)}.log"
 
