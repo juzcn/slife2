@@ -893,7 +893,11 @@ def context_of(kept: int, recalled: int):
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
-                text="ok", usage=Usage(), last_usage=Usage(), steps=1, stop_reason="stop"
+                text="ok",
+                usage=Usage(),
+                last_usage=Usage(),
+                steps=1,
+                stop_reason="stop",
             )
         )
         return "ok"

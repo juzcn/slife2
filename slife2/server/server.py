@@ -717,7 +717,7 @@ def build_server(
         hand it kept, and how much it went back to the log for.  Handing back the
         event rather than the counts keeps the vocabulary in one module: this
         knows *what happened*, `slife2.events` knows how it is said.
-"""
+        """
         carried = max(len(loop.messages) - loop.covered, 0)
         payload = tool_payload(
             await (await memory()).call_tool(

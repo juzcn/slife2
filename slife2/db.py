@@ -1302,9 +1302,7 @@ class TurnStore:
         ][:_MAX_SQL_VARS]
         allowed = await self._off_loop(self._ids_in_window, fused, clauses, params)
         return [
-            (turn_id, semantic.get(turn_id))
-            for turn_id in fused
-            if turn_id in allowed
+            (turn_id, semantic.get(turn_id)) for turn_id in fused if turn_id in allowed
         ][:limit]
 
     def count(self) -> int:
@@ -3099,7 +3097,9 @@ class ToolStore:
                     matched_in=(
                         None
                         if int(row["rowid"]) not in worded
-                        else "line" if int(row["rowid"]) in inline else "rest"
+                        else "line"
+                        if int(row["rowid"]) in inline
+                        else "rest"
                     ),
                 )
                 for row in rows

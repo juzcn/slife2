@@ -46,15 +46,15 @@ INSTRUCTION_TEMPLATE = "recall.j2"
 #: *wording* is what a model copies and a description is what it paraphrases.
 RECALL_REPLY: dict[str, Any] = {
     "context": (
-        "Which of the turns in hand to keep: all of them (omit or \"keep\"), "
-        "none (\"clear\"), or the turn_ids to keep, e.g. [12, 15]."
+        'Which of the turns in hand to keep: all of them (omit or "keep"), '
+        'none ("clear"), or the turn_ids to keep, e.g. [12, 15].'
     ),
     "recall": {
         "query": "Search text. Omit for no search.",
         "since": "Start of a period, in the grammar the turn headers use.",
         "until": "End of a period.",
         "anchor": (
-            "Which end of a period to recall from, \"newest\" or \"oldest\". "
+            'Which end of a period to recall from, "newest" or "oldest". '
             "Omit for the newest end."
         ),
     },
@@ -156,7 +156,9 @@ def _keep(raw: Any) -> list[int] | None | _Rejected:
             return []
         return REJECTED
     if isinstance(raw, list):
-        if not all(isinstance(item, int) and not isinstance(item, bool) for item in raw):
+        if not all(
+            isinstance(item, int) and not isinstance(item, bool) for item in raw
+        ):
             return REJECTED
         return _dedupe(raw)
     return REJECTED

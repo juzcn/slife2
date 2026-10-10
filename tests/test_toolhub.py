@@ -1060,7 +1060,9 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     """
     hub = hub_with_documents({"x": {"command": "x", "description": "工具"}})
     async with Client(hub) as client:
-        found = await call(client, "tool_search", {"keywords": [], "sentences": ["工具"]})
+        found = await call(
+            client, "tool_search", {"keywords": [], "sentences": ["工具"]}
+        )
         nothing = await call(
             client, "tool_search", {"keywords": [], "sentences": ["trump"]}
         )

@@ -818,7 +818,9 @@ def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) 
         "office",
         "mcp",
         [
-            tool("office__convert", "Transform a document.", schema='{"query": "工具"}'),
+            tool(
+                "office__convert", "Transform a document.", schema='{"query": "工具"}'
+            ),
             tool("office__other", "Transform a document."),
         ],
     )
@@ -910,9 +912,7 @@ def test_a_second_question_does_not_demote_what_the_first_one_found(tmp_path) ->
     merge(store, "arxiv", "mcp", [tool("arxiv__papers", "测试")])
 
     alone = asyncio.run(store.search(sentences=["工具"], embedder=EMBEDDER))
-    together = asyncio.run(
-        store.search(sentences=["工具", "测试"], embedder=EMBEDDER)
-    )
+    together = asyncio.run(store.search(sentences=["工具", "测试"], embedder=EMBEDDER))
 
     assert alone["results"][0]["name"] == "browser__tools", "the first question"
     assert together["results"][0]["name"] == "browser__tools", (

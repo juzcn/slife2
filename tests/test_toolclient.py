@@ -290,9 +290,7 @@ async def test_the_identity_reaches_the_db_through_the_hub(
     config = default_config()
     hub = build_hub(
         config,
-        transports=plugin_transports(
-            config, {"context": lambda settings: store}
-        ),
+        transports=plugin_transports(config, {"context": lambda settings: store}),
         embedder=StubEmbedder(),
     )
 

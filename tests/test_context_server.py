@@ -206,7 +206,10 @@ async def test_a_model_reads_the_history_it_is_calling_from(
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
-        for agent, question in (("jack", "jack's question"), ("jill", "jill's question")):
+        for agent, question in (
+            ("jack", "jack's question"),
+            ("jill", "jill's question"),
+        ):
             await client.call_tool(
                 "remember", {"agent": agent, "messages": _exchange(question, "…")}
             )
@@ -309,7 +312,9 @@ async def test_reading_a_turn_that_is_not_there_says_which_one(
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="no turn 7"):
-            await client.call_tool("turn_read", {"turn_id": 7}, meta=client_meta("jack"))
+            await client.call_tool(
+                "turn_read", {"turn_id": 7}, meta=client_meta("jack")
+            )
 
 
 # --- restore: the exit-time context, replayed ---------------------------------
@@ -360,9 +365,10 @@ async def test_a_restore_replays_the_list_and_names_its_turns(
         "assistant",
     ]
     assert messages[1]["content"].startswith("first")
-    assert json.loads(messages[1]["content"].split("[TURN: ")[1].rstrip("]"))[
-        "turn_id"
-    ] == ids[0]
+    assert (
+        json.loads(messages[1]["content"].split("[TURN: ")[1].rstrip("]"))["turn_id"]
+        == ids[0]
+    )
 
 
 def test_the_footnote_a_screen_shows_is_the_one_the_model_reads() -> None:
@@ -491,8 +497,11 @@ async def _rebuild(client: Client, reply: str, **overrides):
         "rebuild",
         {
             "agent": "jack",
-            "messages": [SYSTEM, {"role": "user", "content": "one"},
-                         {"role": "assistant", "content": "1"}],
+            "messages": [
+                SYSTEM,
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "1"},
+            ],
             "turn_ids": [1],
             "prompt": "and then?",
             **overrides,

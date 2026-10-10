@@ -463,10 +463,9 @@ def build_server(
     def _rows(store: TurnStore, turn_ids: list[int]) -> list[dict[str, Any]]:
         return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
 
-
     def _in_hand(
-    messages: Sequence[dict[str, Any]], turn_ids: Sequence[int]
-) -> dict[str, Any]:
+        messages: Sequence[dict[str, Any]], turn_ids: Sequence[int]
+    ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
         Four of `rebuild`'s five exits are this one outcome — the switch is off, a

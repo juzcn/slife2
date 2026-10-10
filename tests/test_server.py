@@ -267,9 +267,7 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
         return inner(messages, tools)
 
     backend.stream = stream  # type: ignore[method-assign]
-    server = build_server(
-        base, context_client=context, hub_client=hub, backend=backend
-    )
+    server = build_server(base, context_client=context, hub_client=hub, backend=backend)
 
     await send(server, "one", channel="tui")
     await send(server, "two", channel="tui")

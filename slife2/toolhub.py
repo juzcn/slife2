@@ -298,6 +298,7 @@ ALWAYS_LOADED = frozenset(
     }
 )
 
+
 def _refused(exc: BaseException) -> bool:
     """Whether a catalogue call was a *refusal* rather than a fault.
 
@@ -501,9 +502,7 @@ class Catalogue:
         model reads is built from it here, because a store that wrote prose
         would be the second place model-facing text lived.
         """
-        return await self._off_loop(
-            (await self.store()).set_load, name, load_status
-        )
+        return await self._off_loop((await self.store()).set_load, name, load_status)
 
     async def touch(self, name: str) -> None:
         """Mark one tool *called*, for the eviction order.  Best-effort.
@@ -1519,6 +1518,7 @@ def _names_of(arguments: Mapping[str, Any]) -> list[str]:
 MATCH_FLOOR = 0.55
 WEAK_FLOOR = 0.48
 
+
 def _quoted(description: Any) -> list[str]:
     """A tool's description, as the lines under its record.
 
@@ -1623,7 +1623,9 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
         return "Nothing matched. Try fewer or different words."
 
     scored = [
-        float(row["similarity"]) for row in rows if isinstance(row.get("similarity"), float)
+        float(row["similarity"])
+        for row in rows
+        if isinstance(row.get("similarity"), float)
     ]
     best = max(scored) if scored else 0.0
 
