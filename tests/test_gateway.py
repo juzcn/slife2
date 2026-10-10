@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastmcp import FastMCP
 
+from slife2 import gateway
 from slife2.config import ToolServerSettings
 from slife2.gateway import (
     Connection,
@@ -117,6 +118,78 @@ async def test_a_changed_tool_list_is_read_again() -> None:
     assert await link.ready() is True
     assert link.state == "ready"
     assert len(seen.listings) == 2, "the second ask re-listed and re-handed"
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_listing_that_has_aged_is_read_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What replaced the notification, now that it cannot be relied on.
+
+    2026-07-28 moved change notifications onto a `subscriptions/listen` stream
+    the *client* has to open, and this build's client cannot open one — so an
+    answer that stopped being true has to be re-read on a clock instead.  The
+    bound is set to zero here, which is the one thing a test can do and a session
+    cannot: make the very next ask already overdue.
+
+    What it must not cost is the *tool*: the aged listing stays usable while it is
+    being replaced, so a source never blinks out of the model's list because its
+    answer got old.
+    """
+    monkeypatch.setattr(gateway, "RELIST_AFTER_SECONDS", 0.0)
+    seen = Recorder()
+    link = connection(seen)
+    assert await link.ready() is True
+
+    link.connecting()
+    assert link.usable is True, "aged is not the same as unusable"
+    attempt = link.attempt
+    assert attempt is not None, "an aged listing is due to be read again"
+    await attempt
+
+    assert len(seen.listings) == 2, "and reading it again hands it over again"
+    assert link.error == "", "a re-list that worked leaves no error behind"
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_listing_that_is_fresh_is_not_read_again() -> None:
+    """And it is the age that decides, not the ask.
+
+    Every step of every turn asks for the tool list, so re-reading per ask would
+    put one `tools/list` per source inside each of them for an answer that did
+    not change — which is the cost the bound exists to refuse.
+    """
+    seen = Recorder()
+    link = connection(seen)
+    assert await link.ready() is True
+
+    for _ in range(3):
+        link.connecting()
+        assert link.attempt is None, "a current listing is not due for another"
+
+    assert len(seen.listings) == 1
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_call_does_not_reread_an_aged_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call is by the far end's own name, so the age changes nothing about it.
+
+    The peer resolves the name; nothing on this side consults the listing.  So a
+    call must not wait behind a re-list, which is what would happen if `ready`
+    refreshed — it is the question calls ask.
+    """
+    monkeypatch.setattr(gateway, "RELIST_AFTER_SECONDS", 0.0)
+    seen = Recorder()
+    link = connection(seen)
+    assert await link.ready() is True
+
+    assert await link.call("echo", {"text": "hi"}) == ("hi", True)
+    assert len(seen.listings) == 1, "the call read no listing"
     await link.close()
 
 

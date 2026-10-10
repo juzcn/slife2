@@ -20,9 +20,27 @@ piece both halves share.
 **Health is a tool list, not a connection** — v1's rule, and most of what the
 class does.  A server is either usable, meaning its tool list is in hand, or it
 is not, and in the second case the useful fact is what it said the last time we
-asked.  There is no connection state machine and no timer: the source stops
-counting as usable when the peer says `tools/list_changed`, when a call fails at
-the transport, or when a connect fails, and the next ask re-lists it.
+asked.  There is no connection state machine: the source stops counting as
+usable when a call fails at the transport or when a connect fails, and the next
+ask re-lists it.
+
+**A listing ages, because the peer can no longer be asked to say it changed.**
+This module used to re-list on one event and nothing else — the peer's
+`notifications/tools/list_changed` — and at 2026-07-28 that event stopped
+arriving on its own.  Change notifications moved onto `subscriptions/listen`, a
+stream the *client* has to open, and measured against the installed FastMCP
+4.0.11 there is no way to open one from here: `Client` exposes no such call, a
+FastMCP **server** advertises `tools.listChanged: false` and answers the listen
+request with `Method not found` — so our own plugins never send one either — and
+the SDK's own `mcp.client.subscriptions.listen` has nothing to talk to.  So
+`RELIST_AFTER_SECONDS` is what keeps a listing true: an ask that finds one older
+than that re-reads it.  **The age costs a round trip and never a tool** — a
+stale listing is still `usable` and still in the model's list while it is being
+replaced, and it is replaced inside the same ask that noticed, because
+`list_tools` already waits briefly (`LIST_SETTLE_SECONDS`) for work it started.
+A peer that *does* send the notification is believed at once (`invalidate`),
+which is the whole of what a legacy server gets: the event is the fast path, and
+the age is the floor under it.
 
 **Two failures that look alike and are not.**  A *transport* failure and a peer's
 *refusal* are opposites here.  A refusal — an unknown tool, bad arguments, a
@@ -46,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -66,6 +85,19 @@ CONNECT_TIMEOUT_SECONDS = 60.0
 #: How long a tool may run.  Long: a tool is a real action somewhere else, and
 #: the alternative to waiting is a call the model cannot tell was cut off.
 CALL_TIMEOUT_SECONDS = 300.0
+
+#: How long a tool list is trusted without being read again.
+#:
+#: **A policy number, not a measurement**, and it buys the one thing the
+#: notification can no longer promise (see the module docstring): a listing that
+#: is not merely un-invalidated but *current*.  What sets the size is who pays —
+#: the list is asked for at the top of every step of every turn, so a bound of
+#: zero would put one `tools/list` per source inside every step, and the point of
+#: a bound at all is that a session is hours long while a server's tool set
+#: changes about as often as it is restarted.  Five minutes is that trade,
+#: deliberately far above the loopback round trip it costs and far below the age
+#: at which "the tool is not there" would read as a bug rather than as staleness.
+RELIST_AFTER_SECONDS = 300.0
 
 #: How a client is built from a transport.  A seam rather than a direct call,
 #: because the rebuild-once rule below is about a link that dies *during a call*,
@@ -207,7 +239,9 @@ class Connection:
 
     **State is a snapshot plus an error, not a state machine.**  A server is
     either usable — meaning its tool list is in hand — or it is not, and in the
-    second case the useful fact is what it said the last time we asked.
+    second case the useful fact is what it said the last time we asked.  The
+    snapshot carries its age as well (`_listed_at`), and that is not a third
+    state: an old listing is usable, it is simply due to be read again.
 
     Everything here is safe to call concurrently: a caller asks for a tool list
     while a turn that is already running is calling a tool.
@@ -239,6 +273,11 @@ class Connection:
         self._client: Client | None = None
         self._error = ""
         self._ready = False
+        #: When the listing in hand was read, on the monotonic clock — the one
+        #: clock that cannot go backwards, since a wall clock that jumps is how a
+        #: listing becomes either immortal or instantly stale.  Zero means the
+        #: same as "never", which is what a source that has not listed yet is.
+        self._listed_at = 0.0
         self._lock = asyncio.Lock()
         #: The attempt in flight, if any.  Held so that a caller can wait for it
         #: and so that a second one is never started alongside it.
@@ -273,17 +312,37 @@ class Connection:
     # --- the connection ------------------------------------------------------
 
     def connecting(self) -> None:
-        """Start a connect attempt unless one is running or one has succeeded.
+        """Start a connect, or a re-list, unless one is running or neither is due.
 
-        Separate from `ready` because the common case — a healthy server — must
-        not await anything, and separate from the connect itself so that the
-        callers who only want the list can start one and move on.
+        Separate from `ready` because the common case — a healthy server with a
+        current listing — must not await anything, and separate from the work
+        itself so that the callers who only want the list can start one and move
+        on.
+
+        **This is where a listing is refreshed without anybody asking it to be**,
+        and an ask is what this method means: a caller arriving here has decided
+        to read the tool list, which is the moment a stale one is worth
+        re-reading and no earlier.  `_stale` is what bounds how often — see
+        `RELIST_AFTER_SECONDS`.
         """
-        if self._ready:
-            return
         if self._attempt is not None and not self._attempt.done():
             return
+        if self._ready and not self._stale:
+            return
         self._attempt = asyncio.create_task(self._establish())
+
+    @property
+    def _stale(self) -> bool:
+        """Whether the listing in hand is old enough to be worth reading again.
+
+        `_ready` is part of the answer rather than assumed by the caller: a
+        source with no listing has none to age, and its reason to reconnect is
+        its own rather than this one's.  So the only state this can be true in is
+        "listed, and a while ago", and both callers above read it that way.
+        """
+        return (
+            self._ready and time.monotonic() - self._listed_at >= RELIST_AFTER_SECONDS
+        )
 
     @property
     def attempt(self) -> asyncio.Task[None] | None:
@@ -292,7 +351,14 @@ class Connection:
         return None if self._attempt is None or self._attempt.done() else self._attempt
 
     async def ready(self) -> bool:
-        """Whether the link is usable, starting one and waiting if it is not."""
+        """Whether the link is usable, starting one and waiting if it is not.
+
+        **Not where a listing is refreshed**, and the omission is deliberate: this
+        is the question a *call* asks, and a call is by the far end's own name —
+        the peer resolves it, so a listing that has aged changes nothing about
+        whether the call can be made.  Freshness belongs to `connecting`, which
+        the askers of the tool *list* call.
+        """
         if self._ready:
             return True
         self.connecting()
@@ -311,9 +377,15 @@ class Connection:
         Both steps are here because both can be the thing that failed, and the
         answer to either is the same: keep the error, drop the link, and let the
         next ask try again.
+
+        **The second step is also the whole of a re-list.**  A source that has
+        aged out needs no new connection — only a new answer — so the client is
+        kept and `_refresh` runs over it, which is what makes the age cost a
+        round trip rather than a handshake (and, for a stdio server, rather than
+        the seconds it takes to start a child process again).
         """
         async with self._lock:
-            if self._ready:
+            if self._ready and not self._stale:
                 return
             if self._client is None:
                 # Everything, including building the transport, is inside the
@@ -353,6 +425,11 @@ class Connection:
         as the server answered, *before* the handover, so that a caller which
         decides the list cannot be recorded can take it back down (by calling
         `disconnect` or `fail`) and have the last word.
+
+        **The clock starts when the answer lands, not when it was asked for**,
+        and that is the same rule as the flag above: what ages is the listing, so
+        a slow answer is a *new* listing for as long as it takes to arrive and
+        the next ask is not already overdue for the one after it.
         """
         client = self._client
         if client is None:  # pragma: no cover - only reachable after `fail`
@@ -365,6 +442,7 @@ class Connection:
             return
         self._error = ""
         self._ready = True
+        self._listed_at = time.monotonic()
         if self._on_listed is not None:
             await self._on_listed(listed)
 
@@ -380,6 +458,11 @@ class Connection:
 
         Forgetting it means the source is no longer *usable*, so a caller that
         gates on liveness stops counting it until the next ask re-lists it.
+
+        **A peer that says so is still worth listening to**, and this is the fast
+        path over `RELIST_AFTER_SECONDS`: where the age bounds how wrong a
+        listing may be, this makes it zero — which is all a legacy server, whose
+        notifications still arrive, gets out of having sent one.
         """
         if self._ready:
             self._ready = False

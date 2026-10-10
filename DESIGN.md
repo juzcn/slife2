@@ -743,7 +743,7 @@ write path was deliberately kept on the other side of all three.
 
 ## 6. Compatibility notes
 
-Three things about the 2026-07-28 revision that the code depends on, all
+Four things about the 2026-07-28 revision that the code depends on, all
 verified by running against the installed library rather than by reading:
 
 - **`ping` is gone, and nothing replaced it.** The protocol-level ping was
@@ -772,6 +772,18 @@ verified by running against the installed library rather than by reading:
   §3 is built on, and it is listed here because it is the same kind of fact as
   the two around it: a property of the revision that the code depends on, and
   one that would be re-derived wrongly from an older memory of MCP.
+- **A change notification is opt-in now, and nothing here can opt in.** The
+  old HTTP GET endpoint and `resources/subscribe` were replaced by
+  `subscriptions/listen`, a single long-lived POST-response stream, so
+  `notifications/tools/list_changed` reaches only a client that has opened one.
+  Measured against FastMCP 4.0.11: a client that has *not* opened one receives
+  nothing when the server adds a tool, `Client` exposes no call that would open
+  one, and a FastMCP **server** advertises `tools.listChanged: false` and
+  answers the listen request with `Method not found` — so our own plugins never
+  send one either. The consequence for §8 is that the peer's notification could
+  no longer be the only thing a tool list stays true by, and
+  `Connection` re-reads an aged listing instead.
+
 - **`stream_options` and usage.** OpenAI sends token counts on a trailing chunk
   with an empty `choices` list. DeepSeek attaches them to the final chunk that
   *still carries a choice*. An adapter that handles only the documented OpenAI
@@ -1036,14 +1048,28 @@ know what a tool server is — it is handed a coroutine that returns a registry.
 **Health is a tool list, not a connection** — v1's rule, and it is most of what
 `Upstream` does. A server is either usable, meaning its tool list is in hand, or
 it is not, and in the second case the useful fact is what it said the last time
-we asked. There is no connection state machine and no timer: the listing goes to
-the catalogue when it arrives, the source stops counting as *live* when the peer
-says `tools/list_changed`, when a call fails at the transport, or when a connect
-fails, and the next ask re-lists it. **What nobody holds any more is the tool
-list itself** — that is a row now, and the gateway's `_ready` is a flag saying
-whose rows may be injected (`Connection.usable`). "The snapshot is dropped"
-survives as that flag, and it is the same flag whether the connection is the
-hub's to a plugin or a family's to somebody else's server.
+we asked. There is no connection state machine: the listing goes to the
+catalogue when it arrives, the source stops counting as *live* when a call fails
+at the transport or when a connect fails, and the next ask re-lists it. **What
+nobody holds any more is the tool list itself** — that is a row now, and the
+gateway's `_ready` is a flag saying whose rows may be injected
+(`Connection.usable`). "The snapshot is dropped" survives as that flag, and it
+is the same flag whether the connection is the hub's to a plugin or a family's
+to somebody else's server.
+
+**A listing also ages, and that is new.** The sentence above used to name a
+third trigger — the peer's `tools/list_changed` — and at 2026-07-28 that trigger
+stopped firing on its own: change notifications moved to `subscriptions/listen`,
+a stream the client must open, and against FastMCP 4.0.11 there is no way to open
+one (no such call on `Client`; a FastMCP *server* advertises
+`tools.listChanged: false` and answers listen with `Method not found`, so our own
+plugins never send one either). So `Connection` re-reads a listing that is older
+than `RELIST_AFTER_SECONDS` on the next ask, and the notification — where a
+legacy peer still sends one — is the fast path over that bound rather than the
+only path. **The age costs a round trip and never a tool**: a stale listing stays
+usable and stays in the model's list while it is replaced, and it is replaced
+inside the same ask that noticed, because `list_tools` already waits briefly for
+work it started.
 
 **Two failures that look alike and are not.** The hub distinguishes a *transport*
 failure from a peer's *refusal*, and does opposite things with them. A refusal —
