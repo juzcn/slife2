@@ -362,13 +362,19 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "builtins"
     }
     assert ours == {"echo", "now", "calc"}
-    # Four sources, and each is a real one: the builtins are a plugin, the
+    # Seven sources, and each is a real one: the builtins are a plugin, the
     # context store offers the model its two history tools (they carry the
-    # mark), the skills server offers `skill_use`, and the last is this
-    # process's own — `tool_search`, `func_tool_load` and `_func_tool_unload`.
+    # mark), `skills-server` offers `skill_use` and the four tools that install,
+    # remove and switch a playbook, and `mcp-tools`, `restapi-tools` and
+    # `cli-server` offer the tools a model uses to edit those three sections
+    # itself.  The last is this process's own — `tool_search`, `func_tool_load`
+    # and `_func_tool_unload`.
     assert {tool["server"] for tool in listed.data["tools"]} == {
         "builtins",
+        "cli-server",
         "context",
+        "mcp-tools",
+        "restapi-tools",
         "skills-server",
         "toolhub",
     }
@@ -529,6 +535,29 @@ async def found(hub: Client, query: str) -> str:
 def as_cli_server(answer: dict[str, Any]) -> dict[str, Any]:
     """The wiring that makes a plugin under test be the one that declares."""
     return {"cli-server": lambda settings: declaring(answer)}
+
+
+class ReDeclaring:
+    """A plugin that answers twice, differently.
+
+    What taking an entry out of a section looks like from the hub's side is *the
+    same server, answering the next time without it* — so the seam a test needs
+    is the answer, not a second plugin.  `declaring` above is the fixed case;
+    this one is the same shape with the list made changeable between two asks.
+    """
+
+    def __init__(self, answer: dict[str, Any]) -> None:
+        self.answer = answer
+
+    def server(self) -> FastMCP:
+        server = FastMCP("declaring")
+
+        @server.tool(name=LIST_SOURCES)
+        def list_sources() -> dict[str, Any]:
+            """Declare whatever the test has set now."""
+            return self.answer
+
+        return server
 
 
 @pytest.mark.asyncio
@@ -1179,6 +1208,100 @@ async def test_a_search_says_how_to_load_what_it_found() -> None:
 
     assert answer["text"], "a hit answers with the rows it found"
     assert "func_tool_load" in answer["text"]
+
+
+@pytest.mark.asyncio
+async def test_an_entry_removed_from_the_config_leaves_no_rows() -> None:
+    """**The other moment an entry can be removed — slife2 was not running.**
+
+    The mirror of the test below, and the contrast is the whole point:
+    `enabled: false` keeps the rows and says so, because the entry is still in
+    the section and the switch is the operator's to flip back.  Taking the entry
+    *out* is not a switch, and there is nothing left to come back to — so the
+    rows go, rather than staying as a search hit that leads to a refusal.  A row
+    marked `error` would be found by a search, ranked by the meaning leg and
+    counted by the budget, and `func_tool_load` would refuse it with "the server
+    that owns it is not answering": a true sentence about a link, and the wrong
+    one about a server nothing is configured to ask.
+
+    The boot pass is what does it here (`ToolStore.reset`, handed every name the
+    config carries); the same removal while slife2 *is* running is
+    `test_an_entry_taken_out_of_a_section_takes_its_rows_with_it` below.
+    """
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as first:
+        await first.call_tool("list_tools", {})
+        assert "fake__echo" in await found(first, "echo"), "recorded while it ran"
+
+    # The same data directory with the entry gone from `tools:`.
+    async with Client(hub_for()) as second:
+        rows = await found(second, "echo")
+        refused = await call(second, "func_tool_load", {"names": ["fake__echo"]})
+
+    assert "fake__echo" not in rows
+    assert refused["ok"] is False
+    assert "unknown tool" in refused["text"], (
+        "a tool whose entry is gone is not a tool whose server is down: "
+        f"{refused['text']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_entry_taken_out_of_a_section_takes_its_rows_with_it() -> None:
+    """**The runtime half: the entry was removed while the hub was answering.**
+
+    Nothing restarts, so the boot pass never runs — what notices is the plugin
+    that holds the section, which now answers `list_sources` without a source it
+    held last time.  A source is gone rather than unreachable, and the hub
+    settles it the same way the boot pass does, so a removal does not depend on
+    whether a process happened to be up when it was made.
+    """
+    holding = ReDeclaring(one_source(name="cli"))
+    async with Client(
+        hub_for(connected={"cli-server": lambda settings: holding.server()})
+    ) as hub:
+        assert "cli:thing" in await found(hub, "cli:thing"), "held, and so catalogued"
+
+        holding.answer = {"sources": []}
+        rows = await found(hub, "cli:thing")
+        refused = await call(hub, "func_tool_load", {"names": ["cli:thing"]})
+
+    assert "cli:thing" not in rows
+    assert refused["ok"] is False
+    assert "unknown tool" in refused["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_that_stops_answering_keeps_the_rows_it_declared() -> None:
+    """**The guard on the other side of that deletion.**
+
+    A plugin that is not answering declares nothing, and "declares nothing" is
+    what a removal looks like from the same seat — so the two are told apart by
+    the thing that actually differs: whether the plugin *answered*.  One that
+    did not is skipped whole, and its sources are left exactly as they were; the
+    rows belong to a server that is merely out of reach, and a hub that deleted
+    them would empty a catalogue every time a plugin restarted, then re-embed
+    every tool when it came back.
+    """
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as first:
+        await first.call_tool("list_tools", {})
+
+    def refuses_to_start(settings: ToolServerSettings) -> Any:
+        raise FileNotFoundError("no such program: slife2-mcp-tools")
+
+    # `mcp-tools` is the plugin that holds `fake` — with it down, nothing
+    # declares the entry, and the entry is still in the config.
+    async with Client(
+        hub_for(connected={"mcp-tools": refuses_to_start}, entries=entries)
+    ) as second:
+        rows = await found(second, "echo")
+
+    assert "fake__echo" in rows, "nothing answered for it, so nothing forgot it"
 
 
 @pytest.mark.asyncio
@@ -1947,6 +2070,29 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
             "skill_use",
             "tool_search",
             "func_tool_load",
+            # Three of the plugins offer the model the tools that edit the
+            # section each owns — `cli-server` four, the other two five each,
+            # and they are the ones that add `spawned__greet` below if a person
+            # would rather be told than write it.
+            "cli_list",
+            "cli_remove",
+            "cli_set",
+            "cli_set_enabled",
+            "mcp_list",
+            "mcp_list_tools",
+            "mcp_remove",
+            "mcp_set",
+            "mcp_set_enabled",
+            "rest_api_list",
+            "rest_api_list_tools",
+            "rest_api_remove",
+            "rest_api_set",
+            "rest_api_set_enabled",
+            # And `skills-server`, which already served `skill_use`.
+            "skill_list",
+            "skill_remove",
+            "skill_set",
+            "skill_set_enabled",
         }
 
         loaded = await call(client, "func_tool_load", {"names": ["spawned__greet"]})

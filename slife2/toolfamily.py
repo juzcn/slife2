@@ -37,6 +37,7 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 #: means a cold `npx` holds a turn open for a minute.  So: wait, but briefly, and
 #: only for attempts that have already begun.
 LIST_SETTLE_SECONDS = 5.0
+
+#: How many of one server's tools a `*_list_tools` prints.  v1's number and v1's
+#: reason: a published server can carry four figures of tools (github: 1239),
+#: and printing them all spends the model's context on names it never asked for.
+#: The read is uncapped — the catalogue needs every tool.
+TOOL_LIST_LIMIT = 20
 
 
 class Held:
@@ -161,18 +168,87 @@ class Family:
         client_factory: ClientFactory | None = None,
     ) -> None:
         self.category = category
-        directory = str(data_dir())
-        wired = transports or {}
-        self._held = {
-            entry.name: Held(
-                entry,
-                directory=directory,
-                category=category,
-                transport=wired.get(entry.name),
-                client_factory=client_factory,
-            )
-            for entry in entries
-        }
+        self._directory = str(data_dir())
+        self._transports = dict(transports or {})
+        self._client_factory = client_factory
+        self._held = {entry.name: self._hold(entry) for entry in entries}
+
+    def _hold(self, settings: ToolServerSettings) -> Held:
+        """A `Held` for one entry, wired the way this process wires its own."""
+        return Held(
+            settings,
+            directory=self._directory,
+            category=self.category,
+            transport=self._transports.get(settings.name),
+            client_factory=self._client_factory,
+        )
+
+    # --- what a management tool changes --------------------------------------
+
+    async def put(self, settings: ToolServerSettings) -> Held:
+        """Hold *settings*, replacing whatever was held under that name.
+
+        **The new entry is in the map before anything is awaited.**  A caller
+        that took the old one out and only then awaited its close would leave a
+        window in which this family declares *nothing* for a name it still
+        holds — and the hub reads a source that has stopped being declared as an
+        entry taken out of the section, so it would delete that server's rows
+        and re-embed every one of them when the next declaration put them back.
+        So the swap is synchronous and the teardown follows it.
+
+        The replacement is a *new* connection rather than a mutated one: a
+        connection is what it was built from, and the settings it was built from
+        are frozen.
+
+        **An unchanged entry is left alone**, which is what makes this an upsert
+        a caller can repeat: tearing the link down and rebuilding it would cost a
+        fresh `npx` start and a new handshake for a call that changed nothing.
+        The comparison is on the settings, and both sides came from the config
+        layer, so a `${VAR}` reference is compared resolved-against-resolved —
+        v1 compared the raw argument against the resolved pool and therefore
+        never matched, reconnecting on every identical `mcp_set`.
+        """
+        previous = self._held.get(settings.name)
+        if previous is not None and previous.settings == settings:
+            return previous
+        previous = self._held.pop(settings.name, None)
+        one = self._hold(settings)
+        self._held[settings.name] = one
+        if settings.enabled:
+            one.connection.connecting()
+        if previous is not None:
+            await previous.connection.close()
+            logger.info("%s: replaced", settings.name)
+        return one
+
+    async def remove(self, name: str) -> Held | None:
+        """Stop holding *name*, dropping its link.  `None` if it was not held.
+
+        The pop is what the declaration sees, so it happens first for the reason
+        `put` states — except that here the disappearance is the point, and the
+        hub deleting the rows is the outcome being asked for.
+        """
+        one = self._held.pop(name, None)
+        if one is not None:
+            await one.connection.close()
+        return one
+
+    async def set_enabled(self, name: str, enabled: bool) -> Held | None:
+        """Switch one held entry on or off.  `None` if it is not held.
+
+        A rebuild rather than a flag on the live object: an enabled entry has a
+        link and a disabled one does not, so this is `remove` and `put` and
+        there is no third state where the settings say one thing and the
+        connection is doing another.
+        """
+        one = self._held.get(name)
+        if one is None or one.settings.enabled == enabled:
+            return one
+        return await self.put(replace(one.settings, enabled=enabled))
+
+    def held(self, name: str) -> Held | None:
+        """One held entry, for a tool answering about it."""
+        return self._held.get(name)
 
     def connecting(self) -> None:
         """Start a connect attempt for every entry that is switched on.
@@ -243,6 +319,149 @@ class Family:
             await one.connection.close()
 
 
+async def settled(one: Held) -> Held:
+    """Wait briefly for *one* entry's connect attempt, and hand it back.
+
+    **Bounded, and the bound is the point**: an answer about a server that is
+    still starting is the same answer a broken one gives — "not answering yet" —
+    and telling those two apart is the whole job of the tools that ask.  So it
+    starts the attempt if nobody has (a call arriving before anything tried is
+    one that tries) and waits for the one in flight, for no longer than the hub
+    waits for its own links.  A cold `npx` that this process started has had its
+    own start-up to answer by now; one that needs longer is reported as
+    connecting, truthfully, rather than held open.
+
+    **A switched-off entry is never started**, which is the one thing this must
+    not do: asking what a disabled server offers would otherwise spawn it, and
+    the operator's `enabled: false` would be undone by a *question*.  The guard
+    is here rather than left to the callers who remember to check.
+    """
+    if not one.settings.enabled:
+        return one
+    one.connection.connecting()
+    attempt = one.connection.attempt
+    if attempt is not None:
+        await asyncio.wait([attempt], timeout=LIST_SETTLE_SECONDS)
+    return one
+
+
+async def apply_and_report(
+    family: Family, settings: ToolServerSettings, *, section: str
+) -> str:
+    """Hold *settings* and describe what happened, in one sentence.
+
+    **The three outcomes are the three things that can be true**, and the point
+    is that they are distinguishable: a server that connected has a tool count,
+    a disabled one has nothing to connect, and one that did not answer says so
+    rather than reporting a count of zero — which is what a server with no tools
+    would also report.  Whether it answers *later* is not a claim this can make;
+    what it can say is that the catalogue learns at the next search, because the
+    hub re-reads every declaration before each one.
+    """
+    one = await family.put(settings)
+    if not settings.enabled:
+        return (
+            f"'{settings.name}' is written into `{section}:` and switched off, "
+            f"so it is not connected. Its `set_enabled` tool turns it on."
+        )
+    await settled(one)
+    if one.connection.usable:
+        count = len(one.rows or [])
+        # **The count is the cost, and only the tool can say it before it is
+        # paid.**  Nothing here writes the catalogue: the hub merges this
+        # source's whole list before the next search, and that merge embeds every
+        # row — one request, every text of every tool.  So a server with four
+        # figures of tools makes the model's *next* search the expensive call,
+        # which is one turn too late to be discovering it.  A count at or under
+        # the listing cap is ordinary and is left unsaid.
+        expensive = (
+            " That is a large server: the next search writes and embeds a row for "
+            "each of them, and may take a while."
+            if count > TOOL_LIST_LIMIT
+            else ""
+        )
+        return (
+            f"'{settings.name}' is connected and offers {count} tool(s); they "
+            f"are in your tool list from the next search.{expensive}"
+        )
+    reason = one.connection.error or "it has not answered yet"
+    return (
+        f"'{settings.name}' is written into `{section}:` and connecting — "
+        f"{reason}. Its tools appear once it answers, and the hub retries before "
+        f"every search."
+    )
+
+
+def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> str:
+    """One server's tools, capped, with the count it was capped from.
+
+    The cap is announced rather than applied quietly: a trimmed list that reads
+    as the whole list is a model concluding a server cannot do something it can.
+
+    `noun` is the family's own word for what it lists — a REST API exposes
+    *operations*, and the tool that asked for them said so.  The same answer
+    under two names would make a reader wonder whether they are two things.
+    """
+    rows = list(one.rows or [])
+    if not one.connection.usable or not rows:
+        reason = one.connection.error or "it is not answering yet"
+        return (
+            f"'{name}' has no tool list to show — {reason}. The `_list` tool "
+            f"reports its state."
+        )
+    shown = rows[:limit]
+    lines = [f"{name} — {len(rows)} {noun}(s), showing {len(shown)}:"]
+    for row in shown:
+        text = str(row.get("description") or "").strip().splitlines()
+        summary = text[0] if text else ""
+        lines.append(
+            f"- {row.get('remote_name', '?')}" + (f" — {summary}" if summary else "")
+        )
+    if len(shown) < len(rows):
+        lines.append(
+            f"\n{len(rows) - len(shown)} more — use tool_search to find the one "
+            f"you need."
+        )
+    return "\n".join(lines)
+
+
+def refusal(config: Config, name: str) -> str | None:
+    """Why *name* cannot become a source of this family, or `None`.
+
+    **The collision it prevents is silent, which is the whole reason it is
+    checked here.**  The hub routes by source name and refuses to know two owners
+    for one: a `tools:` entry called `agent` would be declared, dropped by
+    `refresh_declared` as a name this hub is already connected under, and
+    reported to the model as added — with no tools, and nothing anywhere saying
+    why.  The same from the other side for `skills` and `cli`, which are the
+    names those two families file their own rows under; a source's verdict is
+    written across every row it owns, so sharing one would mark somebody else's
+    playbooks broken.
+
+    Two names and not every reserved word: the rest of what a source may not be
+    called — the plugin's own name, a category the hub owns — the hub refuses
+    loudly at declaration time (`Upstream._record`), and duplicating that list
+    here would be a second copy to keep in step.
+    """
+    # Imported here rather than at module scope: `slife2.toolhub` is the tool
+    # set's own process and opens a catalogue and a vector index, and this plugin
+    # wants two string constants from it.
+    from slife2.toolhub import CLI_SOURCE, SKILLS_SOURCE
+
+    if name in config.plugins():
+        return (
+            f"[refused] '{name}' is a server slife2 itself runs, so its tools "
+            f"would be dropped as a name the hub is already connected under. "
+            f"Choose another name."
+        )
+    if name in (SKILLS_SOURCE, CLI_SOURCE):
+        return (
+            f"[refused] '{name}' is the name the `{name}:` section's rows are "
+            f"filed under. Choose another name."
+        )
+    return None
+
+
 def build_family_server(
     config: Config,
     *,
@@ -252,17 +471,30 @@ def build_family_server(
     entries: Iterable[ToolServerSettings],
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
+    management: Callable[[FastMCP, Family], None] | None = None,
 ) -> FastMCP:
     """One family, as the MCP server slife2 starts.
 
-    The two tools are the whole of the plugin contract this kind of plugin has:
-    what it holds, and running one.  Neither is marked for the model — the model
-    is given the tools of the *entries*, merged by the hub, and never these.
+    Two tools are the whole of the plugin contract this kind of plugin has
+    *towards the hub*: what it holds, and running one.  Neither is marked for the
+    model, and neither should be — the model is given the tools of the *entries*,
+    merged by the hub, and never these.  What the model gets from this process is
+    what `management` registers, which is a different surface with a different
+    reader (see `slife2.toolfamily`'s own note on `refusal`, and DESIGN.md §8).
 
     `transports` and `client_factory` are the same two seams the hub has and for
     the same reason: a test drives the whole thing over in-memory servers, with
     no process and no port, and a test that needs a client which misbehaves needs
     to say so from outside this module.
+
+    `management` registers the family's own tool set — the tools a model uses to
+    add, remove and switch entries — and it is a callback rather than something
+    this function writes because those tools are *the family's vocabulary*:
+    `mcp_set` takes a command or a URL and `rest_api_set` takes a spec and a base
+    URL, and the parameter list of a tool is the schema the model reads, so it
+    belongs with the section it describes rather than in the code the two
+    sections share.  What is shared — the live `_held` the tools mutate, so that
+    an entry written to the file is connected in the same breath — is here.
     """
     family = Family(
         config,
@@ -327,5 +559,8 @@ def build_family_server(
             source, tool, arguments, forwarded_client(request_meta(ctx))
         )
         return {"text": text, "ok": ok}
+
+    if management is not None:
+        management(mcp, family)
 
     return mcp

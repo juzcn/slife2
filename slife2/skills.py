@@ -70,7 +70,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -386,6 +386,93 @@ def document(skill: Skill, note: str = "") -> str:
     return "\n".join([*preamble, "", text])
 
 
+def _within(base: Path, name: str) -> Path:
+    """`base / name`, refused unless it lands inside *base*.
+
+    **A model writes these names, so this is the boundary.**  `skill_set` takes
+    a list of `{path, content}` pairs and `skill_remove` takes a name, and in
+    both the path becomes a filesystem path on the operator's machine: `..\\..`
+    or an absolute path in one of them is how a playbook would rewrite the
+    config that describes it, or the turn log beside it.
+
+    Resolved *before* the comparison, because `scripts/../../..` is only outside
+    once it has been resolved — a check on the string would pass it, and the
+    resolution is what the filesystem will actually open.
+    """
+    root = base.resolve()
+    target = (root / name).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"{name!r} is outside {base.name}/, and a skill is not")
+    return target
+
+
+def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
+    """Write a skill — its `SKILL.md` and anything beside it — and return where.
+
+    **Whole or not at all, and never outside its own directory.**  The files are
+    written into a staging directory beside the real one and the real one is
+    swapped in afterwards, so a skill that was interrupted half-written never
+    exists: a model reading a playbook that stops in the middle of a command is
+    worse off than one told the skill is not installed.  A name that resolves
+    outside `<data>/skills/`, or a file whose path does, is refused before
+    anything is created.
+
+    **The manifest is required**, because the folder's rule is that the manifest
+    is what makes a directory a skill (`scan`): writing three files and no
+    `SKILL.md` would be an install that reports success and installs nothing
+    anything can find.
+    """
+    root = skills_dir()
+    final = _within(root, name)
+    if final == root.resolve():
+        raise ValueError("a skill needs a name")
+    staging = root / f".{name}.installing"
+    previous = root / f".{name}.replacing"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        for one in files:
+            relative = str(one.get("path") or "").strip()
+            if not relative:
+                raise ValueError("every file needs a `path`")
+            target = _within(staging, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(one.get("content") or ""), encoding="utf-8")
+        if not (staging / MANIFEST).is_file():
+            raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
+        # The swap: the live one moves aside, the new one takes its place, and a
+        # failure puts the old one back.  `os.replace` cannot do this for a
+        # non-empty directory — a rename onto one is refused rather than merged.
+        shutil.rmtree(previous, ignore_errors=True)
+        if final.exists():
+            os.rename(final, previous)
+        try:
+            os.rename(staging, final)
+        except OSError:
+            if previous.exists() and not final.exists():
+                os.rename(previous, final)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return final
+
+
+def remove(name: str) -> bool:
+    """Delete one skill's directory; True if it was there.
+
+    The whole directory, and not only its manifest: a skill's scripts live
+    beside it (`SKILL.md`'s own paths are relative to it), so a removal that
+    left them behind would leave a folder that is no longer a skill and files
+    nobody can place.
+    """
+    root = skills_dir()
+    target = _within(root, name)
+    if target == root.resolve() or not target.is_dir():
+        return False
+    shutil.rmtree(target)
+    return True
+
+
 async def use(
     name: str,
     *,
@@ -435,7 +522,9 @@ __all__ = [
     "document",
     "find",
     "frontmatter",
+    "install",
     "readiness",
+    "remove",
     "requirements",
     "scan",
     "split_frontmatter",

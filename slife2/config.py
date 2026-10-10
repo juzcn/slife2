@@ -687,10 +687,21 @@ class SkillSettings:
 
     A skill with no entry is not misconfigured: the environment alone is a real
     answer, and a playbook that needs nothing is the common case.
+
+    **`enabled` is here and not in the folder**, which is the one thing about a
+    skill that the folder cannot say.  What is installed is a directory — that is
+    the whole of `slife2.skills`, and nothing has to be kept in step with it —
+    but a skill somebody wants out of the model's way is a *decision*, and a
+    decision belongs in the file the operator edits rather than in a name
+    convention inside a directory.  It is the same switch, with the same meaning
+    and the same spelling, as on a server and on a `cli:` entry.
     """
 
     name: str
     env: dict[str, str] = field(default_factory=dict)
+    #: `false` keeps the playbook installed and out of the catalogue.  Read by
+    #: the plugin that owns the section, which declares the row `disabled`.
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -1344,6 +1355,7 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
             env=_secrets(spec.get("env"), f"skills.{name}.env")
             if isinstance(spec, dict)
             else {},
+            enabled=bool(spec.get("enabled", True)) if isinstance(spec, dict) else True,
         )
         for name, spec in _mapping(raw.get("skills"), "skills").items()
     }

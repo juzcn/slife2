@@ -220,10 +220,35 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         assert [spec.name for spec in registry.specs] == [
             "_func_tool_unload",
             "calc",
+            # `cli-server` records programs already on this machine, and offers
+            # the model the tools that edit that record.
+            "cli_list",
+            "cli_remove",
+            "cli_set",
+            "cli_set_enabled",
             "echo",
             "fake__echo",
             "func_tool_load",
+            # The `mcp_*` and `rest_api_*` fives are here too: each family
+            # plugin holds somebody else's servers *and* offers the model the
+            # tools that edit its own section, and both arrive by the same road.
+            "mcp_list",
+            "mcp_list_tools",
+            "mcp_remove",
+            "mcp_set",
+            "mcp_set_enabled",
             "now",
+            "rest_api_list",
+            "rest_api_list_tools",
+            "rest_api_remove",
+            "rest_api_set",
+            "rest_api_set_enabled",
+            # And `skills-server`: `skill_use` was always the model's, and the
+            # four that install, remove and switch a playbook have joined it.
+            "skill_list",
+            "skill_remove",
+            "skill_set",
+            "skill_set_enabled",
             "skill_use",
             "tool_search",
             "turn_list",

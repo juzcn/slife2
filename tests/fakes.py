@@ -350,6 +350,26 @@ def plugin_transports(
     return transports
 
 
+def answering(server: Any) -> Any:
+    """A client factory that wires *every* entry to one in-memory server.
+
+    **A transport a test did not wire still has to be reachable**, and that is
+    the case the family plugins create: their management tools *add* entries,
+    and an added entry names a command nothing in the test connected — so left
+    to the real factory, `command: in-memory` would be spawned as a process and
+    `uvx mcp-openapi-proxy` would be fetched.  Answering everything with the
+    same in-memory server is what keeps those tests about the editing; the
+    commands an entry names are never run.
+    """
+
+    def factory(_transport: Any, _handler: Any) -> Any:
+        from fastmcp import Client
+
+        return Client(server)
+
+    return factory
+
+
 def blank_plugin() -> Any:
     """One of our own servers, answering, with nothing for the model.
 

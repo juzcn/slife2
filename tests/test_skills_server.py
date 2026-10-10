@@ -1,10 +1,14 @@
-"""slife2-skills: the playbooks, and the two things it serves about them.
+"""slife2-skills: reading a playbook, and declaring the folder.
 
 The server is a plugin like any other, so what is worth testing is not that MCP
 works — `test_builtins.py` does that for the shape — but the two decisions it
 owns and the hub used to: that `skill_use` is *derived* from a signature rather
 than hand-written, and that `list_sources` answers with the folder's whole
 list, which is what makes a deleted skill stop being a hit.
+
+The tools that *change* that folder are `tests/test_skills_tools.py`, because
+they are about the only thing in this system that writes somewhere other than
+the config.
 """
 
 from __future__ import annotations
@@ -62,17 +66,27 @@ async def test_the_reader_is_the_one_marked_tool_and_the_declaration_is_not(
     """**The audience mark decides what the model may call**, and it is the only
     thing that does.
 
-    `skill_use` is the model's.  `list_sources` is the hub's, and it has to
-    stay out of the model's list for the reason the whole gate exists: a tool
-    that declares rows is a tool that could declare a category — and a plugin
-    able to name its own category could offer the model `remember`.
+    `skill_use` is the model's, and so are the four tools that install, remove
+    and switch playbooks.  `list_sources` is the hub's, and it has to stay out of
+    the model's list for the reason the whole gate exists: a tool that declares
+    rows is a tool that could declare a category — and a plugin able to name its
+    own category could offer the model `remember`.
     """
     skill(isolated_runtime, "one")
     async with Client(build_server(default_config())) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
 
-    assert set(listed) == {USE_TOOL, LIST_SOURCES}
-    assert for_the_model(listed[USE_TOOL].meta)
+    assert set(listed) == {
+        USE_TOOL,
+        "skill_list",
+        "skill_set",
+        "skill_remove",
+        "skill_set_enabled",
+        LIST_SOURCES,
+    }
+    assert all(
+        for_the_model(listed[name].meta) for name in listed if name != LIST_SOURCES
+    )
     assert listed[LIST_SOURCES].meta is None or not for_the_model(
         listed[LIST_SOURCES].meta
     )
@@ -189,7 +203,7 @@ def test_a_skill_is_a_row_whose_schema_is_the_document(isolated_runtime: Path) -
     hands back, so what a search ranks and what a call returns are one text.
     """
     skill(isolated_runtime, "browser-harness", description="Drive a browser.")
-    rows = catalogue(default_config())
+    rows = catalogue(default_config().skills)
 
     assert [row["name"] for row in rows] == ["skill:browser-harness"]
     row = rows[0]
@@ -211,7 +225,7 @@ def test_an_unreadable_manifest_is_a_row_that_says_so(
         raise OSError("cannot read")
 
     monkeypatch.setattr(Path, "read_text", refuse)
-    rows = catalogue(default_config())
+    rows = catalogue(default_config().skills)
 
     assert manifest.exists()
     assert [row["status"] for row in rows] == ["error"]
@@ -220,7 +234,7 @@ def test_an_unreadable_manifest_is_a_row_that_says_so(
 
 def test_no_skills_is_no_rows(isolated_runtime: Path) -> None:
     """A fresh install is a folder that is not there, not an error."""
-    assert catalogue(default_config()) == []
+    assert catalogue(default_config().skills) == []
 
 
 def test_the_source_is_not_the_servers_own_name(isolated_runtime: Path) -> None:
