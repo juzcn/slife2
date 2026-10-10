@@ -82,9 +82,11 @@ The budget that bounds it is enforced by the *harness*, not by the gate:
 `_func_tool_unload` is called by the agent server before it saves a turn, and the
 names it unloaded come back — to the harness's log, and to the model, as the
 tool pair the trim is recorded as.  The leading underscore is the system's mark
-for a tool the machinery calls rather than one a model chooses, and this is the
-one name that carries it *and* is in the model's list: the pair has to name a
-declared tool, so the model has it too — see `_func_tool_unload`.
+for a tool the machinery calls rather than one a model chooses, and the names
+that carry it *and* are in the model's list are the ones whose pairs the harness
+writes into a conversation — the trim, and the message a running turn is handed
+(`_check_new_input`).  A pair has to name a declared tool, so the model has them
+too; `ALWAYS_LOADED` is where they are kept from leaving.
 
 Why the tools are *here* and not in the agent
 ---------------------------------------------
@@ -268,10 +270,13 @@ SKILL_USE = "skill_use"
 #: The trim, and the only name here with **two callers**.  The leading
 #: underscore is the convention — **a name beginning with `_` is a harness
 #: tool**, one the machinery drives rather than one the model chooses — and this
-#: is the single exception to it: the model has it too, because the harness's
+#: is one of the exceptions to it: the model has it too, because the harness's
 #: trim is recorded in the conversation as a tool pair, and a pair names a tool
 #: the request declares (v1's rule, and the reason its `_func_tool_unload` is
-#: the one `_` tool a model sees).  So the model may call it with the names it
+#: a `_` tool a model sees).  The other is `_check_new_input`, which reaches the
+#: model the same way from the other direction — a message delivered inside a
+#: running turn (`ALWAYS_LOADED`, and `slife2.server.server`).  So the model may
+#: call it with the names it
 #: is done with, while the *harness* calls it with none — on this server's API
 #: rather than through `call_tool`, so the trim does not depend on the
 #: catalogue, the routing or the model's list being in any state.  See
@@ -289,12 +294,28 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: being obeyed.  One string is cheaper than a column the row would have to
 #: carry to say "the system needs me", and the name it must match is
 #: `slife2.skills.USE_TOOL`.
+#:
+#: **This is a question about unloadability and not about who calls a tool** —
+#: `slife2.tools` separates the two and this set is where the third one is
+#: answered.  So it holds `skill_use`, which nothing but the model drives,
+#: alongside the harness tools, which the machinery drives and the model may call
+#: too; what all of them share is that something *else* refers to them by name.
+#: `CHECK_NEW_INPUT` is the sharpest case of that and is spelled below
+#: (the hub must not import a server): a pair the harness wrote into the history
+#: names it, so a turn that unloaded it would send a request whose history calls
+#: a tool its `tools` array no longer declares — a 400, and one the model could
+#: not have avoided.
 ALWAYS_LOADED = frozenset(
     {
         TOOL_SEARCH,
         FUNC_TOOL_LOAD,
         FUNC_TOOL_UNLOAD,
         SKILL_USE,
+        # slife2.server.server.CHECK_NEW_INPUT — the tool a message that arrives
+        # mid-turn is delivered under.  Spelled here rather than imported for the
+        # reason this module spells `SKILL_USE`: the hub is the model's tool
+        # list, and it must not be importable from an agent.
+        "_check_new_input",
     }
 )
 

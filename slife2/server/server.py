@@ -10,7 +10,10 @@ and a model name from the config.
 own state by.  `subagent=""` is the agent's own conversation; anything else is a
 worker it is running.  A caller submits a user message under that key and gets
 that turn's answer back; the surface is three tools — `send_message`, `reset`,
-and `transcript`, which is what a window that has just opened asks for.
+and `transcript`, which is what a window that has just opened asks for.  A
+fourth, `_check_new_input`, is not part of that surface: it is the name a message
+arriving mid-turn is delivered under, and it is declared here because the pair
+the harness writes into a conversation has to name a tool the request carries.
 
 **A key is created when it is first used, and it never expires.**  That is the
 difference from the handle this server used to mint: an id could go stale — a
@@ -37,6 +40,12 @@ because they are the price of the state:
 * **A per-key lock**, so two turns cannot race over one list.  `send_message`
   takes it; a second caller waits, and that wait *is* the inbox.  Distinct keys
   hold distinct locks, so two agents' conversations run at the same time.
+* **Cut-in**, which is what waiting *for* means.  A message that arrives while a
+  turn runs is handed to that turn at its next step boundary — as a call to
+  `_check_new_input` and a result carrying the message's own words — so the model
+  addresses it inside the turn it arrived in rather than one turn later.  v1's
+  mode, always on, and the one place this server writes a message into a
+  conversation that its own caller did not send.
 * **Repair on cancellation.**  A cancelled turn can leave the list holding an
   assistant message whose tool calls are only partly answered, which is a 400
   from every provider.  `run_turn_into` truncates back to the user's own message,
@@ -63,6 +72,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
@@ -76,7 +86,7 @@ from slife2.context import turn_note, with_note
 from slife2.events import ContextChosen, TurnEvent, TurnObserver, encode
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
-from slife2.loop import AgentLoop, TurnResult
+from slife2.loop import AgentLoop, TurnResult, harness_call
 from slife2.mcp_server import (
     ClientId,
     close_server,
@@ -88,7 +98,7 @@ from slife2.mcp_server import (
     serve,
     tool_payload,
 )
-from slife2.messages import Message, ToolCall
+from slife2.messages import Message
 from slife2.prompt import render as render_system_prompt
 from slife2.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
 from slife2.tools import Tool, ToolRegistry
@@ -124,6 +134,28 @@ LOOP_IDLE_SECONDS = 30 * 60.0
 #: and cancels the turn, which is the very way a message gets lost.  A bound is
 #: what keeps "queued" from meaning "eventually dropped".
 MAX_QUEUED = 32
+
+#: The harness tool a message that arrived mid-turn is delivered under — v1's
+#: *cut-in*, and the name is v1's for the same reason its pair shape is.
+#:
+#: **It is a tool because a pair has to name one.**  The Responses and Messages
+#: backends reject a tool call in history whose name is not in the request's
+#: declared tool list, so an injected message cannot be a fabrication of the
+#: history layer: it is a call to a real tool, declared like any other, that the
+#: *harness* makes on the model's behalf.  The model can call it too and gets a
+#: sentence saying there is nothing to fetch — only the harness pulls.
+#:
+#: Being declared is not enough for it to survive: `slife2.db` admits
+#: `_`-prefixed names to the model's list only from its own set, and
+#: `slife2.toolhub.ALWAYS_LOADED` is what stops the model unloading a name its
+#: own history refers to.  Both spellings are this string.
+CHECK_NEW_INPUT = "_check_new_input"
+
+#: What that tool answers when there is nothing to hand over — an empty queue, or
+#: a head that carries images and so cannot ride a tool result.  A sentence and
+#: not an empty string: it lands in a tool result, and a blank one reads as a
+#: failure rather than as "nothing had arrived".
+NOTHING_WAITING = "Nothing waiting: no message has arrived since the last boundary."
 
 INSTRUCTIONS = (
     "A conversational agent. Call `send_message` with an agent name and what was "
@@ -161,12 +193,15 @@ class ProgressObserver:
 
 @dataclass(eq=False)
 class Pending:
-    """A message submitted to a loop whose turn has not started yet.
+    """A message submitted to a loop, waiting for its own turn — or for one.
 
-    It is held here, and *not* appended to the loop's messages, until its turn
-    begins.  `AgentLoop.run_turn` re-reads the message list at every step, so a
-    message appended early would be seen by the model mid-turn — steering that
-    nobody asked for, arriving silently.
+    It is held here, and *not* appended to the loop's messages as a user message,
+    until its turn begins.  What may happen to it in between is the running
+    turn **folding it in** (`inject`): the message goes to the model at that
+    turn's next step boundary as a harness tool pair, and this entry's `result`
+    is set to that turn's answer.  It is never appended as a user message
+    mid-turn, which is what would be steering nobody asked for — the model reads
+    a folded message as something that arrived, which is what it is.
 
     `eq=False` because the inbox is a queue of *submissions* and not of values.
     `deque.remove` compares by equality, so the generated `__eq__` — which
@@ -180,6 +215,18 @@ class Pending:
     prompt: str
     images: list[str]
     channel: str
+    #: Set by the turn that folded this message into itself, and **only when that
+    #: turn produced a result**.  `None` is therefore the honest "nothing folded
+    #: this in — run your own turn", and one field carries both the branch and
+    #: the answer rather than a second slot that could disagree with it.
+    #:
+    #: A turn that produced no result — cancelled *or* failed — leaves this alone
+    #: on purpose: the message was not answered, so it still owes itself a turn,
+    #: and the caller is already parked on the lock with this very object in hand.
+    #: Restoring it to the inbox instead would race a caller that had been
+    #: cancelled in the meantime and leave an orphan the next turn would fold in
+    #: with nobody waiting for it.
+    result: TurnResult | None = None
 
 
 @dataclass
@@ -213,6 +260,11 @@ class Loop:
     lock: asyncio.Lock
     last_used: float
     inbox: deque[Pending] = field(default_factory=deque)
+    #: The entries this turn has folded in, in the order it took them.  Held for
+    #: exactly one turn: it is how the turn's own end reaches them (their `result`
+    #: is set there), and it is cleared by the same `finally`, so a later turn can
+    #: never answer for one this one took.
+    injected: list[Pending] = field(default_factory=list)
     #: Which turns of the log `messages` is made of, in order — the agent's copy
     #: of the live-context list the store persists.  Held here rather than read
     #: per turn because it *is* the in-memory state: `rebuild` is handed it and
@@ -802,26 +854,63 @@ def build_server(
             len(unloaded),
             ", ".join(unloaded),
         )
-        call_id = f"_harness_func_tool_unload_{time.time_ns():x}"
+        call = harness_call(FUNC_TOOL_UNLOAD)
         # **Both halves with nothing awaited between them.**  An interruption in
         # that gap leaves an assistant message whose call is never answered, and
         # that is the one history state every provider rejects — the same reason
         # the caller refuses to start a trim on a cancelled turn.  Two appends
-        # with no suspension point between them cannot be split.
-        loop.messages.append(
-            Message(
-                role="assistant",
-                content=None,
-                tool_calls=[ToolCall(id=call_id, name=FUNC_TOOL_UNLOAD, arguments={})],
-            )
-        )
+        # with no suspension point between them cannot be split.  (`harness_call`
+        # is the one builder of these pairs: the loop writes the cut-in's the same
+        # way, and two writers inventing ids would eventually invent one twice.)
+        loop.messages.append(Message(role="assistant", content=None, tool_calls=[call]))
         loop.messages.append(
             Message(
                 role="tool",
                 content=str(found.get("text") or ""),
-                tool_call_id=call_id,
+                tool_call_id=call.id,
             )
         )
+
+    def take_waiting(client_id: ClientId) -> str:
+        """The first message waiting for one conversation, taken for delivery.
+
+        **The delivery itself, and the reason `_check_new_input` is a real tool
+        rather than a stub beside a fabricated pair.**  What the harness writes
+        into the conversation is this call's answer, exactly as `trim_tools`
+        writes `_func_tool_unload`'s — so the tool does the work, and the pair
+        cannot say something the tool would not say.
+
+        **The model can reach this too, and that is not the design's intent —
+        only its constraint.**  The tool has to be declared (a pair names it),
+        being declared puts it in the model's list, and a call from there cannot
+        be refused: a provider hands us the call and the only answer available is
+        this one.  So the same function serves both, and what makes that
+        acceptable is that the model calling it is the boundary's own move made
+        early rather than something new — the message would have arrived at the
+        next step regardless.  A tool that could not say that could not be a
+        harness tool at all (`slife2.tools`).
+
+        **The entry is claimed before it is returned**, into `loop.injected`, so
+        that the turn this arrives in is the turn that answers for it: the
+        caller parked on the lock reads its own entry's `result` and stops
+        waiting.  Taken in arrival order — the queue's first is the message that
+        has waited longest.
+
+        Returns `""` for nothing to deliver: no such conversation, an empty
+        queue, or a head that carries images.  That last one is the single
+        refusal, and it is `auto_invoke`'s too — a tool result carries text, so
+        delivering one would drop what somebody attached, and the message keeps
+        its place and its own turn instead.
+        """
+        loop = loops.get(client_id)
+        if loop is None or not loop.inbox:
+            return ""
+        waiting = loop.inbox[0]
+        if waiting.images:
+            return ""
+        loop.inbox.popleft()
+        loop.injected.append(waiting)
+        return waiting.prompt
 
     def annotate_turn(outcome: Outcome, item: Pending, turn_id: int) -> None:
         """Write a turn's id and span onto the message that opened it.
@@ -881,13 +970,39 @@ def build_server(
         read in the turn that took it away, rather than a gap somebody has to
         explain.
         """
+
+        def auto_invoke() -> str | None:
+            """The tool to call at this step boundary, or `None` — v1's cut-in.
+
+            **Cheap, and it decides only *whether*.**  The name it returns is
+            handed to the loop, which makes the call through the same registry
+            the model's calls go through, so this half never touches a tool and
+            never builds a message.  What it answers is one question — has
+            anything arrived for this conversation — and the answer is a queue
+            that is almost always empty.
+
+            **A message with images is not folded in**, and this is the one
+            refusal: a tool result carries text, so delivering one would drop
+            what somebody attached, and this system announces what it cannot keep
+            rather than keeping it silently.  The message keeps its place and
+            runs its own turn, which costs the messages behind it one wait and
+            loses nobody anything.  `take_waiting` refuses the same way, so the
+            two agree about what is deliverable — this one without popping, so
+            that a boundary which delivers nothing leaves no pair behind.
+            """
+            if not loop.inbox:
+                return None
+            return None if loop.inbox[0].images else CHECK_NEW_INPUT
+
         snapshot = len(loop.messages)
         outcome.started_at = now()
         user = _with_images(item.prompt, item.images, config, loop.model)
         agent_loop = await loop_for(loop.model, (loop.agent, loop.subagent))
         cancelled = False
         try:
-            outcome.result = await agent_loop.run_turn(loop.messages, user, observer)
+            outcome.result = await agent_loop.run_turn(
+                loop.messages, user, observer, auto=auto_invoke
+            )
         except asyncio.CancelledError:
             # The repair, and it has to happen *here* — inside the lock, before
             # it is released.  Releasing first and truncating after would let
@@ -911,6 +1026,21 @@ def build_server(
             # same reason.  The turn is over; the budget can wait a turn.
             if not cancelled:
                 await trim_tools(loop)
+            # **What a folded message is owed, settled where the turn ends.**
+            # A turn that produced a result has answered for everything it was
+            # handed, so each entry it took is given that answer and the caller
+            # waiting on it stops waiting.  A turn that produced *none* — the
+            # cancelled path above, or any failure — has answered nothing: the
+            # entries keep `result` as `None`, and their callers, who are already
+            # parked on the lock holding these same objects, run their own turns.
+            #
+            # The list is one turn's and is emptied either way.  A later turn
+            # answering for a message it never saw is the failure that would come
+            # of leaving it.
+            if outcome.result is not None:
+                for folded in loop.injected:
+                    folded.result = outcome.result
+            loop.injected.clear()
             outcome.messages = list(loop.messages[snapshot:])
             outcome.completed_at = now()
 
@@ -955,6 +1085,19 @@ def build_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
 
+    @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
+    async def check_new_input(ctx: Context) -> str:
+        """The message that arrived while the turn was running, verbatim.
+
+        The harness hands these over at the turn's next step boundary, so what
+        you read under it is somebody's own words, exactly as they wrote them.
+        Calling it yourself is not how this arrives and gets you nothing extra —
+        it hands over the first message waiting for this conversation, or says
+        there is none — and it takes what it hands over.
+        """
+        client_id = request_client(ctx)
+        return take_waiting(client_id) if client_id else NOTHING_WAITING
+
     @mcp.tool
     async def send_message(
         agent: str,
@@ -978,11 +1121,19 @@ def build_server(
         still gets the whole thing.
 
         **A message sent to a busy conversation waits rather than displacing
-        anything.**  Turns on one key run one at a time, in the order they were
-        submitted, and a queued message becomes a turn of its own when its place
+        anything** — and what it waits *for* is the running turn's next step
+        boundary, where it is folded in (see `inject`).  Turns on one key run one
+        at a time, in the order they were submitted; a message the running turn
+        did not reach before it ended becomes a turn of its own when its place
         comes up.  Nothing is dropped and nothing is cancelled — up to a bound,
         because a client's call timeout does not know it is waiting.  Different
         keys do not wait for each other at all.
+
+        A caller whose message was folded in is answered by the turn that took it:
+        the same `text` that turn's own caller got, with `injected` true.  The
+        model was given both messages, so its answer is the answer to both — and
+        a caller told nothing would have no way to tell that from a turn that
+        happened to say the same thing.
 
         Args:
             agent: Whose conversation.  It renders the system prompt and is the
@@ -1013,9 +1164,11 @@ def build_server(
                 can tell a person's turn from a worker's.
 
         Returns:
-            `text` (the final answer), `usage`, `steps`, `stop_reason`, and the
+            `text` (the final answer), `usage`, `steps`, `stop_reason`, the
             `model` that answered — which a bare provider or an empty reference
-            does not otherwise reveal.
+            does not otherwise reveal — and `injected`, true when this message
+            was folded into a turn that was already running rather than run as
+            its own.
         """
         # Asked before anything is spent.  A context plugin that is not there is
         # a broken system rather than a degraded one, and the moment to find that
@@ -1043,6 +1196,17 @@ def build_server(
         outcome = Outcome()
         try:
             async with loop.lock:
+                # **The turn that just released the lock may have taken this
+                # message with it**, folding it in at one of its step boundaries
+                # (`inject`).  Then there is no turn here to run: the model was
+                # handed this message inside that one and its answer is the
+                # answer to this, so the caller is given exactly what that turn's
+                # own caller got.  Asked of the *entry* rather than inferred from
+                # the queue, because a turn that produced no result leaves it as
+                # `None` — and then this message still owes itself a turn, which
+                # is what the rest of this block is for.
+                if item.result is not None:
+                    return _injected_reply(loop, item.result)
                 # Ours, and its turn is starting now.  A message waiting in
                 # the inbox is *not* in `messages`: `AgentLoop.run_turn`
                 # re-reads the list every step, so an early append would be
@@ -1102,16 +1266,13 @@ def build_server(
         finally:
             # On every path, including a cancellation while queued: the turn
             # never started, so there is nothing to record, but the inbox entry
-            # must not be left behind.
+            # must not be left behind.  A no-op when the running turn folded this
+            # message in — that is exactly the case the entry is already gone —
+            # and the suppression is what says so without a branch: there is no
+            # difference to report between "I took it out" and "it was taken".
             loop.last_used = time.monotonic()
             with contextlib.suppress(ValueError):
                 loop.inbox.remove(item)
-                # On every path, including a cancellation while queued: the turn
-                # never started, so there is nothing to record, but the inbox
-                # entry must not be left behind.
-                loop.last_used = time.monotonic()
-                with contextlib.suppress(ValueError):
-                    loop.inbox.remove(item)
 
         result = outcome.result
         return {
@@ -1120,6 +1281,7 @@ def build_server(
             "steps": result.steps if result else 0,
             "stop_reason": result.stop_reason if result else "cancelled",
             "model": loop.model,
+            "injected": False,
         }
 
     @mcp.tool
@@ -1206,6 +1368,29 @@ def build_server(
         return {"reset": forgotten}
 
     return mcp
+
+
+def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
+    """What a caller is told when a running turn folded its message in.
+
+    **The answer that turn's own caller got, said the same way**, because there
+    is only one answer to give: the model was handed both messages in one turn,
+    and what it said was said to both.
+
+    `usage` and `steps` are that whole turn's, deliberately — they describe the
+    work that answered this message, which is that turn's work and nothing else.
+    `injected` is the one thing added, and it is not decoration: without it a
+    caller cannot tell "my message rode in another turn" from "my turn happened
+    to say the same thing", and the two call for different things to be shown.
+    """
+    return {
+        "text": result.text,
+        "usage": result.usage.to_wire(),
+        "steps": result.steps,
+        "stop_reason": result.stop_reason,
+        "model": loop.model,
+        "injected": True,
+    }
 
 
 def _with_images(

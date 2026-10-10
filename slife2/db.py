@@ -1908,16 +1908,24 @@ UNLOADED = "unloaded"
 #: and a forgotten one cannot silently return an empty set.
 NA = "n/a"
 
-#: The `_`-prefixed names the model *does* get, and there is exactly one.
+#: The `_`-prefixed names that are still injected: the harness tools, which are
+#: in the model's list *because* their pairs are written into its history.  A
+#: name in this set is injected, callable, and evictable only in the sense that
+#: nothing of ours ever is — see `_injectable_sql` for the argument,
+#: `slife2.toolhub.FUNC_TOOL_UNLOAD` for the trim, and
+#: `slife2.server.server.CHECK_NEW_INPUT` for the mid-turn delivery.
 #:
-#: A name in this set is injected, callable, and evictable only in the sense
-#: that nothing of ours ever is — see `_injectable_sql` for the argument and
-#: `slife2.toolhub.FUNC_TOOL_UNLOAD` for the tool.  Spelled here rather than
-#: imported for the reason `PLUGIN` is spelled in two modules: the hub must not
-#: be importable from the catalogue's half, and the db must not import a server.
-#: The two spellings are the same fact — the name of one tool — which is why
-#: this set has one member and is not a pattern.
-MODEL_VISIBLE_HARNESS_TOOLS = frozenset({"_func_tool_unload"})
+#: **This set is the intersection of two different questions**, which is why it
+#: is spelled out rather than derived: `slife2.tools` has the vocabulary, and its
+#: point is that the `_` mark answers *who calls it* — the model's list and the
+#: unload rule are asked separately.  Here the two answers happen to line up,
+#: because what makes a tool a harness tool is a pair, and a pair has to name a
+#: tool the request declares.  Both names are here for that one reason.
+#:
+#: Spelled rather than imported for the reason `PLUGIN` is spelled in two
+#: modules: the hub must not be importable from the catalogue's half, and the db
+#: must not import a server.
+MODEL_VISIBLE_HARNESS_TOOLS = frozenset({"_func_tool_unload", "_check_new_input"})
 
 #: The columns the code reads or writes on `tool`, checked at open in BOTH
 #: directions: a missing column cannot answer a query, and an unknown one is a
@@ -3477,19 +3485,24 @@ def _injectable_sql(sources: Sequence[str]) -> str:
     Built from the constants rather than spelled out, so the SQL cannot drift
     from `FUNCTION_CATEGORIES` — the same reason `_CATEGORY_CHECK` is.
 
-    **A name beginning with `_` is a harness tool and is not injected** — with
-    one exception, below.  v1's convention, and it is a name and not a column
-    for v1's reason: what makes a tool the harness's is that the *machinery*
-    calls it, and a fact about who calls a thing belongs on the thing, where
-    both sides can read it without a second register to keep in step.
+    **A name beginning with `_` is not injected** — with the exceptions in
+    `MODEL_VISIBLE_HARNESS_TOOLS`, below.  v1's convention, and it is a name and
+    not a column for v1's reason: what makes a tool the machinery's is that the
+    *machinery* calls it, and a fact about who calls a thing belongs on the
+    thing, where both sides can read it without a second register to keep in
+    step.  (`slife2.tools` is where the word is defined; the mark is about who
+    calls it, and this filter is a *policy about the list* that mostly coincides
+    with it.)
 
-    **The exception is `_func_tool_unload`**, and it is the only one.  The
-    harness's trim is written into the conversation as a tool pair, a pair names
-    a tool, and a request whose history calls a tool its `tools` array does not
-    declare is a 400 from the Responses and Messages backends (v1's rule, and
-    v1's single exception: one `_` tool the model sees).  A tool the model reads
-    in its own history but cannot call would be inconsistent with itself, so it
-    is injected, callable, and named the same way it is named here.
+    **The exceptions are the harness pairs** — `_func_tool_unload` for a turn's
+    trim, `_check_new_input` for a message delivered inside a running turn.  Each
+    is written into the conversation as a tool pair, a pair names a tool, and a
+    request whose history calls a tool its `tools` array does not declare is a
+    400 from the Responses and Messages backends (v1's rule).  A tool the model
+    reads in its own history but cannot call would be inconsistent with itself,
+    so each is injected, callable, and named the same way it is named here — and
+    what qualifies one for this exception is being a pair, which is why the set
+    is written out beside the tool names rather than derived from anything.
     """
     visible = _in_list(MODEL_VISIBLE_HARNESS_TOOLS) or "''"
     return (

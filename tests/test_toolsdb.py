@@ -443,25 +443,30 @@ def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
     convention is a name rather than a column for v1's reason: what makes a tool
     the harness's is who calls it, and that belongs on the thing itself.
 
-    **`_func_tool_unload` is the one exception, and it is by name and not by
-    shape.**  The harness's trim is recorded in the conversation as a tool pair,
-    so the model reads this name in its own history; a tool the model can read
-    there but not call would be inconsistent with itself, and v1's rule is that
-    the name has to be declared for the backends to take the pair at all.  Any
-    other underscore name stays out — which is what the second half of this
-    asserts, and it is the half that keeps the convention from eroding into
-    "names the hub happens to like".
+    **The exceptions are the harness pairs, and they are by name and not by
+    shape.**  Each is recorded in the conversation as a tool pair — the trim, and
+    the message a running turn is handed — so the model reads both names in its
+    own history; a tool the model can read there but not call would be
+    inconsistent with itself, and v1's rule is that the name has to be declared
+    for the backends to take the pair at all.  Any other underscore name stays
+    out — which is what the second half of this asserts, and it is the half that
+    keeps the convention from eroding into "names the hub happens to like".
     """
     store = store_at(tmp_path)
     merge(
         store,
         "toolhub",
         "plugin",
-        [tool("_func_tool_unload"), tool("_func_something_new"), tool("tool_search")],
+        [
+            tool("_func_tool_unload"),
+            tool("_check_new_input"),
+            tool("_func_something_new"),
+            tool("tool_search"),
+        ],
     )
 
     injected = [row["name"] for row in store.injectable(["toolhub"])["tools"]]
-    assert injected == ["_func_tool_unload", "tool_search"]
+    assert injected == ["_check_new_input", "_func_tool_unload", "tool_search"]
 
 
 def test_a_document_row_is_findable_and_never_injected(tmp_path) -> None:

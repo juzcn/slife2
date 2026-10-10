@@ -170,6 +170,86 @@ async def test_tool_call_runs_and_feeds_back() -> None:
     assert [m.role for m in second_call_messages] == ["user", "assistant", "tool"]
 
 
+async def test_a_harness_tool_is_called_through_the_registry() -> None:
+    """v1's auto-invoke: the *same* path the model's own calls take.
+
+    The point is where the pair's text comes from.  The harness names a tool and
+    the loop runs it out of `self._tools` — the registry whose `specs` went out
+    with the last request — so the text is the tool's own answer rather than
+    something written beside it, exactly as `trim_tools` gets the trim's text
+    from `_func_tool_unload`.  A pair that could say something the tool would not
+    say is the second source of truth this arrangement exists to avoid.
+    """
+    calls: list[dict[str, Any]] = []
+    delivered = False
+
+    async def check_new_input(arguments: dict[str, Any]) -> str:
+        calls.append(arguments)
+        return "the second message"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="calc", arguments={"e": "2+2"})),
+        text_turn("It is 4."),
+    )
+    harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
+
+    def auto() -> str | None:
+        """Asked at the top of *every* step; delivers once, on the second.
+
+        The gate is the caller's, and it is the cheap half of v1's split: whether
+        anything arrived is answerable without a call, and which tool answers it
+        is this side's business only because there is one.
+        """
+        nonlocal delivered
+        if backend.calls and not delivered:
+            delivered = True
+            return "_check_new_input"
+        return None
+
+    observer = ListObserver()
+    messages: list[Message] = []
+    result = await AgentLoop(backend, ToolRegistry(harness_tools)).run_turn(
+        messages, "one", observer, auto=auto
+    )
+
+    assert result.text == "It is 4."
+    # Called once, with no arguments: there is nothing for the harness to choose.
+    assert calls == [{}]
+
+    # The pair is the tool's call and the tool's answer, in that shape — written
+    # between the tool call the model made and the answer it gave afterwards.
+    assert [m.role for m in messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    opened, answered = messages[3], messages[4]
+    assert opened.role == "assistant" and opened.content is None
+    call = opened.tool_calls[0]
+    assert call.name == "_check_new_input"
+    assert call.id.startswith("_harness_check_new_input_")
+    assert (answered.role, answered.tool_call_id) == ("tool", call.id)
+    assert answered.content == "the second message"
+
+    # The model's next request carries it — which is the only reason the pair is
+    # written at all — and nothing pretended the call was the model's.
+    assert [m.role for m in backend.calls[1][0]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+    ]
+    # Nobody watching is shown a tool call for it: v1 routes around the
+    # tool-execution path, so the reader sees the model's `c1` and no other.
+    assert [
+        event.call_id for event in observer.events if isinstance(event, ToolCallStarted)
+    ] == ["c1"]
+
+
 async def test_a_failing_tool_is_fed_back_as_text() -> None:
     """The model gets to see the mistake and correct itself."""
     backend = FakeBackend(

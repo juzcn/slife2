@@ -268,11 +268,32 @@ avoided:
 
 - **A per-conversation lock**, because two turns can now race over one list.
 - **An inbox**, which is that lock seen from the other side: a `send_message` for
-  a busy loop *waits*, in arrival order, and becomes a turn of its own. Nothing
-  is dropped and nothing is cancelled. The message is held in the loop's inbox
-  and **not** in its messages until its turn begins — the loop re-reads the
-  message list at every step, so a message appended on arrival would be read by
-  the model mid-turn, which is steering nobody asked for.
+  a busy loop *waits*, in arrival order. Nothing is dropped and nothing is
+  cancelled, and what it waits for is the running turn's next **step boundary** —
+  v1's *cut-in*, ported. What it is handed at that boundary is a **harness tool
+  pair**: the message becomes a call to `_check_new_input` and a result carrying
+  the message's own words, written into the running turn's message list. It is
+  deliberately not appended as a *user* message on arrival — the loop re-reads
+  the list at every step, so that would be read as the turn's own input, arriving
+  silently, and in the middle of an unanswered tool exchange it is a 400 from
+  several providers. The model reads the pair as what it is: something that
+  arrived while it was working.
+  The arrangement is v1's `Inbox`/`_check_new_input` except in one place, and
+  that place is why the answer handoff had to be invented rather than copied.
+  v1's senders were channels that could give up — its own words are "sender-side
+  timeout+degrade is the backstop" — so a message folded into a running turn
+  simply never got its own reply. Here every inbox entry has a caller parked on
+  the lock expecting `{text, usage, steps}`. So the absorbing turn *answers for
+  it*: `Pending.result` is set from that turn's result, and the waiter returns
+  what the turn's own caller got, with `injected` true. A turn that produced no
+  result — cancelled or failed — writes nothing, and the message then runs its
+  own turn, which is the only reason the field can be `None`.
+  **And no screen draws it.** The pair is in the record and in every request the
+  model makes afterwards, so the conversation has it either way — but the live
+  transcript is rendered from `TurnEvent`s and an auto-invoked call raises none
+  (v1 routes around the tool-execution path), and a rebuilt one filters
+  `_`-prefixed calls out by name. Drawing it is §9's, and it is three changes
+  rather than one, which is why it is named there instead of half-built here.
 - **Cancellation repair**, which the plan called the sharpest correctness edge in
   the system and which statelessness had deleted. A cancelled turn can leave an
   assistant message whose tool calls are only partly answered, and *that* list is
@@ -1369,6 +1390,20 @@ Named so they are decisions rather than oversights:
   exist is a promise it cannot keep. When this bullet stops being deferred, the
   sentence can name the tool and be true.
 - **Markdown rendering.** The transcript shows model output as plain text.
+- **Drawing a message that cut in.** §3 has the behaviour: a message that arrives
+  while a turn is running is handed to that turn as a tool pair, and it is then in
+  the record and in every request the model makes. Nothing *draws* it. That is the
+  current state rather than a defect — the live transcript is rendered from
+  `TurnEvent`s and an auto-invoked call emits none, and a rebuilt one drops every
+  `_`-prefixed call by name (`tui/restore.py:_is_harness`), which is right for the
+  trim and wrong for this one: its result is something a person said. Closing it
+  is three changes and the third is the real one — an event, an exception in that
+  filter, and a line that shows a user message **without closing the open turn**,
+  because `ChatView.add_user` sets `_turn_open = False` and reusing it would
+  silently drop the rest of the answer being streamed. Removing the filter alone
+  would draw it as a tool panel, which is the one thing it is not. Until then a
+  person's words can be in the record and off the screen, which is worth knowing
+  before a window is wired to deliver immediately.
 - **`thinking` deltas, and the display decision has since been made.** Both SDKs
   expose them cheaply, and rendering a model's private reasoning as its *answer*
   would be worse than not showing it — so the rule that landed is neither

@@ -58,14 +58,7 @@ def config(**agent_overrides):
 def tool_then_answer() -> FakeBackend:
     """One scripted turn that calls `calc`, then one that answers."""
     return FakeBackend(
-        ScriptedTurn(
-            result=StreamChatResult(
-                text="checking",
-                tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "6*7"}),),
-                stop_reason="tool_calls",
-            ),
-            chunks=[Chunk(text="checking")],
-        ),
+        asks_for_calc(),
         ScriptedTurn(
             result=StreamChatResult(text="It is 42.", stop_reason="stop"),
             chunks=[Chunk(text="It is 42.")],
@@ -75,6 +68,26 @@ def tool_then_answer() -> FakeBackend:
 
 def answering(text: str) -> FakeBackend:
     return FakeBackend(ScriptedTurn(result=StreamChatResult(text=text)))
+
+
+def asks_for_calc(*, delay: float = 0.0) -> ScriptedTurn:
+    """The step that calls a tool — and so gives the turn a second boundary.
+
+    A turn that answers in one step has no boundary after its first, which is
+    why the cut-in needs this shape to be exercised at all.  The delay is what
+    keeps the arrival *inside* the first step instead of racing the second: a
+    test that submits while the stream is still coming is testing the boundary
+    the feature is about.
+    """
+    return ScriptedTurn(
+        result=StreamChatResult(
+            text="checking",
+            tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "6*7"}),),
+            stop_reason="tool_calls",
+        ),
+        chunks=[Chunk(text="checking")],
+        delay=delay,
+    )
 
 
 @pytest_asyncio.fixture(loop_scope="function")
@@ -215,13 +228,19 @@ def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_two_tools(context, hub) -> None:
+async def test_the_server_exposes_its_own_four_tools(context, hub) -> None:
     """There is no `open_loop` because there is nothing to open.
 
     An id a server mints is an id a caller has to keep, and keeping it is where
     every lifetime problem starts.  A conversation is started by the first
     message that names it, so sending *is* opening — and what is left is one verb
     and one way to start over.
+
+    The fourth is not a verb a caller has any use for: `_check_new_input` is the
+    name a message that arrives mid-turn is delivered under, and it is declared
+    here because the *pair* the harness writes into the conversation has to name
+    a tool the request carries.  It is listed with the rest because a server's
+    tool list is what it serves, not what it recommends.
     """
     async with Client(
         build_server(
@@ -229,7 +248,12 @@ async def test_the_server_exposes_two_tools(context, hub) -> None:
         )
     ) as client:
         tools = await client.list_tools()
-    assert [t.name for t in tools] == ["send_message", "transcript", "reset"]
+    assert [t.name for t in tools] == [
+        "_check_new_input",
+        "send_message",
+        "transcript",
+        "reset",
+    ]
 
 
 @pytest.mark.asyncio
@@ -543,17 +567,24 @@ async def test_an_idle_conversation_simply_starts_again(
 
 @pytest.mark.asyncio
 async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -> None:
-    """The core claim of the whole design, and the reason loops exist at all.
+    """A message is never dropped and never displaces the turn it arrives in.
 
     A second message arrives while the first turn is still streaming.  Under the
     TUI's old policy it would have *cancelled* the first turn and thrown it
-    away; here it queues, runs in its turn, and both answers come back.
+    away; here it waits, runs in its turn, and both answers come back.
 
-    The second assertion is the one that catches a real mistake: the queued
-    message must not be visible to the turn that is already running.  The loop
-    re-reads its message list at every step, so a message appended on arrival
-    would be read by the model mid-turn — steering nobody asked for, arriving
-    silently.
+    **This is the turn with nothing to cut into**, and it is the reason both
+    halves are needed.  The first turn here is one step: the model answered and
+    asked for no tools, so the loop made one call and returned, and there was no
+    later boundary for the arrival to be delivered at.  It keeps its place and
+    its own turn.  `test_a_message_sent_to_a_busy_loop_is_folded_into_the_turn`
+    is the other half, on a turn that does take a second step.
+
+    What the second assertion still catches is the mistake the pairing exists to
+    prevent: the arrival must not reach the model as *this turn's* input.  A
+    message appended to the list as a user message on arrival would be read
+    mid-turn — steering nobody asked for, arriving silently, and in the middle of
+    an unanswered tool exchange a 400 from several providers.
     """
     backend = FakeBackend(
         text_turn("slow answer", delay=0.15),
@@ -585,6 +616,137 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
         "assistant:slow answer",
         "user:two",
     ]
+
+
+def wired(backend: FakeBackend, context: Client) -> tuple[Client, FastMCP]:
+    """A hub and an agent that can reach each other, which takes a holder.
+
+    **The circle is real and it is the feature.**  The pair the cut-in writes has
+    to name a tool the model's request carries, so `_check_new_input` reaches the
+    model the way every other tool does — through the hub — which means the hub
+    asks the *agent* for a tool list, while the agent asks the hub for the same
+    list.  Neither can be built first.
+
+    So the hub is built with a transport that resolves the agent later, and the
+    agent is built pointing at a hub client that has not been entered yet.  A
+    transport is only *called* when the hub starts, which the caller does once
+    both objects exist — and `plugin_transports`'s agent entry is a `blank_plugin`
+    otherwise, which would leave the loop with a registry that has no such tool
+    and the pair naming one the model was never offered.
+    """
+    from slife2.toolhub import build_server as build_hub
+    from tests.fakes import plugin_transports
+
+    holder: dict[str, Any] = {}
+    transports = plugin_transports(default_config())
+    transports["agent"] = lambda _settings: holder["agent"]
+    hub_server = build_hub(
+        default_config(), transports=transports, embedder=StubEmbedder()
+    )
+    hub_client = Client(hub_server)
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub_client,
+        backend=backend,
+    )
+    holder["agent"] = server
+    return hub_client, server
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
+    context,
+) -> None:
+    """v1's cut-in: the arrival is handed to the turn that is already running.
+
+    The first turn here takes two steps — the model asks for `calc` and is told
+    — so there *is* a boundary after the message arrives, and at it the message
+    is delivered as a call to `_check_new_input` and answered with its own words.
+    The model reads it as something that arrived mid-turn, which is what it is.
+
+    Its sender is answered by that turn rather than by one of its own, which is
+    the half v1 had no need of: there, a sender was a channel that could give up,
+    and here it is a call parked on the lock expecting `{text, usage, steps}`.
+    It gets the answer the message was actually given, and `injected` says so —
+    without which a caller could not tell this from a turn of its own that
+    happened to say the same thing.
+    """
+    backend = FakeBackend(
+        asks_for_calc(delay=0.1),
+        text_turn("It is 42, and yes to that too."),
+        # Scripted so that a second turn *can* run: if the message were not
+        # folded in, this test would fail on the assertion below rather than on
+        # the backend running out of turns.
+        text_turn("second answer"),
+    )
+    hub_client, server = wired(backend, context)
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        one, two = await asyncio.gather(first, second)
+
+    # The turn answered both, and the answer is the same answer.
+    assert one.data["text"] == "It is 42, and yes to that too."
+    assert one.data["injected"] is False
+    assert two.data["text"] == one.data["text"]
+    assert two.data["injected"] is True
+
+    # Delivered at the boundary, as a call the model reads, not as its own input.
+    assert "tool:two" in prompts_seen(backend, 1)
+    assert "user:two" not in prompts_seen(backend, 1)
+    # ...and it never became a turn of its own: two model calls, one turn.
+    assert len(backend.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
+    context,
+) -> None:
+    """A turn that produced no answer answered for nothing it was handed.
+
+    The absorbing turn raises here — a provider 500 on its second call — so
+    there is no repair (only a cancellation truncates) and the pair stays in that
+    turn's record.  What must not follow is the folded message being counted as
+    answered: its `result` is written only by a turn that produced one, so its
+    sender runs its own turn and gets its own answer.
+
+    This is the case that decides how the handoff is asked.  A design that
+    inferred "it was absorbed" from the message having left the queue would see
+    the empty `result` and answer this caller out of whatever the last turn
+    happened to leave behind — a wrong answer rather than a missing one, and
+    nothing downstream could tell.
+    """
+
+    class FailsOnTheSecondCall(FakeBackend):
+        """A provider that answers once and then dies, the way a 500 does."""
+
+        def stream(self, messages, tools) -> Stream:
+            if len(self.calls) == 1:
+                self.calls.append((list(messages), list(tools)))
+                raise RuntimeError("the provider answered 500")
+            return super().stream(messages, tools)
+
+    backend = FailsOnTheSecondCall(
+        asks_for_calc(delay=0.1),
+        text_turn("second answer"),
+    )
+    hub_client, server = wired(backend, context)
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        with pytest.raises(Exception, match="500"):
+            await first
+        answer = await second
+
+    assert answer.data["injected"] is False
+    assert answer.data["text"] == "second answer"
 
 
 @pytest.mark.asyncio

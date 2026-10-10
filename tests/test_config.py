@@ -148,6 +148,33 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
     assert SOURCE != CONFIG_KEY
 
 
+def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
+    """`_check_new_input` is written into a conversation, so four things must agree.
+
+    One name crosses more boundaries than `skill_use` does, because this tool is
+    not merely refused to the model — it is *called by the harness* and its pair
+    is read back by the model:
+
+    * `slife2.server.server` declares it and writes the call,
+    * `slife2.toolhub` keeps it on the list the model cannot unload,
+    * `slife2.db` is the gate that lets a `_`-prefixed name through at all, and
+    * the request's `tools` array has to carry it, or the Responses and Messages
+      backends reject every turn that follows the delivery.
+
+    Each of those is a silent failure in a different direction — a pair naming a
+    tool that is not declared is a 400, and a name the model can unload is a 400
+    one turn later — so the spellings are held together here rather than left to
+    a comment.
+    """
+    from slife2.db import MODEL_VISIBLE_HARNESS_TOOLS
+    from slife2.server.server import CHECK_NEW_INPUT
+    from slife2.toolhub import ALWAYS_LOADED
+
+    assert CHECK_NEW_INPUT == "_check_new_input"
+    assert CHECK_NEW_INPUT in ALWAYS_LOADED
+    assert CHECK_NEW_INPUT in MODEL_VISIBLE_HARNESS_TOOLS
+
+
 # --- providers and models ----------------------------------------------------
 
 

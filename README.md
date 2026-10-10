@@ -332,6 +332,17 @@ list shrank learns that from the transcript rather than by reaching for a tool
 that is no longer there. Nothing is written when nothing was taken. Being
 evicted costs a search and a load, not a capability.
 
+**A message that arrives while a turn is running is handed to that turn.** At
+the next step boundary the harness calls `_check_new_input` and writes the call
+and the message's own words into the running turn — v1's *cut-in*, always on — so
+what you say while the agent is working reaches it inside the turn it arrived in
+rather than one turn later. Like the trim, it is a tool pair: it is in the record
+and in every request that follows, and the model reads it as something that
+arrived while it was working. **No screen shows it yet.** That is a deferred
+display decision rather than a half-built mechanism — the transcript draws from
+events and this call raises none, and a rebuilt one skips `_`-prefixed calls by
+name (DESIGN.md §9) — and the conversation has it either way.
+
 Which of a plugin's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
 context store's `remember` does not. A plugin's tools are its own code's until one of

@@ -13,6 +13,67 @@ to the model as the tool's result.  That is deliberate: the model can read
 "unknown tool 'wether'" and correct itself, where an exception would end the
 turn and lose the conversation's thread.  The error path is a feedback channel,
 not a failure mode.
+
+One kind of tool, and four questions
+------------------------------------
+**There is one kind of tool here** — a name, a schema and a body — and one thing
+that varies about it, which is who calls it:
+
+* a **model tool** is one the model chooses: it reads the spec and calls it;
+* a **harness tool** is LLM-visible and **auto-invoked** — v1's definition, and
+  both halves are load-bearing.  *Auto-invoked* is what makes it one: the
+  machinery calls it on the model's behalf, at a moment the machinery decides,
+  and it would be called whether or not the model ever chose it.  *LLM-visible*
+  is why there are so few: the call is written into the conversation as a pair,
+  and a pair has to name a tool the request declares.  **There are two**,
+  `_func_tool_unload` and `_check_new_input`, and that is the whole class.
+
+**And the guard has to be there, because there is nowhere else for it to be.**  A
+pair has to name a declared tool, so a harness tool is in the model's list, where
+the model sees it — and nothing can stop it being called: a provider hands us a
+tool call and the only refusal this system has is a tool that answers.  So the
+class is not protected by forbidding the call, and cannot be.
+**A harness tool has to be harmless when the model calls it, or it cannot be
+one.**
+
+That is a condition, not an invitation.  Each of the two is the *machinery's*
+move, made at a moment the machinery knows is the right one, and a call from the
+model is not wanted — the boundary is how a message is meant to arrive.  What the
+design guarantees is only that the unwanted call is not a damaging one:
+`_func_tool_unload` refuses the names the system works by and can otherwise only
+shorten the model's own list, and `_check_new_input` hands over a message the next
+boundary would have handed over anyway, so a call from the model is the same thing
+sooner rather than something new.  A tool that *would* do damage there is not
+protected from being one; it is simply not one — it stays undeclared, which is
+what the audience gate is for.
+
+A leading `_` is the mark on those two names (:data:`HARNESS_PREFIX`) and, more
+widely, on any name that is the machinery's rather than the model's — it is a
+convention about names, not a definition of the class.  It is on the *name*
+because names are what the askers hold: the catalogue holds one in a query, the
+TUI reads one out of a rebuilt message, and the loop mints one for a pair.
+
+A tool the *harness* calls and the model never sees is not one of these — it is
+an API, like `send_message` for the TUI or `restore` and `rebuild` for the agent
+server.  It needs no mark, no place in the model's list and no pair, because
+nothing about it is written into a conversation.
+
+**Four facts hang off a tool, and each is asked in exactly one place.**  The
+first is the one the mark answers; the mistake to avoid is reading it as an
+answer to the other three:
+
+* **who calls it** — :data:`HARNESS_PREFIX`;
+* **may the model be given it** — `slife2.audience` for ours, and the operator's
+  config for everybody else's;
+* **may the model unload it** — `slife2.toolhub.ALWAYS_LOADED`;
+* **does a screen draw it** — `slife2.tui.restore`.
+
+The middle two do line up with the mark for the tools the harness writes *pairs*
+with — a pair has to name a tool the request declares, so those names are in the
+model's list and are protected from being unloaded — but that is a consequence
+of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
+tool and is protected the same way; `_check_new_input` is one, and is drawn by
+nothing at all today, for a reason that has nothing to do with who calls it.
 """
 
 from __future__ import annotations
@@ -29,6 +90,21 @@ logger = logging.getLogger(__name__)
 #: How a tool is implemented: arguments in, result text out.  Returning text
 #: rather than raising is the convention — see the module docstring.
 ToolFunc = Callable[[dict[str, Any]], Awaitable[str]]
+
+#: The mark of a harness tool — a name the machinery calls rather than one the
+#: model chooses.  Spelled once because four modules ask about it, and the
+#: module docstring is where the four questions it does *not* answer are listed.
+HARNESS_PREFIX = "_"
+
+
+def is_harness(name: str) -> bool:
+    """Whether a tool name is the harness's rather than the model's.
+
+    Takes a name and not a tool, because the mark is on the name and names are
+    what the askers hold: the catalogue stores them, the TUI reads one out of a
+    rebuilt message, and the loop mints one for a pair.
+    """
+    return name.startswith(HARNESS_PREFIX)
 
 
 class ToolFailed(Exception):

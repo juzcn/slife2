@@ -37,6 +37,7 @@ from typing import Any
 from slife2.context import turn_footnote
 from slife2.events import preview
 from slife2.messages import ToolCall
+from slife2.tools import is_harness
 from slife2.tui.widgets import ChatView
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ def _draw_answer(
     calls = [
         ToolCall.from_wire(raw)
         for raw in message.get("tool_calls") or []
-        if not _is_harness(raw)
+        if _drawn(raw)
     ]
     answer = _text(message.get("content"))
     thinking = _text(message.get("thinking"))
@@ -187,16 +188,27 @@ def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
     )
 
 
-def _is_harness(raw: dict[str, Any]) -> bool:
-    """Whether a stored call is the harness talking to itself.
+def _drawn(raw: dict[str, Any]) -> bool:
+    """Whether a stored call is one the transcript draws.
 
-    `_func_tool_unload` and its kin are the harness's own bookkeeping — the
-    model's tool list carries them, so they are in the record — and the live
-    transcript does not show them either.  The leading underscore is the mark,
-    and it is the same one `slife2.tools` reserves them under.
+    **Today: only the model's own calls.**  The harness tools
+    (`slife2.tools`'s word, and the mark is `is_harness`) are in the record — the
+    model's list carries them, which is what makes the pair legal — and nothing
+    draws them, live or rebuilt.  Live because the auto-invoke raises no event;
+    here because of this filter.
+
+    **The two are hidden for different reasons, and only one of them is a
+    decision.**  `_func_tool_unload` is bookkeeping: its result is a sentence
+    about the model's own tool list, and a panel for it would be noise.
+    `_check_new_input` carries something a *person* said — DESIGN.md §9 defers
+    drawing it.  So what is missing there is not a line to delete but a widget: a
+    line that shows a user message **without closing the open turn**, since
+    `ChatView.add_user` sets `_turn_open = False` and would drop the rest of the
+    answer being streamed.  Deleting this filter alone would draw it as a tool
+    panel, which is the one thing it is not.
     """
     function = raw.get("function") or {}
-    return str(function.get("name") or "").startswith("_")
+    return not is_harness(str(function.get("name") or ""))
 
 
 def _text(content: Any) -> str:

@@ -37,7 +37,10 @@ send_message
        save                                       the new id joins the live list
 ```
 
-**Both are harness tools and neither is the model's.**  The model has `turn_list`
+**Both are the harness's API and neither is the model's** — which is not the same
+thing as a *harness tool*: those are LLM-visible and auto-invoked, and these two
+are never in the model's list at all (`slife2.tools` is where the two words are
+told apart).  The model has `turn_list`
 and `turn_read` — a model that can read its history is the point of a turn log —
 and it has no `rebuild`: what the context *is* is not something a model gets to
 ask for, and the footnote it reads on each turn is how it says what it wants kept

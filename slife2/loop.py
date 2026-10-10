@@ -31,10 +31,30 @@ from slife2.events import (
     preview,
 )
 from slife2.llm.base import Chunk, LLMBackend
-from slife2.messages import Message, Usage
-from slife2.tools import ToolRegistry
+from slife2.messages import Message, ToolCall, Usage
+from slife2.tools import HARNESS_PREFIX, ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def harness_call(name: str) -> ToolCall:
+    """A call the harness makes on the model's behalf, marked as one.
+
+    **One builder, because there are two writers of these pairs and an id is a
+    detail they would otherwise each invent.**  `trim_tools` writes the trim's
+    pair at a turn boundary and the loop writes the cut-in's at a step boundary;
+    two id formats would be two conventions for one thing, and two
+    `time_ns`-suffixed ids built in two places are two chances to collide.
+
+    The `_harness_` prefix with the tool's own mark stripped is v1's, and it is
+    what makes the pair recognisable as the machinery's rather than the model's —
+    `slife2/tui/restore.py` reads it, and so does anyone reading a transcript.
+    """
+    return ToolCall(
+        id=f"_harness_{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
+        name=name,
+        arguments={},
+    )
 
 
 @dataclass(frozen=True)
@@ -105,6 +125,8 @@ class AgentLoop:
         messages: list[Message],
         user: str | list[dict[str, Any]],
         observer: TurnObserver = NULL_OBSERVER,
+        *,
+        auto: Callable[[], str | None] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
 
@@ -118,6 +140,26 @@ class AgentLoop:
         with it.  It is appended here rather than by the caller because the loop
         is what owns the shape of a turn, and a caller that appended its own user
         message would be a second place that knows it.
+
+        **The auto-invoke.**  `auto` is asked at the top of every step for the
+        name of a tool the *harness* wants called — v1's cut-in — and the call is
+        then made the way the model's own calls are made: through `self._tools`,
+        the registry whose `specs` went out with the last request.  So the name
+        routes the same way, the caller's identity rides the same way, and the
+        text written into the pair is **the tool's own answer** rather than
+        something written beside it.  `trim_tools` is the other half of this and
+        does the same thing at a turn boundary; the two are the same mechanism
+        and differ only in when the boundary is.
+
+        What lands in the list is a **harness tool pair**, not a user message,
+        and that is the whole of why it is safe: the model reads it as something
+        that arrived mid-turn, and the exchange stays a legal assistant/tool
+        sequence for every provider.  A bare user message in the middle of one is
+        a 400 from several of them.
+
+        `auto` returns a name or `None`, which is v1's split: the caller decides
+        *whether* something arrived — cheaply, without a call — and this decides
+        nothing about tools at all.  The registry is what knows a name.
         """
         messages.append(Message(role="user", content=user))
 
@@ -126,6 +168,30 @@ class AgentLoop:
         last_usage = Usage()
 
         for step in range(1, self._max_steps + 1):
+            # **The call is made before either half is written**, because the
+            # pair's text *is* the tool's answer — there is nothing to write
+            # until it has answered.  Putting the one `await` in front of both
+            # appends rather than between them is what keeps the pair
+            # unsplittable: an interruption in the gap would leave an assistant
+            # message whose call is never answered, the one history state every
+            # provider rejects.  This way a cancellation during the call leaves
+            # no pair at all, and whatever the call consumed is still in hand to
+            # be run as its own turn.
+            #
+            # v1 writes its pair the other way round, because its tools can
+            # raise and a failure had to be *recorded* as the result of the call
+            # it was written for.  Here the registry returns a failure as text
+            # (`ToolRegistry.execute` never raises), so there is no such case:
+            # everything that can come back is an answer.
+            if auto is not None and (name := auto()) is not None:
+                call = harness_call(name)
+                text, _ok = await self._tools.execute(call)
+                messages.append(
+                    Message(role="assistant", content=None, tool_calls=[call])
+                )
+                messages.append(
+                    Message(role="tool", content=text, tool_call_id=call.id)
+                )
             # The tool list goes with the call, so it is asked for with the
             # call.  `specs` is read after this and never cached across steps.
             await self._retool()
