@@ -2689,48 +2689,91 @@ class ToolStore:
             )
         return int(cursor.rowcount)
 
+    def forget_source(self, source: str) -> list[str]:
+        """Delete every row of one source, and everything derived from them.
+
+        **The other answer to "its entry is gone", and the one a verdict is
+        not.**  `set_source_state` is about a source that is *there* — a server
+        that is down, an entry the operator switched off — and it leaves the
+        rows standing on purpose, because those are tools the model wants back
+        the moment it answers.  A source the config no longer names is the case
+        the boot pass already singles out as "the rows nothing will ever speak
+        for again", and marking it was one step short of the conclusion: an
+        `error` row is still found by a search, still ranked by the semantic
+        leg, still counted by the budget, and `func_tool_load` refuses it with
+        "the server that owns it is not answering" — a true sentence about a
+        link, and the wrong one about a server that is not there at all.
+
+        Deleting is the truth about an entry taken out of its section, and it is
+        what re-adding one rebuilds: a merge writes the whole list, so the rows
+        come back with their vectors the first time the holding plugin declares
+        the source again.
+
+        Returns the names removed — for the log line, and so a caller can say
+        what went rather than only that something did.
+        """
+        with self._connect() as connection:
+            names = [
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM tool WHERE source_id = ?", (source,)
+                )
+            ]
+            self._delete(connection, names)
+        return names
+
     def reset(self) -> dict[str, int]:
-        """Withdraw the verdicts this config can no longer justify — run at open.
+        """Forget what this config can no longer justify — run at open.
 
         A verdict is a statement about *now*, and this file outlives the process
         that wrote it, so some of what it holds is about a moment that has
         passed.  One of those this process can speak to on its own: a source
-        **it cannot name at all** is `error`, whatever wrote its rows not being
-        something this file can be asked about any more.
+        **it cannot name at all** has no entry in the config any more, so
+        nothing will ever declare it again — and that is `forget_source`, the
+        rows and their vectors gone rather than marked.  An entry somebody
+        deleted must stop being a search hit at the next start as well as during
+        the run, or "removed" would mean "hidden until next time", and
+        `Upstream.declare` covers the other moment.
 
         **Everything else is left alone, deliberately.**  A source this process
         can name is one the hub is about to ask about, and whether it is
         answering is the hub's to say — it is the party that asks, and it writes
         the verdict when a source answers, when one is switched off and when a
-        link fails.  Marking those rows `error` here would be this file guessing
-        at a fact it cannot observe, and the guess would be visible: a db
-        restarted under a running hub would report every tool as unusable while
-        the model was still holding and calling them.
+        link fails.  Touching those rows here would be this file guessing at a
+        fact it cannot observe, and the guess would be visible: a db restarted
+        under a running hub would report every tool as unusable while the model
+        was still holding and calling them.
 
         **`known` is therefore every name the config carries, and not the peers
-        alone.**  A source held by a plugin is named over the wire, but this runs
-        *before* any wire — so a boot pass told about the plugins only reads
-        every `tools:` entry as a source that has gone, and the window it opens
-        is not the moment the docstring above admits to: it lasts until the
-        holding plugin has started, connected to that entry and declared it,
-        which for a section of twenty `npx` servers is tens of seconds.  Inside
-        it a search reports those tools `error` and `func_tool_load` refuses them
-        — "its owner is not answering", about a server that is answering — and
-        when the declaration lands it re-enables every row one at a time, so the
-        log of a restart is "239 changed" about a catalogue nothing changed.
-        `slife2.toolhub.configured_sources` is the set; what this must not be
-        given is a source the config has *dropped*, because that is precisely the
-        stale row this exists to withdraw.
+        alone** — more so than when the wrong answer was a mark.  A source held
+        by a plugin is named over the wire, but this runs *before* any wire — so
+        a boot pass told about the plugins only reads every `tools:` entry as a
+        source that has gone, and the window it opens is not the moment the
+        docstring above admits to: it lasts until the holding plugin has
+        started, connected to that entry and declared it, which for a section of
+        twenty `npx` servers is tens of seconds.  Inside it a search reports
+        those tools `error` and `func_tool_load` refuses them — "its owner is not
+        answering", about a server that is answering — and when the declaration
+        lands it re-enables every row one at a time, so the log of a restart is
+        "239 changed" about a catalogue nothing changed.  A deletion is worse
+        than that mark was: a mark the next declaration writes back costs a
+        noisy restart, and a deletion costs a restart that re-embeds every one
+        of those tools.  `slife2.toolhub.configured_sources` is the set; what
+        this must not be given is a source the config has *dropped*, because
+        that is precisely the stale row this exists to forget.
         """
         with self._connect() as connection:
-            marks = _marks(self.known)
-            cursor = connection.execute(
-                f"UPDATE tool SET status = ? WHERE status = ?"
-                f" AND category IN ({_in_list(FUNCTION_CATEGORIES)})"
-                + (f" AND source_id NOT IN ({marks})" if self.known else ""),
-                (STATUS_ERROR, STATUS_ENABLED, *sorted(self.known)),
-            )
-        return {"error": int(cursor.rowcount)}
+            where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
+            if self.known:
+                where += f" AND source_id NOT IN ({_marks(self.known)})"
+            names = [
+                str(row["name"])
+                for row in connection.execute(
+                    f"SELECT name FROM tool WHERE {where}", sorted(self.known)
+                )
+            ]
+            self._delete(connection, names)
+        return {"forgotten": len(names)}
 
     def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Flip one row's load state, and say what happened.

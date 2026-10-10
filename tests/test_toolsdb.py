@@ -366,15 +366,18 @@ def test_a_move_that_is_not_the_document_does_not_re_embed(tmp_path) -> None:
 # --- the boot pass: off is not down -------------------------------------------
 
 
-def test_the_boot_pass_withdraws_only_what_the_config_cannot_justify(tmp_path) -> None:
+def test_the_boot_pass_forgets_only_what_the_config_cannot_justify(tmp_path) -> None:
     """A source the config still names is the hub's to speak for, not this file's.
 
     Whether a server is *answering* is a fact about connections, and this store
-    holds none — so marking its rows `error` on the way up would be a guess, and
-    a visible one: a db restarted under a running hub would report every tool as
+    holds none — so touching its rows on the way up would be a guess, and a
+    visible one: a db restarted under a running hub would report every tool as
     unusable while the model was still holding and calling them.  What the config
-    can speak to on its own is a source it no longer names at all, and that is
-    what the boot pass withdraws.
+    can speak to on its own is a source it no longer names at all, and that is a
+    *removal*: the entry is gone, so its rows go with it rather than sitting in
+    the catalogue as a search hit marked "not answering" about a server nobody
+    is asking.  `slife2.toolhub.Upstream.declare` does the same thing for the
+    moment the entry is taken out while slife2 is running.
     """
     path = tmp_path / "tools.db"
     store = ToolStore(path, threshold=100)
@@ -383,12 +386,9 @@ def test_the_boot_pass_withdraws_only_what_the_config_cannot_justify(tmp_path) -
 
     # A new run: `arxiv` is still configured, `gone` is not.
     again = ToolStore(path, threshold=100, known={"arxiv"})
-    assert [row for row in rows_in(again) if row[0] == "arxiv__search"] == [
-        ("arxiv__search", "enabled", "unloaded")
-    ], "left alone: the hub is about to say whether it is answering"
-    assert [row for row in rows_in(again) if row[0] == "gone__thing"] == [
-        ("gone__thing", STATUS_ERROR, "unloaded")
-    ]
+    assert rows_in(again) == [("arxiv__search", "enabled", "unloaded")], (
+        "left alone: the hub is about to say whether it is answering"
+    )
 
 
 def test_a_source_that_is_switched_off_is_not_a_source_that_is_down(
@@ -428,19 +428,45 @@ def test_a_source_that_is_switched_off_is_not_a_source_that_is_down(
     assert rows_in(store)[0][1] == "enabled"
 
 
-def test_the_boot_pass_counts_what_it_moved(tmp_path) -> None:
-    """`reset` answers with what it changed, which is what a log line reads.
+def test_the_boot_pass_counts_what_it_forgot(tmp_path) -> None:
+    """`reset` answers with what it removed, which is what a log line reads.
 
-    Nothing connected is a verdict per row, and a run that changes nothing —
-    because nothing had been stored yet — says so rather than reporting work it
-    did not do.
+    Nothing connected means no source is named, so every stored row is one the
+    config cannot speak for — and a run that changes nothing, because nothing
+    had been stored yet, says so rather than reporting work it did not do.
     """
     store = ToolStore(tmp_path / "tools.db", threshold=100)
-    assert store.reset() == {"error": 0}
+    assert store.reset() == {"forgotten": 0}
 
     merge(store, "arxiv", "mcp", [tool("arxiv__search"), tool("arxiv__other")])
-    assert store.reset() == {"error": 2}
-    assert store.reset() == {"error": 0}, "already said"
+    assert store.reset() == {"forgotten": 2}
+    assert store.reset() == {"forgotten": 0}, "already gone"
+
+
+def test_a_verdict_keeps_the_rows_and_a_removal_does_not(tmp_path) -> None:
+    """The two answers to "its entry is gone", and they are not the same one.
+
+    `set_source_state` is about a source that is *there*: a server that is down,
+    or an entry the operator switched off.  Both keep their rows, because those
+    tools are wanted back the moment it answers, and the row is what the model
+    is handed then.  A source the config has dropped has nothing to come back
+    to, so `forget_source` takes it out of the catalogue — rows, keyword
+    document and vectors together, or a search keeps ranking a tool whose name
+    resolves to nothing.
+    """
+    store = store_at(tmp_path)
+    merge(store, "down", "mcp", [tool("down__thing")])
+    merge(store, "gone", "mcp", [tool("gone__thing")])
+
+    store.set_source_state("down", STATUS_ERROR)
+    assert rows_in(store) == [
+        ("down__thing", STATUS_ERROR, "unloaded"),
+        ("gone__thing", "enabled", "unloaded"),
+    ], "a verdict is said about rows that stay"
+
+    assert store.forget_source("gone") == ["gone__thing"]
+    assert rows_in(store) == [("down__thing", STATUS_ERROR, "unloaded")]
+    assert store.forget_source("gone") == [], "nothing left to forget"
 
 
 # --- the gate -----------------------------------------------------------------

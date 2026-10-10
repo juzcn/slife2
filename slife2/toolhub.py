@@ -487,6 +487,23 @@ class Catalogue:
         """Record the verdict on one source: `enabled` or `error`."""
         await self._off_loop((await self.store()).set_source_state, source, state)
 
+    async def forget_source(self, source: str) -> list[str]:
+        """Delete a source's rows, because nothing will declare it again.
+
+        **The write that goes with the verdict, and the one case where a source
+        is removed rather than reported.**  A plugin that answers without a
+        source it held last time is saying the entry has been taken out of its
+        section; a row for a source nobody declares is a search hit that leads
+        to a refusal, so the rows go with the entry.  See
+        `slife2.db.ToolStore.forget_source` for why this deletes where an
+        unreachable server's rows are only marked, and
+        `ToolStore.reset` for the other moment the same thing has to happen.
+        """
+        return [
+            str(name)
+            for name in await self._off_loop((await self.store()).forget_source, source)
+        ]
+
     async def injectable(self, sources: Sequence[str]) -> dict[str, Any]:
         """The tools the model may be given now.
 
@@ -733,7 +750,7 @@ class Upstream:
         #: `declare`, which is the only thing that reads it.
         self._declares = False
         #: The source names it declared last time, so that one it has stopped
-        #: holding can be marked stale — see `declare`.
+        #: holding can be forgotten — see `declare`.
         self._declared: set[str] = set()
         #: Verdicts written without waiting for them.  Held for the reason
         #: `slife2.server.server.detach` holds its own: a task nothing
@@ -997,12 +1014,22 @@ class Upstream:
             )
         declared = [one for raw in held if (one := await self._record(raw)) is not None]
         # **A source it used to hold and does not any more.**  The entry was
-        # taken out of the section, and its rows have to stop claiming to work —
-        # so what is left of it is marked the way a server that is gone is.  This
-        # and the db's own boot pass between them cover both moments an entry can
-        # be removed: while slife2 is running, and while it was not.
-        for source in self._declared - {one.name for one in declared}:
-            await self._catalogue.source_state(source, "error")
+        # taken out of the section, so nothing will declare it again and its rows
+        # go with it — deleted, not marked.  `error` is the verdict for a source
+        # that is *there* and cannot be reached; this one is not there at all, and
+        # a row left behind would be a search hit saying "not answering" about a
+        # server nobody is asking.  The other moment an entry can be removed is
+        # while slife2 is not running, which is the db's boot pass
+        # (`ToolStore.reset`); the two agree, so a removal does not depend on
+        # whether a process happened to be up when it was made.
+        for source in sorted(self._declared - {one.name for one in declared}):
+            gone = await self._catalogue.forget_source(source)
+            logger.info(
+                "%s: %r is no longer in its section — %d tool(s) removed",
+                self.settings.name,
+                source,
+                len(gone),
+            )
         self._declared = {one.name for one in declared}
         return declared
 
