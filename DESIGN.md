@@ -722,6 +722,24 @@ a stale file is reported and rebuilt rather than migrated, exactly as a stale
 `turn` file is, and the loaded set is what the rebuild costs (a `tool_search`
 and a `func_tool_load` per tool, which is why it is a cost and not a loss).
 
+**`status` is the other column a boot rewrites, and the pass that does it is
+told every name the config carries.** A source the config no longer names is one
+nothing will ever speak for again, so its rows are marked `error` on the way up
+(`ToolStore.reset`); a source the config still names is one the hub is about to
+ask about, and whether it answers is the runtime's to say. So the set of names
+that pass is handed is load-bearing — and it is not the plugins, which is the
+only list `Config.plugins()` gives. The entries under `tools:` and `rest-api:`,
+and the two document sources, are named in the config too. Handed the plugins
+alone, a restart read every one of them as a source that had gone, and the truth
+came back only once the holding plugin had started, reached the entry and
+declared it — tens of seconds, for a section of twenty `npx` servers — and in
+between a `tool_search` called those tools unusable and `func_tool_load`
+refused them as "its owner is not answering" about a server that answers. Every
+row was then written back, so a restart of the real catalogue logged `0 added,
+239 changed` about a config nobody had edited: the two halves of that are
+`slife2.toolhub.configured_sources` and a family that does not stamp a verdict
+of its own on a row (`slife2.toolfamily.Held._row`).
+
 An index whose recorded identity no longer matches the configuration is dropped
 and rebuilt rather than read, and that is one mechanism for all four things that
 can invalidate one: a different normalization rule, a different embedding model,
@@ -1077,6 +1095,18 @@ gateway's `_ready` is a flag saying whose rows may be injected
 (`Connection.usable`). "The snapshot is dropped" survives as that flag, and it
 is the same flag whether the connection is the hub's to a plugin or a family's
 to somebody else's server.
+
+**What a person reads when a tool is missing is `servers()`, and it answers
+about sources rather than about links.** Three of its words describe a
+connection — `ready`, `connecting`, `failed` — and two are outside one: `idle`
+for a source nobody has asked yet, and `off` for an entry the operator switched
+off, which is the commonest reason a *configured* server's tools are absent and
+the one answer a report that simply left the row out could not give. Its two
+counts are the distinction everything above rests on: `tools` is what the source
+last offered, which is a row on disk, while `loaded` is what the model is
+*holding* — and a load outlives the connection, so the second is taken against
+the live set (`ToolStore.source_counts`) or a server that has stopped answering
+would be reported as one whose tools the model still has.
 
 **A listing also ages, and that is new.** The sentence above used to name a
 third trigger — the peer's `tools/list_changed` — and at 2026-07-28 that trigger

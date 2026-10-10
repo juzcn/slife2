@@ -397,10 +397,12 @@ directory into `skills/` is found at once and not at the next restart.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
-rule above, who may call one — and `slife2-context` keeps the record
-and answers the questions: which rows are loaded, what one is called at the far
-end, and the two search legs. Nothing in the hub opens a database, and nothing in
-the catalogue knows what a proxy name is.
+rule above, who may call one — and the record is a file the hub itself opens,
+`<data>/slife2.db/tools.db` through `slife2.db.ToolStore`: rows and two indexes
+over them, and the same machinery the turns use, because a store has one writer
+and one writer is what a SQLite file already is. It answers the questions about
+the rows — which are loaded, what one is called at the far end, and the two
+search legs — and nothing in it knows what a proxy name is.
 
 A skill is a document, and it can still need a key: `baidu-search` declares
 `BAIDU_API_KEY` in its own header, and its first instruction runs a script that
@@ -423,8 +425,11 @@ belongs in the reader.
 
 `enabled: false` keeps an entry configured but never connects it, which is the
 lever worth knowing: everything enabled is a process at startup and its tools in
-every request. `slife2 down` takes those a step further — a plugin it stops takes
-the child processes that plugin started with it.
+every request. `servers()` reports it as `off`, so "why is my tool missing" has
+an answer even for an entry that was switched off before it ever ran — and the
+tools it offered while it was on stay in the catalogue, marked `disabled`, so a
+search still finds them. `slife2 down` takes those a step further — a plugin it
+stops takes the child processes that plugin started with it.
 
 A plugin is required and everything in `tools:` is optional: the hub asks
 each plugin for a tool list, and one that cannot answer fails the turn rather
@@ -514,8 +519,10 @@ slife2/
 │                     #   client id, with the two derived indexes over its turns
 │                     #   and the live-context list — and ToolStore, the tool
 │                     #   catalogue, one file per data directory.  No server
-│                     #   holds it: the two plugins that own its two halves
-│                     #   import it (DESIGN §1.1)
+│                     #   holds it: the plugin that owns the turns imports the
+│                     #   first half, and the toolhub opens the catalogue
+│                     #   in-process, because a file already has one writer
+│                     #   (DESIGN §1.1)
 ├─ tokens.py          # how large a piece of a conversation is, when nobody has
 │                     #   measured it — one estimator, every user of one
 ├─ embedder.py        # the client half of the embeddings server, as a library:

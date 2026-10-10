@@ -27,6 +27,7 @@ from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
 from slife2.gateway import flatten, make_client, mcp_config, proxied_name, sanitise
 from slife2.mcp_server import LIST_SOURCES
+from slife2.toolfamily import Held
 from slife2.toolhub import (
     LIST_SETTLE_SECONDS,
     MAX_LOAD_NAMES,
@@ -614,9 +615,38 @@ async def test_a_switched_off_source_is_declared_but_not_merged() -> None:
 
     assert "cli:thing" not in rows, "nothing was merged, so nothing was inserted"
     assert "nowhere" not in {one["name"] for one in reported.data["servers"]}, (
-        "a source that is not connected is not a server with a state"
+        "a source with no transport is not a server, so there is no row for it"
     )
     assert "cli:thing" not in names(listed.data)
+
+
+@pytest.mark.asyncio
+async def test_a_switched_off_server_is_reported_as_off() -> None:
+    """`enabled: false` is the commonest answer to "why is my tool missing",
+    and the one answer a report that left the source out could not give.
+
+    It was left out because the state words were all about a *link* and nothing
+    was asked to connect — which made `connecting` a wait nobody was making and
+    `failed` an error nobody hit.  The word was added rather than the row dropped
+    (`DeclaredSource.snapshot`), because the report is what a person reads and
+    "somebody turned it off" is a different problem from a server that will not
+    start.
+    """
+    answer = one_source(
+        name="nowhere",
+        category="mcp",
+        enabled=False,
+        up=False,
+        rows=None,
+        transport="stdio",
+    )
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        reported = await hub.call_tool("servers", {})
+
+    rows = {row["name"]: row for row in reported.data["servers"]}
+    assert rows["nowhere"]["state"] == "off"
+    assert rows["nowhere"]["tools"] == 0, "it never answered, so it never offered"
+    assert rows["nowhere"]["error"] == ""
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1258,119 @@ async def test_the_loaded_set_outlives_the_process() -> None:
         listed = await second.call_tool("list_tools", {})
 
     assert "fake__echo" in names(listed.data)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_does_not_read_the_configs_own_sources_as_gone() -> None:
+    """**The window that made a restart look like a broken server.**
+
+    Opening the catalogue runs the file's boot pass, which withdraws the verdict
+    on rows whose source the config no longer names (`slife2.db.ToolStore.reset`)
+    — so the set of names it is handed has to be every name the config carries,
+    not the plugins alone (`slife2.toolhub.configured_sources`).  Given the
+    plugins alone it read every `tools:` entry as a source that had gone, and the
+    truth came back only when the holding plugin had started, reached that entry
+    and declared it: a real section is twenty `npx` servers, so in between a
+    search called those tools unusable and `func_tool_load` refused them as "its
+    owner is not answering", about a server that answers.
+
+    **The plugin that declares the entry is deliberately unreachable**, so this
+    measures the boot pass and nothing else: with `mcp-tools` down, nothing
+    re-declares `fake`, so its rows are exactly what the boot pass left.  That is
+    the window, held open on purpose.
+    """
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
+
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as first:
+        await first.call_tool("list_tools", {})
+        assert (await call(first, "func_tool_load", {"names": ["fake__echo"]}))["ok"]
+
+    def refuses_to_start(settings: ToolServerSettings) -> Any:
+        raise FileNotFoundError("no such program: slife2-mcp-tools")
+
+    async with Client(
+        hub_for(connected={"mcp-tools": refuses_to_start}, entries=entries)
+    ) as second:
+        loaded = await call(second, "func_tool_load", {"names": ["fake__echo"]})
+
+    assert loaded["ok"] is True, (
+        "the boot pass withdrew a configured source's verdict, so loading one of "
+        f"its tools was refused: {loaded['text']}"
+    )
+
+
+def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
+    """A `tools:` entry has a connection, so its rows may not state a status.
+
+    Whether a server is *answering* is the runtime's to say, because the runtime
+    is the party that connects — and a family stamping `enabled` on each row
+    takes that decision away from it: the merge then writes the verdict as an
+    *update* rather than through the reconnect that exists for it
+    (`slife2.db.ToolStore._plan`), which rewrites the row's keyword document and
+    reports a tool nobody touched as changed.  That is the other half of what a
+    restart cost: the boot pass withdrew the verdict on every row of every
+    `tools:` entry, and this stamp wrote each one back as a change — measured on
+    the real catalogue, 239 rows per restart, logged as `0 added, 239 changed`
+    about a config nobody edited.
+
+    Only the two document families carry a status, because neither has a
+    connection a verdict could come from — the other side of this is
+    `test_a_document_row_carries_its_own_verdict`, and
+    `test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row`
+    is the store half of the same rule.
+    """
+    held = Held(
+        ToolServerSettings(name="serper", command="in-memory"),
+        directory=".",
+        category="mcp",
+    )
+    row = held._row(
+        types.SimpleNamespace(
+            name="search", description="Find things.", input_schema=None
+        )
+    )
+
+    assert "status" not in row
+    assert set(row) == {"name", "description", "remote_name", "schema"}
+
+
+@pytest.mark.asyncio
+async def test_servers_does_not_count_a_dead_servers_tools_as_held() -> None:
+    """Two numbers, and only one of them is about now.
+
+    `tools` is what the source last offered — a row on disk, and the reason a
+    server that has stopped answering does not look like an empty one.  `loaded`
+    says the model is holding them, and a load outlives the connection, so a
+    dead server leaves every one of its rows saying `loaded` while the gate hands
+    over none of them.  Taken against the live set, that contradiction is what
+    this asserts — it was the one number in `servers()` that could disagree with
+    `list_tools`.
+    """
+    entries = {
+        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    }
+
+    def refuses_to_start(settings: ToolServerSettings) -> Any:
+        raise FileNotFoundError("no such program: in-memory")
+
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as first:
+        await first.call_tool("list_tools", {})
+        assert (await call(first, "func_tool_load", {"names": ["fake__echo"]}))["ok"]
+
+    async with Client(
+        hub_for(connected={"fake": refuses_to_start}, entries=entries)
+    ) as second:
+        listed = await second.call_tool("list_tools", {})
+        reported = await second.call_tool("servers", {})
+
+    rows = {row["name"]: row for row in reported.data["servers"]}
+    assert "fake__echo" not in names(listed.data), "down, so it is not in the list"
+    assert rows["fake"]["tools"] == 3, "what it last offered is still on disk"
+    assert rows["fake"]["loaded"] == 0, "and none of it is in the model's list"
 
 
 @pytest.mark.asyncio

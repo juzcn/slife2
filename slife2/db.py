@@ -2214,12 +2214,16 @@ class ToolStore:
         #: call because the count it bounds is a `SELECT COUNT(*)` over these
         #: rows: the budget and the rows it applies to live in one place.
         self.threshold = max(1, int(threshold))
-        #: Every source this process can name at all, which is what the boot
-        #: pass needs to tell a stale row from a slow one: see `reset`.  It is
-        #: the *peers* — the plugins slife2 starts — and nothing else, because
-        #: every other source is held by one of them and named over the wire:
-        #: see `merge`'s `autoload` and `evict`'s, which is where the other two
-        #: facts the config used to supply now arrive.
+        #: Every source name the *config* carries, which is what the boot pass
+        #: needs to tell a stale row from a slow one: see `reset`.  It is not the
+        #: peers alone — a `tools:` entry, a `rest-api:` one and the two document
+        #: sources are named in the config too, and a boot pass told only about
+        #: the plugins reads every one of them as a source that has gone.  The
+        #: caller assembles the set (`slife2.toolhub.configured_sources`), because
+        #: which sections name sources is knowledge about the config and this
+        #: module has none — and it is *names*, not a list of connections: this
+        #: file is still told nothing about liveness (`merge`'s `autoload` and
+        #: `evict`'s are where the other facts the config used to supply arrive).
         self.known = frozenset(str(name) for name in known)
         self.path = path
         self._ensure_schema()
@@ -2703,10 +2707,20 @@ class ToolStore:
         restarted under a running hub would report every tool as unusable while
         the model was still holding and calling them.
 
-        **Which is why the sources a plugin holds read as `error` here**, in the
-        window between this running and the hub's first declaration: this process
-        cannot name them, and they are not reachable by anybody *yet*.  The
-        declaration writes the truth over it a moment later.
+        **`known` is therefore every name the config carries, and not the peers
+        alone.**  A source held by a plugin is named over the wire, but this runs
+        *before* any wire — so a boot pass told about the plugins only reads
+        every `tools:` entry as a source that has gone, and the window it opens
+        is not the moment the docstring above admits to: it lasts until the
+        holding plugin has started, connected to that entry and declared it,
+        which for a section of twenty `npx` servers is tens of seconds.  Inside
+        it a search reports those tools `error` and `func_tool_load` refuses them
+        — "its owner is not answering", about a server that is answering — and
+        when the declaration lands it re-enables every row one at a time, so the
+        log of a restart is "239 changed" about a catalogue nothing changed.
+        `slife2.toolhub.configured_sources` is the set; what this must not be
+        given is a source the config has *dropped*, because that is precisely the
+        stale row this exists to withdraw.
         """
         with self._connect() as connection:
             marks = _marks(self.known)
@@ -2920,21 +2934,35 @@ class ToolStore:
             ).fetchone()
         return _tool_dict(row) if row else None
 
-    def source_counts(self) -> dict[str, dict[str, int]]:
+    def source_counts(self, sources: Sequence[str]) -> dict[str, dict[str, int]]:
         """Per source: how many tools it has, and how many the model holds.
 
-        Two numbers because they answer two questions.  `tools` is what the
-        source last offered — the answer to "why is my tool missing" when it is
-        not the same as `loaded`, which is how many of them the model has in its
-        list right now.  A source with ninety tools and none loaded is a healthy
-        server, and saying so is the difference between a fault and a choice.
+        Two numbers because they answer two questions, and only the second is
+        gated on liveness.  `tools` is what the source last offered — the answer
+        to "why is my tool missing" when it is not the same as `loaded`, which is
+        how many of them the model has in its list right now.  A source with
+        ninety tools and none loaded is a healthy server, and saying so is the
+        difference between a fault and a choice.
+
+        **`loaded` is a fact about the model's list, and the column alone does not
+        say it.**  A load is a decision the model made and it outlives the
+        connection — that is the point of the column — so a server that is down
+        leaves every one of its rows saying `loaded` while the gate hands the
+        model none of them.  `sources` is the caller's for the reason `injectable`
+        and `evict` state: liveness is a fact about connections, and this file
+        holds none.  Quoting those rows as "the model has them now" would be the
+        one number in `servers()` that contradicts `list_tools`.
         """
+        live = [str(name) for name in dict.fromkeys(sources)]
+        gate = f" AND source_id IN ({_marks(live)})" if live else " AND 0"
         where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT source_id, COUNT(*) AS tools,"
-                f" SUM(CASE WHEN load_status = '{LOADED}' THEN 1 ELSE 0 END) AS loaded"
-                f" FROM tool WHERE {where} GROUP BY source_id"
+                f" SUM(CASE WHEN load_status = '{LOADED}'{gate}"
+                f" THEN 1 ELSE 0 END) AS loaded"
+                f" FROM tool WHERE {where} GROUP BY source_id",
+                live,
             ).fetchall()
         return {
             str(row["source_id"]): {

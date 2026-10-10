@@ -101,7 +101,20 @@ class Held:
         logger.warning("%s is not reachable: %s", self.settings.name, exc)
 
     def _row(self, tool: Any) -> dict[str, Any]:
-        """One tool of this entry, as the catalogue's row for it."""
+        """One tool of this entry, as the catalogue's row for it.
+
+        **No `status`, which is the whole of how this family differs from the two
+        documents.**  An entry here has a *connection*, so whether its tools are
+        usable is the runtime's answer and the hub writes it: a source that
+        answers puts back what an older verdict left `error`, and that is the one
+        path the merge has for re-enabling a row (`ToolStore._plan`'s
+        `reconnected`).  A row stating a verdict of its own would take that
+        decision away from the runtime and turn it into an "update" — which is
+        what marking every row `error` at boot and then writing it straight back
+        looked like from the log.  Neither document family can do this: a skill
+        and a `cli:` entry have no connection whose state a verdict could come
+        from, which is why they, and only they, carry one.
+        """
         schema = getattr(tool, "input_schema", None)
         return {
             "name": proxied_name(self.settings.name, str(getattr(tool, "name", ""))),
@@ -110,7 +123,6 @@ class Held:
             # the advertised name is sanitised and carries the server in front.
             "remote_name": str(getattr(tool, "name", "")),
             "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
-            "status": "enabled",
         }
 
     def declaration(self) -> dict[str, Any]:

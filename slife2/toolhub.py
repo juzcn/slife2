@@ -267,6 +267,19 @@ FUNC_TOOL_LOAD = "func_tool_load"
 #: still the hub's: not letting the model throw it away (see `ALWAYS_LOADED`).
 SKILL_USE = "skill_use"
 
+#: The two **source** names the document families file their rows under, which
+#: are `slife2.skills_server.SOURCE` and `slife2.cli_server.SOURCE` — spelled
+#: here for the reason above, and held together with those two in
+#: `tests/test_config.py`.  The catalogue files a document under these, and the
+#: boot pass has to be able to name them without asking anybody (see
+#: `configured_sources`), which is the one thing this process needs them for.
+#:
+#: `CLI_SOURCE` and `CLI` are the same word and stay two names: a *source* is
+#: what a row is filed under, and a *category* is what it is — and for `cli:`
+#: entries the operator's section happens to be called the same thing twice.
+SKILLS_SOURCE = "skills"
+CLI_SOURCE = "cli"
+
 #: The trim, and the only name here with **two callers**.  The leading
 #: underscore is the convention — **a name beginning with `_` is a harness
 #: tool**, one the machinery drives rather than one the model chooses — and this
@@ -501,9 +514,14 @@ class Catalogue:
         """The row for one advertised name, or `None` if there is no such tool."""
         return await self._off_loop((await self.store()).route, name)
 
-    async def sources(self) -> dict[str, dict[str, int]]:
-        """Per source: how many tools it has, and how many the model holds."""
-        return await self._off_loop((await self.store()).source_counts)
+    async def sources(self, live: Sequence[str]) -> dict[str, dict[str, int]]:
+        """Per source: how many tools it has, and how many the model holds.
+
+        `live` is the caller's, and only the second number reads it: what a
+        source *offers* is a row on disk, and what the model *holds* is a row
+        the gate would hand over — which is `slife2.db.ToolStore.source_counts`.
+        """
+        return await self._off_loop((await self.store()).source_counts, list(live))
 
     async def search(self, **arguments: Any) -> dict[str, Any]:
         """Both legs of a tool search, fused.  See `ToolStore.search`.
@@ -635,8 +653,20 @@ class DeclaredSource:
     transport: str
 
     def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
-        """This source's row in `servers()`."""
-        if self.up:
+        """This source's row in `servers()`.
+
+        **`off` is the fourth word, and the one that keeps a switched-off source
+        reportable.**  Without it the other three all lie about it: nothing was
+        asked to connect, so `connecting` is a wait nobody is making and
+        `failed` is an error nobody hit — which is what the report used to say by
+        leaving the source out, and the reason it was out.  But "why is my tool
+        missing" is the question `servers()` answers, and `enabled: false` is the
+        commonest reason a *configured* server's tools are not there, so the word
+        had to be added rather than the row dropped.
+        """
+        if not self.enabled:
+            state = "off"
+        elif self.up:
             state = "ready"
         elif self.error:
             state = "failed"
@@ -986,6 +1016,13 @@ class Upstream:
         list would purge exactly the rows this system keeps on purpose; and what
         the operator **switched off** is marked `disabled` and is the one state
         the runtime never overwrites.
+
+        **A mark lands on rows, so a source with none has nothing to mark.**
+        That is not a hole in this rule but a limit of it: an entry switched off
+        before it ever answered has no rows, so there is nothing for the
+        catalogue to say — `servers()` is what reports it (`off`), and the
+        `state` written here is what tells a *previously working* server's rows
+        they are off rather than broken.
         """
         if not isinstance(raw, dict):
             return None
@@ -1860,6 +1897,46 @@ def plugin_settings(config: Config, name: str) -> ToolServerSettings:
     )
 
 
+def configured_sources(config: Config) -> frozenset[str]:
+    """Every source name the config carries, which the boot pass is handed.
+
+    `ToolStore.reset` runs on the way up, before anything is asked over any
+    wire, and it has one job: withdraw the verdicts on rows whose source the
+    config no longer names — because those are the rows nothing will ever speak
+    for again.  The other direction is the one this has to get right.  A source
+    the config *does* still name is one this process is about to ask about, and
+    whether it answers is the runtime's to say; marking it `error` on the way up
+    is a guess, and the guess is visible while it stands.
+
+    **And it is more than the plugins.**  A plugin is the only source name this
+    process *connects* under, which is what the set used to be — but the
+    entries under `tools:` and `rest-api:` are named in the config too, and so
+    are the two document sources, and none of them has answered yet at the
+    moment `reset` runs.  Handed the plugins alone, the boot pass read every one
+    of them as a source that has gone: a restart marked every external tool
+    `error`, and the declaring plugin wrote them all back — a window in which a
+    search called those tools unusable and `func_tool_load` refused them, and a
+    rewrite of every row to end it.  Measured on the real catalogue, that is 239
+    rows rewritten per restart, logged as "239 changed" about a config nobody
+    edited.
+
+    The two document sources are here as constants rather than read off their
+    servers, because a name crossing a process boundary is spelled on both sides
+    (`SKILLS_SOURCE`).  Which means a *disabled* source is in this set too, and
+    must be: `enabled: false` is a switch, not a deletion, and its rows are the
+    ones the catalogue keeps on purpose.
+    """
+    return frozenset(
+        {
+            *config.plugins(),
+            *config.tools,
+            *config.rest_apis,
+            SKILLS_SOURCE,
+            CLI_SOURCE,
+        }
+    )
+
+
 def build_server(
     config: Config,
     *,
@@ -1918,6 +1995,12 @@ def build_server(
         index this one cannot search, and the answer is to build it again from
         the rows rather than to read numbers that do not mean what they say.
 
+        **`known` is the whole config, and it is what the file's own boot pass
+        runs on**: opening a store withdraws the verdicts on rows whose source
+        the config no longer names, and every other source has to be named here
+        or it is read as one that has gone — see `configured_sources`, which is
+        where that argument is.
+
         `transports` is still the seam at the level below — every *upstream* is
         built from a wired entry in a test — and the catalogue is deliberately
         no longer one of them: a file is not a plugin, and a test that wants it
@@ -1928,7 +2011,7 @@ def build_server(
             ToolStore,
             tools_db(),
             threshold=config.tool_load.threshold,
-            known=frozenset(config.plugins()),
+            known=configured_sources(config),
         )
         status = await store.sync_indexes(await embedding.get())
         logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
@@ -2028,11 +2111,20 @@ def build_server(
         connected to, and two plugins may not claim one source between them —
         a merge is the whole truth about a source, so two holders would each
         purge the other's rows on every ask.
+
+        **The sets are built aside and swapped in, not emptied first.**  The
+        awaits below are round trips to plugins, one of which waits up to
+        `slife2.toolfamily.LIST_SETTLE_SECONDS` for the servers it holds — and
+        `live_sources` is read the whole time by whatever else this process is
+        serving, since one hub answers every conversation.  A reader that caught
+        the function between an emptying and a filling would see no declared
+        source at all and hand its model a list missing every external tool; the
+        swap has no await in it, so no reader can see a half-built set.
         """
         begin_connecting()
         known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
-        held.clear()
-        holders.clear()
+        found: dict[str, DeclaredSource] = {}
+        owners: dict[str, Upstream] = {}
         for upstream in upstreams:
             if not upstream.usable:
                 continue
@@ -2044,17 +2136,21 @@ def build_server(
                         one.name,
                     )
                     continue
-                if one.name in holders:
+                if one.name in owners:
                     logger.warning(
                         "%s: %r is already declared by %s",
                         upstream.settings.name,
                         one.name,
-                        holders[one.name].settings.name,
+                        owners[one.name].settings.name,
                     )
                     continue
                 known.add(one.name)
-                held[one.name] = one
-                holders[one.name] = upstream
+                found[one.name] = one
+                owners[one.name] = upstream
+        held.clear()
+        held.update(found)
+        holders.clear()
+        holders.update(owners)
 
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
@@ -2443,8 +2539,9 @@ def build_server(
         Returns:
             `servers`: one row per source of tools — `name`, `kind` (`mcp`,
             `rest` or `plugin`), `transport`, `state` (`ready`, `connecting`,
-            `failed` or `idle`), how many `tools` it last offered, how many of
-            them are `loaded` (which is what the model has now), `autoload` —
+            `failed`, `idle` or `off`), how many `tools` it last offered, how
+            many of them are `loaded` (which is what the model has now, so a
+            source that is not live is `0` whatever its rows say), `autoload` —
             whether they are wanted every turn, so they are never evicted — the
             `description` it was configured with, the `error` if there is one,
             and `required` — whether slife2 starts it, which is what decides if
@@ -2464,25 +2561,32 @@ def build_server(
         # read: what a plugin fronts is a server in its own right, with its own
         # health and its own error, and reporting the plugin in its place would
         # hide exactly the thing a person came here looking for.
+        #
+        # `live_sources` goes to the counts for the reason the gate reads it:
+        # what a source offers is a row, and what the model *holds* is a row this
+        # process would hand over — so a server that is down must not be reported
+        # as one whose tools are loaded (`slife2.db.ToolStore.source_counts`).
         begin_connecting()
         await settle()
         await refresh_declared()
-        counts = await catalogue.sources()
+        counts = await catalogue.sources(live_sources())
         return {
             "servers": [
                 *(
                     upstream.snapshot(counts.get(upstream.settings.name))
                     for upstream in upstreams
                 ),
-                # Two kinds of declared source are not reported, and neither is
-                # a gap: one the operator switched off is not connected, so there
-                # is no connection to have a state; and one with no transport has
-                # nothing to connect to at all — a folder of playbooks is a
-                # source of rows, not a server, and this answer is about servers.
+                # One kind of declared source is not reported, and it is not a
+                # gap: one with no transport has nothing to connect to at all —
+                # a folder of playbooks is a source of rows, not a server, and
+                # this answer is about servers.  A *switched-off* one is here,
+                # saying `off`: it is a configured server, and the operator
+                # turning it off is the answer to "why is my tool missing" more
+                # often than a fault is.
                 *(
                     one.snapshot(counts.get(one.name))
                     for one in held.values()
-                    if one.enabled and one.transport
+                    if one.transport
                 ),
             ]
         }

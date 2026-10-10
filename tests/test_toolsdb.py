@@ -183,6 +183,37 @@ def test_a_source_that_answers_again_puts_its_rows_back(tmp_path) -> None:
     assert rows_in(store)[0] == ("arxiv__search", "enabled", LOADED)
 
 
+def test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row(
+    tmp_path,
+) -> None:
+    """The re-enable is the *reconnect*, and not an update to a row that moved.
+
+    A `tools:` entry's rows carry no verdict of their own (`slife2.toolfamily`),
+    because the runtime is the only thing that can say whether a connection is
+    answering — so a source that recovers puts back what the verdict withdrew
+    through `_apply`'s reconnect, and the merge answers `updated: []` because
+    nothing about the tool itself moved.
+
+    **The difference is not bookkeeping.**  The update path rewrites the row's
+    keyword document, so a family that stamped its own `enabled` on every row
+    turned every boot into a full rewrite of the catalogue: the boot pass
+    withdrew the verdict on each row of every `tools:` entry, and the declaration
+    wrote each one straight back as a "change" — measured on the real catalogue,
+    239 rows per restart, logged as `0 added, N changed` about a config nobody
+    edited.  `tool()` below sends no `status`, which is the shape the family
+    sends.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    store.set_source_state("arxiv", STATUS_ERROR)
+    assert rows_in(store)[0][1] == STATUS_ERROR
+
+    again = merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    assert again["reconnected"] == ["arxiv__search"]
+    assert again["updated"] == [], "the row did not move; only its verdict did"
+    assert rows_in(store)[0][1] == STATUS_ENABLED
+
+
 def test_rows_and_vectors_are_written_together(tmp_path) -> None:
     """There is no window in which a row is stored and unindexed.
 
@@ -433,6 +464,27 @@ def test_the_gate_answers_with_loaded_tools_of_live_sources(tmp_path) -> None:
 
     # A source that is not live contributes nothing, however loaded it is.
     assert store.injectable(["builtins"])["tools"] == []
+
+
+def test_the_count_of_what_the_model_holds_is_gated_on_liveness(tmp_path) -> None:
+    """Two numbers per source, and only one of them is about now.
+
+    `tools` is what the source last offered — a row on disk, and the reason a
+    dead server does not look like an empty one.  `loaded` says the model is
+    *holding* those tools, and a load is a decision the model made that outlives
+    the connection: a server that has stopped answering leaves every row saying
+    `loaded` while the gate hands none of them over.  So the count is taken
+    against the live set, which is the caller's to say for the reason
+    `injectable` gives — and without it this is the one number `servers()`
+    reports that can contradict `list_tools`.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search"), tool("arxiv__other")])
+    store.set_load("arxiv__search", LOADED)
+
+    assert store.source_counts(["arxiv"]) == {"arxiv": {"tools": 2, "loaded": 1}}
+    assert store.source_counts(["builtins"]) == {"arxiv": {"tools": 2, "loaded": 0}}
+    assert store.source_counts([]) == {"arxiv": {"tools": 2, "loaded": 0}}
 
 
 def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:

@@ -148,6 +148,27 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
     assert SOURCE != CONFIG_KEY
 
 
+def test_a_document_source_is_spelled_on_both_sides() -> None:
+    """The two source names the boot pass has to be able to say on its own.
+
+    `slife2.db.ToolStore.reset` runs before anything is asked over any wire — it
+    is handed the names the *config* carries, and withdraws the verdict on rows
+    whose source is not among them — so the hub spells `skills` and `cli` for
+    itself (`slife2.toolhub.configured_sources`, `SKILLS_SOURCE`).  A rename on
+    one side only would leave the boot pass reading every playbook and every
+    command as a source that has gone, which is the failure the whole set exists
+    to prevent: it would mark them `error` on the way up and nothing would ever
+    write the truth back, since no connection owns either family.
+    """
+    from slife2.cli_server import SOURCE as CLI_SOURCE
+    from slife2.skills_server import SOURCE as SKILLS_SOURCE
+    from slife2.toolhub import CLI_SOURCE as HUB_CLI
+    from slife2.toolhub import SKILLS_SOURCE as HUB_SKILLS
+
+    assert HUB_SKILLS == SKILLS_SOURCE
+    assert HUB_CLI == CLI_SOURCE
+
+
 def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     """`_check_new_input` is written into a conversation, so four things must agree.
 
