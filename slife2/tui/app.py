@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding

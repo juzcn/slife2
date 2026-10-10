@@ -819,8 +819,16 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     Measured against the index over a whole catalogue, the two agree to float32
     rounding (worst case 8e-7), which is what makes that claim a fact rather than
     a hope.
+
+    **The two must be the same length, and a mismatch is not truncated.**  It
+    cannot happen while the fingerprint above holds — `identity` and `dimension`
+    are what a rebuild keys on, so a stored vector is always one this embedder
+    wrote — and that is the reason to say so out loud rather than to read the
+    shorter of the two: a dot product over the first *n* of two incomparable
+    vectors is a plausible number, and a plausible number in the column that
+    orders a search is worse than an exception that names the problem.
     """
-    dot = sum(a * b for a, b in zip(left, right))
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
     sizes = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
     return dot / sizes if sizes else 0.0
 
