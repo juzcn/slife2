@@ -65,13 +65,14 @@ import logging
 import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from fastmcp import Client, FastMCP
 
 from slife2 import __version__
-from slife2.config import ServerSettings
+from slife2.config import Config, ServerSettings, find_config_path, load
 from slife2.paths import add_data_dir_argument, apply_data_dir
 from slife2.runtime import ServerRecord, clear_record, tcp_listening, write_record
 
@@ -370,3 +371,51 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def serve_plugin(
+    argv: list[str] | None,
+    *,
+    server_name: str,
+    config_key: str,
+    build: Callable[[Config], FastMCP],
+    logger: logging.Logger,
+    note: Callable[[Config], str] | None = None,
+) -> int:
+    """The `main` every plugin that owns a config section shares.
+
+    Same shape as `slife2.llm.server_common.serve_backend`, and its sibling: one
+    process per plugin, so the only thing that differs between any two of them
+    is which config key their address is filed under and which server they
+    build.  Seven servers each spelled out the same eleven lines, which is the
+    kind of duplication that drifts one branch at a time.
+
+    `note` is the one thing a server wants to add to its start-up line — "turns
+    in <dir>", "N plugin(s) to ask" — and it is a *callable* because the config
+    it reports on is only loaded in here.  It returns the text **inside** the
+    parentheses; the parentheses are this function's, so no caller can produce
+    a half-formatted line.  `logger` is the caller's, so a line still lands
+    under the name of the server that wrote it rather than this module's.
+    """
+    args = parse_serve_args(argv, server_name)
+    configure_logging()
+    config_path: Path | None = find_config_path()
+    config = load()
+
+    address = config.server(config_key)
+    logger.info(
+        "serving %s on http://%s:%d%s%s",
+        server_name,
+        args.host or address.host,
+        args.port or address.port,
+        address.path,
+        f" ({note(config)})" if note is not None else "",
+    )
+    serve(
+        build(config),
+        address,
+        args,
+        name=server_name,
+        config_path=config_path,
+    )
+    return 0

@@ -43,7 +43,7 @@ import tempfile
 from collections.abc import Callable, Mapping
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
@@ -105,7 +105,10 @@ def _document(text: str, path: Path) -> CommentedMap:
         return CommentedMap()
     if not isinstance(document, dict):
         raise ConfigError(f"{path} is not a mapping, so it has no sections")
-    return document
+    # `rt` mode builds every mapping as a CommentedMap, so the shape check above
+    # has proved the concrete type too — which a plain `isinstance(…, dict)`
+    # widens back out of.
+    return cast(CommentedMap, document)
 
 
 def _render(document: CommentedMap) -> str:
@@ -210,7 +213,7 @@ def _section(
     """
     current = document.get(section)
     if isinstance(current, dict):
-        return current
+        return cast(CommentedMap, current)
     if not create:
         return None
     current = CommentedMap()
@@ -268,17 +271,25 @@ def _without_empties(entry: Mapping[str, Any]) -> dict[str, Any]:
 def upsert(
     section: str, name: str, entry: Mapping[str, Any], *, path: Path | None = None
 ) -> None:
-    """Write *entry* under *section* → *name*, merging over what is there.
+    """Write *entry* under *section* → *name*, replacing what is there.
 
-    **Merge and not replace**, which is what makes this usable as an "update":
-    a caller passes the fields it is setting and leaves the rest out, and the
-    ones it left out keep their value.  `remove` is the way to drop a field.
+    **Replace and not merge**, so a `set` says what the whole entry *is*: a
+    field the caller leaves out is a field the entry does not have.  That is
+    what makes switching a `tools:` entry from `url` to `command` possible at
+    all — a merge would keep the stale `url`, and the loader would then refuse
+    the entry for naming two transports.  Flipping one field and leaving the
+    rest alone is a *different* operation, and the one that has to read first:
+    `set_enabled`.
 
-    An entry that already exists keeps its key order and its comments; only the
-    fields handed in move.  `enabled: true` **removes** the key rather than
-    writing it, because `enabled` is the default and the file's own convention
-    is that only `enabled: false` is written down — see
-    `slife2.config._tool_server`, which reads a missing key as true.
+    The entry's key order and comments are the caller's now — an entry written
+    fresh is rendered in the order it was built.  What survives from the entry
+    being replaced is its comment in the *section*, the explanation a person
+    put above it, because that belongs to the section and not to the fields.
+
+    `enabled: true` **removes** the key rather than writing it, because
+    `enabled` is the default and the file's own convention is that only
+    `enabled: false` is written down — see `slife2.config._tool_server`, which
+    reads a missing key as true.
     """
     target = path or config_path()
 
@@ -289,12 +300,10 @@ def upsert(
         current = _section(document, section)
         if current is None:  # unreachable while `create=True`; kept honest
             return
-        existing = current.get(name)
-        merged = (
-            CommentedMap(existing) if isinstance(existing, dict) else CommentedMap()
-        )
-        merged.update(values)
-        current[name] = merged
+        # A fresh mapping rather than an update of the one that is there: what
+        # is written is exactly what was handed in, and nothing the caller did
+        # not name survives from whatever the entry used to say.
+        current[name] = CommentedMap(values)
 
     _edit(target, mutate)
     logger.info("config_upsert section=%s name=%s", section, name)

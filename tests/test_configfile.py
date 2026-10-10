@@ -2,8 +2,9 @@
 
 It is the first thing in slife2 that writes the config, so each of them is a new
 promise rather than a regression guard: comments and the rest of the file
-survive, a field left out keeps its value, an edit that changes nothing does not
-touch the file, and a file the loader would refuse is not left on disk.
+survive, a `set` replaces the whole entry rather than patching a field, an edit
+that changes nothing does not touch the file, and a file the loader would refuse
+is not left on disk.
 """
 
 from __future__ import annotations
@@ -108,12 +109,15 @@ def test_a_write_keeps_the_whole_file_around_it(tmp_path) -> None:
     assert "高德地图官方 MCP Server，提供地理编码" in after, "not \\uXXXX escaped"
 
 
-def test_an_update_moves_only_what_it_was_given(tmp_path) -> None:
-    """Merge and not replace, which is what makes an upsert an update.
+def test_an_update_replaces_the_entry_rather_than_patching_it(tmp_path) -> None:
+    """**The whole entry, so a `set` can say a field is gone.**
 
-    `slow-one` is written again with no `description` and no `enabled`; both are
-    facts the caller did not mention, and an entry that lost them would turn
-    "set this field" into "replace this entry" without saying so.
+    `slow-one` is written again with no `description` and no `enabled`; both were
+    facts about the *old* entry and neither survives.  This is what makes
+    switching a server from `url` to `command` possible at all — a merge would
+    keep the stale `url`, and the loader would then refuse the entry for naming
+    two transports.  What an entry written fresh does keep is the comment in the
+    section above it, because that belongs to the section and not to the fields.
     """
     path = write(tmp_path)
 
@@ -122,8 +126,9 @@ def test_an_update_moves_only_what_it_was_given(tmp_path) -> None:
     entry = load(path).tools["slow-one"]
     assert entry.command == "uvx"
     assert entry.args == ("other-server",)
-    assert entry.description.startswith("A very long single line")
-    assert entry.enabled is False, "the switch the caller never mentioned"
+    assert entry.description == "", "a field the caller did not name is gone"
+    assert entry.enabled is True, "and the switch it did not name is back to default"
+    assert "# Kept for a rainy day." in path.read_text(encoding="utf-8")
 
 
 def test_a_field_that_says_nothing_is_not_written(tmp_path) -> None:
@@ -159,10 +164,14 @@ def test_enabled_is_written_only_when_it_is_false(tmp_path) -> None:
     path = write(tmp_path)
 
     upsert("tools", "newcomer", {"url": "https://new.test/mcp"}, path=path)
-    upsert("tools", "newcomer", {"description": "d", "enabled": True}, path=path)
+    # Every `set` is the whole entry, so a second one restates what it keeps —
+    # an update that named only `enabled` would replace the entry with one the
+    # loader refuses for having no transport.
+    entry = {"url": "https://new.test/mcp", "description": "d"}
+    upsert("tools", "newcomer", {**entry, "enabled": True}, path=path)
     assert "enabled" not in added(path, "newcomer")
 
-    upsert("tools", "newcomer", {"description": "d", "enabled": False}, path=path)
+    upsert("tools", "newcomer", {**entry, "enabled": False}, path=path)
     assert "enabled: false" in added(path, "newcomer")
 
 

@@ -1461,7 +1461,15 @@ change from when that bullet was written: the question used to be hypothetical,
 and the four families of management tools are what made it a real one. The five
 tools are v1's, per family, and they are the model's (`FOR_THE_MODEL`), because
 the alternative — an operator-only path — is a second way to write the same file
-and therefore a second thing to keep in step.
+and therefore a second thing to keep in step. **And where two families are one
+mechanism, so is their code.**  `mcp_set` takes a command and `rest_api_set` a
+spec, so those stay apart — the parameter list *is* the schema the model reads.
+The other four (`list`, `remove`, `set_enabled`, `list_tools`) have one control
+flow between the two families, and one set of sentences in which only the words
+change: a `FamilyWords` per section supplies `tools`/`rest-api`, `server`/`API`,
+`tool`/`operation`, and `slife2.toolfamily` writes the sentence once.  Two copies
+of "is not in `…:` — `…_set` adds it" is two chances for a model to learn two
+vocabularies for one road.
 
 **What a management tool does not do is write the catalogue, and the bill
 arrives later.** None of them touches `tools.db`: a management tool writes a
@@ -1494,7 +1502,13 @@ in atomically, preserving the file's mode; and it hands the whole thing to
 reader refuses. That last step is what makes the parsers the boundary rather than
 a convention: an entry is judged by the same `_tool_server` / `_rest_api` /
 `_cli_tool` a start uses, so "what a model may write" and "what a start accepts"
-are one question with one answer.
+are one question with one answer. **And a `set` writes the whole entry, not a
+patch of it** (`configfile.upsert` replaces): a field the caller leaves out is a
+field the entry does not have. That is what makes switching a server from `url`
+to `command` possible at all — a merge would keep the stale `url` and the loader
+would then refuse the entry for naming two transports. Changing one field and
+leaving the rest is a different operation and the one that has to read the entry
+first, which is `set_enabled`.
 
 **And one thing was un-ported after a first pass left it out.** v1's
 `_func_tool_unload` is back, as the tool that carries the budget. The first

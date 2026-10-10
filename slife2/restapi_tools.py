@@ -23,27 +23,28 @@ from urllib.parse import urlparse
 
 from fastmcp import FastMCP
 
-from slife2 import configfile
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import (
     Config,
     ConfigError,
     ToolServerSettings,
     _rest_api,
-    find_config_path,
     load,
     resolve_secret,
 )
 from slife2.gateway import ClientFactory
-from slife2.mcp_server import configure_logging, parse_serve_args, serve
+from slife2.mcp_server import serve_plugin
 from slife2.toolfamily import (
-    TOOL_LIST_LIMIT,
     Family,
+    FamilyWords,
     apply_and_report,
     build_family_server,
-    refusal,
-    settled,
-    tools_as_text,
+    list_entries,
+    list_entry_tools,
+    prepare_entry,
+    remove_entry,
+    state_word,
+    switch_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,23 @@ INSTRUCTIONS = (
     "The REST APIs the config's `rest-api:` section expands into MCP servers. "
     "This server is called by the toolhub, not by a model: it holds the "
     "connections, and the tools themselves reach the model through the hub."
+)
+
+#: What this family calls things, for the sentences `slife2.toolfamily` writes
+#: once for both connection families.  An API is *served* where a server is
+#: *connected*, and it exposes *operations* where one of ours exposes tools —
+#: the same mechanism under the two names a person already uses for them.
+WORDS = FamilyWords(
+    section=SECTION,
+    plural="REST APIs",
+    entry="an API",
+    unit="operation",
+    list_tool="rest_api_list",
+    set_tool="rest_api_set",
+    remove_log="rest_api_removed",
+    present="serving",
+    past="served",
+    starting="starting",
 )
 
 
@@ -113,20 +131,19 @@ def _prepare(
     config: Config, name: str, spec: str, base_url: str, api_key: str, **rest: Any
 ) -> tuple[ToolServerSettings | None, str]:
     """Validate a `rest-api:` entry and write it, or say why not."""
-    if why := refusal(config, name):
-        return None, why
-    try:
+
+    def build() -> tuple[ToolServerSettings, dict[str, Any]]:
+        # The two URL checks run here, inside the shared helper's `try`: a
+        # `file://` spec is refused as a `ConfigError` like any other bad entry.
         entry: dict[str, Any] = {
             "spec": _validate_http_url(spec, "spec") if spec else None,
             "base_url": _validate_http_url(base_url, "base_url") if base_url else None,
             "api_key": _reference(api_key) if api_key else None,
             **rest,
         }
-        settings = _rest_api(entry, name)
-        configfile.upsert(SECTION, name, entry)
-    except ConfigError as exc:
-        return None, f"[refused] {exc}"
-    return settings, ""
+        return _rest_api(entry, name), entry
+
+    return prepare_entry(config, name, build, section=SECTION)
 
 
 def _unresolved(api_key: str) -> str:
@@ -162,12 +179,7 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
     the held settings would print `uvx mcp-openapi-proxy` and lose the only
     thing a reader wanted.
     """
-    if raw.get("enabled") is False:
-        state = "off"
-    elif one is None:
-        state = "not held"
-    else:
-        state = one.connection.state
+    state = state_word(raw, one)
     lines = [f"- {name} [{state}]"]
     if spec := raw.get("spec"):
         lines.append(f"    spec     {spec}")
@@ -193,17 +205,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         credential it uses — and whether it is serving. A REST API is expanded
         into one MCP server per entry, so its state is a server's state.
         """
-        family.connecting()
-        await family.settle()
-        entries = configfile.read_section(SECTION)
-        if not entries:
-            return (
-                "No REST APIs are configured under `rest-api:` yet. "
-                "`rest_api_set` adds one."
-            )
-        return "\n".join(
-            _describe(family.held(name), name, raw) for name, raw in entries.items()
-        )
+        return await list_entries(family, words=WORDS, describe=_describe)
 
     @mcp.tool(name="rest_api_set", meta=FOR_THE_MODEL)
     async def rest_api_set(
@@ -221,6 +223,10 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         `{name}__{operation}`, so a published API is worth checking before you
         add it: one spec can be hundreds of tools. Set `enabled: false` — or
         turn it off afterwards — to keep it written down without serving it.
+
+        **This is the whole entry**: an `api_key` or `description` left out is
+        not kept from an older version, so restate everything the API should
+        have.
 
         Args:
             name: The API's name; its tools reach you as `{name}__{operation}`.
@@ -262,14 +268,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         Args:
             name: The API to remove, from `rest_api_list`.
         """
-        if family.held(name) is None and name not in configfile.read_section(SECTION):
-            return f"'{name}' is not an API under `rest-api:` — see `rest_api_list`."
-        removed = configfile.remove(SECTION, name)
-        await family.remove(name)
-        if not removed:
-            return f"'{name}' was not written in `rest-api:`, so nothing was removed."
-        logger.info("rest_api_removed name=%s", name)
-        return f"'{name}' is stopped and its entry is gone from `rest-api:`."
+        return await remove_entry(family, name, words=WORDS, logger=logger)
 
     @mcp.tool(name="rest_api_set_enabled", meta=FOR_THE_MODEL)
     async def rest_api_set_enabled(name: str, enabled: bool) -> str:
@@ -284,29 +283,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The API, from `rest_api_list`.
             enabled: True serves it; False stops it and keeps the entry.
         """
-        if name not in configfile.read_section(SECTION):
-            return (
-                f"'{name}' is not in `rest-api:` — `rest_api_set` adds it, "
-                f"`rest_api_list` shows what is there."
-            )
-        configfile.set_enabled(SECTION, name, enabled)
-        one = await family.set_enabled(name, enabled)
-        if one is None:
-            return (
-                f"'{name}' is now {'enabled' if enabled else 'disabled'} in "
-                f"`rest-api:`. It was not one of the servers this process is "
-                f"holding, so it is served from the next start."
-            )
-        if not enabled:
-            return f"'{name}' is switched off; its entry stays in `rest-api:`."
-        await settled(one)
-        if one.connection.usable:
-            return (
-                f"'{name}' is serving and offers {len(one.rows or [])} "
-                f"operation(s); they are in your tool list from the next search."
-            )
-        reason = one.connection.error or "it has not answered yet"
-        return f"'{name}' is switched on and starting — {reason}."
+        return await switch_entry(family, name, enabled, words=WORDS)
 
     @mcp.tool(name="rest_api_list_tools", meta=FOR_THE_MODEL)
     async def rest_api_list_tools(name: str, limit: int = 0) -> str:
@@ -320,13 +297,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The API, from `rest_api_list`.
             limit: How many to show. Omit for the cap.
         """
-        one = family.held(name)
-        if one is None:
-            return f"'{name}' is not an API this process holds — see `rest_api_list`."
-        await settled(one)
-        return tools_as_text(
-            one, name, limit if limit > 0 else TOOL_LIST_LIMIT, noun="operation"
-        )
+        return await list_entry_tools(family, name, limit, words=WORDS)
 
 
 def build_server(
@@ -349,27 +320,13 @@ def build_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-
-    address = config.server(CONFIG_KEY)
-    logger.info(
-        "serving %s on http://%s:%d%s",
-        SERVER_NAME,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
     )
-    serve(
-        build_server(config),
-        address,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

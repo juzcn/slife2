@@ -37,13 +37,14 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
+from slife2 import configfile
 from slife2.audience import forwarded_client, request_meta
-from slife2.config import Config, ToolServerSettings
+from slife2.config import Config, ConfigError, ToolServerSettings
 from slife2.gateway import ClientFactory, Connection, mcp_config, proxied_name
 from slife2.mcp_server import CALL_SOURCE, LIST_SOURCES, house_server
 from slife2.paths import data_dir
@@ -460,6 +461,226 @@ def refusal(config: Config, name: str) -> str | None:
             f"filed under. Choose another name."
         )
     return None
+
+
+# ── The management tools' shared half ───────────────────────────────────
+# `mcp_tools` and `restapi_tools` serve the same four tools over one mechanism
+# and answer in the same sentences; the words they differ by live in a
+# `FamilyWords`, and the sentences that consume it live here.  What stays in
+# each family is the part that is genuinely its own: `*_set`'s argument list
+# (the schema the model reads — `mcp_set` takes a command, `rest_api_set` a
+# spec), and `*_list`'s `describe`, because an MCP entry is a command or a URL
+# and a REST entry is a spec and a base URL.
+
+
+@dataclass(frozen=True)
+class FamilyWords:
+    """One family's vocabulary — the tokens its four sentences vary by.
+
+    The two connection families manage the same shape of entry through the
+    same `Family` and answer in the same sentences: "is not in `…:` — `…_set`
+    adds it"; "is switched on and …ing".  Every word that changes between them
+    is a field here, so the sentences can be written once.  Two copies of a
+    sentence is two chances for a model to learn two vocabularies for one
+    mechanism.
+    """
+
+    section: str
+    """The config section this family owns: `tools` or `rest-api`."""
+
+    plural: str
+    """Its entries, plural, as the empty listing names them."""
+
+    entry: str
+    """One entry, singular with its article: `a server` or `an API`."""
+
+    unit: str
+    """What one exposed item is: `tool` or `operation` (pluralised `{unit}(s)`)."""
+
+    list_tool: str
+    """The listing tool's name, so another sentence can point at it."""
+
+    set_tool: str
+    """The upsert tool's name, for the same reason."""
+
+    remove_log: str
+    """The `logger.info` event a removal writes."""
+
+    present: str
+    """A live link, present tense: `connected` or `serving`."""
+
+    past: str
+    """A live link said of the next start: `connected` or `served`."""
+
+    starting: str
+    """A link still coming up: `connecting` or `starting`."""
+
+
+def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
+    """The one word a listing puts in `[brackets]` for one entry.
+
+    **Read off the file before the link**, which is the whole of the rule: a
+    switched-off entry was never asked, so its link has nothing to say and its
+    state is the operator's `off` — not the `idle` of a connection nobody
+    started.  `not held` is an entry the file has and this process does not.
+
+    The word for a live link is `Connection.state`'s own (`ready`, `connecting`,
+    `failed`, `idle`), because it is the same question the hub answers and a
+    second vocabulary for it would be a second thing to learn.
+
+    Only the families that hold a *link* use this.  A `cli:` entry and a skill
+    have no connection whose state a verdict could come from, so they say
+    `on`/`off` from their own rule and are not folded in here.
+    """
+    if raw.get("enabled") is False:
+        return "off"
+    if one is None:
+        return "not held"
+    return one.connection.state
+
+
+def prepare_entry(
+    config: Config,
+    name: str,
+    build: Callable[[], tuple[ToolServerSettings, Mapping[str, Any]]],
+    *,
+    section: str,
+) -> tuple[ToolServerSettings | None, str]:
+    """Refuse, validate and write one entry, or answer with why it cannot be.
+
+    `(settings, "")` means it was written; `(None, refusal)` is a sentence for
+    the caller to return.  Both refusals happen **before** anything is written:
+    a name the hub is already using (`refusal`), and an entry the config layer
+    will not parse.
+
+    `build` is the family's own half — it constructs the entry and runs it
+    through the parser a start uses (`_tool_server`, `_rest_api`), returning
+    the settings and the mapping to write.  A callable rather than a mapping
+    because the REST family's two URL checks raise `ConfigError` *while
+    building the entry*, and giving them a `try` of their own would be the
+    contortion that keeping them inside this one avoids.  Anything `build`
+    raises as a `ConfigError`, and anything the writer raises, is refused in
+    the loader's own words — which is what makes what a model may write and
+    what a start accepts one question.
+    """
+    if why := refusal(config, name):
+        return None, why
+    try:
+        settings, entry = build()
+        configfile.upsert(section, name, entry)
+    except ConfigError as exc:
+        return None, f"[refused] {exc}"
+    return settings, ""
+
+
+async def list_entries(
+    family: Family,
+    *,
+    words: FamilyWords,
+    describe: Callable[[Held | None, str, Mapping[str, Any]], str],
+) -> str:
+    """The `*_list` answer: every entry as the file has it, with its state.
+
+    Settles first, for the reason the hub's `servers()` does: this is the
+    answer to "why is my tool missing", and a server that started a moment ago
+    reads as one still starting — two different problems this tool exists to
+    tell apart.  The description is the family's, because an MCP entry is a
+    command or a URL and a REST entry is a spec and a base URL.
+    """
+    family.connecting()
+    await family.settle()
+    entries = configfile.read_section(words.section)
+    if not entries:
+        return (
+            f"No {words.plural} are configured under `{words.section}:` yet. "
+            f"`{words.set_tool}` adds one."
+        )
+    return "\n".join(
+        describe(family.held(name), name, raw) for name, raw in entries.items()
+    )
+
+
+async def remove_entry(
+    family: Family,
+    name: str,
+    *,
+    words: FamilyWords,
+    logger: logging.Logger,
+) -> str:
+    """The `*_remove` answer: stop holding *name*, drop its entry.
+
+    The file is consulted as well as the process, because a name this process
+    never held but the operator wrote is still one to delete — and one in
+    neither is answered as what it is rather than silently succeeding.
+    """
+    if family.held(name) is None and name not in configfile.read_section(words.section):
+        return (
+            f"'{name}' is not {words.entry} under `{words.section}:` — "
+            f"see `{words.list_tool}`."
+        )
+    removed = configfile.remove(words.section, name)
+    await family.remove(name)
+    if not removed:
+        return (
+            f"'{name}' was not written in `{words.section}:`, so nothing was removed."
+        )
+    logger.info("%s name=%s", words.remove_log, name)
+    return f"'{name}' is stopped and its entry is gone from `{words.section}:`."
+
+
+async def switch_entry(
+    family: Family, name: str, enabled: bool, *, words: FamilyWords
+) -> str:
+    """The `*_set_enabled` answer: flip the switch and say what followed.
+
+    The switch is the file's, and the link follows it — a rebuild rather than a
+    flag, so there is no state where the two disagree (`Family.set_enabled`).
+    """
+    if name not in configfile.read_section(words.section):
+        return (
+            f"'{name}' is not in `{words.section}:` — `{words.set_tool}` adds it, "
+            f"`{words.list_tool}` shows what is there."
+        )
+    configfile.set_enabled(words.section, name, enabled)
+    one = await family.set_enabled(name, enabled)
+    if one is None:
+        # Written but not held: this process did not have it — an entry another
+        # instance added since this one read the config.  The file is right;
+        # the next start holds it.
+        return (
+            f"'{name}' is now {'enabled' if enabled else 'disabled'} in "
+            f"`{words.section}:`. It was not one of the servers this process is "
+            f"holding, so it is {words.past} from the next start."
+        )
+    if not enabled:
+        return f"'{name}' is switched off; its entry stays in `{words.section}:`."
+    await settled(one)
+    if one.connection.usable:
+        return (
+            f"'{name}' is {words.present} and offers {len(one.rows or [])} "
+            f"{words.unit}(s); they are in your tool list from the next search."
+        )
+    reason = one.connection.error or "it has not answered yet"
+    return f"'{name}' is switched on and {words.starting} — {reason}."
+
+
+async def list_entry_tools(
+    family: Family, name: str, limit: int, *, words: FamilyWords
+) -> str:
+    """The `*_list_tools` answer: one entry's exposed items, capped."""
+    one = family.held(name)
+    if one is None:
+        return (
+            f"'{name}' is not {words.entry} this process holds — "
+            f"see `{words.list_tool}`."
+        )
+    # Waits for the link, for the reason `list_entries` does: what this reports
+    # is the items the entry *offers*, and "no list" is the answer for both a
+    # broken entry and one still starting.
+    await settled(one)
+    return tools_as_text(
+        one, name, limit if limit > 0 else TOOL_LIST_LIMIT, noun=words.unit
+    )
 
 
 def build_family_server(

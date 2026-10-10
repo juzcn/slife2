@@ -180,13 +180,12 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
 from slife2.audience import for_the_model, forwarded_client, request_meta
-from slife2.config import Config, ToolServerSettings, find_config_path, load
+from slife2.config import Config, ToolServerSettings
 from slife2.db import Embedder, ToolStore
 from slife2.embedder import EmbedderConnection
 from slife2.gateway import (
@@ -196,14 +195,7 @@ from slife2.gateway import (
     proxied_name,
     sanitise,
 )
-from slife2.mcp_server import (
-    CALL_SOURCE,
-    LIST_SOURCES,
-    configure_logging,
-    house_server,
-    parse_serve_args,
-    serve,
-)
+from slife2.mcp_server import CALL_SOURCE, LIST_SOURCES, house_server, serve_plugin
 from slife2.paths import data_dir, tools_db
 from slife2.textindex import terms
 from slife2.toolclient import UpstreamTool
@@ -2622,27 +2614,17 @@ def build_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path: Path | None = find_config_path()
-    config = load()
-    settings = config.server(CONFIG_KEY)
-    logger.info(
-        "serving %s on http://%s:%d%s (%d plugin(s) to ask)",
-        SERVER_NAME,
-        args.host or settings.host,
-        args.port or settings.port,
-        settings.path,
-        len([name for name in config.plugins() if name != CONFIG_KEY]),
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
+        note=lambda config: (
+            f"{len([name for name in config.plugins() if name != CONFIG_KEY])} "
+            f"plugin(s) to ask"
+        ),
     )
-    serve(
-        build_server(config),
-        settings,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

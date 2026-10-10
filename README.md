@@ -311,7 +311,10 @@ skill that declares `requires.env` needs one process that knows the answer.
 paragraph for.** Each of the four families serves its own management tools —
 `mcp_set` / `rest_api_set` / `cli_set` / `skill_set`, with `remove`, `list` and
 `set_enabled` beside them, v1's names — so "written *here*, in the operator's
-file" is no longer the same as "written by the operator". What is unchanged is
+file" is no longer the same as "written by the operator". A `set` writes the
+*whole* entry rather than patching it: a field left out is dropped, and
+`set_enabled` is the one that changes a single field and leaves the rest. What
+is unchanged is
 the road an edit travels: the file is written by one module
 (`slife2/configfile`) under a cross-process lock, as a document edit that keeps
 every comment, and the result is handed to the same parsers and the same loader
@@ -548,7 +551,8 @@ slife2/
 │                     #   file's comments, judged by the loader that reads it
 ├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
 │                     #   is shared: hold, declare, route a call back, and the
-│                     #   text the management tools answer with
+│                     #   management tools' sentences, which one `FamilyWords`
+│                     #   per section supplies the words for
 ├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section — held, declared,
 │                     #   and editable by the `mcp_*` tools
 ├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, likewise
@@ -576,8 +580,9 @@ slife2/
 │                     #   and the two decisions — `restore` and `rebuild` —
 │                     #   which are the harness's and never the model's
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
-│                     #   the client id every one of them keys its state by —
-│                     #   and how a client proves which one it reached
+│                     #   the client id every one of them keys its state by,
+│                     #   how a client proves which one it reached, and the
+│                     #   `serve_plugin` start-up every plugin's `main` is
 ├─ audience.py        # who a tool is for, and whose behalf a call is on: the
 │                     #   two `_meta` facts that keep `remember` out of a
 │                     #   model's hands and one conversation out of another's
@@ -621,8 +626,10 @@ agent server's business.
 
 `mcp_server.py` is a leaf every server sits on: it holds what being one of our
 servers means — the flags, the HTTP transport, the record that says a daemon is
-here, and the two conventions (`house_server`) that would otherwise be copied
-into each server. It is not LLM-specific, which is why it is not under
+here, the two conventions (`house_server`) that would otherwise be copied into
+each server, and the whole of a plugin's `main` (`serve_plugin`), which is
+eleven lines every one of them would otherwise spell out. It is not
+LLM-specific, which is why it is not under
 `llm/`: the db server, the toolhub and the agent server are not LLM
 plugins, and the scaffold they serve on should not come out of the LLM
 package. The embeddings server is the one plugin under `llm/` that is not a

@@ -70,18 +70,16 @@ from fastmcp import Client, Context, FastMCP
 
 from slife2 import context as decisions
 from slife2.audience import FOR_THE_MODEL, request_client
-from slife2.config import API_SERVER_NAMES, Config, find_config_path, load
+from slife2.config import API_SERVER_NAMES, Config
 from slife2.context import Decision
 from slife2.db import Embedder, TurnStore, page_limit, store_for
 from slife2.embedder import EmbedderConnection
 from slife2.mcp_server import (
     close_server,
-    configure_logging,
     describe,
     house_server,
     open_server,
-    parse_serve_args,
-    serve,
+    serve_plugin,
 )
 from slife2.messages import StreamChatResult
 from slife2.paths import db_dir
@@ -845,28 +843,14 @@ def build_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-
-    address = config.server(CONFIG_KEY)
-    logger.info(
-        "serving %s on http://%s:%d%s (turns in %s)",
-        SERVER_NAME,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
-        db_dir(),
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
+        note=lambda _config: f"turns in {db_dir()}",
     )
-    serve(
-        build_server(config),
-        address,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

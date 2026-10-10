@@ -41,14 +41,8 @@ from fastmcp.exceptions import ToolError
 
 from slife2 import configfile, skills
 from slife2.audience import FOR_THE_MODEL
-from slife2.config import Config, SkillSettings, find_config_path, load
-from slife2.mcp_server import (
-    LIST_SOURCES,
-    configure_logging,
-    house_server,
-    parse_serve_args,
-    serve,
-)
+from slife2.config import Config, SkillSettings
+from slife2.mcp_server import LIST_SOURCES, house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -421,27 +415,13 @@ def build_server(config: Config) -> FastMCP:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-
-    address = config.server(CONFIG_KEY)
-    logger.info(
-        "serving %s on http://%s:%d%s",
-        SERVER_NAME,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
     )
-    serve(
-        build_server(config),
-        address,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

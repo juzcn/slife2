@@ -180,6 +180,36 @@ async def test_setting_it_again_does_not_rebuild_the_link(isolated_runtime) -> N
 
 
 @pytest.mark.asyncio
+async def test_setting_it_again_replaces_the_entry_rather_than_patching_it(
+    isolated_runtime,
+) -> None:
+    """**A `set` is the whole entry, so a transport can be switched.**
+
+    An entry first written as a URL and then written again as a command would
+    otherwise carry both, and the loader refuses an entry that names two
+    transports — so the second `set` could never land.  This is what "replace,
+    not merge" buys, and it is the reason the tool says so in its own words.
+    """
+    async with Client(family(isolated_runtime)) as client:
+        await ask(
+            client,
+            "mcp_set",
+            name="added",
+            url="https://x.test/mcp",
+            description="What it used to be.",
+        )
+        answer = await ask(client, "mcp_set", name="added", command="in-memory")
+        listed = await ask(client, "mcp_list")
+
+    entry = section(isolated_runtime)["added"]
+    assert entry["command"] == "in-memory"
+    assert "url" not in entry, "the transport it used to be is gone"
+    assert "description" not in entry, "and a field this call did not name"
+    assert "connected" in answer
+    assert "added [ready]" in listed
+
+
+@pytest.mark.asyncio
 async def test_an_entry_the_config_refuses_is_refused_before_anything_is_written(
     isolated_runtime,
 ) -> None:

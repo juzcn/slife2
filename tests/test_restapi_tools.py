@@ -148,6 +148,36 @@ async def test_the_credential_is_stored_as_a_name_and_never_as_a_value(
 
 
 @pytest.mark.asyncio
+async def test_setting_an_api_again_replaces_the_whole_entry(isolated_runtime) -> None:
+    """A `set` says what the entry *is*, so a field left out is gone.
+
+    An API added with a credential and then set again without one keeps it no
+    more.  `set_enabled` is the operation that changes one field and leaves the
+    rest — a merge here would leave "stop using this key" unsayable.
+    """
+    async with Client(family(isolated_runtime)) as client:
+        await ask(
+            client,
+            "rest_api_set",
+            name="github",
+            spec="https://api.example.test/openapi.yaml",
+            base_url="https://api.example.test",
+            api_key="GITHUB_TOKEN",
+        )
+        await ask(
+            client,
+            "rest_api_set",
+            name="github",
+            spec="https://api.example.test/openapi.yaml",
+            base_url="https://api.example.test",
+        )
+
+    entry = section(isolated_runtime)["github"]
+    assert entry["spec"] == "https://api.example.test/openapi.yaml"
+    assert "api_key" not in entry, "the credential this call did not name is gone"
+
+
+@pytest.mark.asyncio
 async def test_a_key_nothing_resolves_says_so_at_the_moment_it_is_written(
     isolated_runtime,
 ) -> None:

@@ -23,26 +23,26 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from slife2 import configfile
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import (
     Config,
-    ConfigError,
     ToolServerSettings,
     _tool_server,
-    find_config_path,
     load,
 )
 from slife2.gateway import ClientFactory
-from slife2.mcp_server import configure_logging, parse_serve_args, serve
+from slife2.mcp_server import serve_plugin
 from slife2.toolfamily import (
-    TOOL_LIST_LIMIT,
     Family,
+    FamilyWords,
     apply_and_report,
     build_family_server,
-    refusal,
-    settled,
-    tools_as_text,
+    list_entries,
+    list_entry_tools,
+    prepare_entry,
+    remove_entry,
+    state_word,
+    switch_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,22 @@ INSTRUCTIONS = (
     "themselves reach the model through the hub."
 )
 
+#: What this family calls things, for the sentences `slife2.toolfamily` writes
+#: once for both connection families.  Every word here is one a model reads
+#: back: `a server` here is `an API` next door, over one road underneath.
+WORDS = FamilyWords(
+    section=SECTION,
+    plural="MCP servers",
+    entry="a server",
+    unit="tool",
+    list_tool="mcp_list",
+    set_tool="mcp_set",
+    remove_log="mcp_removed",
+    present="connected",
+    past="connected",
+    starting="connecting",
+)
+
 
 # ── The management tools ────────────────────────────────────────────────
 # v1's `mcp_*` set, ported — the model may add, remove and switch a server, and
@@ -99,17 +115,9 @@ def _prepare(
     words the loader would have used — a restart later, and in a process that
     never saw this call.
     """
-    if why := refusal(config, name):
-        return None, why
-    try:
-        settings = _tool_server(entry, name)
-    except ConfigError as exc:
-        return None, f"[refused] {exc}"
-    try:
-        configfile.upsert(SECTION, name, entry)
-    except ConfigError as exc:
-        return None, f"[refused] {exc}"
-    return settings, ""
+    return prepare_entry(
+        config, name, lambda: (_tool_server(entry, name), entry), section=SECTION
+    )
 
 
 def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
@@ -119,13 +127,7 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
     was configured (**with `${VAR}` intact** — the settings this process holds
     have been through `resolve_secret`, so printing those would put the
     operator's live keys in the conversation), and the link says whether it is
-    answering.
-
-    The state words are the hub's own (`off`, `ready`, `connecting`, `failed`,
-    `idle`, `servers()`), because they are answers to the same question and a
-    second vocabulary for it would be a second thing to learn.  `off` is read
-    off the *file* rather than the link: a switched-off server was never asked,
-    so its link has nothing to say.
+    answering — one word in brackets, `state_word`'s to choose and explain.
     """
     if raw.get("url"):
         reach = "http  " + str(raw["url"])
@@ -134,12 +136,7 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
     args = raw.get("args")
     if isinstance(args, list) and args:
         reach += " " + " ".join(str(part) for part in args)
-    if raw.get("enabled") is False:
-        state = "off"
-    elif one is None:
-        state = "not held"
-    else:
-        state = one.connection.state
+    state = state_word(raw, one)
     line = f"- {name} [{state}]\n    {reach}"
     # The credentials are named and never shown — `KEY=${VAR}`, exactly as the
     # file has it.  Worth printing for the usual reason a listing exists (which
@@ -168,22 +165,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         still starting, or failing here — `mcp_list_tools` shows what one offers
         once it does.
         """
-        # Settles first, for the reason the hub's `servers()` does: this is the
-        # answer to "why is my tool missing", and a server that started a moment
-        # ago reads as one that is still starting.  The two are different
-        # problems and this is the tool that is supposed to tell them apart.
-        # Bounded, and only for attempts already in flight — a cold `npx` that
-        # this process started has had its own start-up to answer by now.
-        family.connecting()
-        await family.settle()
-        entries = configfile.read_section(SECTION)
-        if not entries:
-            return (
-                "No MCP servers are configured under `tools:` yet. `mcp_set` adds one."
-            )
-        return "\n".join(
-            _describe(family.held(name), name, raw) for name, raw in entries.items()
-        )
+        return await list_entries(family, words=WORDS, describe=_describe)
 
     @mcp.tool(name="mcp_set", meta=FOR_THE_MODEL)
     async def mcp_set(
@@ -201,8 +183,10 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         """Add or update an MCP server under `tools:` (upsert; idempotent).
 
         One entry is one transport, so give `command` for a process slife2 starts
-        or `url` for an endpoint somebody else runs — never both. An entry that
-        is already there keeps every field this call does not mention.
+        or `url` for an endpoint somebody else runs — never both. **This is the
+        whole entry**: a field left out is not kept from an older version, so
+        restate everything the entry should have — which is also how a server
+        is switched from `url` to `command`.
 
         Call this once you know the server works: it is connected here and now,
         and the answer says whether it did.
@@ -255,14 +239,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         Args:
             name: The server to remove, from `mcp_list`.
         """
-        if family.held(name) is None and name not in configfile.read_section(SECTION):
-            return f"'{name}' is not a server under `tools:` — see `mcp_list`."
-        removed = configfile.remove(SECTION, name)
-        await family.remove(name)
-        if not removed:
-            return f"'{name}' was not written in `tools:`, so nothing was removed."
-        logger.info("mcp_removed name=%s", name)
-        return f"'{name}' is stopped and its entry is gone from `tools:`."
+        return await remove_entry(family, name, words=WORDS, logger=logger)
 
     @mcp.tool(name="mcp_set_enabled", meta=FOR_THE_MODEL)
     async def mcp_set_enabled(name: str, enabled: bool) -> str:
@@ -277,29 +254,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The server, from `mcp_list`.
             enabled: True connects it; False stops it and keeps the entry.
         """
-        if name not in configfile.read_section(SECTION):
-            return f"'{name}' is not in `tools:` — `mcp_set` adds it, `mcp_list` shows what is there."
-        configfile.set_enabled(SECTION, name, enabled)
-        one = await family.set_enabled(name, enabled)
-        if one is None:
-            # Written but not held: this process did not have it, which happens
-            # when the entry was added by another instance since this one read
-            # the config.  The file is right; the next start holds it.
-            return (
-                f"'{name}' is now {'enabled' if enabled else 'disabled'} in "
-                f"`tools:`. It was not one of the servers this process is "
-                f"holding, so it is connected from the next start."
-            )
-        if not enabled:
-            return f"'{name}' is switched off; its entry stays in `tools:`."
-        await settled(one)
-        if one.connection.usable:
-            return (
-                f"'{name}' is connected and offers {len(one.rows or [])} tool(s); "
-                f"they are in your tool list from the next search."
-            )
-        reason = one.connection.error or "it has not answered yet"
-        return f"'{name}' is switched on and connecting — {reason}."
+        return await switch_entry(family, name, enabled, words=WORDS)
 
     @mcp.tool(name="mcp_list_tools", meta=FOR_THE_MODEL)
     async def mcp_list_tools(name: str, limit: int = 0) -> str:
@@ -313,14 +268,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The server, from `mcp_list`.
             limit: How many to show. Omit for the cap.
         """
-        one = family.held(name)
-        if one is None:
-            return f"'{name}' is not a server this process holds — see `mcp_list`."
-        # Waits for the link, for the reason `mcp_list` does: what this reports
-        # is the tools the server *offers*, and "it has no tool list" is the
-        # answer for both a broken server and one that is still starting.
-        await settled(one)
-        return tools_as_text(one, name, limit if limit > 0 else TOOL_LIST_LIMIT)
+        return await list_entry_tools(family, name, limit, words=WORDS)
 
 
 def build_server(
@@ -343,27 +291,13 @@ def build_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-
-    address = config.server(CONFIG_KEY)
-    logger.info(
-        "serving %s on http://%s:%d%s",
-        SERVER_NAME,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
     )
-    serve(
-        build_server(config),
-        address,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
