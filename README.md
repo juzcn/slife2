@@ -233,11 +233,19 @@ provider key by the model server that needs it, `BAIDU_API_KEY` by
 `slife2-skills`. What the model is *handed* is the part of the list it has
 loaded, which is the section after the config:
 
+### The config
+
 ```yaml
 # The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
 # There is no config for them — adding one is a decorated function in
 # `slife2/builtins.py`, and it arrives at the model the same way as everything
 # below.
+#
+# Every section below is written by hand *and* by the model: each family serves
+# the tools that edit its own (`mcp_set`, `rest_api_set`, `cli_set`, `skill_set`
+# with `remove` / `list` / `set_enabled` beside them, v1's names).  Either way
+# the write goes through `slife2/configfile` — one writer, the file's comments
+# kept, and the loader that reads this file at every start as the judge.
 
 tools:                                  # other people's MCP servers
   arxiv:
@@ -260,6 +268,12 @@ cli:                                    # programs already on this machine
     description: Download video from 1000+ sites, subtitles and playlists.
     install: uv pip install yt-dlp
 
+skills:                                 # what one playbook in skills/ is given
+  baidu-search:
+    env:
+      BAIDU_API_KEY: ${BAIDU_API_KEY}
+    # enabled: false                    # installed, and out of the way
+
 tool_load:                              # how many tools the model may hold
   threshold: 100
 
@@ -278,19 +292,35 @@ A `cli` entry is the odd one out: there is no process to start and no URL to
 connect to, because the program is already installed. It is written down so the
 model can be told it exists — and written *here*, in the operator's file,
 because an entry is the opt-in, exactly as an entry under `tools:` is. `install`
-is what a person is told when the command turns out not to be on `PATH`.
-**Every entry is a row in the tool catalogue** (`cli:yt-dlp`), so `tool_search`
-finds a command by what it does rather than by its name — being findable is the
-half that landed. **Nothing runs one yet**: the tool that does is the next
-change (DESIGN.md §9), and until then `func_tool_load` says exactly that. The
-rows are declared by **`slife2-cli`**, a plugin whose only job today is that —
-which is why it exists before its tool does: one tool per entry is a tool the
-model calls, and a tool needs a server to be served from.
+is what a person is told when the command turns out not to be on `PATH`, which
+`cli_set` checks for while somebody is looking. **Every entry is a row in the
+tool catalogue** (`cli:yt-dlp`), so `tool_search` finds a command by what it does
+rather than by its name — being findable is the half that landed. **Nothing runs
+one yet**: the tool that does is the next change (DESIGN.md §9), and until then
+`func_tool_load` says exactly that. **`slife2-cli`** declares the rows and serves
+the `cli_*` tools that write the section.
 
 The playbooks in `skills/` are catalogued the same way and *are* readable —
-`skill_use`, which **`slife2-skills`** serves. It is a plugin for the same
-reason, and it holds what the `skills:` section resolved, because a skill that
-declares `requires.env` needs one process that knows the answer.
+`skill_use`, which **`slife2-skills`** serves, along with `skill_list` and the
+`skill_*` tools that install, remove and switch a playbook. It is a plugin for
+the same reason, and it holds what the `skills:` section resolved, because a
+skill that declares `requires.env` needs one process that knows the answer.
+
+**The model can edit these sections, and that is the thing to read this
+paragraph for.** Each of the four families serves its own management tools —
+`mcp_set` / `rest_api_set` / `cli_set` / `skill_set`, with `remove`, `list` and
+`set_enabled` beside them, v1's names — so "written *here*, in the operator's
+file" is no longer the same as "written by the operator". What is unchanged is
+the road an edit travels: the file is written by one module
+(`slife2/configfile`) under a cross-process lock, as a document edit that keeps
+every comment, and the result is handed to the same parsers and the same loader
+a *start* uses — an entry the loader refuses is put back and the caller told
+why. So what can be written is what an operator could write, and it lands where
+they would have written it. What is *not* here yet is a gate before the write:
+`mcp_set` with a `command:` names a program slife2 will start, and nothing asks
+first (DESIGN.md §9, "Tool approval").
+
+### What the model is handed
 
 A tool's name carries the server it came from when there is one to carry: an
 entry under `tools:` reaches the model as `{name}__{tool}` —
@@ -302,10 +332,13 @@ tools are bare, and they are one namespace — two plugins cannot offer one name
 between them — which the catalogue refuses loudly rather than resolving.
 
 **What the model is handed is the tools it has loaded, not the tools that
-exist.** The list is re-read from the hub before *every model call*, and it holds
-`tool_search`, `func_tool_load`, `_func_tool_unload` and `skill_use` plus
-whatever else the model has loaded — a server with ninety tools costs nothing
-until one of them is wanted.
+exist.** The list is re-read from the hub before *every model call*, and what
+starts in it is slife2's own: `tool_search`, `func_tool_load`,
+`_func_tool_unload`, `skill_use`, the builtins, the two history tools, and the
+eighteen tools that edit the four config sections — that last group is why the
+list is noticeably longer than it was, and it is the one group whose being
+always-loaded is worth a second look. Everything else is loaded on demand — a
+server with ninety tools costs nothing until one of them is wanted.
 `tool_search` searches the whole catalogue by keyword *and* by meaning, one
 hybrid search; `func_tool_load` puts one or several names in the list, and they
 are there from the next step of the same turn. The catalogue is
@@ -317,6 +350,8 @@ Two things decide what starts loaded. **Ours always do** — a model that has
 quietly lost `now` and `calc` is a failure nobody can see — and somebody else's
 do when their entry says `autoload: true`, which is how a server whose tools are
 wanted every turn is written down as such. Everything else arrives on demand.
+
+### The budget, and the pairs the harness writes
 
 The list is bounded, because it goes out with every request: over
 `tool_load: threshold:` (100, in `slife2.yaml`) the least recently *called* tools
@@ -342,6 +377,8 @@ arrived while it was working. **No screen shows it yet.** That is a deferred
 display decision rather than a half-built mechanism — the transcript draws from
 events and this call raises none, and a rebuilt one skips `_`-prefixed calls by
 name (DESIGN.md §9) — and the conversation has it either way.
+
+### How a plugin contributes
 
 Which of a plugin's tools the model may call is said on the tool —
 `@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
@@ -505,10 +542,15 @@ slife2/
 ├─ gateway.py         # the link to a server somebody else runs: connect, list,
 │                     #   call, and say whether it is answering — no catalogue,
 │                     #   no category, no config
+├─ configfile.py      # the one writer of slife2.yaml: a section edit under a
+│                     #   cross-process lock, as a document edit that keeps the
+│                     #   file's comments, judged by the loader that reads it
 ├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
-│                     #   is shared: hold, declare, route a call back
-├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section, held
-├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, held
+│                     #   is shared: hold, declare, route a call back, and the
+│                     #   text the management tools answer with
+├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section — held, declared,
+│                     #   and editable by the `mcp_*` tools
+├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, likewise
 ├─ toolhub.py         # slife2-toolhub: the model's tools and the *set* they
 │                     #   belong to — the naming rule, the gate, the budget, and
 │                     #   the calls, which it routes to whoever holds the source
@@ -540,10 +582,11 @@ slife2/
 │                     #   model's hands and one conversation out of another's
 ├─ skills.py          # the `skills/` folder: a playbook's header, its
 │                     #   `requires` block, and what `skill_use` answers with
-├─ skills_server.py   # slife2-skills: `skill_use`, and the catalogue rows a
-│                     #   search finds a playbook by
+├─ skills_server.py   # slife2-skills: `skill_use` and the `skill_*` tools that
+│                     #   install one, plus the catalogue rows a search finds a
+│                     #   playbook by
 ├─ cli_server.py      # slife2-cli: the `cli:` section as catalogue rows — one
-│                     #   per entry, and no tools at all yet
+│                     #   per entry — and the `cli_*` tools that write it
 ├─ llm/
 │  ├─ base.py                    # Chunk, Stream, LLMBackend  (no I/O)
 │  ├─ wire.py                    # Chunk <-> progress payload (no I/O)

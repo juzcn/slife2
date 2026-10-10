@@ -134,7 +134,12 @@ endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
 else's processes rather than at a file: `tools:` and `rest-api:` are config
 sections, and the plugin that owns a section is the one that holds the
 connections its entries describe (§8). The gateway underneath them
-(`slife2.gateway`) is a library, and always was.
+(`slife2.gateway`) is a library, and always was. **And the one *writer* of
+`slife2.yaml` is a library too** (`slife2/configfile`), which is the same row of
+that table rather than a new one: it holds a file and nothing else, the four
+plugins that own the four sections import it, and the cross-process lock it
+takes is the other half of "one writer" — a SQLite lock for a database, a kernel
+mutex for a file both a human and four daemons edit.
 
 The cost of a library is the error boundary: a plugin that is gone fails the
 turn with a named peer, and a file that will not open raises where it is used.
@@ -917,6 +922,8 @@ slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins   
                              └── in-process ──▶ `slife2.db.ToolStore`  (the catalogue's own file)
 ```
 
+### 8.1 What the hub owns, and how a tool gets into the set
+
 **What the hub owns is the set, and it owns all of it.** Which tools exist, what
 the model is holding, what a name resolves to, what the budget takes back, and
 who may call what — every one of those is a question about the *whole* list, so
@@ -1005,6 +1012,8 @@ would be the one place the tool table has a branch in it. What the hop costs is
 one loopback call per model call; what it buys is that "where the tools come
 from" has one answer and no exceptions.
 
+### 8.2 Sources: what a plugin holds, and how it declares it
+
 **Two families are not tools, and they got servers of their own.** A skill is a
 document in `<data>/skills/` and a `cli:` entry is a program already installed:
 neither is anything a call could reach, and for a while that was the argument for
@@ -1013,18 +1022,23 @@ config's own section. That was defensible while the families were two
 row-builders and one `read_text`, and it stopped being defensible for two
 reasons. The first is that it put the hub in charge of two config sections that
 belong to somebody else's job, which is not the job the hub is the only one who
-can do. The second is what is next: both families have a **model-facing tool
-still to come** (§9 — `skill_list`, and one tool per `cli:` entry that runs a
-command as an argv rather than through a shell), and a tool needs a server to be
-served from. So `slife2-skills` and `slife2-cli` are plugins like any other,
-each owning its section, and the rule that survives is the one worth having:
-**everything with a server behind it goes through the one code path**, and a
-source that owns rows which are not tools *declares* them.
+can do. The second is what was next: both families were going to have
+**model-facing tools** — and they have them now, `skill_list`, `skill_use` and
+the `skill_*` and `cli_*` sets that edit the two sections, with one tool per
+`cli:` entry that *runs* a command still to come (an argv rather than a shell,
+and §9). A tool needs a server to be served from, which is why these plugins
+existed before their tools did. So `slife2-skills` and `slife2-cli` are plugins
+like any other, each owning its section, and the rule that survives is the one
+worth having: **everything with a server behind it goes through the one code
+path**, and a source that owns rows which are not tools *declares* them.
 
 **A source declares rows; the hub merges them, and the hub is still the only
-writer.** One tool on the plugin's API — `list_sources`, unmarked and so
-invisible to the model — answers with the source's whole list, and the hub
-merges it exactly as it merges the tools a `tools/list` returned:
+writer.** The declaring tool is `list_sources`, unmarked and so invisible to the
+model — a plugin's *other* tools are its own, and these families have two kinds:
+what the hub calls (`list_sources`, `call_source`) and the `*_set` / `*_remove` /
+`*_list` names the model calls, which are what the paragraph above describes.
+The declaring one answers with the source's whole list, and the hub merges it
+exactly as it merges the tools a `tools/list` returned:
 
 * **The whole list, so a deleted skill stops being a hit.** A merge reads an
   absent name as a row the source no longer has, which is the half that makes
@@ -1090,6 +1104,23 @@ about a declared key needs an address or a protocol. `skill_use` reads the decla
 rather than ignoring it, so a model told which key is missing — before it acts —
 is the difference between a skill that does not work and a skill that does not
 work silently.
+
+**REST APIs are not a second mechanism, and `restapi-tools` is not a second
+implementation.** A `rest-api:` entry is expanded *by the config layer* into the
+stdio command that serves it — `uvx mcp-openapi-proxy` with the environment it
+reads — so what reaches `slife2-restapi-tools` is an ordinary stdio server and
+nothing outside the config layer knows that REST exists. The two family plugins
+are the same code over two sections, which is the honest consequence: what is
+REST-specific is the *entry* — a spec, a base URL, a key — and the expansion that
+turns it into a command, and both of those are the config layer's. That wrapper
+is v1's, kept because it is what the ecosystem publishes and because writing an
+OpenAPI-to-tools converter here would be a large feature that is wrong in
+interesting ways. Splitting the two sections into two plugins anyway is about
+ownership rather than mechanism: each is a place an operator writes a server
+down, and a family that owns its section is one whose next change has somewhere
+to land.
+
+### 8.3 The list, and what says when something is missing
 
 **A tool list is one thing and it has one owner.** Provenance (whose tool is
 this), the naming rule that keeps two servers' `search` apart, and — the first
@@ -1167,6 +1198,8 @@ somebody else's process: reported by `servers()`, its rows left in the catalogue
 with `error` on them, and retried on the next ask. An upstream *refusing a call*
 is one caller's bad data. Collapsing these is how a config mistake becomes an
 outage, and separating them is most of what the module's prose is about.
+
+### 8.4 The catalogue, and the search over it
 
 **The catalogue is a file this process opens, not a plugin it asks.**  It was
 the second half of `slife2-db` and that plugin is gone, for the test in §1.1: a
@@ -1328,6 +1361,8 @@ a model that has quietly lost
 unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
 
+### 8.5 The budget
+
 **The budget is enforced by the harness, at a turn boundary, and it says what it
 took — in the conversation, not only in a log.** Over `tool_load.threshold` (a
 hundred, v1's number), the least recently *called* function tools are unloaded —
@@ -1363,6 +1398,8 @@ keeps wanting. The stamp is written before the answer is returned, which is what
 keeps it ahead of the trim: a detached write could land after the turn boundary
 and cost the model the tool it had just been using.
 
+### 8.6 Names, and the links the hub holds
+
 **A name is a row's identity, and two sources cannot offer one.** That is the
 catalogue's primary key and the merge's match key, so a collision is refused
 rather than resolved by whoever happened to be listed last — silently replacing
@@ -1392,26 +1429,72 @@ them, including the model backends a config uses and the agent server, which hav
 nothing to offer: which tools a server has is not knowable without asking, and a
 second list is a list that goes stale the first time somebody adds a tool.
 
-**REST APIs are not a second mechanism, and `restapi-tools` is not a second
-implementation.** A `rest-api:` entry is expanded *by the config layer* into the
-stdio command that serves it — `uvx mcp-openapi-proxy` with the environment it
-reads — so what reaches `slife2-restapi-tools` is an ordinary stdio server and
-nothing outside the config layer knows that REST exists. The two family plugins
-are the same code over two sections, which is the honest consequence: what is
-REST-specific is the *entry* — a spec, a base URL, a key — and the expansion that
-turns it into a command, and both of those are the config layer's. That wrapper
-is v1's, kept because it is what the ecosystem publishes and because writing an
-OpenAPI-to-tools converter here would be a large feature that is wrong in
-interesting ways. Splitting the two sections into two plugins anyway is about
-ownership rather than mechanism: each is a place an operator writes a server
-down, and a family that owns its section is one whose next change has somewhere
-to land.
+### 8.7 Editing the config
 
-What was deliberately **not** ported: v1's `mcp_set`/`mcp_remove` tools, which
-let the model write its own `tools.yaml`. slife2's config is one file read by
-every process and by the launcher, and the launcher already refuses to let a
-command line name an arbitrary program; a language model choosing one is the
-same capability with a worse author.
+**A model may edit the sections it can read, and what bounds that is the path an
+edit takes rather than who takes it.** This paragraph used to say the opposite —
+that v1's `mcp_set`/`mcp_remove` were deliberately not ported, because "a
+language model choosing [a program] is the same capability with a worse author" —
+and the reasoning is worth keeping rather than deleting, because most of it still
+holds. What holds: an entry under `tools:` names a program slife2 will *start*,
+so writing one is a capability, and the operator's file was the thing bounding
+it. What changed is the answer to "bounded by what". Not the author of the bytes,
+but the road they travel: every one of the tools writes through
+`slife2.configfile`, the single writer of `slife2.yaml`, which holds the file's
+cross-process lock across a read-modify-write, edits the *document* so the
+file's own explanation survives, and hands the result to `slife2.config.load` as
+the judge — a file the loader refuses is put back and the caller told why. The
+parsers that decide what an entry may say are the same ones a start uses
+(`_tool_server`, `_rest_api`, `_cli_tool`), so an entry written by a model is an
+entry an operator could have written, and the same names are refused
+(`toolfamily.refusal`: a name the hub is already connected under, or one the two
+document families file their rows beneath).
+
+**The one thing that is genuinely new, and it is not a permission.** A `tools:`
+entry is a process, so a model that can write one can name a program that gets
+spawned — and the argument above does not make that safe, it makes it *legible*:
+it lands in the operator's file, in the section the section's comment explains,
+and a person reading it sees `command: npx …` in the place they would have
+written it. What the system does not have yet is a gate *before* the write, and
+that is §9's tool approval rather than this paragraph's problem — which is a
+change from when that bullet was written: the question used to be hypothetical,
+and the four families of management tools are what made it a real one. The five
+tools are v1's, per family, and they are the model's (`FOR_THE_MODEL`), because
+the alternative — an operator-only path — is a second way to write the same file
+and therefore a second thing to keep in step.
+
+**What a management tool does not do is write the catalogue, and the bill
+arrives later.** None of them touches `tools.db`: a management tool writes a
+config entry and the family holds the connection, and what writes the *catalogue*
+is `refresh_declared`, at the next ask — and asking is what a search does. So
+adding a server is cheap and the model's **next search** is what pays: the whole
+of that server's tool list is merged then, one row each, and embedded in one
+request. Nothing splits that request — `ToolStore._embed` chunks *documents* by
+`max_chars` and not requests by size — so a published server with four figures of
+tools makes a single search the expensive one, and the count is the only warning
+anybody can give: `mcp_set` says so when it is over `TOOL_LIST_LIMIT`. A batch
+that big is also the one failure here that is *not* the source's fault and is
+reported as such (§8, "Three kinds of missing"): a merge the catalogue *refuses*
+marks that source unusable, and a merge that raises fails the list rather than
+quietly shortening it. Removing costs nothing in this direction — the rows, their
+keyword documents and their vectors go in one transaction and nothing is
+embedded, which is the whole reason a removal is a deletion rather than a
+re-merge with an empty list.
+
+**And the writer is where the promise has to be kept, so it is worth saying what
+it is.** `slife2/configfile` edits `slife2.yaml` in four steps, and each answers
+one way the promise could break: it takes the *kernel's* lock on the file (the
+same `slife2.runtime.exclusive` the launcher uses for a cold start), so four
+daemons and a person cannot interleave a read-modify-write; it loads the file in
+ruamel's round-trip mode and edits the *document*, so every comment, quote style
+and blank line around the change is still exactly where the operator put it —
+which is not decoration in a file that is mostly explanation; it swaps the result
+in atomically, preserving the file's mode; and it hands the whole thing to
+`slife2.config.load` before the write counts, putting the old text back if the
+reader refuses. That last step is what makes the parsers the boundary rather than
+a convention: an entry is judged by the same `_tool_server` / `_rest_api` /
+`_cli_tool` a start uses, so "what a model may write" and "what a start accepts"
+are one question with one answer.
 
 **And one thing was un-ported after a first pass left it out.** v1's
 `_func_tool_unload` is back, as the tool that carries the budget. The first
@@ -1530,13 +1613,21 @@ Named so they are decisions rather than oversights:
   Python over a bounded scan, unranked — for the queries neither index can
   describe: a partial spelling, a path, a symbol. It is not here, and it is the
   mode v1's notes say the model reached for most often.
-- **Tool approval.** `now` and `calc` are side-effect-free precisely so this cut
-  does not have to answer it. A tool that writes a file reopens the question v1
-  answered with a model-driven `_approve` parameter — and a tool that spawns a
-  subagent is the first such tool this design has an obvious use for. §8 says why
-  the hub is where the answer goes: it is the one place that knows the whole set,
-  and the only one that could hold a per-tool policy without the agent learning
-  what a tool server is.
+- **Tool approval, and the trigger is no longer hypothetical.** `now` and `calc`
+  are side-effect-free precisely so this cut does not have to answer it — and
+  then the four families of management tools landed (§8), which are the tools
+  this design was deferring the question for: `skill_set` writes files a model
+  chose the paths of, `mcp_set` writes a `command:` that slife2 will start, and
+  neither asks anybody first. What §8 argues there is that the write is
+  *legible* — one writer, the loader as judge, the result in the file a person
+  reads — and legible is not the same as gated, so the gap this bullet names is
+  now open rather than closed by construction. v1 answered it with a
+  model-driven `_approve` parameter, which is the shape to be suspicious of: the
+  model being asked is the model asking. §8 still says where the answer goes —
+  the hub is the one place that knows the whole set and the only one that could
+  hold a per-tool policy without the agent learning what a tool server is — and
+  what that answer has to cover is now a named list of tool names rather than a
+  category.
 - **Skills, and the CLI registry.** v1 had two families that were never quite
   tools, and each is now a plugin of its own (§8). A **skill** is a playbook: a
   directory with a
@@ -1554,15 +1645,19 @@ Named so they are decisions rather than oversights:
   `requires.bins` — the block these skills already carry for other hosts, read
   out of whichever namespace it is filed under), `skills:` in `slife2.yaml` says
   where the value comes from, and `skill_use` reports the difference before the
-  model acts on instructions that would fail. **Nothing writes**, and that is
-  not an oversight: v1's `skill_set`, `skill_remove` and `cli_set` were a model
-  editing its own configuration, which is `mcp_set` wearing a different hat, and
-  a skill is installed by putting a directory in a folder. What is next is the
-  rest of the reading family — `skill_list`, the half a model uses to find the
-  name it then reads, and one tool per `cli:` entry; each lands in the plugin
-  that already owns its section, which is why those plugins exist before their
-  tools do. That last one is
-  the family's real decision and it is made: an entry becomes **a tool the
+  model acts on instructions that would fail. **And the writing half has landed
+  too**, which reverses what this bullet used to say ("Nothing writes, and that
+  is not an oversight"): `skill_set`, `skill_remove` and `cli_set` are back, one
+  set per family, on §8's argument — an edit by a model is an edit through the
+  same writer, the same parsers and the same refusals, and what a person gets in
+  exchange is a file that says what happened. A skill is *still* installed by
+  putting a directory in a folder; the tool is what writes the directory, and
+  the only paths it accepts are ones that resolve inside that skill's own
+  (`slife2.skills._within`), because a playbook is written by a model and one of
+  its `path` values becomes a path on the operator's machine — the same boundary
+  §8 draws, in the one family where the model names a file rather than a field.
+  What is left of the *reading* family is one tool per `cli:` entry, and that is
+  the family's real decision, already made: an entry becomes **a tool the
   operator's own config gave the model**, run as an argv rather than through a
   shell so that the arguments a model invents cannot become commands it
   invented. It is also what opens the approval question above — `yt-dlp` writes
