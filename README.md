@@ -110,9 +110,10 @@ uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
 uv run slife2-llm-embeddings   # vectors for both indexes,  :8004
 ```
 
-In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Ctrl+C** cancels
-a running turn (and quits when there is none), **Ctrl+N** starts a new
-conversation, **Ctrl+Q** quits.
+In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Esc** cancels a
+running turn, **Ctrl+C** cancels one too and quits when there is none (copying
+instead when something is selected), **Ctrl+N** starts a new conversation,
+**Ctrl+Q** quits.
 
 **PageUp/PageDown** page the transcript and **Home/End** jump to its ends, and
 the wheel scrolls it wherever the pointer happens to be — the transcript is what
