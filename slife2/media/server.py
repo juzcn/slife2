@@ -340,7 +340,9 @@ def build_server(
             "transcript",
             media.adapter(provider).transcribe_audio(
                 model=entry.model,
-                audio_path=Path(path).expanduser(),
+                # Not expanded here: every filesystem call belongs in the
+                # adapter, where it goes off the event loop.
+                audio_path=Path(path),
                 extra_params=dict(entry.params),
             ),
         )

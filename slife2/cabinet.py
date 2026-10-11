@@ -97,7 +97,7 @@ MAX_READ_BYTES = 2 * 1024 * 1024
 SNIFF_BYTES = 8192
 
 #: Where a saved file goes, by what it is.  v1 auto-filed by extension and this
-#: keeps that: the cabinet is browsed by a person, and `files/images/` is a
+#: keeps that: the cabinet is browsed by a person, and `images/` is a
 #: directory they can find something in.  An extension nobody here knows lands in
 #: `files/other/`, which is a name that says exactly that rather than guessing.
 CATEGORIES: dict[str, tuple[str, ...]] = {
@@ -488,7 +488,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """Copy files from this machine into the cabinet.
 
         **This copies and never moves**: what you point at stays where it is, and
-        the cabinet keeps its own copy under `files/<category>/`. The bytes are
+        the cabinet keeps its own copy under `<category>/`. The bytes are
         never indexed — what a search matches is the file's name, where it came
         from and any `summary` you write, so a file saved without one is still
         findable by its path and by meaning, and `cabinet_summarize` is how it
@@ -515,11 +515,24 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         saved: list[str] = []
         for source in wanted:
             chosen = category.strip() or category_for(source.name)
-            if chosen in RESERVED_CATEGORIES:
+            # **Two questions, and the first is the one the second depends on.**
+            # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
+            # an absolute path all name something else once a filesystem has
+            # normalised them, so a guard that compared the raw string against a
+            # set would let `"./notes"` through and file a saved attachment among
+            # the notes' own mirrors.  The second question is then asked of the
+            # component that would actually be created, and case-insensitively —
+            # this platform's filesystem is, so `"NOTES"` is the notes directory.
+            if not chosen or Path(chosen).name != chosen or ".." in Path(chosen).parts:
+                return (
+                    f"Not saved — {chosen!r} is not one folder name. A category is "
+                    f"a single name like `images`, not a path."
+                )
+            if chosen.casefold() in RESERVED_CATEGORIES:
                 return (
                     f"Not saved — {chosen!r} is where the cabinet keeps its "
-                    f"{chosen}, so a file cannot be filed under it. Choose "
-                    f"another category, or leave it out to file by extension."
+                    f"{chosen.casefold()}, so a file cannot be filed under it. "
+                    f"Choose another category, or leave it out to file by extension."
                 )
             target = unique_path(opened.root / chosen, source.name)
             relative = target.relative_to(opened.root).as_posix()

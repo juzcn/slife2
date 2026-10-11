@@ -75,6 +75,9 @@ class Bridge:
         self.sent: list[dict[str, Any]] = []
         self.typing: list[int] = []
         self.ticket = "ticket-1"
+        #: An unreachable bridge: every call raises, which is what a machine
+        #: that has just booted and whose proxy is not up yet looks like.
+        self.down = False
 
     async def __call__(
         self,
@@ -87,6 +90,8 @@ class Bridge:
     ) -> ilink.Answer:
         path = url[url.index("ilink/bot/") :].split("?", 1)[0]
         self.paths.append(path)
+        if self.down:
+            raise ConnectionError("the bridge is unreachable")
         return ilink.Answer(status=200, text=json.dumps(self._answer(path, body or {})))
 
     def _answer(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -716,3 +721,38 @@ def test_a_torn_session_file_is_a_cache_miss_rather_than_a_crash() -> None:
     )
 
     assert load_session("jack") == {}
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_that_is_unreachable_at_boot_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A transient failure must not wedge the session for the process's life.**
+
+    The launcher starts this plugin at boot, which is exactly when a network can
+    be unreachable — and `try_restore_session` adopts the token *before* anything
+    confirms it.  So a validation that fails on the network used to leave a
+    client that reported itself logged in, and `ready` short-circuits on that:
+    nothing ever retried and the poll loop never started, while the status answer
+    said the link was merely quiet.  The token is let go instead (the *file* is
+    not touched), so the next read re-reads it — which is what "keep retrying"
+    has to mean to be worth saying.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    made.bridge.down = True
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: session.restore_note)
+        assert not session.polling, "no loop can start against a dead bridge"
+        assert not session.client.is_logged_in, "the unconfirmed token is let go"
+        assert session_path("jack").exists(), "and the file is kept: it is not at fault"
+
+        made.bridge.down = False
+        answer = await made.plugin.status(session)
+        await until(lambda: session.polling)
+    finally:
+        await made.close()
+
+    assert "connected" in answer

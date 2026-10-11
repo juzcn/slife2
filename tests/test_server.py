@@ -1339,13 +1339,19 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
         },
     )
     backend = answering("ok")
-    await send(
+    result = await send(
         build_server(
             text_only, context_client=context, hub_client=hub, backend=backend
         ),
         "look",
         images=["data:image/png;base64,AAAA"],
     )
+
+    # **And the caller is told which source it was**, which is the half that was
+    # missing: a reply that quietly carried fewer pictures than the call asked
+    # for is the one thing a caller cannot detect for itself.
+    assert result.data["refused"], "the refusal reaches the caller"
+    assert "cannot read images" in result.data["refused"][0]
 
     # The model was asked with the text alone — nothing was encoded for it, so
     # there is no part a provider would reject — and the caller is told which

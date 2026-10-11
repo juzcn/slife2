@@ -102,6 +102,10 @@ FILE = "file"
 REPORT = "report"
 KINDS = (NOTE, DIARY, FILE, REPORT)
 
+#: The sentence a caller gets for a kind that is not one of the four.  Spelled
+#: from `KINDS` so that a fifth cannot be added without this agreeing.
+_KIND_HINT = f"kind must be one of: {', '.join(KINDS)}"
+
 #: The index file, inside the cabinet it indexes.
 INDEX_NAME = ".index.db"
 
@@ -158,15 +162,6 @@ SPECS: dict[str, Spec] = {
     FILE: Spec(time="created_at", day=False, appends=False, mirror=""),
     REPORT: Spec(time="created_at", day=False, appends=True, mirror="reports"),
 }
-
-#: The axis a window uses when the caller named no kind.  Every kind has
-#: `updated_at`, and "when was this last written" is the only question all four
-#: can answer, so it is what a window means when the caller did not narrow one.
-ANY = Spec(time="updated_at", day=False, appends=False, mirror="")
-
-#: The sentence a caller gets for a kind that is not one of the four.  Spelled
-#: from `KINDS` so a fifth cannot be added without this agreeing.
-_KIND_HINT = f"kind must be one of: {', '.join(KINDS)}"
 
 
 def cabinet_dir(agent: str) -> Path:
@@ -252,7 +247,16 @@ def vector_text(row: Mapping[str, Any]) -> str:
     parts = (
         [row.get("title"), row.get("source"), row.get("file_path"), row.get("summary")]
         if str(row.get("kind") or "") == FILE
-        else [row.get("body"), row.get("summary")]
+        # **Body alone, and the summary is deliberately not here.**  A summary is
+        # something a model wrote *about* the row, and it is read by the keyword
+        # leg on either side; the vector is what the document *is*.  Only a file
+        # carries one into its vector, because a file has no text of its own —
+        # and that is the one kind `annotate` re-embeds.  Including it here made
+        # `cabinet_summarize(kind="note", …)` change the text a vector should
+        # come from while leaving the stored vector alone, so the new words were
+        # unreachable by meaning and nothing could repair them ("missing" means
+        # "has no chunks", and it had them).
+        else [row.get("body")]
     )
     return storable("\n\n".join(str(part) for part in parts if part))
 
@@ -486,7 +490,18 @@ class CabinetStore:
         if text_stale:
             self._rebuild_text_index()
 
-        missing, _ = await self.embed_missing(embedder)
+        # **Every document, not one batch of them.**  `embed_missing` is bounded
+        # per call so that a call cannot embed a thousand documents before it
+        # answers, so the loop that *finishes* the index belongs here — with the
+        # same shape `TurnStore.sync_indexes` uses, and for the same reason.
+        # Without it a changed embedding model left every document past the first
+        # batch with no vector, reported it once, and never tried again: the
+        # cabinet answered meaning queries about part of its corpus, silently,
+        # for as long as the process lived.
+        while True:
+            missing, done = await self.embed_missing(embedder)
+            if not done:
+                break
         if missing:
             problems.append(f"{missing} document(s) have no vector")
         return {
@@ -497,7 +512,7 @@ class CabinetStore:
         }
 
     async def embed_missing(
-        self, embedder: Embedder, *, limit: int = SYNC_BATCH
+        self, embedder: Embedder, *, limit: int | None = None
     ) -> tuple[int, int]:
         """Embed documents the vector index does not hold.  `(remaining, done)`.
 
@@ -511,6 +526,7 @@ class CabinetStore:
         call placed.  `remaining` is the count *after* the batch, read from the
         same connection that wrote it, so it cannot disagree with itself.
         """
+        limit = limit or SYNC_BATCH  # read here, so a test can size the batch
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT id, kind, key, body, title, summary, tags, source, file_path"

@@ -145,12 +145,3 @@ def estimate_turn_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     it is a lie that bounds the count.
     """
     return max(sum(estimate_message_tokens(message) for message in messages), 1)
-
-
-def count_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
-    """About how many tokens a whole conversation is, floored at one.
-
-    The same floor as `estimate_turn_tokens` and for the same reason, one level
-    up: a conversation that weighs nothing is a conversation no ceiling holds.
-    """
-    return max(sum(estimate_message_tokens(message) for message in messages), 1)

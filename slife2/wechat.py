@@ -501,9 +501,20 @@ class Wechat:
                 )
                 logger.warning("wechat %s: the saved login was rejected", session.agent)
             else:
+                # **The token is let go, and the file is kept.**  This is the one
+                # outcome of the three that has to be *reversible*:
+                # `try_restore_session` adopted the token before anything
+                # confirmed it, so leaving it in place would make
+                # `is_logged_in` true — and `ready` short-circuits on exactly
+                # that, so no later read would ever try again and the poll loop
+                # would never start.  A bridge that was unreachable for one
+                # moment at boot would cost the process every message it runs
+                # for.  Dropping the in-memory token (not the file) is what makes
+                # "keep the file, keep retrying" true rather than a promise.
+                reason = client.last_error or "no answer"
+                client.reject_session()
                 session.restore_note = (
-                    f"the saved login could not be confirmed just now "
-                    f"({client.last_error or 'no answer'})"
+                    f"the saved login could not be confirmed just now ({reason})"
                 )
             return False
         client.clear_session_faults()

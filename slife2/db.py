@@ -174,12 +174,6 @@ def safe_agent_name(name: str) -> str:
     return cleaned[:64]
 
 
-#: What separates the two halves of a client id in a filename.  It has to be a
-#: character `safe_agent_name` cannot leave behind, or `("a.b", "c")` and
-#: `("a", "b.c")` would name the same file — and `@` is not in that set.
-_CLIENT_SEPARATOR = "@"
-
-
 def database_path(agent: str, subagent: str = "") -> Path:
     """The database for one client id.
 
@@ -3583,7 +3577,7 @@ def _injectable_sql(sources: Sequence[str]) -> str:
     what qualifies one for this exception is being a pair, which is why the set
     is written out beside the tool names rather than derived from anything.
     """
-    visible = _in_list(MODEL_VISIBLE_HARNESS_TOOLS) or "''"
+    visible = _in_list(MODEL_VISIBLE_HARNESS_TOOLS)
     return (
         f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
         f" AND load_status = '{LOADED}'"

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
+from slife2 import cabinet_store
 from slife2.audience import client_meta, for_the_model
 from slife2.cabinet import build_server, category_for, decode, unique_path
 from slife2.cabinet_store import (
@@ -514,3 +515,66 @@ def test_decoding_refuses_a_file_that_is_not_text() -> None:
     assert decode(b"\x00\x01\x02")[0] == ""
     assert decode(b"\x00\x01\x02")[1] == "binary"
     assert decode("记录\n".encode("utf-16"))[0].strip() == "记录"
+
+
+@pytest.mark.asyncio
+async def test_sync_embeds_every_document_and_not_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The loop `embed_missing`'s docstring promises lives in `sync`.**
+
+    `embed_missing` is bounded per call, so a `sync` that called it once would
+    leave every document past the first batch without a vector — and say so
+    exactly once, at open, after which the plugin's `synced` set means nothing
+    tries again for the life of the process.  A cabinet bigger than one batch
+    would then answer meaning queries about part of its corpus and report itself
+    ready.
+    """
+    monkeypatch.setattr(cabinet_store, "SYNC_BATCH", 1)
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    for index in range(3):
+        await store.write(NOTE, f"n{index}", body=f"body {index}", embedder=embedder)
+    with store._connect() as connection:
+        # The state a changed embedding model leaves: rows, no vectors.
+        connection.execute("DELETE FROM cabinet_vec")
+        connection.execute("DELETE FROM cabinet_chunk")
+
+    status = await store.sync(embedder)
+
+    assert status["ready"] is True, status["problems"]
+    with store._connect() as connection:
+        chunks = connection.execute(
+            "SELECT COUNT(*) AS n FROM cabinet_chunk"
+        ).fetchone()["n"]
+    assert int(chunks) == 3, "every document, not the first batch"
+
+
+@pytest.mark.asyncio
+async def test_a_category_is_one_folder_name() -> None:
+    """**The guard has to see what the filesystem will see.**
+
+    `./notes`, `notes/` and (on a case-insensitive filesystem) `NOTES` all name
+    the notes directory once a path is normalised, so a guard comparing the raw
+    string against the reserved set let them through — and the file a model saved
+    landed among the notes' own mirrors, listed by `file_list(category="notes")`
+    as if it were one of them.  The question asked first is therefore "is this one
+    name at all", and the reserved check is asked of the component that would
+    really be created.
+    """
+    source = data_dir() / "report.txt"
+    source.write_bytes(b"x")
+    async with Client(cabinet()) as client:
+        traversing = await ask(
+            client, "file_save", paths=[str(source)], category="./documents"
+        )
+        trailing = await ask(
+            client, "file_save", paths=[str(source)], category="documents/"
+        )
+        reserved = await ask(client, "file_save", paths=[str(source)], category="NOTES")
+        nested = await ask(client, "file_save", paths=[str(source)], category="a/b")
+
+    for answer in (traversing, trailing, reserved, nested):
+        assert "not one folder name" in answer or "cannot be filed under it" in answer
+    assert not (bag() / "notes").exists() or not list((bag() / "notes").glob("*.txt"))

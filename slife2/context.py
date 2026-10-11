@@ -141,7 +141,7 @@ def _dedupe(values: Sequence[int]) -> list[int]:
     return list(seen)
 
 
-def _keep(raw: Any) -> list[int] | None | _Rejected:
+def _keep(raw: Any) -> list[int] | _Rejected | None:
     """The `context` field, as a keep-list.
 
     Three answers and one rejection: absent or `"keep"` is every turn in hand,
@@ -167,7 +167,7 @@ def _keep(raw: Any) -> list[int] | None | _Rejected:
     return REJECTED
 
 
-def _recall(raw: Any) -> dict[str, str | None] | None | _Rejected:
+def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
     """The `recall` field, as one condition.
 
     **One condition, never several.**  A period and a query are the two halves of

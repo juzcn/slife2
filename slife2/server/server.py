@@ -1069,10 +1069,20 @@ def build_server(
         # the text and a refusal, not parts its provider would reject.
         pairs, refusals = attachments.resolve(item.images)
         if pairs and not loop.accepts_images:
-            refusals = [
+            # **Extended, not replaced**: a caller who passed one unreadable
+            # source and one the model cannot see is owed both reasons, and a
+            # list that dropped the first to say the second would answer the
+            # wrong question.
+            refusals.extend(
                 f"{source}: {loop.model} cannot read images" for source, _url in pairs
-            ]
+            )
             pairs = []
+        # **On the outcome, so the caller is finally told.**  This is the route a
+        # caller with bytes of its own takes, and a call whose pictures were fewer
+        # than it asked for cannot tell — the reply's `refused` is the only place
+        # that says so.  (The model's own route reports through `attach_image`'s
+        # answer, which is the model's to read.)
+        outcome.refused = refusals
         user = (
             attachments.parts(item.prompt, [url for _source, url in pairs])
             if pairs

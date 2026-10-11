@@ -85,13 +85,21 @@ def as_url(source: str) -> str:
     if not path.is_file():
         return ""
     media_type = MEDIA_TYPES.get(path.suffix.lower(), "image/png")
+    # **Asked of the file before it is read**, not of the bytes afterwards: an
+    # oversized source is refused *without* allocating it, which matters because
+    # the cap exists precisely for the file nobody should be holding in memory.
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        logger.debug("attachment %s could not be stat'd: %s", path, exc)
+        return ""
+    if size > MAX_BYTES:
+        logger.warning("attachment %s is %d bytes, over the cap", path, size)
+        return ""
     try:
         data = path.read_bytes()
     except OSError as exc:
         logger.debug("attachment %s could not be read: %s", path, exc)
-        return ""
-    if len(data) > MAX_BYTES:
-        logger.warning("attachment %s is %d bytes, over the cap", path, len(data))
         return ""
     return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}"
 

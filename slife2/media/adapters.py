@@ -446,12 +446,18 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                 )
             await asyncio.sleep(POLL_SECONDS)
 
-    def _data_uri(self, path: Path) -> str:
+    async def _data_uri(self, path: Path) -> str:
         """A local file as a `data:` URI, with its media type.
 
         The suffix decides the type and an unknown one is refused rather than
         guessed: the far end decodes the payload by that header, so a wrong one
         is bytes nobody can read.
+
+        **The read goes off the event loop**, and here that is the point rather
+        than a formality: an audio file handed to `transcribe_audio` is
+        megabytes, and reading one inline blocks every other call this process
+        is serving for as long as the disk takes — which is the same rule
+        `slife2.cabinet`'s `file_read` follows with its own `to_thread` hop.
         """
         media_type = AUDIO_MIME.get(path.suffix.lower(), "")
         if not media_type:
@@ -459,11 +465,10 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                 f"{path.suffix or '(no suffix)'} is not an audio format this "
                 f"adapter knows: {', '.join(sorted(AUDIO_MIME))}"
             )
-        return (
-            f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode()}"
-        )
+        data = await asyncio.to_thread(path.read_bytes)
+        return f"data:{media_type};base64,{base64.b64encode(data).decode()}"
 
-    def _reference(self, image: str | Path | None) -> str | None:
+    async def _reference(self, image: str | Path | None) -> str | None:
         """A reference image as something the far end can fetch: a URL or a URI.
 
         A local path becomes a data URI; a URL and a data URI pass through.  A
@@ -473,15 +478,23 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         if image is None:
             return None
         if isinstance(image, Path):
-            if not image.is_file():
-                raise MediaAdapterError(f"no such reference image: {image}")
-            return self._data_uri(image)
-        if image.startswith(("http://", "https://", "data:")):
+            path = image
+        elif image.startswith(("http://", "https://", "data:")):
             return image
-        path = Path(image).expanduser()
-        if not path.is_file():
+        else:
+            path = Path(image)
+
+        # **One hop, and both filesystem calls inside it**: `~` expansion reads
+        # the environment and `is_file` reads the disk, and either on the event
+        # loop is the thing this is avoiding.
+        def expanded() -> Path | None:
+            found = Path(path).expanduser()
+            return found if found.is_file() else None
+
+        where = await asyncio.to_thread(expanded)
+        if where is None:
             raise MediaAdapterError(f"no such reference image: {path}")
-        return self._data_uri(path)
+        return await self._data_uri(where)
 
     async def generate_image(
         self,
@@ -494,7 +507,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         extra_params: dict[str, Any] | None = None,
     ) -> str:
         content: list[dict[str, Any]] = [{"text": prompt}]
-        if (reference := self._reference(image)) is not None:
+        if (reference := await self._reference(image)) is not None:
             content.append({"image": reference})
         params = dict(extra_params or {})
         if size:
@@ -521,7 +534,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         params = dict(extra_params or {})
         field = str(params.pop(IMAGE_FIELD_KEY, DEFAULT_IMAGE_FIELD))
         data: dict[str, Any] = {"prompt": prompt}
-        if (reference := self._reference(image)) is not None:
+        if (reference := await self._reference(image)) is not None:
             data[field] = reference
         task_id = await self._submit(model, data, params)
         output = await self._poll(
@@ -590,13 +603,16 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         are read because the endpoint has three: `output.text`, a segmented
         `output.sentence.text`, and a `choices` list like a chat answer.
         """
-        if not audio_path.is_file():
+        if not await asyncio.to_thread(audio_path.is_file):
             raise MediaAdapterError(f"no such audio file: {audio_path}")
         params = dict(extra_params or {})
         params.setdefault("format", "wav")
         params.setdefault("sample_rate", "16000")
         content: list[dict[str, Any]] = [
-            {"type": "input_audio", "input_audio": {"data": self._data_uri(audio_path)}}
+            {
+                "type": "input_audio",
+                "input_audio": {"data": await self._data_uri(audio_path)},
+            }
         ]
         output = await self._generate(model, content, params)
         if text := output.get("text"):
