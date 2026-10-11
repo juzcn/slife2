@@ -208,6 +208,12 @@ of `wechat_send_message`*, so that replying is copying two values rather than
 translating between two vocabularies.  v1's marker, keys and case, for the same
 reason its session file is: a habit and a file format both survive a port.
 
+**Its reader is the model, and a screen has the channel instead.**  A window
+shows `Wechat> ` and takes the marker back off, because the two ids inside it are
+what a *reply* needs — nothing a person reading over the model's shoulder can act
+on. That is one unwrapping asked where the line is drawn, not a rule each path
+remembers (§5.1).
+
 **And of the two markers a conversation carries, this is the one that is
 stored.**  A turn footnote is derived every time a message list is built and is
 never written down (§5); this marker is content — it goes into the turn's row
@@ -800,6 +806,15 @@ calls (`add_user`, `finish_assistant`, `add_tool_start`/`add_tool_end`) rather
 than with a rendering vocabulary of its own — which is what makes a rebuilt
 conversation and a live one the same thing rather than two renderings that
 happen to agree.
+
+**A turn that arrived over another channel wears it on screen**, and both of the
+things that takes belong to the one call that draws the line. `add_user` is
+given the turn's `channel` and asks `channel_prefix` for the bubble (`Wechat> `
+for a WeChat turn, `You> ` for this window's own) and `slife2.wechat.
+strip_marker` for the text — the marker is stored, so a rebuild reads it back out
+of the row, and the two ids in it are what a *reply* needs rather than anything a
+person watching can use (§1.2). One mapping, one unwrapping, and the person's own
+channel is never unwrapped: what they typed is theirs, marker-shaped or not.
 
 That required one thing of the record. The model's reasoning is part of what
 happened — a transcript read back that has lost it has a hole exactly where the

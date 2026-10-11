@@ -324,6 +324,38 @@ def test_the_qr_is_drawn_as_something_that_can_be_scanned() -> None:
 # --- messages become turns ----------------------------------------------------
 
 
+def test_the_marker_a_person_is_shown_is_not_the_one_the_model_reads() -> None:
+    """Build and strip are one pair, and this is what holds them together.
+
+    The marker is *content*: it goes into the row, and the window reads it back
+    out of there — so the string that goes on has to be the string that comes
+    off, character for character.  A second spelling on the display side is the
+    copy that drifts into printing two ids at somebody.
+    """
+    written = wechat.marker("peer-1", "ctx-1")
+    assert written.startswith(wechat.MARKER_PREFIX)
+    assert wechat.strip_marker(f"{written} 你好") == "你好"
+    # Without a token, which is the shape a first reply's marker has.
+    assert wechat.strip_marker(f"{wechat.marker('peer-1')} hi") == "hi"
+
+
+def test_unwrapping_takes_a_leader_and_leaves_everything_else() -> None:
+    """A prefix by construction, and only that.
+
+    Three kinds of text that must survive: a message that *mentions* a marker
+    rather than starting with one, a marker-shaped leader whose bracket never
+    closes (a torn row, a hand-edited file), and text with no marker at all.  A
+    display that ate any of them would be losing somebody's words to make a
+    point about punctuation.
+    """
+    inside = 'we discussed [Wechat:{"peer_wechat_id": "p"}] and moved on'
+    assert wechat.strip_marker(inside) == inside
+    torn = '[Wechat:{"peer_wechat_id": "p"'
+    assert wechat.strip_marker(torn) == torn
+    assert wechat.strip_marker("plain words") == "plain words"
+    assert wechat.strip_marker("") == ""
+
+
 @pytest.mark.asyncio
 async def test_a_message_becomes_a_turn_with_the_marker(
     monkeypatch: pytest.MonkeyPatch,

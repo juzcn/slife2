@@ -50,6 +50,13 @@ from textual.widgets import Static, TextArea
 
 from slife2.tui.theme import GLYPHS, PALETTE
 
+# Imported, never re-spelled.  The module that writes the marker is the one that
+# knows what it looks like, and `[Wechat:` typed a second time here is a copy
+# that drifts — into printing the raw marker at somebody, which is the failure
+# this half of the pair exists to prevent.
+from slife2.wechat import CONFIG_KEY as WECHAT_CHANNEL
+from slife2.wechat import strip_marker
+
 #: So `_add` can hand back the widget type it was given.
 WidgetT = TypeVar("WidgetT", bound=Static)
 
@@ -61,6 +68,40 @@ PRIMARY_ARG_CHARS = 72
 #: it is the model talking to itself — and past a few hundred characters nobody
 #: is reading it, they are skimming for the shape of it.
 THINKING_PREVIEW_CHARS = 500
+
+#: The channel this window's own turns are sent on (`slife2.tui.client`), and
+#: therefore the one whose messages are the person's own words.
+WINDOW_CHANNEL = "tui"
+
+
+def channel_prefix(channel: str) -> str:
+    """What a turn's channel is called on screen.
+
+    **One function, and every reader of a channel asks it** — the live prompt and
+    the rebuild both go through :meth:`ChatView.add_user` — which is v1's
+    arrangement (`Channel.display_prefix`): a prefix decided in two places is two
+    answers to "who said this", and the disagreement surfaces on the screen,
+    where nobody can tell which one is wrong.
+
+    `tui` is this window, so its turns are the person's own and read `You> `.
+    An absent channel is read the same way, because the only rows without one are
+    rows this window wrote before there was a column for it.
+
+    Anything else is a name that already exists in the conversation — the key a
+    plugin runs under, or a worker's — and it is shown as itself.  `wechat` keeps
+    v1's spelling of its bubble rather than the key's (`Wechat> `): a
+    conversation that reads the same in both builds is one less thing to relearn,
+    and the footnote beside the message still carries the key it really came in
+    on.
+    """
+    if channel in ("", WINDOW_CHANNEL):
+        return "You> "
+    if channel == WECHAT_CHANNEL:
+        return "Wechat> "
+    # A worker's key, which is a name rather than a channel's name — shown as it
+    # is rather than guessed at, since a guess here would be this window
+    # inventing a speaker.
+    return f"{channel}> "
 
 
 def _timestamp(when: datetime | str | None = None) -> str:
@@ -287,8 +328,9 @@ class ChatView(VerticalScroll):
         text: str,
         moment: datetime | str | None = None,
         footnote: str = "",
+        channel: str = WINDOW_CHANNEL,
     ) -> None:
-        """`[HH:MM] You> text`, the timestamp dim and the prefix bold amber.
+        """`[HH:MM] <channel>> text`, the timestamp dim and the prefix bold amber.
 
         `moment` is when the message was *sent*, and defaults to now.  Restore
         is the only caller that passes one, and it is what keeps a rebuilt
@@ -303,12 +345,21 @@ class ChatView(VerticalScroll):
         parsed back out of a string.  v1 reaches the same picture from the other
         side, wrapping the footnote in `[INFO: …]` for the model and unstyling it
         again for the screen.
+
+        `channel` is where the turn came in on, and it is asked for here rather
+        than passed in as a prefix so that the two things the screen does with it
+        cannot come apart: the bubble it wears (`channel_prefix`) and the marker
+        it must not show (`strip_marker`).  Both are for a message that arrived
+        over *another* channel — what the person typed is `You> ` and is theirs,
+        which is also why their own text is never unwrapped.
         """
         self._turn_open = False
         self._close_block()
+        if channel != WINDOW_CHANNEL:
+            text = strip_marker(text)
         line = Text.assemble(
             (f"[{_timestamp(moment)}] ", f"dim {PALETTE['dim']}"),
-            ("You> ", f"bold {PALETTE['amber-bold']}"),
+            (channel_prefix(channel), f"bold {PALETTE['amber-bold']}"),
             (text, PALETTE["text"]),
         )
         if footnote:

@@ -143,6 +143,13 @@ TYPING_REFRESH = 8.0
 TYPING_MAX_LIFETIME = 300.0
 
 
+#: What the marker opens with.  A constant because the marker is *read* as well
+#: as written: stored text carries it into a transcript, and the window takes it
+#: back off by this string (:func:`strip_marker`) rather than by a second copy of
+#: the spelling that could drift from this one.
+MARKER_PREFIX = "[Wechat:"
+
+
 def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
     """The prefix an incoming message carries, naming who it is from.
 
@@ -160,7 +167,36 @@ def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
     payload: dict[str, str] = {"peer_wechat_id": peer_wechat_id}
     if context_token is not None:
         payload["context_token"] = context_token
-    return f"[Wechat:{json.dumps(payload, ensure_ascii=False)}]"
+    return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}]"
+
+
+def strip_marker(content: str) -> str:
+    """*content* as a person reads it: the marker taken back off.
+
+    The marker is machine-facing — it is how the model learns the peer and the
+    conversation's token, and it is *stored*, because the model reads it back out
+    of the row (`annotate_turn`'s footnote is derived, this is content).  A screen
+    has the channel already, as the bubble's own prefix, so leaving it in prints
+    two ids at somebody who can do nothing with them.  v1's rule, from
+    `unwrap_info_envelope`, minus its legacy branch — this build has no old prose
+    prefix to strip, because nothing here ever wrote one.
+
+    **A leader, and a leader that closes.**  A marker is a prefix by construction
+    (`_hand_over`), so text that merely *mentions* one is left alone — and so is
+    text whose bracket never closes, which is a torn row or a hand-edited file: a
+    display that eats the rest of a message is worse than one that shows a marker
+    it could not read.
+
+    Callers strip only what arrived from another channel.  The words a person
+    typed are theirs, marker-shaped or not, and a turn of this window's own is
+    the one place a marker cannot legitimately be.
+    """
+    if not content.startswith(MARKER_PREFIX):
+        return content
+    end = content.find("]", len(MARKER_PREFIX))
+    if end == -1:
+        return content
+    return content[end + 1 :].lstrip()
 
 
 def render_qr(content: str) -> str:

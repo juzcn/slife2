@@ -120,10 +120,16 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
             # turn — which is the same message `messages_from_turns` appends it
             # to.  Keyed by position rather than by role so the two builders
             # cannot disagree about which message it belongs to.
+            # The channel rides along because the screen needs two things from
+            # it that are not the footnote's business: the bubble this message
+            # wears (`Wechat> ` for a turn somebody sent over WeChat) and the
+            # marker the widget takes back off the text.  One value, so the
+            # bubble and the stripping cannot come from different turns.
             chat.add_user(
                 _text(message.get("content")),
                 moment=asked,
                 footnote=footnote if index == 0 else "",
+                channel=str(turn.get("channel") or ""),
             )
         elif role == "assistant":
             _draw_answer(chat, message, results)

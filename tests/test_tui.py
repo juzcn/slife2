@@ -790,7 +790,11 @@ async def test_space_on_a_message_unfolds_its_reasoning() -> None:
 
 
 def stored(
-    *messages: Message, turn_id: int = 1, asked: str = "", context: int = 0
+    *messages: Message,
+    turn_id: int = 1,
+    asked: str = "",
+    context: int = 0,
+    channel: str = "tui",
 ) -> dict:
     """One stored turn, as the server hands it back.
 
@@ -801,13 +805,16 @@ def stored(
 
     `context` is how large the conversation had become by the end of the turn —
     `TurnRecord.context_tokens`, which `to_wire` always sends and the bar reads.
+
+    `channel` is where the turn came in on: this window's own (`tui`), or the key
+    a plugin runs under for a turn somebody else's message started.
     """
     return {
         "turn_id": turn_id,
         "messages": [message.to_wire() for message in messages],
         "created_at": asked,
         "completed_at": None,
-        "channel": "tui",
+        "channel": channel,
         "what_model": "fake",
         "token_count": context,
         "context_tokens": context,
@@ -985,6 +992,53 @@ async def test_a_restored_message_is_stamped_when_it_was_sent() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         assert "[2020-03-04 09:05] You> hello" in shown(app)
+
+
+async def test_a_restored_message_from_another_channel_wears_it() -> None:
+    """A WeChat turn is not the person's own line, and it does not print its ids.
+
+    The marker is for the model — it is how a reply learns which peer and which
+    thread — and it is *stored*, so a rebuild reads it back out of the row.  On
+    the screen both halves of that belong to the channel: the bubble says
+    `Wechat> ` and the marker comes off, because the two ids in it are of no use
+    to somebody reading over the model's shoulder.  v1's split, kept: the channel
+    picks the prefix, and the widget unwraps the text.
+    """
+    client = answering_with(
+        stored(
+            Message(
+                role="user",
+                content='[Wechat:{"peer_wechat_id": "peer-1"}] 你好',
+            ),
+            asked="2020-03-04T09:05:00+08:00",
+            channel="wechat",
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "[2020-03-04 09:05] Wechat> 你好" in shown(app)
+        assert "peer-1" not in shown(app), "the marker reached the screen"
+
+
+async def test_the_persons_own_words_are_never_unwrapped() -> None:
+    """Typing a marker-shaped message is not a way to lose the front of it.
+
+    Unwrapping is for a turn that arrived over *another* channel.  This window's
+    own turns are the person's words — a question about the marker, a paste, a
+    line of a log — and they are shown as typed, which is the one place the guard
+    can be checked from: through the window, on its own channel.
+    """
+    typed = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+    client = answering_with(stored(Message(role="user", content=typed)))
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        # Restored, on this window's channel: shown verbatim.
+        await restored(pilot, app)
+        assert typed in shown(app)
+        # And typed live, which is the same claim through the other path.
+        await submit(pilot, typed)
+        assert f"You> {typed}" in shown(app)
 
 
 async def test_a_restored_message_says_which_turn_it_opened() -> None:

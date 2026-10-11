@@ -608,7 +608,10 @@ rule: **capitals mark an annotation that is not part of the conversation**,
 which is what `[TURN:{…}]` is, the footnote a turn carries when the model reads
 its context back (added when the list is built, never stored) — while this marker
 is part of the message and goes into the turn's log with it. Nothing checks the
-case; it is there to be read. Answering is the model's job and only the
+case; it is there to be read. A window shows the channel rather than the marker:
+the line wears `Wechat> ` instead of `You> ` and the two ids inside the marker
+come off, because they are what a reply needs and not what a reader does.
+Answering is the model's job and only the
 model's: nothing here auto-dispatches a reply, so a turn that says nothing sends
 nothing — call `wechat_send_message` with the peer and the `context_token` the
 marker carried. While the turn runs the person on the other end sees *typing…*,
