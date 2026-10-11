@@ -203,22 +203,22 @@ Two things follow, and both are the shape rather than an implementation detail:
 **The prompt carries its own addressing, because the turn's record cannot.**
 `channel` says `wechat` and nothing more, and answering needs the peer's id and
 the conversation's `context_token` — so the message is prefixed
-`[WECHAT:{"peer_wechat_id": …}]`, with the JSON keys *named after the arguments
+`[Wechat:{"peer_wechat_id": …}]`, with the JSON keys *named after the arguments
 of `wechat_send_message`*, so that replying is copying two values rather than
-translating between two vocabularies.  v1's marker, keys and all, for the same
-reason its session file is: a habit and a file format both survive a port.  The
-port capitalised the name, which is how a marker is spelled here — the turn
-footnote `[TURN:{…}]` is the other one, and capitals are what make either read as
-a marker rather than as something a person typed.
+translating between two vocabularies.  v1's marker, keys and case, for the same
+reason its session file is: a habit and a file format both survive a port.
 
-**And of the marker and the footnote, this is the one that is stored.**  A
-footnote is derived every time a message list is built and is never written down
-(§5); this marker is content — it goes into the turn's row along with the message
-and comes back out of it verbatim.  So the capitalisation is in the record here:
-a turn saved before it keeps the spelling it was saved with, while a restored
-conversation renders its footnotes in the new one.  Nothing parses either marker,
-so nothing has to be migrated, and the two do not have to agree — the spelling is
-a convention they share, not a coupling.
+**And of the two markers a conversation carries, this is the one that is
+stored.**  A turn footnote is derived every time a message list is built and is
+never written down (§5); this marker is content — it goes into the turn's row
+along with the message and comes back out of it verbatim.  The two are the same
+shape, `[NAME:{…}]`, so **the case is what tells them apart** — and that
+correspondence is a convention and nothing more: no code reads the case, and the
+two markers are never compared to each other anywhere.  What the capitals say is
+where the marker lives: this build's own annotation is `[TURN:{…}]`, which is not
+part of the conversation, and a name that reads as a word — `[Wechat:{…}]` — is a
+marker that is in what the model remembers.  Since nothing parses either, nothing
+has to be migrated, and the spelling is only ever read.
 
 **And it has no config section at all.**  Every other plugin here owns one, and
 this one owns none — not even a switch.  v1's `wechat: {enabled: false}`
@@ -750,7 +750,9 @@ verbatim, in its own order, with no ceiling re-slicing. Each turn contributes a
 copy of its first message carrying a `[TURN:{…}]` footnote naming its id, its
 channel and its span, which is **how a turn id reaches the model at all** and
 therefore how a keep-list is expressible. The footnote is added when a message
-list is built and never stored, so it cannot drift from the row it describes.
+list is built and never stored, so it cannot drift from the row it describes —
+and its name is in capitals, which by the convention of §1.2 is what says the
+harness made it rather than the conversation.
 
 **And there is a second place it is written, because a rebuild is not the only
 way a turn enters the list.** The turn that has just run was appended by the loop

@@ -196,7 +196,11 @@ than fits returns what fits, and the keep-list is how a model says which of the
 turns in hand it is still working from. Every turn it reads carries a `[TURN:{…}]`
 footnote naming its id, its channel and its span, which is where those ids come
 from — and every turn the process ran itself gets one too, written the moment it
-is saved, so the newest turns are as addressable as the restored ones.
+is saved, so the newest turns are as addressable as the restored ones. The
+capitals are the tell, by convention: a name in capitals is the harness's own
+annotation, never part of the record, where a marker that reads as a word —
+`[Wechat:{…}]`, on a turn somebody sent over WeChat — was said by somebody and is
+stored with what they said.
 
 **Nothing a model can call decides this.** The model has `turn_list` and
 `turn_read` — reading its own history is the point of a log — and the two
@@ -598,12 +602,17 @@ Four tools, and the model uses all of them:
 | `wechat_logout` | Forget this agent's login |
 
 A message somebody sends arrives as a **turn of that agent's own conversation**,
-with `channel=wechat` and a `[WECHAT:{"peer_wechat_id": …}]` prefix naming who it
-is from. Answering is the model's job and only the model's: nothing here
-auto-dispatches a reply, so a turn that says nothing sends nothing — call
-`wechat_send_message` with the peer and the `context_token` the marker carried.
-While the turn runs the person on the other end sees *typing…*, and it stops when
-the reply goes out.
+with `channel=wechat` and a `[Wechat:{"peer_wechat_id": …}]` prefix naming who it
+is from. The name is deliberately not in capitals — a convention rather than a
+rule: **capitals mark an annotation that is not part of the conversation**,
+which is what `[TURN:{…}]` is, the footnote a turn carries when the model reads
+its context back (added when the list is built, never stored) — while this marker
+is part of the message and goes into the turn's log with it. Nothing checks the
+case; it is there to be read. Answering is the model's job and only the
+model's: nothing here auto-dispatches a reply, so a turn that says nothing sends
+nothing — call `wechat_send_message` with the peer and the `context_token` the
+marker carried. While the turn runs the person on the other end sees *typing…*,
+and it stops when the reply goes out.
 
 Each agent logs in separately and gets its own account, its own file and its own
 poll loop; the plugin is one shared process (DESIGN.md §1.2). There is no

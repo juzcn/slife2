@@ -86,7 +86,7 @@ INTERRUPTED = "(Tool execution interrupted)"
 #: one has a string to look for.
 #:
 #: **One of this build's two markers**, and the other is
-#: `slife2.wechat.marker`'s `[WECHAT:{…}]` on a turn somebody sent over WeChat.
+#: `slife2.wechat.marker`'s `[Wechat:{…}]` on a turn somebody sent over WeChat.
 #: The name is what the port changed: v1 spelled this envelope `[INFO: …]` and
 #: put two things in it — this footnote, on the user message a turn opened with,
 #: and a trim note saying how many old turns had just been cut, which went on the
@@ -96,15 +96,18 @@ INTERRUPTED = "(Tool execution interrupted)"
 #: with one occupant can say what it holds.  `TURN` is what it holds: the turn
 #: this message opened.
 #:
-#: **A name in capitals, a colon, and the payload hard against it.**  The other
-#: marker is spelled the same way, and a model reading the conversation is the
-#: reader both are written for.  That is a convention and not a coupling: this
-#: one is derived every time a message list is built and never stored, that one
-#: is part of a stored turn's content, and neither is ever parsed back.  Nothing
-#: goes inside the brackets but the payload, because the payload is the part a
-#: model copies out — one more character in it is one more character to copy
-#: wrong.  The space that sets a marker off from the text beside it is outside
-#: the bracket, and it belongs to whoever joins the two.
+#: **A name in capitals, a colon, and the payload hard against it.**  Both
+#: markers have this shape, so the case is what tells them apart — by convention,
+#: and convention is the whole of it: no code reads the case, and the two are
+#: never compared.  What the capitals are meant to say is where the marker lives.
+#: This one is the harness's own annotation, derived every time a message list is
+#: built and never stored, while `[Wechat:{…}]`'s name reads as a word because
+#: that marker is content — it is in the row, and therefore in what the model
+#: remembers.  A model reading the conversation is the reader both are written
+#: for.  Nothing goes inside the brackets but the payload, because the payload is
+#: the part a model copies out — one more character in it is one more character
+#: to copy wrong.  The space that sets a marker off from the text beside it is
+#: outside the bracket, and it belongs to whoever joins the two.
 TURN_PREFIX = "[TURN:"
 TURN_SUFFIX = "]"
 

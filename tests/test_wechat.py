@@ -344,7 +344,7 @@ async def test_a_message_becomes_a_turn_with_the_marker(
         await made.close()
 
     assert made.delivery.prompts == [
-        ("jack", '[WECHAT:{"peer_wechat_id": "peer-1", "context_token": "ctx-1"}] 你好')
+        ("jack", '[Wechat:{"peer_wechat_id": "peer-1", "context_token": "ctx-1"}] 你好')
     ]
 
 
@@ -365,7 +365,7 @@ async def test_a_redelivery_is_dropped_and_a_real_repeat_is_not(
     made.bridge.messages = [message("ok")]
     # The envelope alone: the space that separates it from the message is the
     # joiner's, so it is written here the way `_hand_over` writes it.
-    marker = '[WECHAT:{"peer_wechat_id": "peer-1", "context_token": "ctx-1"}]'
+    marker = '[Wechat:{"peer_wechat_id": "peer-1", "context_token": "ctx-1"}]'
     try:
         await made.plugin.start()
         await until(lambda: made.delivery.prompts)
