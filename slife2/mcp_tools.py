@@ -159,11 +159,8 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def mcp_list() -> str:
         """List the MCP servers configured under `tools:`, with their state.
 
-        The answer to "what do I have and which of them are working": each entry
-        as the file writes it (command or URL, description) and whether its link
-        is answering. A server whose tools are missing is either switched off,
-        still starting, or failing here — `mcp_list_tools` shows what one offers
-        once it does.
+        Each entry as the file writes it, and whether its link is answering.
+        `mcp_list_tools` shows what one offers.
         """
         return await list_entries(family, words=WORDS, describe=_describe)
 
@@ -180,34 +177,28 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         enabled: bool = True,
         autoload: bool = False,
     ) -> str:
-        """Add or update an MCP server under `tools:` (upsert; idempotent).
+        """Add or update an MCP server under `tools:` (upsert).
 
-        One entry is one transport, so give `command` for a process slife2 starts
-        or `url` for an endpoint somebody else runs — never both. **This is the
-        whole entry**: a field left out is not kept from an older version, so
-        restate everything the entry should have — which is also how a server
-        is switched from `url` to `command`.
-
-        Call this once you know the server works: it is connected here and now,
-        and the answer says whether it did.
+        One entry is one transport: `command` for a process slife2 starts, `url`
+        for an endpoint somebody else runs. This is the whole entry — a field
+        left out is dropped, so restate everything, which is also how a server
+        switches between the two. It is connected here and now, and the answer
+        says whether it answered.
 
         Args:
             name: The server's name. Every tool it offers reaches you as
-                `{name}__{tool}`, so it is also how you will call them.
+                `{name}__{tool}`, so it is also how you call them.
             command: stdio — the program to start (npx, uvx, python).
             args: stdio — its arguments.
-            env: stdio — environment overrides. `${VAR}` names a value that is
-                resolved when it is needed; that is how a key stays out of the
-                config file.
+            env: stdio — environment overrides; `${VAR}` resolves when needed.
             url: http — the endpoint (SSE or Streamable HTTP).
             headers: http — request headers, `${VAR}` for anything secret.
             cwd: stdio — the process's working directory; the data directory
-                when left out, which is what `.` in an argument means.
-            description: What it is for, in its own language — a note for a
-                person reading the config, not the text you are given per tool.
+                when left out.
+            description: What it is for, for whoever reads the config.
             enabled: Connect it now. False writes the entry switched off.
-            autoload: Every tool this server offers starts in your list and is
-                never evicted. Worth setting only for one you want every turn.
+            autoload: Every tool it offers starts in your list and is never
+                evicted.
         """
         settings, why = _prepare(
             load(),
@@ -232,9 +223,8 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def mcp_remove(name: str) -> str:
         """Stop an MCP server and delete its entry from `tools:`.
 
-        Its tools stop being offered — the catalogue drops them at the next
-        search — and everything that was configured for it here is gone. Nothing
-        is uninstalled: a package the command names is still on the machine.
+        Its tools leave the catalogue at the next search. A package the command
+        names stays on the machine.
 
         Args:
             name: The server to remove, from `mcp_list`.
@@ -245,10 +235,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def mcp_set_enabled(name: str, enabled: bool) -> str:
         """Switch an MCP server on or off, keeping its entry in `tools:`.
 
-        Off is how a slow, paid or broken server stays configured without being
-        connected: its tools stop being offered and it is not started at the next
-        start either, but nothing about the entry is lost. Turning it back on
-        connects it again.
+        Off keeps the entry and stops the server being connected or started.
 
         Args:
             name: The server, from `mcp_list`.
@@ -260,9 +247,9 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def mcp_list_tools(name: str, limit: int = 0) -> str:
         """List the tools one MCP server offers.
 
-        These are the names behind `{name}__…` in your tool list. It is capped,
-        because a published server can offer more tools than are worth reading —
-        for anything specific, `tool_search` finds it by what it does.
+        These are the names behind `{name}__…` in your tool list. The answer is
+        capped, because a published server can offer more than are worth
+        reading; `tool_search` finds anything specific by what it does.
 
         Args:
             name: The server, from `mcp_list`.

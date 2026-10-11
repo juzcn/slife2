@@ -201,9 +201,8 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def rest_api_list() -> str:
         """List the REST APIs configured under `rest-api:`, with their state.
 
-        Each entry as the file writes it — the OpenAPI spec, the base URL, which
-        credential it uses — and whether it is serving. A REST API is expanded
-        into one MCP server per entry, so its state is a server's state.
+        Each entry as the file writes it — the spec, the base URL, the
+        credential — and whether it is serving.
         """
         return await list_entries(family, words=WORDS, describe=_describe)
 
@@ -217,30 +216,24 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         enabled: bool = True,
         autoload: bool = False,
     ) -> str:
-        """Add or update a REST API under `rest-api:` (upsert; idempotent).
+        """Add or update a REST API under `rest-api:` (upsert).
 
         Every endpoint in the OpenAPI document becomes a tool named
-        `{name}__{operation}`, so a published API is worth checking before you
-        add it: one spec can be hundreds of tools. Set `enabled: false` — or
-        turn it off afterwards — to keep it written down without serving it.
-
-        **This is the whole entry**: an `api_key` or `description` left out is
-        not kept from an older version, so restate everything the API should
-        have.
+        `{name}__{operation}`, so one spec can be hundreds of tools. This is the
+        whole entry: a field left out is dropped, so restate everything.
 
         Args:
             name: The API's name; its tools reach you as `{name}__{operation}`.
-            spec: The OpenAPI document's URL (JSON or YAML). It is fetched, so
-                it has to be http(s) and reachable.
-            base_url: Where the API actually is, which overrides whatever server
-                the document names — e.g. https://api.github.com.
-            api_key: The *name* of the credential, not the secret —
-                `GITHUB_TOKEN`, and `${GITHUB_TOKEN}` is stored. Leave it out for
-                an API that needs no key.
-            description: What the API is for, in its own language.
+            spec: The OpenAPI document's URL (JSON or YAML). It is fetched here,
+                so it has to be http(s) and reachable.
+            base_url: Where the API actually is, overriding whatever server the
+                document names — e.g. https://api.github.com.
+            api_key: The credential's *name*, not the secret: `GITHUB_TOKEN`
+                stores `${GITHUB_TOKEN}`. Omit it for an API that needs no key.
+            description: What the API is for.
             enabled: Serve it now. False writes the entry switched off.
             autoload: Every operation starts in your tool list and is never
-                evicted. Rarely what you want — see how many there are first.
+                evicted. Check how many there are first.
         """
         settings, why = _prepare(
             load(),
@@ -262,8 +255,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def rest_api_remove(name: str) -> str:
         """Stop a REST API and delete its entry from `rest-api:`.
 
-        Its operations stop being offered — the catalogue drops them at the next
-        search. Nothing outside the config is touched.
+        Its operations leave the catalogue at the next search.
 
         Args:
             name: The API to remove, from `rest_api_list`.
@@ -274,10 +266,8 @@ def register_management(mcp: FastMCP, family: Family) -> None:
     async def rest_api_set_enabled(name: str, enabled: bool) -> str:
         """Switch a REST API on or off, keeping its entry in `rest-api:`.
 
-        Worth knowing for this family in particular: a spec is a large document
-        and a proxy generates a tool per endpoint, so one served API can outweigh
-        every other tool in the catalogue. Off is how it stays written down
-        without being served.
+        A spec generates a tool per endpoint, so one served API can outweigh
+        every other tool in the catalogue; off keeps it written down.
 
         Args:
             name: The API, from `rest_api_list`.
@@ -290,8 +280,8 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         """List the operations one REST API exposes.
 
         These are the names behind `{name}__…` in your tool list, one per
-        endpoint in the spec. It is capped: an API can expose hundreds of
-        operations, and `tool_search` finds the one you want by what it does.
+        endpoint in the spec. The answer is capped; `tool_search` finds the one
+        you want by what it does.
 
         Args:
             name: The API, from `rest_api_list`.

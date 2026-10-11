@@ -199,21 +199,19 @@ def build_server(
     ) -> str:
         """Draw an image from a description, and say where it was written.
 
-        The picture is a file on this machine — the answer is its path, and
-        nothing is registered anywhere: to keep it, copy it, or save it into the
-        cabinet yourself.
+        The picture is a file on this machine: copy it, or save it into the
+        cabinet, to keep it.
 
         Args:
-            prompt: What the image should be.  Say what is in it and how it is
-                made; this is the whole instruction the model gets.
-            model: Which model, as `provider/model` or a bare name. Empty uses
-                the configured default for images.
+            prompt: What the image should be.
+            model: `provider/model`, or a bare name. Empty uses the configured
+                default for images.
             size: `WIDTH*HEIGHT`, e.g. `1024*1024`. Empty uses the model's own
-                default, which the config may already pin.
-            image: A picture to work from — a local path, an `http(s)` URL, or a
-                `data:` URI. Only models that take a reference image.
-            folder: A folder inside the media directory to write into, for
-                keeping a project's work together. Empty writes at the top.
+                default.
+            image: A picture to work from — a local path, an `http(s)` URL or a
+                `data:` URI. For models that take a reference image.
+            folder: A folder inside the media directory to write into. Empty
+                writes at the top.
         """
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
@@ -246,15 +244,14 @@ def build_server(
     ) -> str:
         """Render a video from a description, and say where it was written.
 
-        **This can take minutes**, and a call that waits longer than `timeout`
-        is refused with the job's id rather than its result: the render carries
-        on at the provider, and asking for it again would pay for it twice.
+        A render takes minutes; one that outruns `timeout` answers with the
+        job's id, and the render carries on at the provider.
 
         Args:
             prompt: What happens in the video.
-            model: Which model, as `provider/model` or a bare name. Empty uses
-                the configured default for video.
-            image: A first frame to animate, as a local path. Only
+            model: `provider/model`, or a bare name. Empty uses the configured
+                default for video.
+            image: A first frame to animate, as a local path. For
                 image-to-video models.
             resolution: `720P`, `1080P`. Empty uses the model's own default.
             ratio: `16:9`, `9:16`, `1:1`. Empty uses the model's own default.
@@ -294,10 +291,10 @@ def build_server(
 
         Args:
             text: What to say.
-            model: Which model, as `provider/model` or a bare name. Empty uses
-                the configured default for speech.
+            model: `provider/model`, or a bare name. Empty uses the configured
+                default for speech.
             voice: Which voice, by the provider's own name. Empty uses the
-                model's default, which the config may already pin.
+                model's default.
             folder: A folder inside the media directory to write into.
         """
         provider, entry = media.resolve("tts", model)
@@ -318,13 +315,10 @@ def build_server(
     async def transcribe_audio(ctx: Context, path: str, model: str = "") -> str:
         """Write down what an audio file says, and answer with the text.
 
-        The one tool here that produces no file: what it makes is words, and
-        they are the answer.
-
         Args:
             path: The audio file, as a local path.
-            model: Which model, as `provider/model` or a bare name. Empty uses
-                the configured default for transcription.
+            model: `provider/model`, or a bare name. Empty uses the configured
+                default for transcription.
         """
         if not path.strip():
             raise ToolError("[refused] no audio file was named.")

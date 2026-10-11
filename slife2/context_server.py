@@ -377,32 +377,25 @@ def build_server(
     ) -> dict[str, Any]:
         """Browse what was said before, newest first, one line per turn.
 
-        Each line carries `turn_id`, when the turn was, what was asked and what
-        was answered, both cut short — enough to tell whether this is the turn
-        you want, not enough to be the turn.  Read the whole of one with
-        `turn_read`.
-
-        Your own history only: no argument names whose memory to read.
-
-        Both bounds are optional and neither has a default, so leaving both out
-        browses the newest turns.
+        Each line carries `turn_id`, when the turn was, and what was asked and
+        answered, both cut short. Read one whole with `turn_read`. Your own
+        history: no argument names whose memory to read.
 
         Args:
             since: Lower bound on when the turn was written — an ISO date or
                 datetime, or one of: today, yesterday, tomorrow, now,
                 last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
                 Omit for no lower bound.
-            until: Upper bound on the same grammar.  A date means the whole day.
+            until: Upper bound on the same grammar. A date means the whole day.
                 Omit for no upper bound.
             limit: How many turns this page may hold.
-            offset: Skip this many turns — that is how you page back.
+            offset: How many turns to skip — that is how you page back.
 
         Returns:
             `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message` and `token_count` per turn — `total`, how many
-            turns the window holds, so `offset + len(entries) < total` says
-            whether there is more — and the `limit` and `offset` that produced
-            this page.
+            `assistant_message` and `token_count` per turn — and `total`, how
+            many turns the window holds, so `offset + len(entries) < total`
+            says whether more remain.
         """
         # `store_for` and not `store_of`: reading history needs the turn table
         # and nothing else, so it must not need an embedding model.  A browse
@@ -426,10 +419,9 @@ def build_server(
     async def turn_read(ctx: Context, turn_id: int) -> dict[str, Any]:
         """One turn in full, by the id `turn_list` gave you.
 
-        Everything that happened in it, in the order it happened: what the user
-        said, every assistant message, the tool calls and what they answered.
-
-        Your own history, like `turn_list`: an id only resolves inside it.
+        Everything it holds, in the order it happened: what was said, every
+        assistant message, the tool calls and their answers. Your own history,
+        like `turn_list` — an id resolves inside it and nowhere else.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.

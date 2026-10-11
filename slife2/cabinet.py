@@ -326,15 +326,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Write a private note about a subject, replacing what it held.
 
-        A note is a document rather than a log: this *is* the note about that
-        subject, so it is what the cabinet keeps and what the mirror holds — an
-        older body is not appended to or kept beside it. Use `diary_write` for
-        something that accumulates by date. The note also lands as markdown in
-        the agent's cabinet directory, so a person can read it without you.
+        A note is a document: this is the whole of what the cabinet keeps under
+        that subject, and an older body goes. It lands as markdown in the
+        agent's cabinet directory too.
 
         Args:
-            subject: What the note is about; this is its name, and reusing one
-                replaces the note rather than making a second.
+            subject: What the note is about — its name, and reusing one replaces
+                the note rather than making a second.
             content: The note itself.
             tags: Comma-separated words to file it under.
         """
@@ -423,10 +421,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Write today's diary entry, or add to the entry for a given day.
 
-        **A later write of the same day appends** rather than replacing it —
-        two entries under one date are two facts about that day, and nothing in
-        the later text says which part of the earlier one it replaces. So this
-        is safe to call repeatedly, and the day's markdown grows downwards.
+        A later write of the same day appends, so this is safe to call again:
+        two entries under one date are two facts about that day.
 
         Args:
             content: The entry.
@@ -508,21 +504,17 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Copy files from this machine into the cabinet.
 
-        **This copies and never moves**: what you point at stays where it is, and
-        the cabinet keeps its own copy under `<category>/`. The bytes are
-        never indexed — what a search matches is the file's name, where it came
-        from and any `summary` you write, so a file saved without one is still
-        findable by its path and by meaning, and `cabinet_summarize` is how it
-        becomes findable by what it is *about* afterwards.
+        It copies and never moves, so what you point at stays where it is. The
+        bytes are not indexed: a search matches the file's name, where it came
+        from and any `summary` you write.
 
         Args:
-            paths: Local paths to copy. A directory is not copied; give the
-                files in it. A URL is not fetched by this tool.
+            paths: Local paths to copy. Name the files in a directory rather
+                than the directory itself.
             title: A name for it. Empty uses the filename.
             tags: Comma-separated words to file it under.
             summary: What the file is, in your words — the text its semantic
-                search is built from. Write one; it is the difference between a
-                file found by its name and one found by what it is.
+                search is built from.
             category: The directory inside the cabinet — `images`, `documents`
                 and so on. Empty picks one from the extension.
         """
@@ -589,8 +581,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     async def file_remove(ctx: Context, path: str) -> str:
         """Delete a saved file — the cabinet's copy, its row and its vectors.
 
-        The file it was copied *from* is not touched: it was never this
-        cabinet's, and the row remembers where it was.
+        The file it was copied from stays where it is.
 
         Args:
             path: The file's cabinet-relative path, from `file_list`.
@@ -609,12 +600,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     async def file_read(ctx: Context, path: str) -> str:
         """Read a saved file's text.
 
-        A file that has no text is **refused rather than decoded**: a PDF, an
-        image or an archive answers with what it is and how big, and with the
-        path, which is what the tools that take bytes take. Text in another
-        encoding (a `.txt` from cmd is GBK, one from PowerShell is UTF-16LE) is
-        decoded and the encoding named on the first line, because the one
-        outcome worth refusing is a *silent* wrong decode.
+        A PDF, an image or an archive answers with what it is, how big, and the
+        path the tools that take bytes take. Text in another encoding reaches
+        you decoded, with the encoding named on the first line.
 
         Args:
             path: The file's cabinet-relative path, from `file_list`.
@@ -698,10 +686,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Save a report under a title, or add to the one already there.
 
-        **A report is a log**, like a diary: saving under a title that exists
-        appends a dated section rather than replacing what the earlier run said.
-        The period the report covers is recorded separately from when it was
-        written, because a report about last week written this morning is both.
+        A report is a log like a diary: a title that exists gets a new dated
+        section, and the earlier one stays.
 
         Args:
             title: What it is a report of. This is its key.
@@ -783,12 +769,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Search the cabinet — every note, day, file and report at once.
 
-        **Two ways in and they are not alternatives.** `keywords` are words you
-        need to be there, all of them, matched exactly (a name, a path, a
-        symbol); `sentences` are questions, matched by meaning, and several are
-        several questions — another one cannot cost you a result an earlier one
-        found. Give both for the strongest answer, either alone for the other
-        leg, and neither to browse what is there, newest first.
+        The two legs add up rather than competing: give both for the strongest
+        answer, either alone for one leg, and neither to browse what is there,
+        newest first.
 
         Args:
             keywords: Words that must appear. A path like `files/docs/spec.pdf`
@@ -796,7 +779,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             sentences: What you are looking for, asked normally. One per
                 question you have.
             kind: `note`, `diary`, `file` or `report` to look in one of them.
-                Empty searches all four together, which is the usual thing.
+                Empty searches all four.
             since: Only documents from this time on.
             until: Only documents up to this time.
             limit: How many results.
@@ -828,11 +811,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> str:
         """Describe a document already in the cabinet so it can be found.
 
-        Tags work for any kind; a **summary is what a file's meaning is built
-        from**, so writing one for a file re-embeds it — a file has no text of
-        its own, and until somebody describes it a search can only reach it by
-        its name and paths. A summary is read by the keyword leg on either side,
-        so it is how a row becomes findable by words it never contained.
+        Tags work for any kind; a summary is what a file's meaning is built
+        from, so writing one for a file re-embeds it — a file has no text of its
+        own, and a search reaches it by its name and paths until somebody
+        describes it.
 
         Args:
             kind: `note`, `diary`, `file` or `report`.

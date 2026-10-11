@@ -1197,21 +1197,14 @@ def build_server(
 
     @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
     async def attach_image(ctx: Context, sources: list[str]) -> str:
-        """Attach images so that you can see them, and say what was attached.
+        """Add the image parts a vision model reads to the request.
 
-        **Call this whenever a message names a picture** — a path, an `http(s)`
-        URL, or a `data:` URI. "看看 D:\\shots\\a.png 上面有什么" is a file you have
-        not been shown, and this is how you are shown it; until you call this you
-        are guessing at what it holds. Several sources go in one call, and one
-        that cannot be read is named in the answer rather than failing the rest.
-
-        The images stay for this conversation and are never written down: what a
-        later turn carries is the text and this answer, which names every file —
-        so a turn that needs the picture again attaches it again from here.
+        Call this when a message names a picture — a path on this machine, a
+        URL, a `data:` URI.
 
         Args:
-            sources: What to attach — absolute paths, `http(s)` URLs, or `data:`
-                URIs, as many as you need in one call.
+            sources: Absolute paths on this machine, `http(s)` URLs that serve
+                image bytes, or `data:` URIs — as many as you need in one call.
         """
         client_id = request_client(ctx)
         loop = loops.get(client_id) if client_id else None
@@ -1262,11 +1255,10 @@ def build_server(
     async def check_new_input(ctx: Context) -> str:
         """The message that arrived while the turn was running, verbatim.
 
-        The harness hands these over at the turn's next step boundary, so what
-        you read under it is somebody's own words, exactly as they wrote them.
-        Calling it yourself is not how this arrives and gets you nothing extra —
-        it hands over the first message waiting for this conversation, or says
-        there is none — and it takes what it hands over.
+        The harness calls this at a turn's next step boundary and writes the
+        call and its result into the conversation, so a message that arrives
+        mid-turn reaches the turn it arrived in. It hands over the first message
+        waiting for this conversation.
         """
         client_id = request_client(ctx)
         if not client_id:
@@ -1354,13 +1346,10 @@ def build_server(
     async def model_list() -> str:
         """List the models this config defines, grouped by provider.
 
-        Each provider shows its wire protocol and endpoint; each model shows the
-        reference you name it by (`provider/model`), its display name, context
-        window and output limit, and whether it reasons or reads images. The one
-        `default:` names is marked.
-
-        This reads the config file, so it is what the **next** conversation
-        would use — one already running keeps the model it started on.
+        Each model shows the reference you name it by (`provider/model`), its
+        context window and output limit, and whether it reasons or reads images;
+        the one `default:` names is marked. This reads the config file, so it is
+        what the next conversation would use.
         """
         try:
             providers = _providers()
@@ -1422,18 +1411,29 @@ def build_server(
         top_p: float | None = None,
         compat: dict[str, Any] | None = None,
     ) -> str:
-        """Add or update one model on a provider (upsert; creates the provider).
+        """Add or update one model on a provider, creating the provider.
 
-        The provider is created when this is its first model — give `base_url`
-        and `api_key` then; `api` selects the wire protocol and defaults to
-        openai-completions. `api_key` is a `${VAR}` **reference**, so the key
-        itself never enters the file. **This is the model's whole entry**: a
-        field left out is not kept from an older version, so restate everything
-        it should have.
+        This is the model's whole entry: a field left out is dropped, so restate
+        everything it should have. The next conversation can name it.
 
-        The edit is live: the next conversation can name the new model, and the
-        backend serving its protocol picks the change up (and is started, if
-        nothing was serving that protocol).
+        Args:
+            provider: The provider's name in the config; created if it is new.
+            model: The API model id, which is also what `provider/model` names.
+            name: The display name.
+            api: The wire protocol — `openai-completions`,
+                `anthropic-messages` or `openai-responses`. Empty uses the
+                provider's own, or openai-completions for a new one.
+            base_url: The endpoint. A new provider needs it.
+            api_key: A `${VAR}` reference, so the key stays out of the file. A
+                new provider needs it.
+            reasoning: The model thinks natively, and its reasoning is kept on
+                the turn.
+            input: What it reads — `["text"]`, or `["text", "image"]`.
+            context_window: Its context window, in tokens.
+            max_tokens: Its output limit, in tokens.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling.
+            compat: Wire quirks the endpoint needs, e.g. `{"thinking": "omit"}`.
         """
         provider, model, name = provider.strip(), model.strip(), name.strip()
         if not provider or not model or not name:
@@ -1520,11 +1520,13 @@ def build_server(
     async def model_remove(ref: str) -> str:
         """Remove one model, named `provider/model`.
 
-        The provider goes too when that was its last model. **Refused if it is
-        the default** — `model_switch` to another first — **or if a conversation
-        is running on it**, because a conversation's model is fixed when it
-        starts and removing its model would break it at the next call. Nothing
-        is uninstalled: the model is still at the provider.
+        The provider goes too when that was its last model. Refused for the
+        default model — `model_switch` first — and for one a running
+        conversation is on, whose model is fixed when it starts. The model stays
+        at the provider.
+
+        Args:
+            ref: The model, as `provider/model`.
         """
         ref = ref.strip()
         if "/" not in ref:
@@ -1603,9 +1605,12 @@ def build_server(
     async def model_switch(ref: str) -> str:
         """Make `provider/model` the default model, for the next conversation.
 
-        Writes the top-level `default:` in the config file. **A conversation
-        already running keeps the model it started on** — `reset` it to start it
-        over on the new default. The model must be one `model_list` shows.
+        Writes the top-level `default:` in the config file. A conversation
+        already running keeps the model it started on — `reset` starts it over
+        on this one. The model must be one `model_list` shows.
+
+        Args:
+            ref: The model, as `provider/model`.
         """
         ref = ref.strip()
         if "/" not in ref:

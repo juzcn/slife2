@@ -181,22 +181,17 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
     async def skill_use(name: str) -> str:
-        """Read a skill: a playbook kept on this machine, written to be followed
-        rather than called.
+        """Read a skill: a playbook to follow rather than a tool to call.
 
-        A skill carries the procedure for one kind of job and the details that
-        are easy to get wrong — the commands, the paths, the order.  Read it
-        before starting that job.
+        Read the one for a job before starting it.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
 
         Returns:
-            The playbook, preceded by one line saying what the paths in it are
-            relative to — a skill's own paths are relative to its directory —
-            and, when the skill declares requirements, a line saying whether
-            they are met and how to supply what is missing.  For a name that is
-            not installed, the answer lists the ones that are.
+            The playbook, preceded by a line saying what its paths are relative
+            to and whether what it requires is at hand. For a name that is not
+            installed, the answer lists the ones that are.
         """
         # Found here only to read the switch off it: the skill may be filed under
         # either its own name or its directory's, and only the folder knows
@@ -259,11 +254,9 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def skill_list() -> str:
         """List the playbooks installed on this machine, with their state.
 
-        A skill is a procedure you read before doing a job, and `skill_use` is
-        what reads one. This is how you find the name to read: each line says
-        what the playbook is for, and whether it needs something you have not
-        got — a key, a program — before you follow instructions that would fail
-        halfway through.
+        This is where the name `skill_use` takes comes from: each line says what
+        the playbook is for and whether what it requires is at hand — a key, a
+        program.
         """
         found = skills.scan()
         if not found:
@@ -292,15 +285,11 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def skill_set(name: str, files: list[dict[str, str]]) -> str:
         """Install or replace a skill: write a playbook onto this machine.
 
-        A skill is a directory with a `SKILL.md` in it, so that file has to be
-        one of the paths. Write the playbook for one kind of job: the procedure,
-        the commands, the order, the details that are easy to get wrong — it is
-        read by a model at the moment it starts that job, not by a person
-        browsing. Anything else you write lands beside it, and the paths inside
-        the playbook are relative to the directory.
-
-        It replaces an installed skill of the same name in one step, so a
-        half-written playbook is never readable. `skill_remove` removes one.
+        `SKILL.md` is the playbook and has to be one of the paths; anything else
+        you write lands beside it. Write the procedure for one kind of job — the
+        commands, the order, the steps that are easy to get wrong — with paths
+        relative to the skill's directory. A skill of the same name is replaced
+        in one step.
 
         Args:
             name: The directory it lives in — what `skill_use` takes.
@@ -326,9 +315,8 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def skill_remove(name: str) -> str:
         """Uninstall a skill: delete its directory and everything in it.
 
-        The playbook and any scripts beside it go. The `skills:` entry naming
-        what it was given is left alone — it is harmless without a folder, and
-        a name waiting for its files is what re-installing it uses.
+        The `skills:` entry naming what it was given stays, and `skill_set`
+        installs it again.
 
         Args:
             name: The skill to remove, from `skill_list`.
@@ -350,11 +338,8 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def skill_set_enabled(name: str, enabled: bool) -> str:
         """Switch a skill on or off, keeping it installed.
 
-        Off is how a playbook stays on the machine and out of the way: it stops
-        being findable and `skill_use` refuses it, and the files are untouched.
-        The switch is written in the config, which is the only place a decision
-        can live — what is installed is a directory, and a directory cannot say
-        whether somebody wants it.
+        Off keeps the files, stops it being findable, and `skill_use` refuses
+        it. The switch lives in the config.
 
         Args:
             name: The skill, from `skill_list`.

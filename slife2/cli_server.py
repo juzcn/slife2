@@ -237,10 +237,8 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def cli_list() -> str:
         """List the commands recorded under `cli:`, with their switch.
 
-        These are programs already installed on this machine, written down so
-        you can be told they exist. They are catalogue rows rather than tools:
-        `tool_search` finds a command by what it does, and nothing runs one yet
-        (DESIGN.md §9).
+        Each is a command recorded as installed on this machine, and a row in
+        the tool catalogue: `tool_search` finds one by what it does.
         """
         written = configfile.read_section(family.section)
         if not written:
@@ -258,20 +256,16 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     ) -> str:
         """Record a command that is already installed on this machine.
 
-        **This does not install anything and does not run anything.** It writes
-        the entry down so you can find it with `tool_search` and so a person can
-        see what this machine has. Record a command only when you know it is
-        here — the answer says so if it is not on `PATH`. **This is the whole
-        entry**: an `install` or `source` left out is not kept from an older
-        version, so restate everything the entry should have.
+        It writes the entry down for `tool_search`, installing and running
+        nothing; the answer says whether the command is on `PATH`. This is the
+        whole entry: a field left out is dropped, so restate everything.
 
         Args:
             name: The name it is recorded under, from `cli_list`.
-            command: The invocation, resolved on `PATH`. One string, and it may
+            command: The invocation, resolved on `PATH` — one string, which may
                 be more than one word (`python -m mytool`).
-            description: What it does and how it is called — this is the text you
-                will be given when a search finds it, so say what it is for.
-            install: How to get it, for a person who does not have it.
+            description: What it does, in the words a search should find it by.
+            install: How to get it, for somebody who does not have it.
             source: Where the entry came from — `url`, `type`, `version`.
             enabled: False records it and keeps it out of the catalogue.
         """
@@ -299,8 +293,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def cli_remove(name: str) -> str:
         """Forget a command recorded under `cli:`.
 
-        Nothing is uninstalled — the program stays on the machine, and what goes
-        is the entry that told you about it.
+        The program itself stays on the machine.
 
         Args:
             name: The entry to forget, from `cli_list`.
@@ -318,13 +311,10 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     async def cli_set_enabled(name: str, enabled: bool) -> str:
         """Switch a recorded command on or off, keeping the entry.
 
-        Off keeps the entry written down and out of the catalogue — the same
-        switch, with the same meaning, as on a server. Nothing is uninstalled
-        either way.
-
         Args:
             name: The entry, from `cli_list`.
-            enabled: True records it as usable; False keeps it out of the catalogue.
+            enabled: True records it as usable; False keeps it out of the
+                catalogue, the same switch as on a server.
         """
         if name not in configfile.read_section(family.section):
             return (

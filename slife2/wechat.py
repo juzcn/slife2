@@ -1208,17 +1208,13 @@ def build_server(
 
     @mcp.tool(name="wechat_login", meta=FOR_THE_MODEL)
     async def wechat_login(ctx: Context) -> str:
-        """Show a QR code that logs this agent into WeChat.
+        """Get a QR code that logs this agent into WeChat.
 
-        Scan it with the WeChat app on the phone that should be answering here —
+        Put the code in your reply for somebody to scan with the WeChat app:
         the account that scans is the account this conversation speaks as, and
-        other people then reach this conversation by messaging it. Call this
-        only when `wechat_check_status` says there is no login; a scan cannot
-        happen on its own, so put the code in your reply for somebody to scan.
-
-        The code expires after about ten minutes. `wechat_check_status` says
-        whether it has been scanned yet, and the login lasts about a day before
-        it needs scanning again.
+        other people reach this conversation by messaging it. The code expires
+        in about ten minutes, `wechat_check_status` reports the scan, and the
+        login lasts about a day.
         """
         agent = plugin.who(ctx)
         if not agent:
@@ -1229,10 +1225,8 @@ def build_server(
     async def wechat_check_status(ctx: Context) -> str:
         """How the WeChat link is: connected, waiting for a scan, or down.
 
-        Also the one place that says **who to reply to**: the last person to
-        write, with the `context_token` their conversation needs. Call it when
-        you are unsure whether a reply will land, after `wechat_login`, or when
-        messages seem to have stopped arriving.
+        Also the one place that says who to reply to: the last person to write,
+        with the `context_token` their conversation needs.
         """
         agent = plugin.who(ctx)
         if not agent:
@@ -1248,20 +1242,17 @@ def build_server(
     ) -> str:
         """Send a WeChat message to somebody who has written to you.
 
-        Use this to answer. An incoming message arrives with its peer and
-        context token in a `[Wechat:{...}]` prefix, so pass those back here and
-        the reply lands in the conversation it belongs to; `wechat_check_status`
-        gives the same two values if you have lost them. Sending is the only way
-        anything reaches WeChat — nothing here forwards your reply for you, so a
-        turn that says nothing sends nothing.
+        An incoming message carries its peer and context token in a
+        `[Wechat:{...}]` prefix: pass those back here and the reply lands in the
+        conversation it belongs to. `wechat_check_status` reports the same two
+        values. A turn that sends nothing reaches nobody.
 
         Args:
-            peer_wechat_id: The WeChat id to send to, from the incoming message's
-                marker or from `wechat_check_status`.
+            peer_wechat_id: The id to send to, from the message's marker or
+                `wechat_check_status`.
             text: The message body.
             context_token: The conversation's token, from the same place. Empty
-                starts a new thread, which is right for a first message and wrong
-                for an answer.
+                starts a new thread, which a first message wants.
         """
         agent = plugin.who(ctx)
         if not agent:
@@ -1274,10 +1265,9 @@ def build_server(
     async def wechat_logout(ctx: Context) -> str:
         """Disconnect WeChat and forget the saved login.
 
-        Nothing on WeChat's side changes: the account stays logged in on the
-        phone, and what goes is this conversation's token and its place in the
-        message stream. Messages stop arriving until somebody scans a new code —
-        use this to switch accounts. Sending after this fails until `wechat_login`.
+        The account stays logged in on the phone; what goes is this
+        conversation's token and its place in the message stream. Messages
+        arrive again after a new scan, which is how accounts are switched.
         """
         agent = plugin.who(ctx)
         if not agent:

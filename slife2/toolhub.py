@@ -1217,10 +1217,8 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
             # guess costs nothing, so the sentence had become false and would
             # only talk a model out of the words it was sure of.
             "description": (
-                "Words a tool's own text has to contain, every one of them — "
-                "'screenshot', 'pdf'. A word you are confident is in that text "
-                "is the sharpest thing you can give this search. Empty if you "
-                "have none."
+                "Words a tool's own text must contain, every one of them — "
+                "'screenshot', 'pdf'. Empty when you have none."
             ),
         },
         "sentences": {
@@ -1228,9 +1226,8 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "What you want to do, in your own words, one phrase per idea — "
-                "'take a screenshot of a web page'. Matched by meaning, not by "
-                "wording. A second entry is a second chance, not a longer "
-                "query. Empty if you have none."
+                "'take a screenshot of a web page'. Matched by meaning. Empty "
+                "when you have none."
             ),
         },
     },
@@ -1249,10 +1246,8 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
 #: needs from here is what this search is and what its two inputs mean.
 TOOL_SEARCH_DESCRIPTION = (
     "Find a tool by what it does, across the whole catalogue — including tools "
-    "whose server is off or is not answering, not only the tools you have "
-    "loaded. `keywords` are words a tool's own text must contain, all of them; "
-    "`sentences` is what you want to do, matched by meaning. Give both, either "
-    "may be empty."
+    "whose server is off or is not answering, and not only the ones you have "
+    "loaded."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
@@ -1263,9 +1258,8 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "The tool names, as `tool_search` reports them: bare for "
-                "slife2's own tools ('now'), '{server}__{tool}' for a tool "
-                "server's ('arxiv__search'). One or several — a single name as "
-                "a bare string works too."
+                "slife2's own tools, '{server}__{tool}' for a server's. One or "
+                "several."
             ),
         }
     },
@@ -1281,8 +1275,7 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
 FUNC_TOOL_LOAD_DESCRIPTION = (
     "Put tools into the list you are shown before each request. A name from "
     "`tool_search` can be called without loading; loading is what keeps it in "
-    "the list, there to be chosen next step. The list is rebuilt before every "
-    "request, and when it grows past its cap the least recently used go."
+    "that list. The least recently used go when the list passes its cap."
 )
 
 FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
@@ -1293,9 +1286,8 @@ FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "The tools to take out of your list, as `tool_search` reports "
-                "them. Empty leaves the budget to the harness, which calls this "
-                "that way at a turn boundary. One or several — a single bare "
-                "string works too."
+                "them. Empty hands the trim to the harness, which calls it that "
+                "way at a turn boundary."
             ),
         }
     },
@@ -1308,8 +1300,8 @@ FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
 #: own docstring is where the double life is argued.
 FUNC_TOOL_UNLOAD_DESCRIPTION = (
     "Take tools out of your list. Name the ones you are done with, or leave it "
-    "empty to leave the budget to the harness, which calls this with no names "
-    "at a turn boundary. Either way the answer names what went."
+    "empty and the harness's trim runs at a turn boundary. Either way the "
+    "answer names what went."
 )
 
 
