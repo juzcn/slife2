@@ -1,8 +1,12 @@
-"""`@path` attachments: what gets read, and what gets refused.
+"""Attachment sources: what is read, what is passed on, and where it lands.
+
+Three kinds of source — a local path, an `http(s)` URL and a `data:` URI — and
+only the first is read here: the other two go to the provider as they are,
+because nothing in this system fetches an address a model or a person named.
 
 The interesting cases are the refusals.  An attachment that silently does not
-arrive leaves somebody wondering why the model ignored what they sent, which is
-a worse failure than being told.
+arrive leaves somebody wondering why the model ignored what they sent, which is a
+worse failure than being told — and one missing file must not cost the others.
 """
 
 from __future__ import annotations
@@ -11,7 +15,8 @@ import base64
 
 import pytest
 
-from slife2.tui.attachments import MAX_BYTES, extract
+from slife2 import attachments
+from slife2.messages import Message
 
 pytestmark = pytest.mark.unit
 
@@ -24,102 +29,116 @@ def image(tmp_path, name: str = "shot.png", data: bytes = PNG):
     return path
 
 
-def test_an_existing_image_becomes_a_data_url(tmp_path) -> None:
+# --- what a source becomes ----------------------------------------------------
+
+
+def test_a_local_file_becomes_a_data_url_naming_its_type(tmp_path) -> None:
     path = image(tmp_path)
-    urls, complaints = extract(f"look at @{path.as_posix()} please")
+    pairs, refusals = attachments.resolve([path.as_posix()])
 
-    assert complaints == []
-    assert len(urls) == 1
-    assert urls[0].startswith("data:image/png;base64,")
-    assert base64.b64decode(urls[0].split(",", 1)[1]) == PNG
-
-
-@pytest.mark.parametrize("name", ["a.jpg", "a.jpeg", "a.gif", "a.webp", "a.PNG"])
-def test_the_media_type_comes_from_the_suffix(tmp_path, name: str) -> None:
-    path = image(tmp_path, name)
-    urls, _ = extract(f"@{path.as_posix()}")
-    assert len(urls) == 1
-    assert urls[0].startswith("data:")
-    assert ";base64," in urls[0]
+    assert refusals == []
+    assert pairs[0][0] == path.as_posix()
+    assert pairs[0][1].startswith("data:image/png;base64,")
+    assert base64.b64decode(pairs[0][1].split(",", 1)[1]) == PNG
 
 
-@pytest.mark.parametrize("tail", [".", ",", ";", '"', ")", "。", "、", "！", "”"])
-def test_an_image_inside_a_sentence_is_still_an_attachment(tmp_path, tail) -> None:
-    """The marker is written inside sentences, and the punctuation is theirs.
+def test_a_url_and_a_data_uri_are_passed_through_untouched(tmp_path) -> None:
+    """**Nothing here fetches.**  A provider does, on its own side.
 
-    `看看这个 @截图.png。` is how somebody writes it.  Read literally the suffix
-    is `.png。`, which is not a media type — so the attachment was passed over
-    in the silence this module keeps for a mention that was never a file, which
-    is neither of the two things it promises: honoured, or refused out loud.
+    Both wires this system speaks accept a remote image URL, and neither asks
+    this process to have downloaded it — so a prompt cannot aim a request at this
+    machine by naming an address.
     """
+    data = "data:image/png;base64,AAAA"
+    url = "https://x.test/a.png"
+    pairs, refusals = attachments.resolve([url, data])
+
+    assert refusals == []
+    assert pairs == [(url, url), (data, data)]
+
+
+def test_one_unreadable_source_does_not_cost_the_others(tmp_path) -> None:
+    """v1's batch rule, learned the hard way: four good images went with the
+    missing fifth because the first version dropped the whole list."""
+    present = image(tmp_path)
+    pairs, refusals = attachments.resolve(
+        [present.as_posix(), str(tmp_path / "gone.png"), "https://x.test/b.png"]
+    )
+
+    assert [source for source, _ in pairs] == [
+        present.as_posix(),
+        "https://x.test/b.png",
+    ]
+    assert len(refusals) == 1
+    assert "no such file" in refusals[0]
+    assert "gone.png" in refusals[0]
+
+
+def test_an_oversized_file_is_refused_by_its_size(tmp_path, monkeypatch) -> None:
+    """A cap, and a refusal that says which number was too big."""
+    monkeypatch.setattr(attachments, "MAX_BYTES", 8)
+    path = image(tmp_path, data=b"1234567890")
+
+    pairs, refusals = attachments.resolve([path.as_posix()])
+
+    assert pairs == []
+    assert "over the" in refusals[0] and "0.0 MB" in refusals[0]
+
+
+def test_a_source_named_twice_is_attached_once(tmp_path) -> None:
+    """A screenshot is megabytes the model does not read twice."""
     path = image(tmp_path)
-    urls, complaints = extract(f"看看这个 @{path.as_posix()}{tail}")
+    pairs, _ = attachments.resolve([path.as_posix(), path.as_posix()])
 
-    assert complaints == []
-    assert len(urls) == 1
-
-
-def test_the_same_image_named_twice_is_sent_once(tmp_path) -> None:
-    """A second copy is the same megabytes for the same answer."""
-    path = image(tmp_path)
-    urls, complaints = extract(f"@{path.as_posix()} and @{path.as_posix()}")
-
-    assert complaints == []
-    assert len(urls) == 1
+    assert len(pairs) == 1
 
 
-def test_a_missing_file_is_reported_not_skipped(tmp_path) -> None:
-    urls, complaints = extract("look at @nope.png")
-    assert urls == []
-    assert len(complaints) == 1
-    assert "nope.png" in complaints[0]
+# --- where it lands -----------------------------------------------------------
 
 
-def test_a_remote_url_is_refused(tmp_path) -> None:
-    """Fetching an address a prompt named is a request nobody made.
+def test_the_images_go_on_the_last_user_message() -> None:
+    """Content parts on the user message: text first, then the images.
 
-    This module's job is to read a file the user already has.
+    **The only place a wire here can carry one.**  A tool result is text on every
+    backend this system speaks, which is why v1's `attach_image` injected into
+    the user message too rather than answering with the picture.
     """
-    urls, complaints = extract("@https://example.test/a.png")
-    assert urls == []
-    assert "only local files" in complaints[0]
+    messages: list[Message] = [
+        Message(role="user", content="earlier"),
+        Message(role="assistant", content="hello"),
+        Message(role="user", content="看看这个"),
+    ]
+
+    assert attachments.inject(messages, ["data:image/png;base64,AAAA"]) is True
+
+    assert messages[2].content == [
+        {"type": "text", "text": "看看这个"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    assert messages[0].content == "earlier", "an older message is left alone"
 
 
-def test_an_oversized_image_is_refused(tmp_path) -> None:
-    path = image(tmp_path, "big.png", b"x" * (MAX_BYTES + 1))
-    urls, complaints = extract(f"@{path.as_posix()}")
-    assert urls == []
-    assert "over the" in complaints[0]
+def test_the_caller_route_builds_the_same_parts_the_tool_injects() -> None:
+    """`images=` and `attach_image` reach the model the same way.
 
-
-def test_a_mention_that_is_not_an_image_is_passed_over() -> None:
-    """`@channel` in a sentence is text, and complaining would be noise."""
-    assert extract("ask @channel about it") == ([], [])
-
-
-def test_an_unsupported_image_format_is_reported() -> None:
-    """...but something that *looks* like an image is worth saying no to."""
-    urls, complaints = extract("@diagram.svg")
-    assert urls == []
-    assert "unsupported" in complaints[0]
-
-
-def test_the_text_is_left_alone(tmp_path) -> None:
-    """The marker stays where the user put it.
-
-    The transcript should show what was sent, and taking the marker out would
-    leave a sentence with a hole where the attachment was named.
+    One encoder for both, which is the point of the module: a caller that holds a
+    path and a model that is given one must not come to different conclusions
+    about the same file.  `parts` is the caller's half — the message is built
+    with its images before the turn starts — and `inject` is the tool's, because
+    by then the message is already in the list.
     """
-    path = image(tmp_path)
-    text = f"look at @{path.as_posix()} and tell me"
-    extract(text)
-    assert f"@{path.as_posix()}" in text
+    built = attachments.parts("看看这个", ["data:image/png;base64,AAAA"])
+
+    assert built == [
+        {"type": "text", "text": "看看这个"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
 
 
-def test_several_images_and_one_bad_path(tmp_path) -> None:
-    first = image(tmp_path, "one.png")
-    second = image(tmp_path, "two.png")
-    urls, complaints = extract(f"@{first.as_posix()} @missing.png @{second.as_posix()}")
-    # The good ones still go, and the prompt is not lost over the bad one.
-    assert len(urls) == 2
-    assert len(complaints) == 1
+def test_nothing_to_attach_to_is_answered_rather_than_raised() -> None:
+    assert (
+        attachments.inject([Message(role="assistant", content="hi")], ["data:x"])
+        is False
+    )
+    assert attachments.inject([], ["data:x"]) is False
+    assert attachments.inject([Message(role="user", content="hi")], []) is False

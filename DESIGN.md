@@ -575,8 +575,9 @@ Everything is stored as it happened, with two deliberate
 exceptions, both announced rather than silent: an oversized tool result becomes
 a head-and-tail digest, and an attached image becomes a note saying it was
 there. Nothing is lost by the second that the row was the only copy of — the
-file is still named in the prompt, because v1's `@` marker stays in the text
-where the user put it, so attaching it again is what sends it again. What the
+file is still named — in the sentence the person wrote, and in the answer of the
+`attach_image` call that attached it — so attaching it again is what sends it
+again. What the
 rule buys is that a turn is text a model can read back: a ten-megabyte
 screenshot in the row would be megabytes carried into every later read of that
 turn, to say what one line already says.

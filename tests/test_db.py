@@ -79,7 +79,7 @@ async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     turn_id = await store.save_turn(
         embedder=EMBEDDER,
         messages=messages,
-        channel="human",
+        channel="tui",
         who_helped="jack",
         what_model="deepseek/deepseek-flash",
         token_count=245,
@@ -93,7 +93,7 @@ async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     (record,), _ = store.turns()
     assert record.turn_id == turn_id
     assert record.messages == messages
-    assert record.channel == "human"
+    assert record.channel == "tui"
     assert record.who_helped == "jack"
     assert record.what_model == "deepseek/deepseek-flash"
     # The bill for the turn and the size it had grown to are different numbers,

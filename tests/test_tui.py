@@ -1463,11 +1463,13 @@ async def test_the_context_is_the_last_call_not_the_turn_s_bill() -> None:
         assert "245 tokens" in shown(app)
 
 
-async def test_an_at_path_is_read_and_sent_with_the_prompt(tmp_path) -> None:
-    """The client gets a `data:` URL, and the transcript keeps the marker.
+async def test_a_named_file_is_left_to_the_model(tmp_path) -> None:
+    """The terminal sends the prompt as written and attaches nothing itself.
 
-    Keeping it matters: the record should show what was sent, and removing the
-    marker would leave a sentence with a hole where the attachment was named.
+    **`@` is gone, and this is what replaced it**: a path in a sentence is text,
+    and the model attaching it is the one call that `attach_image` is for.  A
+    terminal that resolved paths itself would be a second implementation of one
+    rule, and the place the two would disagree is which file a person meant.
     """
     shot = tmp_path / "shot.png"
     shot.write_bytes(b"pretend png bytes")
@@ -1475,49 +1477,11 @@ async def test_an_at_path_is_read_and_sent_with_the_prompt(tmp_path) -> None:
     app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
 
     async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, f"what is this? @{shot.as_posix()}")
-        assert f"@{shot.as_posix()}" in shown(app)
+        await submit(pilot, f"what is this? {shot.as_posix()}")
+        assert shot.name in shown(app)
 
-    assert len(client.images) == 1
-    assert client.images[0][0].startswith("data:image/png;base64,")
-
-
-async def test_a_missing_attachment_is_reported_and_the_prompt_still_goes() -> None:
-    """Losing what somebody typed because an attachment was wrong is worse.
-
-    So the complaint is written to the transcript and the prompt is sent
-    anyway — with no images, rather than not at all.
-    """
-    client = FakeAgentClient(answering("ok"))
-    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
-
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "look at @nope.png")
-        assert "nope.png" in shown(app)
-
-    assert client.prompts == ["look at @nope.png"]
-    assert client.images == [[]]
-
-
-async def test_a_complaint_lands_under_the_prompt_not_inside_the_answer() -> None:
-    """A note closes the block it is given, so *when* it is written matters.
-
-    `add_note` closes the assistant block, so a complaint emitted after
-    `begin_assistant` closed the block that had just been opened and left it
-    empty in the transcript — one orphaned block before every answer that had
-    anything to complain about.
-    """
-    client = FakeAgentClient(answering("ok"))
-    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
-
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "look at @nope.png")
-        blocks = [widget.classes for widget in app.query_one(ChatView).children]
-
-    assert "user-message" in blocks[0]
-    assert "system-message" in blocks[1], "the complaint goes under the prompt"
-    assert "assistant-message" in blocks[2], "and the answer opens after it"
-    assert len(blocks) == 3, "no empty block is left behind"
+    assert client.prompts == [f"what is this? {shot.as_posix()}"]
+    assert client.images == [[]], "nothing is read here — the model attaches it"
 
 
 async def test_only_one_connection_is_opened_at_a_time(
@@ -1578,7 +1542,6 @@ async def test_the_status_bar_stops_saying_working_when_the_turn_ends() -> None:
         assert "working" not in status(app)
 
 
-@pytest.mark.asyncio
 async def test_ctrl_c_cancels_a_running_turn() -> None:
     """A terminal where you cannot stop a runaway turn is not usable."""
     started = asyncio.Event()

@@ -49,7 +49,6 @@ from slife2.events import (
     TurnEvent,
     TurnFinished,
 )
-from slife2.tui import attachments
 from slife2.tui.client import AgentClient, MCPAgentClient
 from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
@@ -335,22 +334,17 @@ class SlifeApp(App[None]):
                 # does nothing for a reader who is not at it — so a message sent
                 # from up in the history would be written below the fold.
                 self._transcript.jump_to_tail()
-                # Read before the answer's block is opened, so a complaint about
-                # an attachment lands under the prompt rather than *inside* the
-                # answer: `add_note` closes the block it is given, so a note
-                # emitted after `begin_assistant` would close the block just
-                # opened and leave an empty one behind it in the transcript.
-                images, complaints = attachments.extract(prompt)
-                for complaint in complaints:
-                    # Complaints do not stop the prompt.  Losing what somebody
-                    # typed because one attachment was wrong is a worse outcome
-                    # than sending it without.
-                    self._transcript.add_note(complaint)
+                # **Nothing is read out of the prompt here.**  The `@path`
+                # markers a person types are resolved by the *agent server* now,
+                # which is what lets every caller attach an image and not only
+                # this terminal (`slife2.attachments`).  The prompt goes as it was
+                # written, markers and all — and the picture arrives by way of
+                # `attach_image`, whose answer names it.
                 self._transcript.begin_assistant()
                 self._steps = 0
                 self._refresh_status()
 
-                self._turn = asyncio.create_task(self._send(prompt, ticket, images))
+                self._turn = asyncio.create_task(self._send(prompt, ticket))
                 try:
                     final = await self._turn
                 except asyncio.CancelledError:
@@ -369,17 +363,17 @@ class SlifeApp(App[None]):
         finally:
             self._draining = False
 
-    async def _send(self, prompt: str, ticket: int, images: list[str]) -> str:
+    async def _send(self, prompt: str, ticket: int) -> str:
         """Run one turn and return its authoritative answer.
 
         The answer is returned rather than posted so the queue can apply it
         before the next turn opens a block.  Ordering against the deltas is the
         ticket's job, not the message queue's.
 
-        `images` are the `data:` URLs the prompt's `@path` markers named, read
-        by the caller: the transcript should show what was sent, so the markers
-        stay in the `prompt` — and reading them before the answer's block opens
-        is what keeps a complaint about one out of that block.
+        The prompt is sent as the person wrote it, `@path` markers included: what
+        those markers resolve to is the agent server's business now, and a caller
+        that resolved them itself would be a second implementation of one rule —
+        which is also how an image ends up attached twice.
         """
         assert self._client is not None
 
@@ -398,7 +392,7 @@ class SlifeApp(App[None]):
             )
 
         return await self._client.run_turn(
-            prompt, lambda event: self._on_event(ticket, event), images=images
+            prompt, lambda event: self._on_event(ticket, event)
         )
 
     def _on_event(self, ticket: int, event: TurnEvent) -> None:

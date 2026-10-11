@@ -53,7 +53,7 @@ CORPUS = [
 
 async def _corpus(store: TurnStore, embedder: StubEmbedder) -> None:
     for messages in CORPUS:
-        await store.save_turn(messages=messages, embedder=embedder, channel="human")
+        await store.save_turn(messages=messages, embedder=embedder, channel="tui")
 
 
 def _ids(records) -> list[int]:

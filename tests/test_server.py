@@ -239,7 +239,10 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     `_check_new_input` is not a verb a caller has any use for: it is the name a
     message that arrives mid-turn is delivered under, and it is declared here
     because the *pair* the harness writes into the conversation has to name a
-    tool the request carries.
+    tool the request carries.  **`attach_image` is the same arrangement for the
+    other half of a message** — a turn's pictures — and it is the opposite kind
+    of tool in one respect: the model calls it far more often than the harness
+    does, because naming a file in prose is what most people write.
 
     **And the four `model_*` tools are this server's for the same reason they
     are marked for the model**: `default:` and `providers:` are what this
@@ -253,15 +256,18 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         )
     ) as client:
         tools = await client.list_tools()
-    assert [t.name for t in tools] == [
+    # Sorted, because the order a server *lists* its tools in is its own
+    # business — this is about which names it serves, and what they are.
+    assert sorted(t.name for t in tools) == [
         "_check_new_input",
+        "attach_image",
         "model_list",
-        "model_set",
         "model_remove",
+        "model_set",
         "model_switch",
+        "reset",
         "send_message",
         "transcript",
-        "reset",
     ]
 
 
@@ -964,8 +970,8 @@ def test_two_identical_prompts_are_two_places_in_the_queue() -> None:
     than it has, and `MAX_QUEUED`, whose whole job is to bound that wait, would
     stop firing when it should.
     """
-    first = Pending(prompt="same", images=[], channel="human")
-    second = Pending(prompt="same", images=[], channel="human")
+    first = Pending(prompt="same", images=[], channel="tui")
+    second = Pending(prompt="same", images=[], channel="tui")
     queue: deque[Pending] = deque([first, second])
 
     # What `send_message` does: once when the turn starts, once on the way out.
@@ -1078,7 +1084,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         server = build_server(
             cfg, backend=backend, context_client=context_client, hub_client=hub
         )
-        await send(server, "what is 2+2?", agent="jack", channel="human")
+        await send(server, "what is 2+2?", agent="jack", channel="tui")
 
     jack = db_dir() / "jack.turn.db"
     assert jack.is_file(), "the turn was not recorded"
@@ -1104,7 +1110,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     ) = row
 
     assert who_helped == "jack"
-    assert channel == "human"
+    assert channel == "tui"
     assert created_at and completed_at
     assert created_at <= completed_at
     # The bill for the turn against the size it had grown to by the end.
@@ -1212,7 +1218,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
         server = build_server(
             cfg, backend=backend, context_client=context_client, hub_client=hub_client
         )
-        await send(server, "look something up", agent="jack", channel="human")
+        await send(server, "look something up", agent="jack", channel="tui")
 
     stored = json.loads(
         sqlite3.connect(db_dir() / "jack.turn.db")
@@ -1291,10 +1297,14 @@ async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
     )
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
-    sent = backend.calls[0][0][-1]
+    sent = next(m for m in backend.calls[0][0] if m.role == "user")
     assert isinstance(sent.content, list)
     assert sent.content[0] == {"type": "text", "text": "what is this?"}
     assert sent.content[1]["image_url"]["url"].endswith("AAAA")
+    # **And it is the last message**: nothing the harness adds follows it now
+    # that the attachment is the model's own call.  The reply names what was
+    # attached, which is what a later turn keeps when the pixels are gone.
+    assert backend.calls[0][0][-1] is sent
 
 
 @pytest.mark.asyncio
@@ -1307,6 +1317,13 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
     the alternative is a model that quietly ignores what was sent.  Note that
     the *default* model is a vision model, so this has to be built explicitly —
     which is the point: the check reads the config rather than assuming.
+
+    **The refusal is a tool result and not an exception**, which is the better
+    half of v1's version of it.  v1 refused to encode and had the harness write
+    an assistant message saying so, because its history must not end on an
+    unanswered user message; here the turn simply runs, the tool answers with
+    why, and the model reads that — so it can tell the person instead of the
+    turn failing with a message only a programmer sees.
     """
     from slife2.config import ModelSettings, ProviderSettings
 
@@ -1321,17 +1338,23 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
             )
         },
     )
-    with pytest.raises(Exception, match="cannot read images"):
-        await send(
-            build_server(
-                text_only,
-                context_client=context,
-                hub_client=hub,
-                backend=answering("ok"),
-            ),
-            "look",
-            images=["data:image/png;base64,AAAA"],
-        )
+    backend = answering("ok")
+    await send(
+        build_server(
+            text_only, context_client=context, hub_client=hub, backend=backend
+        ),
+        "look",
+        images=["data:image/png;base64,AAAA"],
+    )
+
+    # The model was asked with the text alone — nothing was encoded for it, so
+    # there is no part a provider would reject — and the caller is told which
+    # source was not attached, because a call whose pictures were fewer than it
+    # asked for cannot tell by itself.
+    asked = next(m for m in backend.calls[0][0] if m.role == "user")
+    assert isinstance(asked.content, str)
+    assert asked.content.startswith("look")
+    assert "data:image" not in asked.content
 
 
 # --- the system prompt -------------------------------------------------------

@@ -157,19 +157,27 @@ for. That is one model call per turn that nothing else would show you, and it is
 the mechanism that keeps a long conversation from growing without bound —
 `slife2-context`'s own judgement, argued in DESIGN §5.1.
 
-Name an image with `@` and it goes with the prompt:
+Name an image and the model attaches it:
 
 ```
-what is wrong with this layout? @screenshot.png
+what is wrong with this layout? D:\shots\screenshot.png
 ```
 
-The marker stays in the transcript, so the record shows what was sent. Only
-local files, and only when the model's config lists `image` under `input` — a
-model that cannot read images says so rather than quietly ignoring what you
-attached.
+**That is the whole convention, and it is not a syntax** — the path is a path in
+a sentence, and the model calls `attach_image` for it. There are no markers to
+learn: what a person writes is what a person means. Three kinds of source work
+in one call — a local path, an `http(s)` URL, and a `data:` URI — and several at
+once, with a source that cannot be read named in the answer rather than failing
+the rest. A URL is passed to the provider, which fetches it; nothing here does.
 
-The picture itself goes to the model and no further: what the log keeps is the
-marker, plus a note where the image was saying it was there and how big it was.
+Only when the model's config lists `image` under `input`: a model that cannot
+read images is told so, and says so, rather than quietly ignoring what you
+named.
+
+The picture goes to the model and no further. What the log keeps is the sentence
+and the tool's answer, which names every file — plus a note where the image was
+saying it was there and how big it was — so a rebuilt conversation is text, and
+a turn that needs the picture again attaches it again from that name.
 Attaching it again is what sends it again — the file is named in the prompt, so
 a turn read back a month later still says which picture it was about.
 
@@ -648,6 +656,8 @@ slife2/
 ├─ ilink.py           # the iLink ClawBot protocol, as a library: the QR
 │                     #   handshake, the long poll, and the two envelopes that
 │                     #   mean something other than what their status says
+├─ attachments.py     # how an image reaches the model: the three kinds of
+│                     #   source, and the content parts they become
 ├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
 │                     #   as sixteen tools, and the byte half of a saved file —
 │                     #   what is copied in, what is read back, what is refused
@@ -711,7 +721,6 @@ slife2/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation
    ├─ widgets.py      # ChatView, HistoryInput, StatusBar
-   ├─ attachments.py  # reading `@path` images out of a prompt
    ├─ theme.py        # the palette and glyphs, defined once
    └─ app.tcss
 ```

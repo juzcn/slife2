@@ -305,6 +305,12 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: answered.  So it holds `skill_use`, which nothing but the model drives,
 #: alongside the harness tools, which the machinery drives and the model may call
 #: too; what all of them share is that something *else* refers to them by name.
+#:
+#: **A tool the model calls for itself is not one of them**, however important:
+#: `attach_image` is a plugin's ordinary model-facing tool and is not here,
+#: because nothing *else* names it — no pair the harness writes, no prompt the
+#: system builds.  Being wanted in every turn is the budget's question
+#: (`tool_load.threshold`), and being worth starting loaded is the operator's.
 #: `CHECK_NEW_INPUT` is the sharpest case of that and is spelled below
 #: (the hub must not import a server): a pair the harness wrote into the history
 #: names it, so a turn that unloaded it would send a request whose history calls

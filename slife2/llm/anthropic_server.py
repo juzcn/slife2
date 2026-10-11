@@ -85,15 +85,24 @@ def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
 
 
 def _image_source(raw: Any) -> dict[str, Any] | None:
-    """A `data:` URL as Anthropic's base64 source, or None if it is not one.
+    """An `image_url` as Anthropic's source: inline data, or a URL.
 
-    Only inline data is accepted.  A remote URL would have to be fetched, and
-    fetching a URL a model or a user named is a capability this plugin has no
-    business having — so it is refused rather than quietly turned into a request
-    somebody did not make.
+    **Two forms and neither one is fetched here.**  A `data:` URL becomes a
+    base64 source; a remote `http(s)` URL becomes a `url` source, which Anthropic
+    downloads on its own side — v1 did exactly this, and it is why the capability
+    does not belong to this process: no request leaves this one, and there is no
+    address a prompt could aim at this machine.
+
+    (This function used to refuse a remote URL, on the argument that fetching one
+    was a capability this plugin should not have.  The premise was wrong for this
+    form of it: the provider fetches.)
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url.startswith("data:"):
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith(("http://", "https://")):
+        return {"type": "url", "url": url}
+    if not url.startswith("data:"):
         return None
     header, _, data = url.partition(",")
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"

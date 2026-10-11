@@ -72,7 +72,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2 import configfile
+from slife2 import attachments, configfile
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
@@ -155,6 +155,26 @@ MAX_QUEUED = 32
 #: own history refers to.  Both spellings are this string.
 CHECK_NEW_INPUT = "_check_new_input"
 
+#: The tool an image comes in by.  **The model calls it**, which is the whole
+#: mechanism: somebody writes a path in a sentence and the model attaches it.  v1
+#: also let its harness call this for `@path` markers in the text, and that half
+#: is not ported — it saves one model call and costs a second entry point into
+#: one behaviour, a marker syntax every user has to be taught, and an argument
+#: only the harness ever omits.  What is kept is the half that carries the
+#: feature.
+#:
+#: **An ordinary tool, not a harness tool.**  Nothing this process's machinery
+#: writes refers to it by name — no pair, no prompt — so it is offered to the
+#: model the way any plugin's tool is, and whether it is in the list from the
+#: first turn is the budget's business (`tool_load:`), not this file's.
+#:
+#: It injects content parts into the **user message** — where v1's tool put them
+#: too, and the only place a wire here can carry an image: a tool result is text
+#: on every backend this system speaks.  Those parts are live-session state and
+#: nothing more; what is stored is the text plus a note naming every file
+#: (`slife2.db.strip_images`).
+ATTACH_IMAGE = "attach_image"
+
 #: What that tool answers when there is nothing to hand over — an empty queue, or
 #: a head that carries images and so cannot ride a tool result.  A sentence and
 #: not an empty string: it lands in a tool result, and a blank one reads as a
@@ -209,14 +229,19 @@ class Pending:
 
     `eq=False` because the inbox is a queue of *submissions* and not of values.
     `deque.remove` compares by equality, so the generated `__eq__` — which
-    compares `(prompt, images, channel)` — would make two callers who sent the
-    same text one entry: the first turn takes its own message out of the queue,
+    compares `(prompt, attachments, channel)` — would make two callers who sent
+    the same text one entry: the first turn takes its own message out of the queue,
     and its closing `remove` then takes the *other* caller's place in it, since
     that entry is equal.  The count `MAX_QUEUED` guards would then fall below
     the number of callers actually waiting, which is the bound's whole job.
     """
 
     prompt: str
+    #: What this message arrived with, as **sources** rather than as encoded
+    #: bytes: a path on this machine, an `http(s)` URL, or a `data:` URI.  They
+    #: are turned into content parts by `slife2.attachments` — the same encoder
+    #: `attach_image` uses, so a caller that holds a path and a model that is
+    #: given one cannot come to different conclusions about the same file.
     images: list[str]
     channel: str
     #: Set by the turn that folded this message into itself, and **only when that
@@ -244,6 +269,12 @@ class Outcome:
 
     messages: list[Message] = field(default_factory=list)
     result: TurnResult | None = None
+    #: Sources this turn was handed that could not be attached, in the caller's
+    #: words.  On the outcome rather than on the loop, because it is a fact about
+    #: *this* turn — the next one attaches nothing of the sort — and it is what
+    #: the caller is told, since a call whose pictures were fewer than it asked
+    #: for is a call that cannot tell.
+    refused: list[str] = field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
 
@@ -1029,10 +1060,36 @@ def build_server(
 
         snapshot = len(loop.messages)
         outcome.started_at = now()
-        user = _with_images(item.prompt, item.images, loop)
+        # **The caller's own sources are resolved here**, before the turn: the
+        # message is built with its parts rather than having them injected later,
+        # because there is no tool call to inject them — this is the route for a
+        # caller that holds bytes, and the model's route is `attach_image`.
+        # Resolved through the same encoder for the reason that tool exists, and
+        # gated on the same question: a model whose config lists only `text` gets
+        # the text and a refusal, not parts its provider would reject.
+        pairs, refusals = attachments.resolve(item.images)
+        if pairs and not loop.accepts_images:
+            refusals = [
+                f"{source}: {loop.model} cannot read images" for source, _url in pairs
+            ]
+            pairs = []
+        user = (
+            attachments.parts(item.prompt, [url for _source, url in pairs])
+            if pairs
+            else item.prompt
+        )
+        for refusal in refusals:
+            # **Reported, never dropped in silence**: to the caller in the reply
+            # below, because a call whose pictures were fewer than it asked for
+            # cannot tell.  (The model's own route reports through the tool's
+            # answer, which is the model's to read.)
+            logger.warning("attachment not attached: %s", refusal)
         agent_loop = await loop_for(loop, (loop.agent, loop.subagent))
         cancelled = False
         try:
+            # The parts, built above and after the rebuild — the rebuild
+            # replaces the list wholesale, so a message appended before it would
+            # be destroyed, which is why `run_turn` appends this one itself.
             outcome.result = await agent_loop.run_turn(
                 loop.messages, user, observer, auto=auto_invoke
             )
@@ -1117,6 +1174,59 @@ def build_server(
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
+
+    @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
+    async def attach_image(ctx: Context, sources: list[str]) -> str:
+        """Attach images so that you can see them, and say what was attached.
+
+        **Call this whenever a message names a picture** — a path, an `http(s)`
+        URL, or a `data:` URI. "看看 D:\\shots\\a.png 上面有什么" is a file you have
+        not been shown, and this is how you are shown it; until you call this you
+        are guessing at what it holds. Several sources go in one call, and one
+        that cannot be read is named in the answer rather than failing the rest.
+
+        The images stay for this conversation and are never written down: what a
+        later turn carries is the text and this answer, which names every file —
+        so a turn that needs the picture again attaches it again from here.
+
+        Args:
+            sources: What to attach — absolute paths, `http(s)` URLs, or `data:`
+                URIs, as many as you need in one call.
+        """
+        client_id = request_client(ctx)
+        loop = loops.get(client_id) if client_id else None
+        if loop is None:
+            return "No conversation is running here, so there is nothing to attach to."
+        wanted = [str(source) for source in sources if str(source).strip()]
+        if not wanted:
+            return "Nothing to attach: no source was named."
+
+        if not loop.accepts_images:
+            # v1 refused to encode rather than letting a provider drop them, and
+            # this is the better half of its version: the refusal is a tool result
+            # the model reads, so it can tell the person — where v1 had the
+            # harness write an assistant message on the model's behalf.
+            return (
+                f"Nothing attached: {loop.model} cannot read images. Tell whoever "
+                f"asked, or switch to a model whose config lists `image` under "
+                f"`input`. The file(s) named were: {', '.join(wanted)}"
+            )
+
+        pairs, refusals = attachments.resolve(wanted)
+        if not attachments.inject(loop.messages, [url for _source, url in pairs]):
+            return "Nothing attached: there is no message to attach it to."
+        logger.info(
+            "attach_image %s: %d attached, %d refused",
+            client_id,
+            len(pairs),
+            len(refusals),
+        )
+        lines = [
+            f"Attached {len(pairs)} image(s): "
+            + ", ".join(source for source, _url in pairs)
+        ]
+        lines += [f"Not attached — {refusal}" for refusal in refusals]
+        return "\n".join(lines)
 
     @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
     async def check_new_input(ctx: Context) -> str:
@@ -1680,6 +1790,11 @@ def build_server(
             "stop_reason": result.stop_reason if result else "cancelled",
             "model": loop.model,
             "injected": False,
+            # Empty on every ordinary turn.  A source the caller passed that could
+            # not be read is named here, because the alternative — an answer that
+            # silently had fewer pictures than the call asked for — is the one
+            # thing a caller cannot detect and a person cannot explain.
+            "refused": outcome.refused,
         }
 
     @mcp.tool
@@ -1791,32 +1906,6 @@ def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
         "model": loop.model,
         "injected": True,
     }
-
-
-def _with_images(
-    prompt: str, images: list[str], loop: Loop
-) -> str | list[dict[str, Any]]:
-    """The user's message: text, or text and images.
-
-    The model has to be *able* to read them.  A model's `input` is the config
-    saying so, and the alternative to refusing is worse than it looks: the images
-    would be dropped somewhere along the way and the user would be left
-    wondering why the model ignored what they attached.
-
-    Read off the **loop**, not resolved again from the config: whether a
-    conversation's model reads images is a property of the conversation, and a
-    model edited out of the config since it started must not turn an attachment
-    into an exception.
-    """
-    if not images:
-        return prompt
-
-    if not loop.accepts_images:
-        raise ValueError(f"{loop.model} cannot read images")
-
-    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    parts += [{"type": "image_url", "image_url": {"url": url}} for url in images]
-    return parts
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1541,14 +1541,33 @@ def test_content_parts_become_text_and_image_blocks() -> None:
     ]
 
 
-def test_a_remote_image_url_is_not_fetched() -> None:
-    """Fetching an address a prompt named is a request nobody made.
+def test_a_remote_image_url_is_passed_on_and_not_fetched_here() -> None:
+    """Anthropic downloads it, and **no request leaves this process**.
 
-    So it is dropped here rather than turned into a request — and dropping is
-    safe because the agent server has already refused to send it.
+    This used to be dropped, on the argument that fetching a URL a prompt named
+    is a capability this plugin has no business having.  The premise was wrong
+    for this form of it: the Messages API takes a `url` source and fetches it on
+    its own side, so passing it on is exactly what "not fetching" looks like —
+    and dropping it silently was the one outcome worse than either.
+
+    v1 did this (`llm_backends/anthropic.py`), and it is what makes the third
+    kind of attachment — a URL — work at all.
     """
     blocks = to_anthropic_blocks(
         [{"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]
+    )
+    assert blocks == [
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.test/a.png"},
+        }
+    ]
+
+
+def test_something_that_is_neither_inline_nor_a_url_is_dropped() -> None:
+    """A `file:` URL or a bare word is not an image source in either form."""
+    blocks = to_anthropic_blocks(
+        [{"type": "image_url", "image_url": {"url": "file:///etc/passwd"}}]
     )
     assert blocks == []
 
