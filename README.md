@@ -4,12 +4,13 @@
 
 **A plugin is an MCP server over Streamable HTTP plus a small contract** — an
 implementation of the protocol, not one of its own. The TUI is a client; the
-agent loop is a server and a client; each model backend is its own server, and
-so is the hub the tools come from. The word is what separates the servers slife2
-starts from the ones somebody else wrote under `tools:`, and the difference is
-load-bearing: a plugin is required and a missing one fails the turn, where an
-entry under `tools:` is optional. Two properties follow from the arrangement,
-and they are the point of the whole thing:
+agent loop is a server and a client; each model backend is its own server, and so
+is the hub the tools come from. The word separates the servers slife2 starts from
+the ones somebody else wrote under `tools:`, and the difference is load-bearing:
+**a plugin is required** — a missing one fails the turn — where an entry under
+`tools:` is optional and its absence just means fewer tools.
+
+Two properties follow, and they are the point of the arrangement:
 
 - **A key exists only inside the process that needs it.** A provider's API key
   lives in the LLM server that calls it; a tool server's token lives in the
@@ -19,14 +20,12 @@ and they are the point of the whole thing:
 - **The agent loop imports no provider SDK.** Switching providers is changing a
   URL, and adding tools is adding an entry to a config file.
 
-**A plugin is a capability; a library is its implementation, and they are not
-alternatives.** The turn log is a *file*, so nothing has to be a process to hold
-it: `slife2.db` is a library, and the two plugins that own its two halves import
-it — `slife2-context` for the turns and the context, `slife2-toolhub` for the tool
-catalogue. What stays a plugin is what holds something a process should own: a
-credential, a provider SDK, or somebody else's connection. v1 draws the same line
-the same way — its `memdb` is a plugin *and* a library, imported by the host and
-by four other plugins. The test, and what it costs, is DESIGN §1.1.
+**A plugin is a capability; a library is its implementation.** What holds a
+credential, an SDK or somebody else's connection is a process; what holds a
+*file* is not, because one writer is what a SQLite lock already is. So
+`slife2.db` — the turn log and the tool catalogue — is a library, imported by the
+two plugins that own its two halves, `slife2-context` and `slife2-toolhub`.
+DESIGN §1.1 is the test and what it costs.
 
 [DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
 
@@ -67,13 +66,12 @@ signs the assistant's messages, and it renders the system prompt — and it is
 partition is the context store: each agent's turns go in their own database. The
 servers themselves stay shared.
 
-The **context** is chosen rather than accumulated. Before every turn, one model
-call reads the conversation in hand and decides what to keep of it and what to
-recall from the log; the turn then runs on the two together. That is v1's
-mechanism, ported, and `context:` in the config is where it is tuned — including
-the switch that turns it off, after which the context grows append-only. A
-conversation that restarts, or that sat idle long enough for the loop to be
-reclaimed, comes back on the context it had at exit.
+The **context** is chosen rather than accumulated: one model call before every
+turn decides what to keep of the conversation in hand and what to recall from the
+log, and the turn runs on the two together. There is no switch that turns that
+off. A conversation that restarts, or that sat idle long enough for the loop to
+be reclaimed, comes back on the context it had at exit. The next section is the
+whole of it.
 
 That log is where the model can look back. `turn_list` browses it — newest
 first, one line per turn, `since`/`until` taking an ISO date or a phrase a person
@@ -354,10 +352,10 @@ between them — which the catalogue refuses loudly rather than resolving.
 **What the model is handed is the tools it has loaded, not the tools that
 exist.** The list is re-read from the hub before *every model call*, and what
 starts in it is slife2's own: `tool_search`, `func_tool_load`,
-`_func_tool_unload`, `skill_use`, the two history tools, and the
-twenty-two tools that edit the five config sections — that last group is why the
-list is noticeably longer than it was, and it is the one group whose being
-always-loaded is worth a second look. Everything else is loaded on demand — a
+`_func_tool_unload`, `skill_use`, the two history tools, `attach_image`, the
+harness's `_check_new_input`, and the twenty-two tools that edit the five config
+sections — that last group is why the list is noticeably longer than it was, and
+it is the one group whose being always-loaded is worth a second look. Everything else is loaded on demand — a
 server with ninety tools costs nothing until one of them is wanted.
 `tool_search` searches the whole catalogue by keyword *and* by meaning, one
 hybrid search; `func_tool_load` puts one or several names in the list, and they
@@ -417,6 +415,13 @@ somebody else runs and no key belonging to one: `slife2-mcp-tools` and
 `slife2-restapi-tools` hold those, one connection per entry, and the hub owns the
 tool *set* and nothing else.
 
+**A declaration is the whole list, and it is asked for again before every
+search.** The whole list is what makes a deleted entry stop being a hit — a merge
+reads an absent name as a row the source no longer has — and asking again is what
+makes dropping a directory into `skills/`, or editing the config, take effect at
+the next search rather than at the next restart. The hub stays the only writer of
+the catalogue either way: a source declares, the hub merges.
+
 The hub's own tools are what is left over, and they are exactly the set-level
 work.
 **`tool_search`, `func_tool_load` and `_func_tool_unload`** are served by the hub
@@ -444,13 +449,6 @@ it never enters the model's list, and calling it answers with the step that does
 reach the thing (`skill_use`) rather than a refusal. The name is namespaced
 because `browser-harness` is a command *and* the skill documenting it, and one
 name is one row.
-
-**A family declares its rows and the hub merges them.** `slife2-skills` and
-`slife2-cli` answer `list_sources` with their whole list — which is what makes a
-deleted skill stop being a hit — and the hub merges it exactly as it merges the
-tools a server listed. So the hub stays the only writer of the catalogue,
-and every source is asked again before every search, which is why dropping a
-directory into `skills/` is found at once and not at the next restart.
 
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
@@ -527,10 +525,14 @@ images, video, speech and transcription) and `openai-images` (an OpenAI-compatib
 `/images/generations`, which draws pictures and refuses the other three by name —
 better than a 404 from the vendor).
 
-Generated files are written under **`<data>/media/`** and nowhere else. They are
-work products rather than cabinet documents: nothing registers them, the answer
-is a path, and `folder=` sorts them into subdirectories *inside* that root — a
-model does not get to choose where on your disk a file is written. A video can
+Generated files are written under **`<data>/agents/<agent>/media/`** and nowhere
+else. Per agent because what it holds is what that agent generated, and under
+`agents/` rather than `runtime/` because a daemon's working directory is
+documented as reconstructible — a generated image left there would be the one
+file certain to be lost. They are work products rather than cabinet documents:
+nothing registers them and the answer is a path. `folder=` sorts them into
+subdirectories *inside* that root and a path outside it is refused, so a model
+does not get to choose where on your disk a file is written. A video can
 take minutes and the wait is bounded: past `timeout` the call is refused with the
 provider's job id rather than its result, because the render carries on there and
 asking again would pay for it twice.
@@ -557,7 +559,7 @@ replaces. That is why only the two document kinds have a remove tool.
 `cabinet_search` reads, and the same document lands as markdown under
 `agents/<agent>/cabinet/` — `notes/Python.md`, `diary/2026-10-11.md`,
 `reports/weekly.md` — which is what you open, edit or delete without asking
-anybody. A saved file's bytes live there too (`files/<category>/`) and are never
+anybody. A saved file's bytes live there too (`<category>/`) and are never
 put in the index: `file_read` returns a file's *text*, and refuses a PDF or an
 image by saying what it is rather than decoding it into a page of replacement
 characters. Text in another encoding is read and the encoding named on the first
@@ -733,9 +735,9 @@ slife2/
 │                     #   one hop, shared by the two things with an index
 ├─ context.py         # a conversation's context as a pure function: the reply
 │                     #   parser, the union, the two fit rules, the turn footnote
-├─ context_server.py  # slife2-context: `remember`, `turn_list`, `turn_read`,
-│                     #   and the two decisions — `restore` and `rebuild` —
-│                     #   which are the harness's and never the model's
+├─ context_server.py  # slife2-context: `remember`, `forget`, `turn_list`,
+│                     #   `turn_read`, and the two decisions — `restore` and
+│                     #   `rebuild` — which are the harness's, never the model's
 ├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
 │                     #   the client id every one of them keys its state by,
 │                     #   how a client proves which one it reached, and the
@@ -800,7 +802,7 @@ uv run pytest                  # unit + integration, no network, no live model
 uv run pytest -m unit          # fast only
 uv run pytest -m integration   # the one test that binds a socket
 uv run ruff check . && ruff format --check .
-pyright                        # a uv tool, not a project dependency
+uv run pyright                 # a dev dependency, wired into CI
 ```
 
 Nothing in the suite needs an API key or a running server. The model is faked,

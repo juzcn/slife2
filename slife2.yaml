@@ -83,16 +83,16 @@ servers:
   # Embeddings, for the db's vector index.  A process of its own, and *not* one
   # of the three above: those are chat protocols built from the `providers:`
   # below, and an embedding endpoint speaks neither — it is configured under
-  # `embeddings:` at the bottom of this file.  It starts before `db`, which asks
+  # `embeddings:` at the bottom of this file.  It starts before `context`, which asks
   # it for a dimension before it can build an index at all.
   embeddings:
     host: 127.0.0.1
     port: 8004
     path: /mcp
   # A conversation's memory: the turn log, and the decision about which of its
-  # turns a turn runs on.  One database per `(agent, subagent)`, in the data
-  # directory's `slife2.db/` — those are data, and this is the one file here
-  # that is checked in.  Its settings are the `context:` section below.
+  # turns a turn runs on.  One database per `(agent, subagent)`, at
+  # `<data>/agents/<agent>/turns.db`, a worker's beside its parent's.
+  # Its settings are the `context:` section below.
   context:
     host: 127.0.0.1
     port: 8010
@@ -128,7 +128,8 @@ servers:
     path: /mcp
   # The private cabinet: notes, a diary, saved files, reports — the four kinds
   # are one searchable corpus, and each agent's is its own directory
-  # (`<data>/<agent>.files/`) with markdown mirrors a person can read.  Like
+  # (`<data>/agents/<agent>/cabinet/`) with markdown mirrors a person can read.
+  # Like
   # `wechat`, it reads no config section at all: a cabinet is written, not
   # configured.  Its bytes and mirrors live beside the data, not in a database
   # anyone has to open.
@@ -176,7 +177,8 @@ servers:
 # Every tool here arrives as `{name}__{tool}` — so `filesystem` below offers
 # `filesystem__read_file` — and the name is what the model calls.  The prefix is
 # what keeps two servers' tools apart, and it is for entries *here*: a plugin's
-# tools are the model's under their own names (`now`, `turn_read`), because
+# tools are the model's under their own names (`turn_read`, `skill_use`),
+# because
 # there is one set of tools in this system and the plugin serving one is not
 # something the model needs to reason about.
 #
@@ -457,7 +459,7 @@ context:
 # **There is no `wechat:` section, and that is the design.**  WeChat is always
 # on — a login cannot be configured, it is *scanned*: `wechat_login` puts a QR
 # code in front of somebody, and the token that comes back lives in
-# `<data>/wechat_<agent>.yaml`, one per agent, written by the plugin and read by
+# `<data>/agents/<agent>/wechat.yaml`, written by the plugin and read by
 # it at the next start.  Those files are also how a shared process knows which
 # agents exist, so a section here would be a second answer to a question the
 # files already answer.  A machine that should not talk to WeChat is a machine

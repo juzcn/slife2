@@ -40,6 +40,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
   │                                 │                  └── MCP ──▶ slife2-agent   (what arrives, as a turn)
   │                                 ├── :8035/mcp ──▶ slife2-cabinet       (notes, diary, files, reports)
+  │                                 ├── :8036/mcp ──▶ slife2-media         (images, video, speech, transcripts)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
   │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
@@ -96,7 +97,7 @@ Two properties fall out of this and are the reason for it:
   may call and holds no key at all — which is the point of moving the connections
   out of it.
 - **The agent loop imports no provider SDK.** Its only backend talks MCP, so
-  switching providers is changing a URL. `grep -r "import openai\|import anthropic"
+  switching providers is changing a URL. `grep -rn "^ *from \(openai\|anthropic\) import"
   slife2/` matches four files, all under `llm/` and all servers, each importing
   inside the function that builds the client: three model servers, one per wire
   protocol, plus the embeddings server. Nothing else in the tree imports either
@@ -230,7 +231,7 @@ and, deliberately, **one corpus**.
 
 **One table, because four kinds are one thing to search.**  v1 had four tables, a
 `cabinet_docs` view that unioned them and twelve triggers keeping a shared FTS
-table in step.  What all of that was *for* is the rule §7.2 states for the
+table in step.  What all of that was *for* is the rule §8.4 states for the
 fusion: a rank only means something inside the corpus that produced it, so four
 indexes would be four corpora and a query spanning them would answer with an
 order nothing had measured.  Here the corpus is literal — one `cabinet_doc` table
@@ -407,15 +408,14 @@ on the connection, because the protocol has no connection identity left to key
 on. So the state has to be **named by the caller** — which is a decision per
 call, not per server.
 
-**This server used to be a function, and now it is not.** The first cut was
-`run_turn(messages, prompt)`: the caller sent the whole conversation and got
-back what to remember. That was the right shape while its premise held — "here
-there is one client, and the state is the conversation it is already
-displaying". The premise stopped holding. A loop has to be addressable in its
-own right, for two reasons that are really one: so that a message arriving while
-it is busy can **wait** for it rather than displace what is running, and so that
-a caller which is not displaying the conversation can still continue one. (A
-subagent is that caller — see §9.)
+**So a turn is not a call, and the server is not a function.** `run_turn(messages,
+prompt)` — send the whole conversation, get back what to remember — is the right
+shape for exactly one client whose state is the conversation it is already
+displaying, and that premise is what a message arriving mid-turn breaks. A turn
+has to be addressable in its own right, for two reasons that are really one: so
+that a message arriving while it is busy can **wait** for it rather than displace
+what is running, and so that a caller which is not displaying the conversation
+can still continue one. (A subagent is that caller — see §9.)
 
 So a conversation is an object, and the surface is three tools:
 
@@ -512,17 +512,13 @@ real transport, not assumed — so a record written that way is simply lost. A t
 created outside the cancelled scope does land, so the **cancel path** detaches
 the write and logs its failure instead of dropping it.
 
-**The ordinary path writes inside the lock**, and that reverses an earlier
-decision. It used to run after the lock was released, on the argument that a
-queued turn waiting on a network call is a wait with no reason behind it — and
-the argument held while the write was a store's alone. It stopped holding when
-the write started maintaining the *live-context list*: a rebuild reads that list,
-so a queued turn starting before the write landed would be handed a context
-missing the turn it is following up on. The price is one loopback before a queued
-turn starts. What is given up is nothing: the ordering hazard the detached path
-still has is confined to a cancelled turn, whose messages are deliberately left
-*unbacked* and carried verbatim by the next rebuild (§5.1) rather than counted
-twice.
+**The ordinary path writes inside the lock.** Outside it, a queued turn could
+start before the write landed — and the write maintains the *live-context list*,
+which a rebuild reads, so that turn would be handed a context missing the turn it
+is following up on. The price is one loopback before a queued turn starts, and
+nothing is given up: the ordering hazard the *detached* path still has is
+confined to a cancelled turn, whose messages are deliberately left *unbacked* and
+carried verbatim by the next rebuild (§5.1) rather than counted twice.
 
 **The id travels with the call, at every hop.** It is not only the agent server
 that receives it: the write to the store and the model call are both made under the
@@ -633,7 +629,7 @@ because adding a column to a table with rows in it is the one change this schema
 has no mechanism for.
 
 **Agents are isolated by file.** `agent="jack"` reads and writes
-`jack.turn.db`, and no query can reach another agent's turns because there are
+`<data>/agents/jack/turns.db`, and no query can reach another agent's turns because there are
 no other agent's turns in the file. Isolation as a property of the filesystem
 beats isolation as a `WHERE` clause somebody can forget to write — and it is the
 one place `--agent` partitions anything, since the servers themselves stay
@@ -718,13 +714,12 @@ note between the prompt and the answer, in the same shape and the same dim
 styling as `[restored N turns]`, because both say what the harness did rather than
 what anyone in the conversation said.
 
-**And there is no switch for this.** There used to be one — `context.rebuild`,
-whose `false` grew the context append-only — and it went for the two reasons a
-switch that is never off is worth removing: the step is not optional (a context
-that grows append-only is bounded by nothing, which is the trim §9 still owes), so
-the flag configured a system nobody runs; and the one thing it could still do was
-make the note lie, since `kept 12, recalled 0` is a true sum describing a decision
-that no discriminator made.
+**And there is no switch for this**, which is a decision rather than an omission.
+A `context.rebuild: false` that grew the context append-only would configure a
+system nobody runs — the step is not optional, since a context that grows
+append-only is bounded by nothing (§9 still owes the trim) — and it would make
+the turn's own note lie, because `kept 12, recalled 0` is a true sum describing a
+decision no discriminator made.
 
 **Relevance and time are different axes, and the axis decides the cut.** With a
 query the candidates are ordered by relevance and the caps spend from that head,
@@ -919,8 +914,10 @@ own docstring said it would be.** `ToolStore` is the tool catalogue — v1's
 `tools.db`, rows plus a keyword index and a vector index — in
 `<data>/agents/tools.db`, beside the agents rather than inside one, for the same reason: the
 store, the embedder, the text normalization and the vector index are already
-here, and a catalogue needs all four. It is served over MCP by this plugin
-(`tool_merge`, `tool_injectable`, `tool_search`, …) and §8 has what it is for.
+here, and a catalogue needs all four. **It is opened here and served by nobody**, which is §1.1's test applied: a
+store has one writer — this process — and one writer is what a SQLite lock
+already is. What the hub does with it is `slife2.toolhub.Catalogue`, a thin face
+over this, and §8.4 has the rest.
 
 **One file for the tool catalogue and one per agent for the turns**, which is
 not an inconsistency but the same rule read twice. `--agent` partitions what
@@ -937,11 +934,14 @@ a stale file is reported and rebuilt rather than migrated, exactly as a stale
 `turn` file is, and the loaded set is what the rebuild costs (a `tool_search`
 and a `func_tool_load` per tool, which is why it is a cost and not a loss).
 
-**`status` is the other column a boot rewrites, and the pass that does it is
-told every name the config carries.** A source the config no longer names is one
-nothing will ever speak for again, so its rows are marked `error` on the way up
-(`ToolStore.reset`); a source the config still names is one the hub is about to
-ask about, and whether it answers is the runtime's to say. So the set of names
+**A source the config no longer names has its rows deleted, and the pass that
+does it is told every name the config carries.** Marking it `error` was one step
+short of the conclusion — an `error` row is still found by a search, ranked by
+the semantic leg and counted by the budget — so `ToolStore.reset` calls
+`forget_source`: the rows and their vectors are gone, which is what makes
+"removed" mean removed rather than hidden until next time. A source the config
+still names is one the hub is about to ask about, and whether it answers is the
+runtime's to say. So the set of names
 that pass is handed is load-bearing — and it is not the plugins, which is the
 only list `Config.plugins()` gives. The entries under `tools:` and `rest-api:`,
 and the two document sources, are named in the config too. Handed the plugins
@@ -1366,16 +1366,14 @@ last offered, which is a row on disk, while `loaded` is what the model is
 the live set (`ToolStore.source_counts`) or a server that has stopped answering
 would be reported as one whose tools the model still has.
 
-**A listing also ages, and that is new.** The sentence above used to name a
-third trigger — the peer's `tools/list_changed` — and at 2026-07-28 that trigger
-stopped firing on its own: change notifications moved to `subscriptions/listen`,
-a stream the client must open, and against FastMCP 4.0.11 there is no way to open
-one (no such call on `Client`; a FastMCP *server* advertises
-`tools.listChanged: false` and answers listen with `Method not found`, so our own
-plugins never send one either). So `Connection` re-reads a listing that is older
-than `RELIST_AFTER_SECONDS` on the next ask, and the notification — where a
-legacy peer still sends one — is the fast path over that bound rather than the
-only path. **The age costs a round trip and never a tool**: a stale listing stays
+**A listing also ages, because the change notification no longer arrives.** At
+2026-07-28 change notifications moved to `subscriptions/listen` — a stream the
+client must open — and against FastMCP 4.0.11 there is no way to open one: no
+such call on `Client`, and a FastMCP *server* advertises `tools.listChanged:
+false` and answers listen with `Method not found`, so our own plugins never send
+one either. So `Connection` re-reads a listing older than `RELIST_AFTER_SECONDS`
+on the next ask, and the notification — where a legacy peer still sends one — is
+the fast path *over* that bound rather than the only path. **The age costs a round trip and never a tool**: a stale listing stays
 usable and stays in the model's list while it is replaced, and it is replaced
 inside the same ask that noticed, because `list_tools` already waits briefly for
 work it started.
@@ -1452,7 +1450,7 @@ the same MRR either way. The two inputs are one call apart, not one being the
 other's poor relation. What a *sentence* breaks is the keyword leg, which cannot
 `AND` six words into a row that holds three.
 
-**A keywords-only call reaches both legs anyway** (`local_tools.search`): given
+**A keywords-only call reaches both legs anyway** (`ToolStore.search`): given
 no sentences, the words are handed to the meaning leg as well. Measured through
 the real handler on the 253-tool catalogue, that is **34/36 against 23/36** for
 the keyword leg alone, and none of the 36 now returns nothing — where nine did.
@@ -1532,9 +1530,9 @@ answer uncountable.
 **Every row carries the same two fields, and neither is the order.** `meaning
 0.73` is the cosine, one measurement for every row on the page — including the
 rows the meaning leg never returned, which `ToolStore._meaning_of` reads out of
-the vectors the index already holds; a row the *words* found used to carry no
-number at all, so the row the caller named outright read as the weakest thing
-there. `matched your words` is the other half and is not a score: it is certain
+the vectors the index already holds.  Without that second read the rows the
+*caller's own words* found would carry no number at all, and the one row it named
+outright would read as the weakest thing on the page. `matched your words` is the other half and is not a score: it is certain
 where a cosine is graded, and it is the one piece of evidence no cutoff can
 express, because a row can be named exactly whatever it scores — `pandoc` scores
 0.514 against the row *named* `mcp-pandoc`, and a threshold alone would answer
@@ -1555,9 +1553,11 @@ same failure as an inverted score, reached from the other side — so the number
 had to become the order rather than sit beside it.
 Both rows are the hub's own, so they are found and loaded like anything
 else, and both are in the whitelist that is never evicted — which is the hub's
-own three plus `skill_use`, the one entry there that a plugin serves
-(`ALWAYS_LOADED`, and `_func_tool_unload` is the third of the hub's because the
-harness's trim is a pair under its name). A plugin's tools start loaded, because
+own three, plus `skill_use` and `_check_new_input`, the two entries there a
+*plugin* serves (`ALWAYS_LOADED`). `_check_new_input` is the one of the five the
+model never chooses: it is the name a message that arrives mid-turn is delivered
+under, so it is on the list because a tool pair has to name a tool the request
+declares — the same reason `_func_tool_unload` is. A plugin's tools start loaded, because
 a model that has quietly lost `turn_read` is the failure this section is built
 around; a server's do not
 unless its entry says `autoload: true`, which is the operator saying that this
@@ -1615,10 +1615,10 @@ which is what makes asking before every model call affordable.
 than a coincidence.** A hub that cannot read a plugin's tool list *refuses to
 list anything* — because a model that has quietly lost `turn_read` is a
 failure nobody can see, and a shorter tool list is exactly what that failure
-looks like. That rule is what the `required` flag used to carry, and it now
-carries the other half of the same fact: the only links this process holds are
-the ones it is allowed to be strict about, because everything else is behind a
-plugin that declares what it holds and can be reported without failing a turn.
+looks like. That rule is what `required` carries, and the other half of the same
+fact is that the only links this process holds are the ones it is allowed to be
+strict about — everything else is behind a plugin that declares what it holds and
+can be reported without failing a turn.
 Ours are the worked example of it being ordinary: a plugin's tools are declared
 rows like any source's, findable by search and countable, and nothing about them
 is special but the category they are filed under. And the one thing a declaration
@@ -1635,14 +1635,12 @@ second list is a list that goes stale the first time somebody adds a tool.
 ### 8.7 Editing the config
 
 **A model may edit the sections it can read, and what bounds that is the path an
-edit takes rather than who takes it.** This paragraph used to say the opposite —
-that v1's `mcp_set`/`mcp_remove` were deliberately not ported, because "a
-language model choosing [a program] is the same capability with a worse author" —
-and the reasoning is worth keeping rather than deleting, because most of it still
-holds. What holds: an entry under `tools:` names a program slife2 will *start*,
-so writing one is a capability, and the operator's file was the thing bounding
-it. What changed is the answer to "bounded by what". Not the author of the bytes,
-but the road they travel: every one of the tools writes through
+edit takes rather than who takes it.** The objection this answers is real and was
+made here first: an entry under `tools:` names a program slife2 will *start*, so
+writing one is a capability — "a language model choosing a program is the same
+capability with a worse author". What that argument gets wrong is "bounded by
+what". Not the author of the bytes, but the road they travel: every one of the
+tools writes through
 `slife2.configfile`, the single writer of `slife2.yaml`, which holds the file's
 cross-process lock across a read-modify-write, edits the *document* so the
 file's own explanation survives, and hands the result to `slife2.config.load` as
@@ -1659,20 +1657,29 @@ spawned — and the argument above does not make that safe, it makes it *legible
 it lands in the operator's file, in the section the section's comment explains,
 and a person reading it sees `command: npx …` in the place they would have
 written it. What the system does not have yet is a gate *before* the write, and
-that is §9's tool approval rather than this paragraph's problem — which is a
-change from when that bullet was written: the question used to be hypothetical,
-and the four families of management tools are what made it a real one. The five
-tools are v1's, per family, and they are the model's (`FOR_THE_MODEL`), because
-the alternative — an operator-only path — is a second way to write the same file
-and therefore a second thing to keep in step. **And where two families are one
-mechanism, so is their code.**  `mcp_set` takes a command and `rest_api_set` a
-spec, so those stay apart — the parameter list *is* the schema the model reads.
-The other four (`list`, `remove`, `set_enabled`, `list_tools`) have one control
-flow between the two families, and one set of sentences in which only the words
-change: a `FamilyWords` per section supplies `tools`/`rest-api`, `server`/`API`,
-`tool`/`operation`, and `slife2.toolfamily` writes the sentence once.  Two copies
+that is §9's tool approval rather than this paragraph's problem. The management
+tools are v1's, and they are the model's (`FOR_THE_MODEL`), because the
+alternative — an operator-only path — is a second way to write the same file and
+therefore a second thing to keep in step. **And where families are one mechanism,
+so is their code** — in two places, because there are two mechanisms.
+
+`tools:` and `rest-api:` hold connections, and `slife2.toolfamily`'s
+`build_family_server` is their server: `mcp_set` takes a command and
+`rest_api_set` a spec, so those stay apart — the parameter list *is* the schema
+the model reads — while the other four (`list`, `remove`, `set_enabled`,
+`list_tools`) have one control flow and one set of sentences in which only the
+words change.  A `FamilyWords` per section supplies `tools`/`rest-api`,
+`server`/`API`, `tool`/`operation`, and the sentence is written once.  Two copies
 of "is not in `…:` — `…_set` adds it" is two chances for a model to learn two
 vocabularies for one road.
+
+`skills:` and `cli:` hold documents and no connection, and
+`build_document_server` is their server: one `list_sources` built from a mirror of
+the section, and the mirror's two writes (`switched`, `forgotten`) shared, because
+those are the parts a second copy gets wrong silently.  Their tool *bodies* stay
+apart on the same argument as above — `cli_set` takes a command line and
+`skill_set` takes files — which is also why `management` is a callback rather
+than something the shared builder writes.
 
 **What a management tool does not do is write the catalogue, and the bill
 arrives later.** None of them touches `tools.db`: a management tool writes a
@@ -1759,193 +1766,110 @@ whose name is not declared is a request the backends refuse.
 
 ## 9. Deferred
 
-Named so they are decisions rather than oversights:
+Named so they are decisions rather than oversights. Each entry says what is
+missing, where it would go, and what the current answer costs — a bullet that
+cannot say all three is a wish rather than a decision.
 
-- **The listing tool, and the filters `tool_search` used to take.** §8 is the
-  argument for splitting them out; what is missing is the tool. "What is
-  installed" is a page of rows with no ranking — every tool, or one category, or
-  one server's, or the ones switched off — and it is what a model asks when it
-  wants to know what exists rather than find a thing. Nothing needs building on
-  the store's side: `ToolStore.search` still takes all five filters and still
-  browses on an empty query, which is where the tool will sit. **And `tool_search`
-  no longer points at it.** Its refusal used to end "ask for the list", which read
-  as an instruction to a model that then called `skill_use` with an invented name
-  and got "no skill called `__list__`" — a refusal naming a tool that does not
-  exist is a promise it cannot keep. When this bullet stops being deferred, the
-  sentence can name the tool and be true.
+- **The listing tool.** "What is installed" is a page of rows with no ranking —
+  every tool, one category, one server's, or the ones switched off — and it is
+  what a model asks when it wants to know what exists rather than find a thing.
+  `ToolStore.search` still takes all five filters and still browses on an empty
+  query, which is where the tool will sit. **`tool_search` does not point at it**
+  and must not until it exists: a refusal that ends "ask for the list" is a
+  promise this build cannot keep, and in the log of a real turn a model followed
+  it by calling `skill_use` with an invented name.
 - **Markdown rendering.** The transcript shows model output as plain text.
-- **Drawing a message that cut in.** §3 has the behaviour: a message that arrives
-  while a turn is running is handed to that turn as a tool pair, and it is then in
-  the record and in every request the model makes. Nothing *draws* it. That is the
-  current state rather than a defect — the live transcript is rendered from
-  `TurnEvent`s and an auto-invoked call emits none, and a rebuilt one drops every
-  `_`-prefixed call by name (`tui/restore.py:_is_harness`), which is right for the
-  trim and wrong for this one: its result is something a person said. Closing it
-  is three changes and the third is the real one — an event, an exception in that
-  filter, and a line that shows a user message **without closing the open turn**,
-  because `ChatView.add_user` sets `_turn_open = False` and reusing it would
-  silently drop the rest of the answer being streamed. Removing the filter alone
-  would draw it as a tool panel, which is the one thing it is not. Until then a
-  person's words can be in the record and off the screen, which is worth knowing
-  before a window is wired to deliver immediately.
-- **`thinking` deltas, and the display decision has since been made.** Both SDKs
-  expose them cheaply, and rendering a model's private reasoning as its *answer*
-  would be worse than not showing it — so the rule that landed is neither
-  "drop" nor "print": they cross as their own event kind (`ThinkingDelta`),
-  never merged into the text, and the transcript folds them away behind a
-  toggle. This bullet used to read "dropped until there is a display decision",
-  and the code moved past it.
-- **Delta coalescing.** One notification per token. The seam is
+- **Drawing a message that cut in.** §3 has the behaviour — a message that
+  arrives mid-turn is handed to that turn as a tool pair and is in the record
+  from then on — and nothing draws it. Closing it is three changes: an event, an
+  exception in `tui/restore.py:_is_harness`'s filter, and a line that shows a
+  user message **without closing the open turn** (`ChatView.add_user` sets
+  `_turn_open = False`, and reusing it would drop the rest of a streamed answer).
+  Removing the filter alone would draw somebody's words as a tool panel.
+- **Delta coalescing.** One progress notification per token. The seam is
   `ProgressObserver`.
-- **The trim, which is now a guard rather than the bound.** This bullet used to
-  read "history trimming, and now it is the server's problem" and it was the
-  first thing to do next; the *selection* landed instead (§5.1), which is v1's
-  default and makes the context bounded by construction — every turn is rebuilt
-  to fit the window before it runs, and a recall that would overfill it is cut by
-  the recall's own budget. What is missing is the mechanism *behind* that: at the
-  ceiling, after the turn is saved, drop the oldest complete turns down to the
-  floor and take their ids out of the live list. What it catches is the one thing
-  no selection can see in advance — a turn whose tool results balloon *while it
-  runs* — and what this plugin already owes it is the list and the write that
-  maintains it, which both exist. The `context.ceiling` and `context.floor`
-  fractions are read today; the pass that consumes them is not written.
+- **The pass behind the ceiling.** §5.1's *selection* makes the context bounded
+  by construction; what is missing is the mechanism behind it — at the ceiling,
+  after a turn is saved, drop the oldest complete turns down to the floor and
+  take their ids out of the live list. It catches the one thing no selection can
+  see in advance: a turn whose tool results balloon *while it runs*. The list and
+  the write that maintains it both exist, so this is the consumer.
 - **The real token count.** v1 counts with `tiktoken`'s `o200k_base` and
   provisions the vocabulary at install time. `slife2.tokens` is a script-aware
-  character measure instead, for the reason its docstring gives: this system's
-  endpoints are DeepSeek, Qwen, Ollama and whatever gateway the operator points
-  at, and `o200k_base` is not one of their vocabularies either — so the
-  dependency would buy exactness about a tokenizer nobody here is using. What it
-  costs is tolerance: the budget is a fraction of a window, so an estimate that
-  is 10% wrong spends 10% of a window sized for it. Measured usage is untouched
-  by this — `context_tokens` is the provider's own count, and it is what the
-  status bar and any future ceiling check read.
-- **`turn_search`, offered to the model.** `TurnStore.search` fuses a keyword leg
-  with a semantic one, and the *rebuild* reads it through `recall` — but a model
-  cannot: there is still no `turn_search` tool, on purpose. The order matters and
-  it is v1's: the two legs landed and were measured, then the harness started
-  using them, and offering them to a model is a third step that changes what a
-  prompt is made of. The scoring such a tool should expose (`similarity`, the
-  per-leg ranks, a snippet) is a question about the tool rather than about the
-  store, and the store's API is already the whole of what it would need.
-- **Bounds.** A loop caps its inbox (`MAX_QUEUED`), because a client's call
-  timeout starts when the call is made and an unbounded queue is therefore an
-  unbounded wait — and a wait longer than the timeout closes the stream and
-  cancels the turn, which is the very way a message gets lost. Nothing yet caps
-  how many loops exist.
-- **The tool that runs a `cli:` entry.** The entry is a row now (§8's
-  declaration), so a search finds the command by what it does — but nothing
-  executes one, and `func_tool_load` says so in as many words ("a command
-  already installed on this machine … nothing runs one yet"). Those entries are
-  `tools.yaml`'s other half served: what a call would do is the change, not the
-  row — and where it goes is now decided, because the family has a process:
-  `slife2-cli`, the plugin whose only job today is declaring the rows.
+  character measure instead, because this system's endpoints are DeepSeek, Qwen,
+  Ollama and whatever gateway the operator points at, and `o200k_base` is not one
+  of their vocabularies either — the dependency would buy exactness about a
+  tokenizer nobody here uses. What it costs is tolerance, and the budget is a
+  fraction of a window, so an estimate 10% wrong spends 10% of a window sized for
+  it. Measured usage is untouched: `context_tokens` is the provider's own count.
+- **`turn_search`, offered to the model.** `TurnStore.search` fuses two legs and
+  the *rebuild* reads it through `recall`; a model cannot, on purpose. The order
+  is v1's — the legs landed and were measured, then the harness used them, and
+  offering them to a model changes what a prompt is made of. The scoring such a
+  tool should expose (`similarity`, the per-leg ranks, a snippet) is a question
+  about the tool, and the store's API is already all of what it needs.
+- **A cap on how many loops exist.** The inbox is capped (`MAX_QUEUED`) because
+  a client's call timeout starts when the call is made, so an unbounded queue is
+  an unbounded wait — and a wait past the timeout closes the stream and cancels
+  the turn, which is the way a message actually gets lost. Nothing caps the
+  number of conversations.
+- **The tool that runs a `cli:` entry.** The entry is a row (§8.2), so a search
+  finds the command by what it does — and nothing executes one. The decision is
+  already made: an entry becomes **a tool the operator's own config gave the
+  model**, run as an argv rather than through a shell, so that arguments a model
+  invents cannot become commands it invented. `slife2-cli` is the process it
+  lands in. It is also what opens the approval question below.
 - **A word to the model about the loaded set.** `tool_search` and
   `func_tool_load` explain themselves in their own descriptions and nothing else
-  does. v1 also carried a per-turn prompt saying how many tools were loaded;
-  nobody has measured whether a model uses the mechanism without a nudge, and
-  until somebody has, the descriptions are the nudge.
-- **Recall, offered.** The store now decides relevance — `TurnStore.search`
-  fuses a keyword leg with a semantic one — but **nothing yet offers it to a
-  model**: there is no `turn_search` tool, on purpose, so the two legs could
-  land and be measured before a tool made them part of a prompt. The store's API
-  is the whole of what exists today; the tool is the next change, and the
-  scoring it should expose (`similarity`, the per-leg ranks, a snippet) is a
-  question about that tool rather than about this one.
-- **Selective re-embedding.** A model change re-embeds every turn. Per-turn
-  content hashing would let unchanged rows keep their vectors across a rules
-  change, which is the one place the current answer is slower than it needs to
-  be.
-- **`grep`.** v1 had a third search mode — a real regex over the text, run in
-  Python over a bounded scan, unranked — for the queries neither index can
-  describe: a partial spelling, a path, a symbol. It is not here, and it is the
-  mode v1's notes say the model reached for most often.
-- **Tool approval, and the trigger is no longer hypothetical.** This cut was
-  deferrable while slife2's own tools were side-effect-free — and then the four
-  families of management tools landed (§8), which are the tools
-  this design was deferring the question for: `skill_set` writes files a model
-  chose the paths of, `mcp_set` writes a `command:` that slife2 will start, and
-  neither asks anybody first. What §8 argues there is that the write is
-  *legible* — one writer, the loader as judge, the result in the file a person
-  reads — and legible is not the same as gated, so the gap this bullet names is
-  now open rather than closed by construction. v1 answered it with a
+  does. v1 carried a per-turn prompt saying how many tools were loaded; nobody
+  has measured whether a model uses the mechanism without a nudge, and until
+  somebody has, the descriptions are the nudge.
+- **Selective re-embedding.** A model change re-embeds every turn and every
+  tool. Per-row content hashing would let unchanged rows keep their vectors
+  across a rules change, which is the one place the current answer is slower than
+  it has to be.
+- **`grep`.** v1 had a third search mode — a real regex over the text, bounded,
+  unranked — for the queries neither index can describe: a partial spelling, a
+  path, a symbol. v1's notes say the model reached for it most often.
+- **Tool approval.** Deferrable while slife2's own tools were side-effect-free,
+  and then the management tools landed: `skill_set` writes files whose paths a
+  model chose, `mcp_set` writes a `command:` that slife2 will start, and neither
+  asks anybody first. §8 argues the write is *legible* — one writer, the loader
+  as judge, the result in a file a person reads — and legible is not gated, so
+  the gap is open rather than closed by construction. v1 answered with a
   model-driven `_approve` parameter, which is the shape to be suspicious of: the
-  model being asked is the model asking. §8 still says where the answer goes —
-  the hub is the one place that knows the whole set and the only one that could
-  hold a per-tool policy without the agent learning what a tool server is — and
-  what that answer has to cover is now a named list of tool names rather than a
-  category.
-- **Skills, and the CLI registry.** v1 had two families that were never quite
-  tools, and each is now a plugin of its own (§8). A **skill** is a playbook: a
-  directory with a
-  `SKILL.md` that the model reads on demand (`skill_list` → `skill_use`) instead
-  of calling, which is progressive disclosure and worked. The **`cli:` section**
-  is a registry of programs already on the machine — `yt-dlp`, a browser
-  harness — that v1 recorded in `tools.yaml` and then ran with `execute_shell`,
-  a third family that was never ported either. **The reading half has landed**:
-  `cli:` in `slife2.yaml`, parsed and refused when an entry names no command;
-  `<data>/skills/` becoming the folder a skill is installed by dropping in; and
-  `skill_use`, which `slife2-skills` serves (§8) and which reads one playbook by
-  name — its header for the name and the description, and its whole body after
-  one line saying what the paths in it are relative to. With it, the credential
-  half: a skill declares in its own header what it needs (`requires.env`,
-  `requires.bins` — the block these skills already carry for other hosts, read
-  out of whichever namespace it is filed under), `skills:` in `slife2.yaml` says
-  where the value comes from, and `skill_use` reports the difference before the
-  model acts on instructions that would fail. **And the writing half has landed
-  too**, which reverses what this bullet used to say ("Nothing writes, and that
-  is not an oversight"): `skill_set`, `skill_remove` and `cli_set` are back, one
-  set per family, on §8's argument — an edit by a model is an edit through the
-  same writer, the same parsers and the same refusals, and what a person gets in
-  exchange is a file that says what happened. A skill is *still* installed by
-  putting a directory in a folder; the tool is what writes the directory, and
-  the only paths it accepts are ones that resolve inside that skill's own
-  (`slife2.skills._within`), because a playbook is written by a model and one of
-  its `path` values becomes a path on the operator's machine — the same boundary
-  §8 draws, in the one family where the model names a file rather than a field.
-  What is left of the *reading* family is one tool per `cli:` entry, and that is
-  the family's real decision, already made: an entry becomes **a tool the
-  operator's own config gave the model**, run as an argv rather than through a
-  shell so that the arguments a model invents cannot become commands it
-  invented. It is also what opens the approval question above — `yt-dlp` writes
-  files — and §8 already says where that answer goes.
-- **A measurement of the tool budget.** This bullet used to name a missing
-  feature — everything enabled in `tools:` in every model call's list, with
-  `enabled: false` as the only lever. On-demand loading landed (§8, and the
-  README's own section): `tool_search`, `func_tool_load`, `tool_load.threshold`,
-  `autoload: true`. What is left is a measurement rather than a gap: nobody has
-  watched a real twenty-server config against the budget, and the threshold of
-  100 is still v1's number.
+  model being asked is the model asking. §8.7 still says where the answer goes —
+  the hub, the one place that knows the whole set — and what it has to cover is a
+  named list of tool names rather than a category.
+- **A measurement of the tool budget.** On-demand loading landed (§8.4, §8.5).
+  What is left is not a gap but a number: nobody has watched a real twenty-server
+  config against `tool_load.threshold`, and 100 is still v1's.
 - **Device-code OAuth for tool servers.** v1's gateway ran the whole RFC 8628
   flow, kept tokens in the OS keyring through `credstore`, and held the token
   beside the configured headers so a re-auth did not churn them. Not ported:
   `${VAR}` headers cover a token somebody already has, and FastMCP's own `auth:`
-  key passes through to the SDK's browser flow for the rest. The gap is the
-  headless case, where the browser flow has no browser.
+  key reaches the SDK's browser flow for the rest — except headless, where the
+  browser flow has no browser.
 - **Digesting an oversized tool result.** A tool can return more text than the
-  conversation can hold, and nothing here bounds it. The store already has the
-  pattern for the turn record — an oversized result becomes an announced
-  head-and-tail digest — and the same rule belongs on the way *into* the model,
-  not only on the way into the record.
-- **Subagents.** One seam of the two this paragraph used to claim is actually
-  in: `Loop.records` exists (`slife2.server.server.Loop`), so a worker's round
-  trips are the ones not written to the log, and `send_message` already takes a
-  `subagent` — a worker's conversation is a separate key with its own history,
-  its own inbox and its own lock, in the same process. **`Loop.children` does
-  not exist**, and neither does anything that hangs a worker off its parent, so
-  a worker id *is* addressable from outside today: any caller may name any
-  `(agent, subagent)`. That is the first thing a spawn tool has to decide, and
-  it is the reason this bullet is a shape and not a seam list. What is not
-  decided beyond it: how a spawn tool collects results, whether a worker can be
-  multi-turn, how deep nesting may go, and whether cancelling a parent cancels
-  its children.
+  conversation can hold and nothing bounds it. The store already has the pattern
+  for the *record* — an oversized result becomes an announced head-and-tail
+  digest — and the same rule belongs on the way into the model.
+- **Subagents.** `Loop.records` exists, so a worker's round trips are the ones
+  not written to the log, and `send_message` takes a `subagent`: a worker's
+  conversation is a separate key with its own history, inbox and lock, in the
+  same process. **What does not exist is anything that hangs a worker off its
+  parent**, so a worker id is addressable from outside — any caller may name any
+  `(agent, subagent)`. A spawn tool has to decide that first, and then how it
+  collects results, whether a worker is multi-turn, how deep nesting goes, and
+  whether cancelling a parent cancels its children.
 - **Server-initiated push.** Not available at this revision through FastMCP:
   `subscriptions/listen` is the only push channel, it carries four
-  change-notification types, and FastMCP 4.0.11 registers no handler for it at
-  all. So an answer can only ride the request that asked for it — which is why a
-  queued caller waits on its own call rather than being told later.
+  change-notification types, and FastMCP 4.0.11 registers no handler for it. So
+  an answer rides the request that asked for it, which is why a queued caller
+  waits on its own call rather than being told later.
 - **A client id on the turn record.** Nothing reads it yet, and adding a column
-  to `turn` means deleting every existing `*.turn.db` (there is no migration
-  layer, §5). The failure mode of getting it wrong is worse than the gap: the
-  new INSERT would raise `OperationalError`, the store would report it
-  as one caller's bad data, and every turn after the upgrade would run perfectly
-  and never be recorded. Add it with the reader that needs it.
+  to `turn` means deleting every existing `turns.db` (§5 has no migration layer).
+  Getting it wrong is worse than the gap: the new INSERT would raise
+  `OperationalError`, the store would report it as one caller's bad data, and
+  every turn after the upgrade would run perfectly and never be recorded. Add it
+  with the reader that needs it.
