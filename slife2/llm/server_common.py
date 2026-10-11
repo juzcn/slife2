@@ -30,7 +30,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from slife2.config import ProviderSettings, find_config_path, load
+from slife2.config import Config, ProviderSettings, find_config_path, load, load_cached
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
 from slife2.mcp_server import (
@@ -270,6 +270,48 @@ class ProviderClients:
         return client
 
 
+class LiveProviders:
+    """The providers of one wire protocol, re-read when the config changes.
+
+    **A backend process holds its provider table for its whole life otherwise**,
+    and a model config edit would never reach it: `stream_chat` names a provider
+    and a model, and this is the table those names are looked up in.  So the
+    table follows the file — `load_cached` hands back the *same* `Config` object
+    while the file is untouched and a new one when it is not, which makes "did
+    an edit happen" one `is` comparison and needs no watcher.
+
+    **The whole pool is rebuilt on a change, and that is what drops the cached
+    SDK clients with it** — necessary, because a provider whose `base_url` or key
+    changed needs a client built from the new values, and cheap, because a client
+    nobody has called for has not been built yet.
+    """
+
+    def __init__(
+        self,
+        api: str,
+        server_name: str,
+        make_client: Callable[[ProviderSettings, str], Any],
+    ) -> None:
+        self._api = api
+        self._server = server_name
+        self._make_client = make_client
+        self._config: Config | None = None
+        self._clients: ProviderClients | None = None
+
+    def clients(self) -> ProviderClients:
+        """The pool for the config as it is now, rebuilt if it has changed."""
+        config = load_cached()
+        if self._clients is None or config is not self._config:
+            providers = {
+                name: provider
+                for name, provider in config.providers.items()
+                if provider.api == self._api
+            }
+            self._clients = ProviderClients(providers, self._server, self._make_client)
+            self._config = config
+        return self._clients
+
+
 def unresolved_key(server_name: str, name: str, provider: Any) -> str:
     """The provider's key, or the error naming the reference that did not resolve.
 
@@ -352,7 +394,7 @@ def serve_backend(
     *,
     api: str,
     server_name: str,
-    build: Callable[[dict[str, ProviderSettings]], FastMCP],
+    build: Callable[[], FastMCP],
     logger: logging.Logger,
 ) -> int:
     """The `main` every model server shares.
@@ -362,6 +404,12 @@ def serve_backend(
     the streamer.  Everything else here was byte-identical in the first two,
     which is the kind of duplication that drifts one branch at a time — and a
     third copy would have made it three.
+
+    **`build` takes nothing**: the server it returns reads the providers itself,
+    through `LiveProviders`, so a model added while this process is running
+    arrives without a restart.  What is read *here* is only the boot question —
+    whether this config has a provider for this protocol at all — and the
+    address.
 
     A config with no provider for this protocol stops here, with a one-line
     message and exit code 2, rather than starting a server that can answer
@@ -394,5 +442,5 @@ def serve_backend(
         address.path,
         ", ".join(sorted(providers)),
     )
-    serve(build(providers), address, args, name=server_name, config_path=config_path)
+    serve(build(), address, args, name=server_name, config_path=config_path)
     return 0

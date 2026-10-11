@@ -238,7 +238,10 @@ loaded, which is the section after the config:
 ```yaml
 # Every section below is written by hand *and* by the model: each family serves
 # the tools that edit its own (`mcp_set`, `rest_api_set`, `cli_set`, `skill_set`
-# with `remove` / `list` / `set_enabled` beside them, v1's names).  Either way
+# with `remove` / `list` / `set_enabled` beside them, v1's names).  `providers:`
+# and `default:` at the bottom are edited the same way by `model_set` /
+# `model_remove` / `model_switch`, which live on the agent server rather than on
+# a family plugin of their own (DESIGN.md §8).  Either way
 # the write goes through `slife2/configfile` — one writer, the file's comments
 # kept, and the loader that reads this file at every start as the judge.
 
@@ -305,7 +308,12 @@ skill that declares `requires.env` needs one process that knows the answer.
 paragraph for.** Each of the four families serves its own management tools —
 `mcp_set` / `rest_api_set` / `cli_set` / `skill_set`, with `remove`, `list` and
 `set_enabled` beside them, v1's names — so "written *here*, in the operator's
-file" is no longer the same as "written by the operator". A `set` writes the
+file" is no longer the same as "written by the operator". **A fifth editor is
+the model config itself**: `model_list` / `model_set` / `model_remove` /
+`model_switch` over `providers:` and the top-level `default:`, served by
+`slife2-agent` rather than by a family plugin — the agent server is what turns a
+provider and a model into a conversation's model, so the edit and the read that
+honours it are one process (DESIGN.md §8). A `set` writes the
 *whole* entry rather than patching it: a field left out is dropped, and
 `set_enabled` is the one that changes a single field and leaves the rest. What
 is unchanged is
@@ -333,7 +341,7 @@ between them — which the catalogue refuses loudly rather than resolving.
 exist.** The list is re-read from the hub before *every model call*, and what
 starts in it is slife2's own: `tool_search`, `func_tool_load`,
 `_func_tool_unload`, `skill_use`, the two history tools, and the
-eighteen tools that edit the four config sections — that last group is why the
+twenty-two tools that edit the five config sections — that last group is why the
 list is noticeably longer than it was, and it is the one group whose being
 always-loaded is worth a second look. Everything else is loaded on demand — a
 server with ninety tools costs nothing until one of them is wanted.
@@ -539,7 +547,9 @@ slife2/
 │                     #   no category, no config
 ├─ configfile.py      # the one writer of slife2.yaml: a section edit under a
 │                     #   cross-process lock, as a document edit that keeps the
-│                     #   file's comments, judged by the loader that reads it
+│                     #   file's comments, judged by the loader that reads it —
+│                     #   and the top-level-scalar and locked read-modify-write
+│                     #   writers the model config needs
 ├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
 │                     #   is shared: hold, declare, route a call back, and the
 │                     #   management tools' sentences, which one `FamilyWords`
@@ -594,8 +604,9 @@ slife2/
 │  ├─ openai_server.py           # slife2-llm-openai            <- imports openai
 │  ├─ openai_responses_server.py # slife2-llm-openai-responses  <- imports openai
 │  └─ anthropic_server.py        # slife2-llm-anthropic         <- imports anthropic
-├─ server/server.py   # slife2-agent: FastMCP, the conversations and their two
-│                     #   tools, keyed by (agent, subagent)
+├─ server/server.py   # slife2-agent: FastMCP, the conversations and the tools
+│                     #   that drive them, keyed by (agent, subagent) — plus the
+│                     #   `model_*` tools, which own `providers:` and `default:`
 ├─ templates/
 │  ├─ system.j2       # the system prompt the distribution ships
 │  └─ recall.j2       # the recall instruction, rendered per turn

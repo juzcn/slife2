@@ -40,7 +40,7 @@ from fakes import (
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2.config import DEFAULT_AGENT, default_config
+from slife2.config import DEFAULT_AGENT, ModelSettings, default_config
 from slife2.context import TURN_PREFIX, TURN_SUFFIX
 from slife2.events import TurnEvent, decode
 from slife2.llm.base import Chunk, Stream
@@ -228,7 +228,7 @@ def prompts_seen(backend: FakeBackend, call: int = 0) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_server_exposes_its_own_four_tools(context, hub) -> None:
+async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     """There is no `open_loop` because there is nothing to open.
 
     An id a server mints is an id a caller has to keep, and keeping it is where
@@ -236,11 +236,16 @@ async def test_the_server_exposes_its_own_four_tools(context, hub) -> None:
     message that names it, so sending *is* opening — and what is left is one verb
     and one way to start over.
 
-    The fourth is not a verb a caller has any use for: `_check_new_input` is the
-    name a message that arrives mid-turn is delivered under, and it is declared
-    here because the *pair* the harness writes into the conversation has to name
-    a tool the request carries.  It is listed with the rest because a server's
-    tool list is what it serves, not what it recommends.
+    `_check_new_input` is not a verb a caller has any use for: it is the name a
+    message that arrives mid-turn is delivered under, and it is declared here
+    because the *pair* the harness writes into the conversation has to name a
+    tool the request carries.
+
+    **And the four `model_*` tools are this server's for the same reason they
+    are marked for the model**: `default:` and `providers:` are what this
+    process turns a conversation's model into, so the edit and the read that
+    honours it are one process.  They are listed with the rest because a
+    server's tool list is what it serves, not what it recommends.
     """
     async with Client(
         build_server(
@@ -250,10 +255,63 @@ async def test_the_server_exposes_its_own_four_tools(context, hub) -> None:
         tools = await client.list_tools()
     assert [t.name for t in tools] == [
         "_check_new_input",
+        "model_list",
+        "model_set",
+        "model_remove",
+        "model_switch",
         "send_message",
         "transcript",
         "reset",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_new_conversation_is_built_from_the_config_as_it_is_now(
+    context, hub
+) -> None:
+    """**The live half of the model config**: a conversation reads the config.
+
+    `main` passes `load_cached`, so an edit — by the `model_*` tools or by hand —
+    reaches the *next* conversation with no restart, while one already running
+    keeps the model it started on.  The source is a seam here, so the test needs
+    no file on disk: it answers one config and then another.
+    """
+    base = config()
+    provider = base.providers["deepseek"]
+    other = replace(
+        base,
+        providers={
+            **base.providers,
+            "deepseek": replace(
+                provider,
+                models={**provider.models, "other": ModelSettings(model="other")},
+            ),
+        },
+        default="deepseek/other",
+    )
+    reads: list[int] = []
+
+    def source():
+        reads.append(1)
+        return base if len(reads) == 1 else other
+
+    server = build_server(
+        base,
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("one"), text_turn("two"), text_turn("three")),
+        source=source,
+    )
+
+    first = await send(server, "hello")
+    again = await send(server, "again")
+    assert first.data["model"] == "deepseek/deepseek-flash"
+    assert again.data["model"] == "deepseek/deepseek-flash", "it keeps its model"
+    assert len(reads) == 1, "read once, when the conversation started — not per turn"
+
+    elsewhere = await send(server, "hello", agent="elsewhere")
+    assert elsewhere.data["model"] == "deepseek/other", "the next one reads again"
+    assert len(reads) == 2
 
 
 @pytest.mark.asyncio

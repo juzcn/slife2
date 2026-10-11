@@ -236,6 +236,30 @@ class Outcome:
         return self.status in (Status.RUNNING, Status.UNMANAGED, Status.STARTED)
 
 
+def spec_for_api(config: Config, api: str) -> ServerSpec:
+    """The one model server that serves *api*, in the launcher's own terms.
+
+    `specs` builds the whole list and this is one row of it, so a caller that
+    needs a single backend — the model config tools, which start one when a
+    provider is added for a protocol nothing is serving — builds the same spec
+    the launcher would rather than a second spelling of it.
+
+    `config.server(api)` answers even for an api the file's `servers:` block
+    does not name: the addresses start from the built-in defaults, so every
+    protocol has one whether or not anybody wrote it down.
+    """
+    address = config.server(api)
+    return ServerSpec(
+        name=f"{BACKEND_PREFIX}{api}",
+        module=API_BACKENDS[api],
+        url=address.url,
+        host=address.host,
+        port=address.port,
+        expected_name=API_SERVER_NAMES[api],
+        expected_tool=MODEL_TOOL,
+    )
+
+
 def specs(config: Config) -> list[ServerSpec]:
     """The servers this config needs, in the order they must be started.
 
@@ -255,18 +279,7 @@ def specs(config: Config) -> list[ServerSpec]:
     """
     result: list[ServerSpec] = []
     for api in config.apis_in_use():
-        address = config.server(api)
-        result.append(
-            ServerSpec(
-                name=f"{BACKEND_PREFIX}{api}",
-                module=API_BACKENDS[api],
-                url=address.url,
-                host=address.host,
-                port=address.port,
-                expected_name=API_SERVER_NAMES[api],
-                expected_tool=MODEL_TOOL,
-            )
-        )
+        result.append(spec_for_api(config, api))
 
     for name in LOCAL_SERVERS:
         module, server_name, tool = SERVER_MODULES[name]

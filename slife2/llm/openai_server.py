@@ -31,7 +31,7 @@ from typing import Any
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
-    ProviderClients,
+    LiveProviders,
     build_llm_server,
     serve_backend,
 )
@@ -256,11 +256,11 @@ def _usage(raw: Any) -> Usage | None:
     )
 
 
-def _make_streamer(
-    providers: dict[str, ProviderSettings], *, stream_usage: bool = True
-) -> Streamer:
+def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     """The adapter for one process — every provider that speaks this wire.
 
+    **It reads the config on every call**, through `LiveProviders`, so a
+    provider added while this process is up is reachable without a restart.
     The SDK client is created on first use, not here: the API key is resolved at
     that moment, so a server that never receives a call never opens the OS
     keyring, and constructing a client outside a running event loop is not
@@ -278,7 +278,7 @@ def _make_streamer(
 
         return AsyncOpenAI(base_url=provider.base_url, api_key=key)
 
-    clients = ProviderClients(providers, SERVER_NAME, sdk_client)
+    pool = LiveProviders(API, SERVER_NAME, sdk_client)
 
     async def stream(
         provider: str,
@@ -286,6 +286,7 @@ def _make_streamer(
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
+        clients = pool.clients()
         settings = clients.provider(provider).model(model)
         request = build_request(messages, tools, settings, stream_usage=stream_usage)
         response = await clients.client(provider).chat.completions.create(**request)
@@ -296,26 +297,14 @@ def _make_streamer(
     return stream
 
 
-def build_streamer_for(
-    providers: dict[str, ProviderSettings], *, stream_usage: bool = True
-) -> Streamer:
-    """The adapter for every provider this process serves."""
-    return _make_streamer(providers, stream_usage=stream_usage)
-
-
-def build_server(
-    providers: dict[str, ProviderSettings],
-    *,
-    streamer: Streamer | None = None,
-    stream_usage: bool = True,
-):
+def build_server(*, streamer: Streamer | None = None, stream_usage: bool = True):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_llm_server(
         name=SERVER_NAME,
         streamer=(
             streamer
             if streamer is not None
-            else build_streamer_for(providers, stream_usage=stream_usage)
+            else _make_streamer(stream_usage=stream_usage)
         ),
     )
 

@@ -49,7 +49,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
 
-from slife2.config import ConfigError, find_config_path, load
+from slife2.config import Config, ConfigError, find_config_path, load
 from slife2.runtime import config_key, exclusive
 
 logger = logging.getLogger(__name__)
@@ -221,12 +221,23 @@ def _section(
     return current
 
 
-def _edit(path: Path, mutate: Callable[[CommentedMap], None]) -> None:
+def _edit(
+    path: Path,
+    mutate: Callable[[CommentedMap], None],
+    check: Callable[[Config], None] | None = None,
+) -> None:
     """One locked, validated read-modify-write of the config file.
 
     Everything that writes goes through here, so the four properties a config
     edit needs — held across processes, comment-preserving, atomic, and refused
     by the loader if it produced nonsense — are stated once.
+
+    `check` is the caller's own judge, run on the parsed config *inside the
+    lock* and before the write counts.  `load` alone accepts things that are
+    only wrong in the light of a section's meaning — a `default:` naming no
+    model is a valid string — so a caller that knows its value passes a
+    predicate here, and it must raise `ConfigError` to refuse, which rolls the
+    file back exactly as the loader's own refusal does.
     """
     with exclusive(config_key(path), timeout=WRITE_TIMEOUT_SECONDS):
         existed = path.exists()
@@ -244,7 +255,9 @@ def _edit(path: Path, mutate: Callable[[CommentedMap], None]) -> None:
         try:
             # The reader is the judge: an entry this refuses is one the next
             # `slife2` would fail to start on, so it must not be left on disk.
-            load(path)
+            config = load(path)
+            if check is not None:
+                check(config)
         except ConfigError as exc:
             if existed:
                 _swap(path, before)
@@ -397,3 +410,97 @@ def set_enabled(
         "config_set_enabled section=%s name=%s enabled=%s", section, name, enabled
     )
     return found
+
+
+def update_entry(
+    section: str,
+    name: str,
+    change: Callable[[dict[str, Any]], Mapping[str, Any] | None],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Read-modify-write one entry, inside the file's lock.
+
+    **Why this exists beside `upsert`.**  A `providers:` entry holds a *list* of
+    models, and `upsert` writes exactly what it is handed — so "write the new
+    model" would delete every sibling.  Reading the entry and calling `upsert`
+    would be a read-modify-write with the lock only on the write, which is the
+    interleave the kernel lock exists to prevent and whose cost is silent: two
+    callers add a model to one provider, one model is gone.
+
+    `change` is handed the entry **as the file has it** — a plain dict, `{}` when
+    the name is not there yet — and answers the mapping to write, or `None` to
+    delete the entry (an emptied section is left as `section: {}` with its
+    comment, the same as `remove`).  Returns whether the entry existed before.
+    """
+    target = path or config_path()
+    existed = False
+
+    def mutate(document: CommentedMap) -> None:
+        nonlocal existed
+        values = _section(document, section)
+        if values is None:  # unreachable while `create=True`; kept honest
+            return
+        existed = name in values
+        raw = values.get(name)
+        current = dict(raw) if isinstance(raw, dict) else {}
+        result = change(current)
+        if result is None:
+            values.pop(name, None)
+            if not values:
+                _empty_section(document, section)
+        else:
+            values[name] = CommentedMap(_without_empties(result))
+
+    _edit(target, mutate)
+    logger.info("config_update section=%s name=%s existed=%s", section, name, existed)
+    return existed
+
+
+def set_scalar(
+    name: str,
+    value: Any,
+    *,
+    check: Callable[[Config], None] | None = None,
+    path: Path | None = None,
+) -> None:
+    """Write a top-level scalar — `name: value` — replacing what is there.
+
+    **The one thing a section writer cannot do.**  `upsert` and the rest edit
+    `section → name → mapping`, and `default:` is neither a section nor a
+    mapping: it is the `provider/model` the agent starts a conversation on.  So
+    this is the narrow writer for a top-level scalar, and the document edit is
+    one assignment, which is what keeps every comment around it.
+
+    `check` is the judge for a value `load` alone would accept — `default:` is a
+    plain string to the loader and a reference only to `Config.resolve`, so a
+    caller that knows its value passes `lambda c: c.resolve(ref)` and an edit
+    naming no model is rolled back rather than left for the next conversation to
+    trip over.
+    """
+    target = path or config_path()
+
+    def mutate(document: CommentedMap) -> None:
+        document[name] = value
+
+    _edit(target, mutate, check=check)
+    logger.info("config_set_scalar name=%s", name)
+
+
+def read_scalar(name: str, *, default: str = "", path: Path | None = None) -> str:
+    """A top-level scalar as the file has it, or *default* when it is absent.
+
+    A read like `read_section`, and safe for the same reason: nothing here is
+    resolved, and the one scalar anybody reads — `default:` — is a model
+    reference rather than a secret.
+    """
+    target = path or config_path()
+    text = target.read_text(encoding="utf-8")
+    try:
+        document = YAML(typ="safe").load(text) or {}
+    except YAMLError as exc:
+        raise ConfigError(f"{target} is not YAML: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ConfigError(f"{target} is not a mapping, so it has no sections")
+    value = document.get(name)
+    return default if value is None else str(value)

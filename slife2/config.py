@@ -957,6 +957,41 @@ def load(explicit: str | Path | None = None) -> Config:
     return _build(raw, config_dir=path.parent)
 
 
+#: The last file read, and what it looked like: `(path, (mtime_ns, size), config)`.
+#: One slot, because there is one config file and one process per reader.
+_latest: tuple[Path, tuple[int, int], Config] | None = None
+
+
+def load_cached(explicit: str | Path | None = None) -> Config:
+    """`load`, re-reading the file only when it changed since the last call.
+
+    **Identity is the staleness test, and that is the whole point.**  While the
+    file is untouched this hands back the *same* `Config` object, so a reader
+    asks "did an edit happen" with one `is` comparison — no watcher, no version
+    counter, no lock.  `slife2.configfile` swaps the file atomically and never
+    writes identical bytes, so both `st_mtime_ns` and `st_size` move on a real
+    edit and neither does on a no-op; a local edit by hand is picked up the same
+    way, which is the point of caching on the file rather than on a call.
+
+    A stat on the common path and a parse only when something changed.  A
+    missing file is the built-in defaults, exactly as in `load`.
+    """
+    global _latest
+    path = find_config_path(explicit)
+    if path is None or not path.is_file():
+        return load(explicit)
+    try:
+        stat = path.stat()
+    except OSError:
+        return load(explicit)
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    if _latest is not None and _latest[0] == path and _latest[1] == stamp:
+        return _latest[2]
+    config = load(path)
+    _latest = (path, stamp, config)
+    return config
+
+
 def _mapping(raw: Any, where: str) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -1562,5 +1597,6 @@ __all__ = [
     "default_config",
     "find_config_path",
     "load",
+    "load_cached",
     "resolve_secret",
 ]

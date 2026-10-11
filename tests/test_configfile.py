@@ -12,7 +12,15 @@ from __future__ import annotations
 import pytest
 
 from slife2.config import ConfigError, load
-from slife2.configfile import config_path, remove, set_enabled, upsert
+from slife2.configfile import (
+    config_path,
+    read_scalar,
+    remove,
+    set_enabled,
+    set_scalar,
+    update_entry,
+    upsert,
+)
 from slife2.paths import DATA_ENV_VAR
 
 #: A config with everything an edit must not disturb: comments above, beside and
@@ -320,3 +328,77 @@ def test_the_path_is_the_one_the_loader_reads(
     write(isolated_runtime)
 
     assert config_path() == isolated_runtime / "slife2.yaml"
+
+
+# --- the top-level scalar, and the locked update -----------------------------
+
+
+def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
+    """`default:` is not a section, so it needs a writer of its own.
+
+    And `load` accepts any string there — only `Config.resolve` knows a
+    reference from a typo — which is why the caller passes its own judge and a
+    write naming no model is rolled back like any other the reader refuses.
+    """
+    path = write(tmp_path)
+
+    set_scalar("default", "local/big", path=path)
+    assert read_scalar("default", path=path) == "local/big"
+    assert load(path).default == "local/big"
+    # Everything the one assignment had nothing to do with is untouched.
+    assert "# slife2.yaml — the explanation lives here" in path.read_text(
+        encoding="utf-8"
+    )
+
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ConfigError):
+        set_scalar(
+            "default",
+            "nobody/knows",
+            check=lambda config: config.resolve("nobody/knows"),
+            path=path,
+        )
+    assert path.read_text(encoding="utf-8") == before, "rolled back"
+
+
+def test_a_scalar_that_is_not_there_reads_as_the_default(tmp_path) -> None:
+    path = write(tmp_path)
+    assert read_scalar("nobody-wrote-this", default="?", path=path) == "?"
+
+
+def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
+    """**The whole point of `update_entry`.**  A list is read *and* written.
+
+    `upsert` writes exactly what it is handed, so a caller that read an entry's
+    list and wrote it back through `upsert` would be a read-modify-write with
+    the lock only on the write — and the cost of the interleave is silent: two
+    callers add one item to one entry, and one of them is gone.
+    """
+    path = write(tmp_path)
+
+    def add(current: dict) -> dict:
+        seen = [one for one in current.get("args", []) if isinstance(one, str)]
+        return {**current, "args": [*seen, "extra"]}
+
+    assert update_entry("tools", "slow-one", add, path=path) is True
+
+    entry = load(path).tools["slow-one"]
+    assert entry.args == ("-y", "some-server", "extra")
+    assert entry.command == "npx", "the caller only touched `args`"
+    assert entry.enabled is False, "and only the list moved"
+
+
+def test_an_update_that_answers_none_deletes_the_entry(tmp_path) -> None:
+    path = write(tmp_path)
+
+    assert update_entry("tools", "slow-one", lambda current: None, path=path) is True
+    assert "slow-one" not in load(path).tools
+    assert "chinese" in load(path).tools, "its neighbours stay"
+
+
+def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
+    path = write(tmp_path)
+    assert (
+        update_entry("tools", "ghost", lambda current: {"url": "u"}, path=path) is False
+    )
+    assert load(path).tools["ghost"].url == "u"

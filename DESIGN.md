@@ -944,6 +944,16 @@ not a tool that is dangerous — and the rule that keeps the two apart is that a
 declaration may not use the category `plugin`, which means *the servers slife2
 starts*, the one the gate decides about.
 
+**And the agent server's own tools are where the model config lives, which is
+worth saying because it is not a family plugin.** `_check_new_input` is declared
+here already, for the reason its own docstring gives; the four `model_*` tools
+are the newer case. `providers:` and the top-level `default:` are what this
+server turns a conversation's model into — it resolves the reference, picks the
+backend for the protocol, and reads the model's own settings — so the tools that
+edit them belong to that process rather than to one of their own: the edit and
+the read that honours it are one process, which is what makes a switch live with
+no reload protocol between two of them. See §8.7.
+
 **Which makes a source something a plugin owns rather than something the hub
 holds.** A source — `arxiv`, `skills`, `cli` — is a name, a category, its rows,
 and two facts about it: whether the operator switched it off and whether it is
@@ -1505,6 +1515,35 @@ to `command` possible at all — a merge would keep the stale `url` and the load
 would then refuse the entry for naming two transports. Changing one field and
 leaving the rest is a different operation and the one that has to read the entry
 first, which is `set_enabled`.
+
+**Two writers joined the three for the model config, and one of them is a
+different shape.** `update_entry` is a read-modify-write of one entry *inside*
+the lock, because a `providers:` entry holds a *list* of models and `upsert`
+writes exactly what it is handed: writing the new model through it would delete
+its siblings, and reading then upserting would be a read-modify-write with the
+lock only on the write — the interleave the lock exists to prevent, whose cost
+is silent. `set_scalar` writes the top-level `default:`, which is not a section
+and so has no writer among the others. Both take a `check`, the caller's own
+judge, because `load` accepts a `default:` naming no model and only
+`Config.resolve` knows a reference from a typo. `configfile` stays schema-blind:
+the predicate is the caller's, and a refusal rolls the file back exactly as the
+loader's own does.
+
+**And the model config is live, which the other sections never had to be.** A
+family's edit is live because the process that changes it is the process that
+holds the connection. `providers:` has no such process: it is read by *two
+others* — the agent server, which resolves a reference, and each LLM backend,
+which holds the endpoint and the key — so the config became a thing that can be
+re-read. `load_cached` answers the same `Config` object while the file is
+untouched and a new one when it is not, which makes "did an edit happen" one `is`
+comparison and gives both readers a stat on the common path instead of a parse.
+The agent server builds a conversation from the config as it *is*, so an edit
+reaches the next conversation and not the one running — "a conversation's model
+is fixed when it starts", seen from the other side — and each backend re-reads
+its provider table on the way into a call, dropping its cached SDK clients when a
+key or an endpoint moved. The one case a re-read cannot cover is a provider added
+for a protocol *nothing is serving*: no process can follow the file, so the tool
+starts one through `slife2.launcher`, the same call a cold start makes.
 
 **And one thing was un-ported after a first pass left it out.** v1's
 `_func_tool_unload` is back, as the tool that carries the budget. The first

@@ -38,7 +38,7 @@ from typing import Any
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
-    ProviderClients,
+    LiveProviders,
     build_llm_server,
     read_int,
     serve_backend,
@@ -466,7 +466,7 @@ def _raise_on_error(response: Any) -> None:
         raise RuntimeError(f"{SERVER_NAME}: {_error_text(response)}")
 
 
-def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
+def _make_streamer() -> Streamer:
     """The adapter for one process — every provider that speaks this wire.
 
     The SDK client is created on first use, not here: the key is resolved at
@@ -485,7 +485,7 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
 
         return AsyncOpenAI(base_url=provider.base_url, api_key=key)
 
-    clients = ProviderClients(providers, SERVER_NAME, sdk_client)
+    pool = LiveProviders(API, SERVER_NAME, sdk_client)
 
     async def stream(
         provider: str,
@@ -493,6 +493,7 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
+        clients = pool.clients()
         settings = clients.provider(provider).model(model)
         request = build_request(messages, tools, settings)
         response = await clients.client(provider).responses.create(**request)
@@ -514,13 +515,11 @@ def _make_streamer(providers: dict[str, ProviderSettings]) -> Streamer:
     return stream
 
 
-def build_server(
-    providers: dict[str, ProviderSettings], *, streamer: Streamer | None = None
-):
+def build_server(*, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_llm_server(
         name=SERVER_NAME,
-        streamer=streamer if streamer is not None else _make_streamer(providers),
+        streamer=streamer if streamer is not None else _make_streamer(),
     )
 
 

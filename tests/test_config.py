@@ -15,6 +15,7 @@ from slife2.config import (
     default_config,
     find_config_path,
     load,
+    load_cached,
     resolve_secret,
 )
 from slife2.paths import DATA_ENV_VAR
@@ -792,3 +793,40 @@ def test_no_cli_section_is_no_cli_entries(tmp_path) -> None:
     config = load(write(tmp_path, A_PROVIDER))
     assert config.cli == {}
     assert default_config().cli == {}
+
+
+# --- the config as a file that can change ------------------------------------
+
+
+def test_load_cached_answers_the_same_object_until_the_file_moves(tmp_path) -> None:
+    """**Identity is the staleness test, and that is the whole of the mechanism.**
+
+    A process that has to follow an edit asks "did it change" with one `is`
+    comparison rather than a watcher or a version counter, and what answers it
+    is the file's `mtime` and size — which `configfile` moves on every real
+    write, because it swaps atomically and never writes identical bytes.
+    """
+    path = write(tmp_path, A_PROVIDER)
+
+    first = load_cached(str(path))
+    assert load_cached(str(path)) is first, "untouched: the very same object"
+    assert first.default == "local/small"
+
+    path.write_text(A_PROVIDER.replace("local/small", "local/big"), encoding="utf-8")
+    second = load_cached(str(path))
+    assert second is not first, "an edit is a new object"
+    assert second.default == "local/big"
+
+
+def test_load_cached_does_not_answer_one_file_for_another(tmp_path) -> None:
+    first = write(tmp_path, A_PROVIDER)
+    second = tmp_path / "elsewhere" / "slife2.yaml"
+    second.parent.mkdir()
+    second.write_text(A_PROVIDER.replace("local/small", "local/big"), encoding="utf-8")
+
+    assert load_cached(str(first)).default == "local/small"
+    assert load_cached(str(second)).default == "local/big"
+
+
+def test_load_cached_with_no_file_is_the_defaults() -> None:
+    assert load_cached().default == default_config().default

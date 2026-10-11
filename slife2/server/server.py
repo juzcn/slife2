@@ -63,7 +63,7 @@ import contextlib
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -72,15 +72,19 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2 import configfile
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
+    API_BACKENDS,
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
+    ConfigError,
     find_config_path,
     load,
+    load_cached,
 )
 from slife2.context import turn_note, with_note
 from slife2.events import ContextChosen, TurnEvent, TurnObserver, encode
@@ -279,6 +283,15 @@ class Loop:
     #: can leave a message unbacked, and it is what lets a rebuild replace the
     #: turns without destroying a message that has no turn to be replaced by.
     covered: int = 0
+    #: The rest of how this conversation reaches its model, resolved once when it
+    #: started and kept beside the reference.  Held rather than re-resolved so a
+    #: conversation whose model is later edited out of the config still runs: the
+    #: backend it talks to is already open, and only a *new* conversation reads
+    #: the file.
+    provider: str = ""
+    api: str = ""
+    model_id: str = ""
+    accepts_images: bool = True
 
     @property
     def records(self) -> bool:
@@ -299,6 +312,7 @@ def build_server(
     backend: LLMBackend | None = None,
     context_client: Client | None = None,
     hub_client: Client | None = None,
+    source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
 
@@ -332,6 +346,23 @@ def build_server(
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
+
+    def current() -> Config:
+        """The config a *new* conversation is built from.
+
+        **Live in production, frozen in tests.**  `main` passes `load_cached`,
+        so a model config edit — or a hand edit of `slife2.yaml` — is picked up
+        when the next conversation starts, with no restart.  A server built with
+        a config injected (every test in `test_server.py`) has no source and
+        simply keeps it, which is what lets those tests run with no file on
+        disk.
+
+        **Only what a conversation *starts* from is read here**, which is
+        deliberate: a conversation's model, its prompt and the backend it talks
+        to are properties of the conversation, so a later edit does not reach
+        one already running — it is what `reset` is for.
+        """
+        return source() if source is not None else config
 
     #: Every conversation, by key.  One entry per `(agent, subagent)` that has
     #: been used, which is what makes isolation a property of the key rather than
@@ -515,12 +546,16 @@ def build_server(
             refresh=partial(registry, client_id),
         )
 
-    async def loop_for(reference: str, client_id: ClientId) -> AgentLoop:
-        """The agent loop for a conversation's model, bound to that conversation.
+    async def loop_for(loop: Loop, client_id: ClientId) -> AgentLoop:
+        """The agent loop for a conversation, bound to that conversation.
 
-        A conversation's model is fixed when it starts, so this is asked the same
-        question every turn — which is why the connection is cached per model
-        server, and why the cache is taken under a lock.
+        **Keyed by the model reference, and that is a fix rather than a
+        detail.**  The `MCPBackend` carries the model id it was built with, so a
+        cache keyed by *provider* would hand the second of two conversations on
+        one provider the first one's model — silently, because the name a caller
+        passes is only looked up when the backend is built.  The reference is
+        the loop's own `model`, which is exactly the thing the backend must
+        match.
 
         What is *not* cached is the key.  `with_key` hands back a view of the
         shared backend carrying this conversation's `(agent, subagent)`, so the
@@ -530,55 +565,47 @@ def build_server(
         if backend is not None:
             return await make_loop(backend, client_id)
 
-        name, provider, model = config.resolve(reference)
+        reference = loop.model
         async with opening:
-            if name not in model_backends:
-                url = config.server(provider.api).url
+            if reference not in model_backends:
+                url = current().server(loop.api).url
                 if url not in clients:
                     # One client per *server*, not per provider: a server speaks
                     # one wire format for every provider that uses it.
                     client, _ = await open_backend(
                         url,
-                        model.model,
-                        provider=name,
-                        name=f"{name}/{model.model}",
+                        loop.model_id,
+                        provider=loop.provider,
+                        name=reference,
                         # Checked against the name the protocol's server
                         # advertises, so a URL pointed at the wrong backend is
                         # caught here rather than at the first turn.
-                        server_name=API_SERVER_NAMES[provider.api],
+                        server_name=API_SERVER_NAMES[loop.api],
                     )
                     clients[url] = client
-                model_backends[name] = MCPBackend(
+                model_backends[reference] = MCPBackend(
                     clients[url],
-                    model.model,
-                    provider=name,
-                    name=f"{name}/{model.model}",
+                    loop.model_id,
+                    provider=loop.provider,
+                    name=reference,
                 )
-                logger.info(
-                    "model %s via %s", reference, config.server(provider.api).url
-                )
-        return await make_loop(model_backends[name].with_key(*client_id), client_id)
+                logger.info("model %s via %s", reference, url)
+        return await make_loop(
+            model_backends[reference].with_key(*client_id), client_id
+        )
 
     # --- the registry --------------------------------------------------------
 
-    def resolved_model(reference: str) -> str:
-        """The model a conversation started on, as `provider/model`.
-
-        Read once, when the conversation starts, and kept: a conversation's model
-        is a property of the conversation, so a later message naming a different
-        one is not obeyed — it is what `reset` is for.
-        """
-        name, _, settings = config.resolve(reference)
-        return f"{name}/{settings.model}"
-
-    def opening_messages(agent: str) -> list[Message]:
+    def opening_messages(agent: str, live: Config) -> list[Message]:
         """What a conversation starts with: its system prompt, and nothing else.
 
         Rendered when the conversation starts rather than once at startup,
         because the agent name is a property of the *key* — the server is shared,
-        so two agents are two names asking one process.
+        so two agents are two names asking one process — and it is rendered from
+        the config a conversation *starts* from, so a prompt edited since boot
+        reaches the next one.
         """
-        system = render_system_prompt(config.agent.system_prompt, agent_name=agent)
+        system = render_system_prompt(live.agent.system_prompt, agent_name=agent)
         return [Message(role="system", content=system)] if system else []
 
     def reap() -> None:
@@ -619,11 +646,17 @@ def build_server(
         loop = loops.get(client)
         started = loop is None
         if loop is None:
-            messages = opening_messages(agent)
+            live = current()
+            name, provider, settings = live.resolve(model)
+            messages = opening_messages(agent, live)
             loop = Loop(
                 agent=agent,
                 subagent=subagent,
-                model=resolved_model(model),
+                model=f"{name}/{settings.model}",
+                provider=name,
+                api=provider.api,
+                model_id=settings.model,
+                accepts_images=settings.accepts_images,
                 messages=messages,
                 lock=asyncio.Lock(),
                 last_used=time.monotonic(),
@@ -996,8 +1029,8 @@ def build_server(
 
         snapshot = len(loop.messages)
         outcome.started_at = now()
-        user = _with_images(item.prompt, item.images, config, loop.model)
-        agent_loop = await loop_for(loop.model, (loop.agent, loop.subagent))
+        user = _with_images(item.prompt, item.images, loop)
+        agent_loop = await loop_for(loop, (loop.agent, loop.subagent))
         cancelled = False
         try:
             outcome.result = await agent_loop.run_turn(
@@ -1097,6 +1130,371 @@ def build_server(
         """
         client_id = request_client(ctx)
         return take_waiting(client_id) if client_id else NOTHING_WAITING
+
+    # ── The model config tools ───────────────────────────────────────────
+    # v1's `model_*` set, on the process that *resolves* the model rather than
+    # in a family plugin of its own: `default:` and `providers:` are what this
+    # server turns a conversation's model into, so the edit and the read that
+    # honours it are in one process — "哪个 plugin 用，哪个 plugin 管".  The hub
+    # reaches them because this server is one of `Config.plugins()`, the same
+    # way it reaches `_check_new_input`.
+    #
+    # **Everything here reads the file, never `Config.providers`.**  A held
+    # provider has been through `resolve_secret`, so a listing built from one
+    # would print the operator's live key into the conversation and the
+    # transcript; `read_section` is the `${VAR}` the file holds, and none of
+    # these answers shows even that.
+
+    def _providers() -> dict[str, dict[str, Any]]:
+        """The `providers:` section as the file has it — secrets unresolved."""
+        return configfile.read_section("providers")
+
+    def _active_default(providers: dict[str, dict[str, Any]]) -> str:
+        """The model reference the system runs on, read off the file.
+
+        The `default:` scalar when the file has one, else the first model of the
+        first provider — `slife2.config._first_reference`'s rule, read here so
+        that it reflects an edit this process has just made rather than the
+        config it booted with.
+        """
+        explicit = configfile.read_scalar("default")
+        if explicit:
+            return explicit
+        for name, entry in providers.items():
+            models = entry.get("models")
+            if isinstance(models, list) and models and isinstance(models[0], dict):
+                return f"{name}/{models[0].get('model', '')}"
+        return ""
+
+    async def _ensure_backend(api: str) -> str:
+        """Start the model server for an api nothing was serving.  `""` when up.
+
+        **The one case a re-read cannot cover.**  The agent and the backends
+        follow the file, but a protocol with no provider at boot has no process
+        to follow it — so the first provider added for one is a server that has
+        to exist before the model can be reached.  `launcher.ensure` is the same
+        call the launcher makes, so the process is started, recorded and reused
+        exactly as one from a cold start.
+
+        Off the event loop, because `probe` refuses to run inside one by design
+        (`slife2.launcher`); and on the common path `ensure` probes first, so a
+        model added beside a provider whose backend is already up costs one
+        round trip and starts nothing.
+        """
+        from slife2 import launcher
+
+        try:
+            outcome = await asyncio.to_thread(
+                launcher.ensure,
+                launcher.spec_for_api(current(), api),
+                config_path=configfile.config_path(),
+            )
+        except Exception as exc:  # noqa: BLE001 - a start that raised is not a crash
+            return (
+                f" Its `{api}` server could not be started ({exc}); a restart "
+                f"will retry."
+            )
+        if outcome.ok:
+            return f" Its `{api}` backend is up."
+        return (
+            f" Its `{api}` backend did not come up — "
+            f"{outcome.detail or 'it did not answer'}; a restart will retry."
+        )
+
+    @mcp.tool(name="model_list", meta=FOR_THE_MODEL)
+    async def model_list() -> str:
+        """List the models this config defines, grouped by provider.
+
+        Each provider shows its wire protocol and endpoint; each model shows the
+        reference you name it by (`provider/model`), its display name, context
+        window and output limit, and whether it reasons or reads images. The one
+        `default:` names is marked.
+
+        This reads the config file, so it is what the **next** conversation
+        would use — one already running keeps the model it started on.
+        """
+        try:
+            providers = _providers()
+            active = _active_default(providers)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+        if not providers:
+            return "No models are configured. `model_set` adds one."
+
+        lines: list[str] = []
+        total = 0
+        for provider, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            lines.append(
+                f"\n- {provider}  "
+                f"(api {entry.get('api') or '?'}, base {entry.get('base_url') or '?'})"
+            )
+            models = entry.get("models")
+            for spec in models if isinstance(models, list) else []:
+                if not isinstance(spec, dict):
+                    continue
+                total += 1
+                model = str(spec.get("model") or "?")
+                marks = []
+                if f"{provider}/{model}" == active:
+                    marks.append("default")
+                if spec.get("reasoning"):
+                    marks.append("reasoning")
+                if "image" in (spec.get("input") or []):
+                    marks.append("image")
+                facts = []
+                if spec.get("context_window"):
+                    facts.append(f"ctx {spec['context_window']}")
+                if spec.get("max_tokens"):
+                    facts.append(f"out {spec['max_tokens']}")
+                line = f"    {provider}/{model} — {spec.get('name') or model}"
+                if marks:
+                    line += f"  [{', '.join(marks)}]"
+                if facts:
+                    line += f"  {', '.join(facts)}"
+                lines.append(line)
+        header = f"{total} model(s); `default:` is `{active or '(none)'}`."
+        return "\n".join([header, *lines])
+
+    @mcp.tool(name="model_set", meta=FOR_THE_MODEL)
+    async def model_set(
+        provider: str,
+        model: str,
+        name: str,
+        api: str = "",
+        base_url: str = "",
+        api_key: str = "",
+        reasoning: bool = False,
+        input: list[str] | None = None,
+        context_window: int = 0,
+        max_tokens: int = 0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        compat: dict[str, Any] | None = None,
+    ) -> str:
+        """Add or update one model on a provider (upsert; creates the provider).
+
+        The provider is created when this is its first model — give `base_url`
+        and `api_key` then; `api` selects the wire protocol and defaults to
+        openai-completions. `api_key` is a `${VAR}` **reference**, so the key
+        itself never enters the file. **This is the model's whole entry**: a
+        field left out is not kept from an older version, so restate everything
+        it should have.
+
+        The edit is live: the next conversation can name the new model, and the
+        backend serving its protocol picks the change up (and is started, if
+        nothing was serving that protocol).
+        """
+        provider, model, name = provider.strip(), model.strip(), name.strip()
+        if not provider or not model or not name:
+            return (
+                "[refused] a model needs a `provider`, a `model` id and a "
+                "display `name`."
+            )
+        if api and api not in API_BACKENDS:
+            return (
+                f"[refused] {api!r} is not a wire protocol; known: "
+                f"{', '.join(API_BACKENDS)}."
+            )
+        try:
+            providers = _providers()
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+
+        existing = providers.get(provider)
+        creating = not isinstance(existing, dict)
+        if creating and not (base_url and api_key):
+            return (
+                f"[refused] `{provider}` is a new provider, so it needs "
+                f"`base_url` and `api_key` — the key as a `${{VAR}}` reference, "
+                f"so it stays out of the file."
+            )
+        known = set()
+        for entry in providers.values():
+            if isinstance(entry, dict) and entry.get("api"):
+                known.add(str(entry["api"]))
+        entry_api = api or (existing or {}).get("api") or "openai-completions"
+        before = [
+            one
+            for one in ((existing or {}).get("models") or [])
+            if isinstance(one, dict)
+        ]
+        had_model = any(one.get("model") == model for one in before)
+
+        def change(current: dict[str, Any]) -> dict[str, Any]:
+            entry = dict(current)
+            if creating or api:
+                entry["api"] = entry_api
+            if base_url:
+                entry["base_url"] = base_url
+            if api_key:
+                entry["api_key"] = api_key
+            spec: dict[str, Any] = {"model": model, "name": name}
+            for key, value in (
+                ("reasoning", reasoning or None),
+                ("input", input),
+                ("context_window", context_window or None),
+                ("max_tokens", max_tokens or None),
+                ("temperature", temperature),
+                ("top_p", top_p),
+                ("compat", compat),
+            ):
+                if value is not None:
+                    spec[key] = value
+            # The changed model goes first and its siblings keep their order, so
+            # a `set` on one model of a provider leaves the rest of the file
+            # exactly as it was.
+            entry["models"] = [
+                spec,
+                *(one for one in before if one.get("model") != model),
+            ]
+            return entry
+
+        try:
+            configfile.update_entry("providers", provider, change)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+
+        where = (
+            f"the new provider `{provider}` on `{entry_api}`"
+            if creating
+            else f"`{provider}`"
+        )
+        action = "updated on" if had_model else "added to"
+        answer = f"`{provider}/{model}` ({name}) is {action} {where}."
+        if entry_api not in known:
+            answer += await _ensure_backend(entry_api)
+        return answer
+
+    @mcp.tool(name="model_remove", meta=FOR_THE_MODEL)
+    async def model_remove(ref: str) -> str:
+        """Remove one model, named `provider/model`.
+
+        The provider goes too when that was its last model. **Refused if it is
+        the default** — `model_switch` to another first — **or if a conversation
+        is running on it**, because a conversation's model is fixed when it
+        starts and removing its model would break it at the next call. Nothing
+        is uninstalled: the model is still at the provider.
+        """
+        ref = ref.strip()
+        if "/" not in ref:
+            return f"[refused] `{ref}` is not a model reference; use `provider/model`."
+        provider, model = ref.split("/", 1)
+        try:
+            providers = _providers()
+            active = _active_default(providers)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+        entry = providers.get(provider)
+        specs = (entry or {}).get("models")
+        specs = specs if isinstance(specs, list) else []
+        if not any(
+            isinstance(one, dict) and one.get("model") == model for one in specs
+        ):
+            return (
+                f"[refused] `{ref}` is not a model — `model_list` shows what there is."
+            )
+        # **The config-wide guard comes first, deliberately.**  With one model
+        # the fallback makes it the default too, so both refusals are true — and
+        # "it is the last model" is the deeper reason, the one that says what
+        # would actually go wrong.
+        total = sum(
+            len([one for one in entry.get("models") or [] if isinstance(one, dict)])
+            for entry in providers.values()
+            if isinstance(entry, dict)
+        )
+        if total == 1:
+            return (
+                f"[refused] `{ref}` is the last model in the config; without it "
+                f"slife2 would fall back to its built-in default. `model_set` "
+                f"another first."
+            )
+        if ref == active:
+            return (
+                f"[refused] `{ref}` is the default model; `model_switch` to "
+                f"another first."
+            )
+        holders = [
+            describe((one.agent, one.subagent))
+            for one in loops.values()
+            if one.model == ref
+        ]
+        if holders:
+            return (
+                f"[refused] `{ref}` is the model a conversation is running on "
+                f"({', '.join(holders)}); a conversation's model is fixed when "
+                f"it starts. Switch the default, or reset that conversation."
+            )
+
+        def change(current: dict[str, Any]) -> dict[str, Any] | None:
+            kept = [
+                one
+                for one in (current.get("models") or [])
+                if not (isinstance(one, dict) and one.get("model") == model)
+            ]
+            if not kept:
+                # A provider with no models is one the loader refuses, so its
+                # entry goes with its last model rather than being left empty.
+                return None
+            return {**current, "models": kept}
+
+        try:
+            configfile.update_entry("providers", provider, change)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+        gone = (
+            ""
+            if len(specs) > 1
+            else f" `{provider}` had no other models, so its entry went too."
+        )
+        return f"`{ref}` is removed.{gone}"
+
+    @mcp.tool(name="model_switch", meta=FOR_THE_MODEL)
+    async def model_switch(ref: str) -> str:
+        """Make `provider/model` the default model, for the next conversation.
+
+        Writes the top-level `default:` in the config file. **A conversation
+        already running keeps the model it started on** — `reset` it to start it
+        over on the new default. The model must be one `model_list` shows.
+        """
+        ref = ref.strip()
+        if "/" not in ref:
+            return f"[refused] `{ref}` is not a model reference; use `provider/model`."
+        try:
+            providers = _providers()
+            old = _active_default(providers) or "(none)"
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+        provider, model = ref.split("/", 1)
+        entry = providers.get(provider)
+        specs = (entry or {}).get("models")
+        specs = specs if isinstance(specs, list) else []
+        display = model
+        found = False
+        for one in specs:
+            if isinstance(one, dict) and one.get("model") == model:
+                found = True
+                display = str(one.get("name") or model)
+                break
+        if not found:
+            return (
+                f"[refused] `{ref}` is not a model — `model_list` shows what there is."
+            )
+
+        def resolves(config: Config) -> None:
+            """The writer's judge: `load` accepts any string, `resolve` does not."""
+            config.resolve(ref)
+
+        try:
+            configfile.set_scalar("default", ref, check=resolves)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+        return (
+            f"`default:` is now `{ref}` ({display}); it was `{old}`. It takes "
+            f"effect at the next conversation — one already running keeps the "
+            f"model it started on (`reset` starts it over on the new one)."
+        )
 
     @mcp.tool
     async def send_message(
@@ -1324,7 +1722,9 @@ def build_server(
                     # The opening prompt is what a conversation that has never
                     # run would head with, so it is the honest thing to hand
                     # over rather than an empty list.
-                    "messages": [m.to_wire() for m in opening_messages(agent)],
+                    "messages": [
+                        m.to_wire() for m in opening_messages(agent, current())
+                    ],
                 },
             )
         )
@@ -1394,25 +1794,25 @@ def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
 
 
 def _with_images(
-    prompt: str, images: list[str], config: Config, model: str
+    prompt: str, images: list[str], loop: Loop
 ) -> str | list[dict[str, Any]]:
     """The user's message: text, or text and images.
 
-    The model has to be *able* to read them.  A config that does not list
-    `image` under a model's `input` is the config saying so, and the alternative
-    to refusing is worse than it looks: the images would be dropped somewhere
-    along the way and the user would be left wondering why the model ignored
-    what they attached.
+    The model has to be *able* to read them.  A model's `input` is the config
+    saying so, and the alternative to refusing is worse than it looks: the images
+    would be dropped somewhere along the way and the user would be left
+    wondering why the model ignored what they attached.
+
+    Read off the **loop**, not resolved again from the config: whether a
+    conversation's model reads images is a property of the conversation, and a
+    model edited out of the config since it started must not turn an attachment
+    into an exception.
     """
     if not images:
         return prompt
 
-    settings = config.resolve(model)[2]
-    if not settings.accepts_images:
-        raise ValueError(
-            f"{settings.model} cannot read images "
-            f"(its config lists input: {', '.join(settings.input)})"
-        )
+    if not loop.accepts_images:
+        raise ValueError(f"{loop.model} cannot read images")
 
     parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     parts += [{"type": "image_url", "image_url": {"url": url}} for url in images]
@@ -1435,7 +1835,9 @@ def main(argv: list[str] | None = None) -> int:
         config.default,
     )
     serve(
-        build_server(config),
+        # `load_cached` rather than the config: a new conversation reads the
+        # file, so a model config edit — by a model or by hand — is live.
+        build_server(config, source=load_cached),
         settings,
         args,
         name=SERVER_NAME,
