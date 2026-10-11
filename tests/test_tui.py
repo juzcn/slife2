@@ -685,7 +685,7 @@ async def test_a_streaming_turn_does_not_drag_a_reader_back_to_the_tail() -> Non
     arrived = asyncio.Event()
     release = asyncio.Event()
 
-    async def streams_in_two(prompt, on_event, *, images=None):
+    async def streams_in_two(prompt, on_event, *, channel="tui", images=None):
         on_event(TextDelta(SCROLLABLE))
         arrived.set()
         await release.wait()
@@ -1600,7 +1600,7 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
     """A terminal where you cannot stop a runaway turn is not usable."""
     started = asyncio.Event()
 
-    async def never_finishes(prompt, on_event, *, images=None):
+    async def never_finishes(prompt, on_event, *, channel="tui", images=None):
         # `images` is keyword-only on the real client, so a stand-in that
         # omitted it would fail on every call rather than never finishing —
         # which is a different test.
@@ -1685,7 +1685,7 @@ async def test_a_selection_keeps_ctrl_c_off_a_running_turn() -> None:
     """
     started = asyncio.Event()
 
-    async def never_finishes(prompt, on_event, *, images=None):
+    async def never_finishes(prompt, on_event, *, channel="tui", images=None):
         started.set()
         await asyncio.sleep(30)
         return "never"
@@ -1722,7 +1722,7 @@ async def test_a_second_prompt_waits_and_both_are_answered() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_then_fast(prompt, on_event, *, images=None):
+    async def slow_then_fast(prompt, on_event, *, channel="tui", images=None):
         if prompt == "alpha":
             started.set()
             await release.wait()
@@ -1762,7 +1762,7 @@ async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
     """Ctrl+C stops one turn.  The messages behind it are still wanted."""
     started = asyncio.Event()
 
-    async def first_hangs(prompt, on_event, *, images=None):
+    async def first_hangs(prompt, on_event, *, channel="tui", images=None):
         if prompt == "alpha":
             started.set()
             await asyncio.sleep(30)
@@ -1837,3 +1837,27 @@ async def test_the_context_indicator_is_there_before_the_first_turn() -> None:
     )
     async with app.run_test(size=SIZE):
         assert f"{GLYPHS['up']} 0 (0.0%)" in status(app)
+
+
+async def test_a_message_handed_over_by_another_channel_runs_as_if_typed() -> None:
+    """The pass-through, and the whole of it: words in this window's queue.
+
+    `deliver` is what `slife2.tui.control` calls.  What it does is what the person
+    typing does — nothing more — so the line, the turn and the record are the ones
+    this window already draws, and the channel rides along for the two things that
+    depend on it: the bubble and where the turn came from.
+    """
+    client = FakeAgentClient(answering("你好"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        app.deliver('[Wechat:{"peer_wechat_id": "p1"}] hi', "wechat")
+        await settle(pilot, app)
+        text = shown(app)
+        channels = client.channels
+
+    assert "Wechat> hi" in text
+    # The marker is the model's and not the reader's, exactly as for a turn read
+    # back out of the record.
+    assert "peer_wechat_id" not in text
+    assert "jack> 你好" in text
+    assert channels == ["wechat"]

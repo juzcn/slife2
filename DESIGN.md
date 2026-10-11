@@ -175,25 +175,32 @@ own file, its own poll loop and its own conversation.  This is the contract
 process that cannot ask an operator which agent it is serving has to be told, per
 call, and a call that does not say is refused rather than guessed.
 
-**The plugin delivers its own turns.**  v1's harness polled the plugin for
-messages and injected them into the inbox, so the plugin's job ended at "here is
-what arrived" — and that seam was a tool named `__wechat_drain_incoming`.  There
-is no harness poll loop here, and there is something better: the agent server's
-`send_message` already takes a `channel`, "where this turn came in from … the
-caller is the only party that knows", so the poll loop calls it and a message
-becomes a turn with `channel=wechat` and no seam at all.  **That is why the drain
-tool has no port: it *was* the seam between two processes that are now one.**
+**The plugin delivers its own turns, and it delivers them to the window.**  v1's
+harness polled the plugin for messages and injected them into the inbox, so the
+plugin's job ended at "here is what arrived" — and that seam was a tool named
+`__wechat_drain_incoming`.  There is no harness here, and there is something
+better than a seam: a message is handed to the terminal showing this
+conversation, which puts it in the same queue the person's own typing goes into
+(`slife2.tui.control`).  So a message sent from a phone is *visible in the
+terminal*, wears `Wechat> ` on screen, and is recorded as the turn it is — one
+inbox, one display, and the one path for a turn whether it was typed or arrived.
+
+**That is why the drain tool has no port here either: it *was* the seam.**  What
+replaced it is not a smaller seam but the removal of the question — the window is
+where a message becomes a turn, and the window is already the thing that shows
+turns.
 
 Two things follow, and both are the shape rather than an implementation detail:
 
-* **A turn is handed over, not awaited.**  `send_message` returns when its turn
-  is *finished*, and a turn is a model thinking — so awaiting it in the poll loop
-  would stop watching WeChat for the whole of every reply, and a second message
-  sent mid-turn would sit at the bridge instead of being folded into the turn
-  already running.  The agent server serialises one key's turns itself (§3), so
-  handing them all over is what it expects.  The bound on how many may be in
-  flight is the plugin's, because a person flooding a conversation is a fact the
-  plugin sees first.
+* **A message is handed over and let go.**  The window's `submit` returns as
+  soon as the words are in its queue, *not* when the turn ends, and that is what
+  makes handing over safe to retry: a caller whose call came back knows the
+  message is somebody else's problem, so a connection that drops afterwards
+  cannot run the same words twice.  What the terminal does with them is the ordinary thing it
+  does with anything — one turn at a time, in arrival order (§3) — and the plugin
+  does not wait for any of it.  The bound on how many may be in flight is the
+  plugin's, because a person flooding a conversation is a fact the plugin sees
+  first.
 * **The reply is still the model's to send.**  Nothing here auto-dispatches an
   answer, which is v1's rule unchanged: a turn that says nothing sends nothing.
   What the plugin does do on its own is the typing indicator — up when a message
@@ -615,6 +622,21 @@ the window, it is passed through to the agent server, and it is exclusive (two
 live instances may not share a name). It creates no port, no process, and no
 config section. Isolation, if it ever appears, belongs inside an MCP server —
 which is why the label reaches one.
+
+**The window itself does listen, and it is the one thing here that is not a
+daemon.**  A terminal serving this agent's conversation has an MCP server of its
+own (`slife2.tui.control`), so that a channel like WeChat can hand it a message
+to run as something the person typed (§1.2).  Its address is a `tui:` *section*
+and not an entry under `servers:`, and the rule of that table is why: it is the
+servers this system runs, and a window is the person's process.
+
+What this is *not* is topology in the sense the paragraph above forbids: the
+address is one for the machine and not one per agent, nothing about a
+conversation depends on it, and the daemons, the servers and every agent name are
+exactly as they were.  The honest cost is that the terminal is now reachable by
+anything on loopback that knows the address — which is the same standing as every
+other server here (§3: possession is not authorization, because there is nothing
+on loopback but this machine's own processes).
 
 ## 5. The context store
 

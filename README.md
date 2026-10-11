@@ -608,9 +608,20 @@ Four tools, and the model uses all of them:
 | `wechat_send_message` | Send a text to a peer |
 | `wechat_logout` | Forget this agent's login |
 
-A message somebody sends arrives as a **turn of that agent's own conversation**,
-with `channel=wechat` and a `[Wechat:{"peer_wechat_id": …}]` prefix naming who it
-is from. The name is deliberately not in capitals — a convention rather than a
+A message somebody sends arrives as a **turn of that agent's own conversation —
+in the window**. The plugin hands it to the terminal showing that conversation,
+which runs it exactly as if it had been typed there: the same queue, the same
+turn, the same transcript. So the message sent from a phone appears on screen,
+its answer streams there, and both are in the record afterwards.
+
+For that, the window listens: the `tui:` section in `slife2.yaml` is its
+address, read by the window and by the plugin that delivers to it. It is a
+section of its own rather than a `servers:` entry because that table is the
+servers slife2 runs, and a window is your process (DESIGN.md §4).
+
+The turn is recorded with `channel=wechat` and a
+`[Wechat:{"peer_wechat_id": …}]` prefix naming who it is from. The name is
+deliberately not in capitals — a convention rather than a
 rule: **capitals mark an annotation that is not part of the conversation**,
 which is what `[TURN:{…}]` is, the footnote a turn carries when the model reads
 its context back (added when the list is built, never stored) — while this marker
@@ -790,6 +801,9 @@ slife2/
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient protocol + the MCP implementation
+   ├─ control.py      # the window as an MCP server: one tool, `submit`, so a
+   │                  #   channel can hand it a message to run as if typed
+   ├─ restore.py      # a previous conversation, drawn back into the transcript
    ├─ widgets.py      # ChatView, HistoryInput, StatusBar
    ├─ theme.py        # the palette and glyphs, defined once
    └─ app.tcss

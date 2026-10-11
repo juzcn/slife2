@@ -339,6 +339,10 @@ def main(argv: list[str] | None = None) -> int:
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
+                    # Where another channel hands this window a message
+                    # (`slife2.tui.control`): the `tui:` section, which is an
+                    # address and not a server slife2 runs.
+                    control_url=config.tui.url,
                 )
                 app.run()
     except AgentInUse as exc:

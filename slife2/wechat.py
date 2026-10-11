@@ -15,14 +15,16 @@ every call already carries (`slife2.audience`).  A second agent that scans its
 own QR gets its own session file, its own poll loop and its own conversation,
 and neither can see the other's.
 
-**The plugin delivers its own turns.**  v1's harness polled the plugin for
-messages (`__wechat_drain_incoming`) and injected them into the inbox itself, so
-the plugin's job ended at "here is what arrived".  slife2 has no harness poll
-loop, and it has something better: the agent server's `send_message` already
-takes a `channel` — "where this turn came in from … the caller is the only party
-that knows" — so the poll loop calls it directly and a WeChat message becomes a
-turn with `channel="wechat"` and no seam between two processes that are now one.
-That is why v1's drain tool has no port here: it *was* the seam.
+**The plugin hands each message to the window.**  v1's harness polled the
+plugin for messages (`__wechat_drain_incoming`) and injected them into the inbox
+itself, so the plugin's job ended at "here is what arrived" and a second process
+decided what that meant.  Here the plugin delivers: the window showing this
+agent's conversation takes the message into the same queue the person's own
+typing goes into, and runs it as the same kind of turn — so a message sent from a
+phone is *visible in the terminal*, wears the channel it came in on, and is
+answered there, with the one inbox this system has (see `slife2.tui.control`).
+That is why v1's drain tool has no port either: it *was* the seam, and the seam is
+gone because the terminal is where the message lands.
 
 **The reply is the model's to send**, unchanged from v1. Nothing in this process
 auto-dispatches an answer — the model reads who wrote (the marker below), calls
@@ -73,12 +75,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastmcp import Client, Context, FastMCP
+from fastmcp import Context, FastMCP
 from ruamel.yaml import YAML
 
 from slife2 import ilink
 from slife2.audience import FOR_THE_MODEL, request_client
-from slife2.config import AGENT_SERVER_NAME, Config
+from slife2.config import TUI_SERVER_NAME, Config
 from slife2.ilink import Http, IlinkClient
 from slife2.mcp_server import house_server, open_server, serve_plugin
 from slife2.paths import agent_dir, agents_dir
@@ -122,6 +124,10 @@ DEDUP_SECONDS = 30.0
 #: until its turn is done, so these are turns, and twenty of them is somebody
 #: flooding a conversation rather than talking to it.
 MAX_INFLIGHT = 16
+#: How long to wait for the window when handing a message over.  The call it
+#: makes answers as soon as the message is queued (`slife2.tui.control`), so this
+#: bounds a window that is not answering at all rather than a slow terminal.
+WINDOW_TIMEOUT_SECONDS = 10.0
 #: A login's lifetime, in seconds — 23 hours, from v1, which measured it against
 #: the bridge's own ~24h expiry and left an hour of margin.  Past this a saved
 #: token is not offered to the far end at all.
@@ -423,10 +429,7 @@ class Wechat:
         self._deliver = deliver or self._ask_agent
         self._agents = directory or agents_dir()
         self._sessions: dict[str, Session] = {}
-        #: The one connection to the agent server, opened when it is first
-        #: needed.  A hop to a peer is `open_server`'s business, and this is
-        #: the only peer this plugin has.
-        self._peer: Client | None = None
+
 
     def session(self, agent: str) -> Session:
         """One agent's session, started the first time it is asked for.
@@ -478,10 +481,6 @@ class Wechat:
             for task in list(session.inflight):
                 self._cancel(task)
             session.inflight.clear()
-        if self._peer is not None:
-            peer, self._peer = self._peer, None
-            with contextlib.suppress(Exception):
-                await peer.__aexit__(None, None, None)
 
     @staticmethod
     def _cancel(task: asyncio.Task[Any] | None) -> None:
@@ -788,41 +787,63 @@ class Wechat:
     # ── Handing over, for real ───────────────────────────────────────────
 
     async def _ask_agent(self, agent: str, prompt: str) -> None:
-        """Say something to the agent, and wait for the turn it starts.
+        """Hand one message over to the window showing this agent's conversation.
 
-        The connection is held and reopened once on failure.  A plugin hop is
-        not a per-call cost the way a tool call is: this process polls for hours
-        and speaks only when somebody writes, so one connection kept open is
-        both cheaper and closer to what the relationship is — and a peer that
-        was restarted underneath us is one bad call, not a broken session.
+        **The window and not the agent server**, and that is the whole of what
+        makes a message sent from a phone visible in the terminal: it goes into
+        the same queue the person's own typing goes into and is run as the same
+        kind of turn, so the line, the answer and the record are the ones that
+        window already draws (`slife2.tui.app`).  What the terminal does with it —
+        one turn at a time, in arrival order — is the one inbox everything this
+        system takes goes into.
+
+        **The call returns when the window has taken the message, not when the
+        turn ends** (`slife2.tui.control`), and that is what makes the retry
+        below safe: a connection that died *after* the words were queued cannot
+        make them run twice.
+
+        The connection is per delivery rather than held: this process polls for
+        hours and speaks only when somebody writes, so a handshake on the message
+        that needs it costs one loopback round trip and keeps nothing open in
+        between.
         """
         for attempt in (1, 2):
             try:
-                peer = await self._agent()
-                await peer.call_tool(
-                    "send_message",
-                    {"agent": agent, "prompt": prompt, "channel": CONFIG_KEY},
-                )
+                await self._to_window(agent, prompt)
                 return
             except Exception:
-                await self._drop_peer()
                 if attempt == 2:
                     raise
 
-    async def _agent(self) -> Client:
-        if self._peer is None:
-            self._peer = await open_server(
-                self._config.server("agent").url,
-                name=AGENT_SERVER_NAME,
-                fallback_tool="send_message",
-            )
-        return self._peer
+    async def _to_window(self, agent: str, prompt: str) -> None:
+        """One delivery: the window takes it, or this raises.
 
-    async def _drop_peer(self) -> None:
-        peer, self._peer = self._peer, None
-        if peer is not None:
+        **Not `_hand_over`, which is already this class's word for something
+        else** — the poll loop's "give this message to the agent as a turn of its
+        own" (`_hand_over` above, which spawns the task).  One of these names came
+        first and the other is a call into another process, and having the second
+        silently replace the first is a mistake worth a sentence rather than a
+        memory.
+        """
+        window = await open_server(
+            self._config.tui.url,
+            name=TUI_SERVER_NAME,
+            fallback_tool="submit",
+            timeout=WINDOW_TIMEOUT_SECONDS,
+        )
+        try:
+            # **The call returning is the acknowledgement** — the window has
+            # queued the words by then (`slife2.tui.control`), which is why a
+            # transport failure after this point must not be retried into a
+            # second turn.
+            await window.call_tool(
+                "submit",
+                {"text": prompt, "channel": CONFIG_KEY},
+                timeout=WINDOW_TIMEOUT_SECONDS,
+            )
+        finally:
             with contextlib.suppress(Exception):
-                await peer.__aexit__(None, None, None)
+                await window.__aexit__(None, None, None)
 
     # ── The QR login ─────────────────────────────────────────────────────
 

@@ -175,6 +175,14 @@ DEFAULT_AGENT = "slife2"
 #: agent loop in particular must never reach `openai_server`.  `tests/test_config.py`
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
+
+#: The name the *terminal* advertises when it is serving its control surface —
+#: the window's own MCP server, which exists so that a message arriving on
+#: another channel can be handed to it as something the person typed
+#: (`slife2.tui.control`).  It is not one of the servers slife2 starts: the
+#: window is the person's process, and its address is the `tui:`
+#: section that nothing spawns.
+TUI_SERVER_NAME = "slife2-tui"
 CONTEXT_SERVER_NAME = "slife2-context"
 MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
 RESTAPI_TOOLS_SERVER_NAME = "slife2-restapi-tools"
@@ -912,6 +920,12 @@ class Config:
     #: which is the plugin that owns the section and the only one that holds a
     #: rendering provider's key.
     media: MediaSettings = field(default_factory=MediaSettings)
+    #: Where the *terminal* listens, from `tui:`.  **A section and not a
+    #: `servers:` entry**, because that table is the servers this system runs and
+    #: a window is the person's process (`slife2.tui.control`).  Two readers, one
+    #: address: the window binds it, and a channel hands it messages by dialling
+    #: it (`slife2.wechat`).
+    tui: ServerSettings = field(default_factory=lambda: ServerSettings(port=8005))
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -1278,6 +1292,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
+        tui=_server(raw.get("tui"), base.tui, "tui"),
         default=str(raw.get("default") or _first_reference(providers)),
     )
 

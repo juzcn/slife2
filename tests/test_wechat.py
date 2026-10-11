@@ -22,7 +22,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -623,36 +623,45 @@ async def test_nothing_is_sent_to_nobody(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_the_agent_is_told_the_channel_the_turn_came_in_by(
+async def test_the_message_is_handed_to_the_window_with_its_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`channel` is the one thing that says a turn came from a phone.
+    """The delivery goes to the terminal, and says which channel it came in on.
 
-    Nothing here parses it — it is recorded with the turn and shows in the
-    footnote, which is how a model reading a conversation can tell a person at
-    the terminal from somebody on WeChat.
+    Both halves matter and they are the same fact: the window runs these words as
+    if the person typed them, so the turn's channel is what tells the model — and
+    the bubble — that these came off a phone.  Nothing here parses it; it is
+    recorded with the turn and shows in the footnote.
     """
-    seen: list[dict[str, Any]] = []
+    seen: dict[str, Any] = {}
 
-    class Agent:
-        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            seen.append({"name": name, **arguments})
+    class Window:
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            seen.update({"name": name, **arguments})
+
+        async def __aexit__(self, *exc: object) -> None:
             return None
 
+    async def open_window(url: str, **kwargs: Any):
+        seen.update({"url": url, "advertised": kwargs.get("name")})
+        return Window()
+
+    monkeypatch.setattr(wechat, "open_server", open_window)
     made = rig(monkeypatch)
-    # The one hop, stubbed at its narrowest point: everything else about the
-    # delivery is the poll loop's, and that is tested above.
-    made.plugin._peer = cast(Any, Agent())
     await made.plugin._ask_agent("jack", "hello")
 
-    assert seen == [
-        {
-            "name": "send_message",
-            "agent": "jack",
-            "prompt": "hello",
-            "channel": "wechat",
-        }
-    ]
+    # Where it went, and what it says: the address is the window's own
+    # (the `tui:` section), and the name is what a caller proves before handing
+    # anything over.
+    assert seen.pop("url") == made.plugin._config.server("tui").url
+    assert seen.pop("advertised") == wechat.TUI_SERVER_NAME
+    assert seen == {
+        "name": "submit",
+        "text": "hello",
+        "channel": "wechat",
+    }
 
 
 # --- logging out, and two logins at once --------------------------------------
@@ -790,3 +799,58 @@ async def test_a_bridge_that_is_unreachable_at_boot_is_retried(
         await made.close()
 
     assert "connected" in answer
+
+
+@pytest.mark.asyncio
+async def test_a_message_off_the_wire_is_handed_to_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole path, and the one that was broken: the poll loop's own delivery.
+
+    The tests above drive the delivery *seam* (`deliver=`), which is the poll
+    loop's edge — and the window is reached by a method of this class *after* that
+    edge, so both halves were "tested" while disagreeing about the call.  That is
+    how a method whose name was already taken in this class replaced the poll
+    loop's own hand-over, and it left sending working (that path is a tool) while
+    receiving was dead (this one is not).
+
+    So this goes the whole way and nothing less: a message off the wire →
+    `_queued` → the task `_answer` awaits → the window's `submit`.
+    """
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    class Window:
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            seen.append((name, arguments))
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    async def open_window(url: str, **kwargs: Any):
+        return Window()
+
+    monkeypatch.setattr(wechat, "open_server", open_window)
+    signed_in("jack")
+    # The real delivery — no `deliver=` seam — which is the point of the test.
+    plugin = Wechat(load(), http=Bridge())
+    session = plugin.session("jack")
+
+    plugin._queued(session, message("hi"), set())
+    await until(lambda: not session.inflight)
+
+    assert seen == [
+        (
+            "submit",
+            {
+                # The marker is the plugin's, and it is what the model answers
+                # with: it goes through the window untouched.
+                "text": (
+                    '[Wechat:{"peer_wechat_id": "peer-1", '
+                    '"context_token": "ctx-1"}] hi'
+                ),
+                "channel": "wechat",
+            },
+        )
+    ]

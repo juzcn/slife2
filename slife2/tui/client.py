@@ -17,6 +17,7 @@ from fastmcp.exceptions import ToolError
 from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT
 from slife2.events import TurnEvent, decode
 from slife2.mcp_server import close_server, open_server
+from slife2.tui.widgets import WINDOW_CHANNEL
 
 #: How long a whole turn may take.  A turn is several model calls plus tool
 #: runs, so the default client timeout would abandon it mid-stream and look
@@ -65,12 +66,18 @@ class AgentClient(Protocol):
         prompt: str,
         on_event: Callable[[TurnEvent], None],
         *,
+        channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
     ) -> str:
         """Run a turn, calling `on_event` as it goes.
 
         Returns the final assistant text, which is authoritative — `on_event`
         is a display channel and its events may be dropped or delayed.
+
+        `channel` is where the message came in on.  The window passes its own for
+        what the person typed, and something else when it is running a message
+        another channel handed it (`slife2.tui.app.deliver`) — the turn is
+        recorded with it and the line wears it as a bubble.
 
         `images` are `data:` URLs to send with the prompt.
         """
@@ -212,6 +219,7 @@ class MCPAgentClient:
         prompt: str,
         on_event: Callable[[TurnEvent], None],
         *,
+        channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
     ) -> str:
         if self._client is None:
@@ -228,15 +236,13 @@ class MCPAgentClient:
             "agent": self._agent,
             "subagent": self._subagent,
             "prompt": prompt,
-            # Every turn this client sends came from somebody typing at *this*
-            # window, and that is the whole of what the channel records — which
-            # is why it names the window and not the person: `human` was the
-            # first spelling and it says less, since a turn's channel is what
-            # tells one caller's turns from another's, and "a human" does not
-            # distinguish the terminal from anything else a person might type
-            # into.  A second kind of caller gets a second client rather than a
-            # flag on this one.
-            "channel": "tui",
+            # Where this turn came in on, as the caller knows it.  For a
+            # message the person typed that is this window (`tui` names the
+            # terminal and not the person: `human` was the first spelling and it
+            # says less, since a channel is what tells one caller's turns from
+            # another's); for one another channel handed the window, it is that
+            # channel's key, and the window is only the thing running it.
+            "channel": channel,
         }
         # Omitted rather than sent empty: an empty string and an absent key mean
         # the same thing to the server — "you choose" — and a payload that says

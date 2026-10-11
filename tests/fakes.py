@@ -25,6 +25,7 @@ from slife2.config import Config
 from slife2.events import TurnEvent
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import Message, StreamChatResult, ToolSpec
+from slife2.tui.widgets import WINDOW_CHANNEL
 
 
 @dataclass
@@ -143,6 +144,9 @@ class FakeAgentClient:
         self._connect_error = connect_error
         self.connected = False
         self.prompts: list[str] = []
+        #: The channel each prompt was sent on, so a test can prove a message
+        #: handed over by another channel kept its own.
+        self.channels: list[str] = []
         #: The images sent with each prompt, so a test can assert the attachment
         #: reached the client rather than only that the file was read.
         self.images: list[list[str]] = []
@@ -177,6 +181,7 @@ class FakeAgentClient:
         prompt: str,
         on_event: Callable[[TurnEvent], None],
         *,
+        channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
     ) -> str:
         """Run one scripted turn, keeping the real client's contract.
@@ -190,6 +195,7 @@ class FakeAgentClient:
         if not self.connected:
             raise ConnectionError("not connected")
         self.prompts.append(prompt)
+        self.channels.append(channel)
         self.images.append(images or [])
         try:
             return self._respond(prompt, on_event)

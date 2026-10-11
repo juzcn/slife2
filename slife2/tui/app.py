@@ -25,6 +25,13 @@ Four things here are worth knowing before changing them:
    and nothing is cancelled — and that first refusal is why `escape` is bound to
    the cancel alone: the interrupt that always fires, and the one that cannot
    close the window.
+
+**And another process can hand this window a message**, which is how a channel
+like WeChat reaches the screen: the message goes into the same queue the person's
+own typing goes into and is run as the same kind of turn, so there is one path and
+one display for both.  `slife2.tui.control` is the address it arrives on; the
+channel rides along so the line wears the right bubble and the turn is recorded
+with where it came from.
 """
 
 from __future__ import annotations
@@ -52,7 +59,7 @@ from slife2.events import (
 from slife2.tui.client import AgentClient, MCPAgentClient
 from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
-from slife2.tui.widgets import ChatView, HistoryInput, StatusBar
+from slife2.tui.widgets import WINDOW_CHANNEL, ChatView, HistoryInput, StatusBar
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +138,7 @@ class SlifeApp(App[None]):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
+        control_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
@@ -156,6 +164,11 @@ class SlifeApp(App[None]):
         #: a model cannot read.
         self._thinking = thinking
         self._vision = vision
+        #: Where this window can be reached, so that a message arriving on
+        #: another channel can be handed to it (`slife2.tui.control`).  Empty
+        #: means no control surface, which is what a test wants and what a window
+        #: started without a config address gets.
+        self._control_url = control_url
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
@@ -168,13 +181,18 @@ class SlifeApp(App[None]):
         #: per window: reading it again would append a second copy of a history
         #: the transcript is already showing.
         self._restored = False
-        #: Prompts sent but not started, oldest first.  The user's message is
-        #: added to the transcript when its turn starts rather than on submit,
-        #: so that the transcript stays a faithful record of the turns that
-        #: actually happened, in the order they happened.
-        self._queue: list[str] = []
+        #: Messages waiting for their turn, oldest first, each with the channel
+        #: it came in on.  **Typing is not the only way in**: a message handed
+        #: over by another channel lands here too (`deliver`), which is what makes
+        #: a WeChat message the same thing as one typed here.  A message is added
+        #: to the transcript when its turn starts rather than on arrival, so the
+        #: transcript stays a faithful record of the turns that happened, in the
+        #: order they happened.
+        self._queue: list[tuple[str, str]] = []
         self._worker: Worker[None] | None = None
         self._draining = False
+        #: The worker serving the control surface, held so unmounting stops it.
+        self._control: Worker[None] | None = None
         #: The running turn, as its own task so that cancelling one leaves the
         #: queue alone.  Cancelling the worker would take the queue with it.
         #: It resolves to the turn's answer, which the queue applies before the
@@ -221,12 +239,45 @@ class SlifeApp(App[None]):
         self._client = self._client_factory()
         self.query_one(HistoryInput).focus()
         self._refresh_status()
+        if self._control_url:
+            self._control = self.run_worker(
+                self._serve_control(), group="control", exit_on_error=False
+            )
         # Connecting can take a moment; a worker keeps the first paint prompt.
         self.run_worker(self._connect(), group="connect", exit_on_error=False)
 
     async def on_unmount(self) -> None:
+        if self._control is not None:
+            control, self._control = self._control, None
+            control.cancel()
         if self._client is not None:
             await self._client.close()
+
+    async def _serve_control(self) -> None:
+        """Offer this window's queue to whoever is delivering to it.
+
+        A worker of its own, because the server lives as long as the window does
+        and there is nothing to await in between: `serving` holds the port until
+        it is cancelled on the way out.
+        """
+        from slife2.tui import control
+
+        mcp = control.build_server(deliver=self.deliver)
+        async with control.serving(mcp, self._control_url):
+            await asyncio.Event().wait()
+
+    def deliver(self, text: str, channel: str) -> None:
+        """Take a message from another channel, to run as if it were typed.
+
+        **The whole of the pass-through**: it joins the same queue, is run by the
+        same drain as one turn among others, and is drawn by the same call — so
+        nothing downstream knows or cares that a person typed it somewhere else.
+        The channel travels with it, and that is what the bubble and the turn's
+        own record are made of.
+        """
+        self._queue.append((text, channel))
+        self._start_draining()
+        self._refresh_status()
 
     async def _connect(self) -> bool:
         """Connect, recording the outcome.  Never raises.
@@ -322,7 +373,7 @@ class SlifeApp(App[None]):
 
     async def on_history_input_submitted(self, message: HistoryInput.Submitted) -> None:
         self.query_one(HistoryInput).remember(message.text)
-        self._queue.append(message.text)
+        self._queue.append((message.text, WINDOW_CHANNEL))
         self._start_draining()
         self._refresh_status()
 
@@ -351,10 +402,13 @@ class SlifeApp(App[None]):
                 # Taken off the queue *before* it runs, so the count in the
                 # status bar is what is still waiting rather than including the
                 # turn the user is already watching.
-                prompt = self._queue.pop(0)
+                prompt, channel = self._queue.pop(0)
                 self._ticket += 1
                 ticket = self._ticket
-                self._transcript.add_user(prompt)
+                # The channel is the caller's, and `add_user` is what turns it
+                # into a bubble and unwraps a marker for a line that came in on
+                # somebody else's (`slife2.tui.widgets`).
+                self._transcript.add_user(prompt, channel=channel)
                 # The reader's own message owns the view: sending it goes to
                 # the end and re-arms following, however far up they had read.
                 # `add_user` follows the tail like every other mount, and that
@@ -373,7 +427,7 @@ class SlifeApp(App[None]):
                 # bar's "working" comes from `_turn` being set, and a refresh
                 # that ran first would find it `None` and draw an idle bar — for
                 # the whole turn, since nothing else refreshes until it ends.
-                self._turn = asyncio.create_task(self._send(prompt, ticket))
+                self._turn = asyncio.create_task(self._send(prompt, ticket, channel))
                 self._refresh_status()
                 try:
                     final = await self._turn
@@ -393,7 +447,7 @@ class SlifeApp(App[None]):
         finally:
             self._draining = False
 
-    async def _send(self, prompt: str, ticket: int) -> str:
+    async def _send(self, prompt: str, ticket: int, channel: str) -> str:
         """Run one turn and return its authoritative answer.
 
         The answer is returned rather than posted so the queue can apply it
@@ -417,7 +471,9 @@ class SlifeApp(App[None]):
             )
 
         return await self._client.run_turn(
-            prompt, lambda event: self._on_event(ticket, event)
+            prompt,
+            lambda event: self._on_event(ticket, event),
+            channel=channel,
         )
 
     def _on_event(self, ticket: int, event: TurnEvent) -> None:

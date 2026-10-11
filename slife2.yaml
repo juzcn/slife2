@@ -455,6 +455,16 @@ context:
   min_similarity: 0.45
   timeout: 20.0
 
+# ── The window ──────────────────────────────────────────────────────────────
+# Where your terminal listens.  **Not a server: slife2 never starts this one.**
+# It is here so that a message arriving over WeChat can be handed to the window
+# and run as if you had typed it — the same queue, the same turn, the same
+# transcript (DESIGN.md §1.2, §4).
+tui:
+  host: 127.0.0.1
+  port: 8005
+  path: /mcp
+
 # ── WeChat ──────────────────────────────────────────────────────────────────
 # **There is no `wechat:` section, and that is the design.**  WeChat is always
 # on — a login cannot be configured, it is *scanned*: `wechat_login` puts a QR
