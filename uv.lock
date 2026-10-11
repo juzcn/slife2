@@ -1495,6 +1495,18 @@ wheels = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d5f53b174e9cf701adbb35f39d69c2af63d4a39f81a9/qrcode-8.2.tar.gz", hash = "sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c", size = 43317, upload-time = "2025-05-01T15:44:24.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1669,8 +1681,10 @@ dependencies = [
     { name = "anthropic" },
     { name = "credstore" },
     { name = "fastmcp" },
+    { name = "httpx2" },
     { name = "jinja2" },
     { name = "openai" },
+    { name = "qrcode" },
     { name = "ruamel-yaml" },
     { name = "sqlite-vec" },
     { name = "textual" },
@@ -1691,8 +1705,10 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1.2.0" },
     { name = "credstore", specifier = ">=0.10.5" },
     { name = "fastmcp", specifier = ">=4.0.1" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "openai", specifier = ">=2.46.0" },
+    { name = "qrcode", specifier = ">=8.0" },
     { name = "ruamel-yaml", specifier = ">=0.19.0" },
     { name = "sqlite-vec", specifier = ">=0.1.9" },
     { name = "textual", specifier = ">=8.2.8" },

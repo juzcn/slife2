@@ -43,6 +43,7 @@ from slife2.config import (
     RESTAPI_TOOLS_SERVER_NAME,
     SKILLS_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
+    WECHAT_SERVER_NAME,
     Config,
 )
 from slife2.mcp_server import identifies
@@ -108,6 +109,12 @@ TOOLHUB_SERVER = ("slife2.toolhub", TOOLHUB_SERVER_NAME, "list_tools")
 #: rather than under `providers:`, and is identified by `describe` — the tool
 #: the db calls before it can build an index.  See `slife2.llm.embeddings_server`.
 EMBEDDINGS_SERVER = ("slife2.llm.embeddings_server", EMBEDDINGS_SERVER_NAME, "describe")
+#: WeChat, and the only plugin here that is nobody's family: it declares no
+#: catalogue rows.  It identifies itself by `wechat_check_status` rather than by
+#: a tool the hub asks it for, because the hub asks it for nothing — what it
+#: offers the model is its own four tools, and the status tool is the one that
+#: works before any login exists, which is the state it starts in.
+WECHAT_SERVER = ("slife2.wechat", WECHAT_SERVER_NAME, "wechat_check_status")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -117,6 +124,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "mcp-tools": MCP_TOOLS,
     "restapi-tools": RESTAPI_TOOLS,
     "toolhub": TOOLHUB_SERVER,
+    "wechat": WECHAT_SERVER,
     "agent": AGENT_SERVER,
 }
 
@@ -588,6 +596,12 @@ def others_running() -> list[ClientRecord]:
 #: and nothing here points at itself in a circle.
 NEEDS: dict[str, tuple[str, ...]] = {
     "context": ("embeddings",),
+    # WeChat's poll loop hands a message to a conversation by calling the agent
+    # server's `send_message`, so the peer it speaks to has to be there — and a
+    # login resumed before it is would be a session watching a bridge for
+    # messages it cannot deliver.  Its own call is what notices, so this is
+    # ordering rather than correctness, which is what every edge here is.
+    "wechat": ("agent",),
     "toolhub": (
         "embeddings",
         "context",
@@ -595,6 +609,7 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "cli-server",
         "mcp-tools",
         "restapi-tools",
+        "wechat",
     ),
 }
 

@@ -17,6 +17,19 @@ dependencies = [
     "fastmcp>=4.0.1",
     # The TUI.  Brings `rich` transitively; we do not import it.
     "textual>=8.2.8",
+    # The WeChat bridge, which is the one thing here that talks to somebody who
+    # is not a model: `slife2.ilink` makes plain HTTP requests, and this is the
+    # client FastMCP already brings — as a distribution named `httpx2`, imported
+    # under that name.  Declared rather than relied on transitively, by the same
+    # rule as the provider SDKs below: a module this project imports is a
+    # dependency this project states.
+    "httpx2>=2.13.1",
+    # The login QR, drawn with half-block characters (`█▀▄`) so it can be
+    # scanned off the terminal a person is already looking at.  v1's dependency
+    # and v1's reason.  `slife2-wechat` does not need it to *run* — without it
+    # the login hands over the URL instead of a code — which is why the import
+    # is inside the one function that draws.
+    "qrcode>=8.0",
     # slife2.yaml.  Comment-preserving, so a rewrite does not eat the file's
     # explanation of itself — the same reason v1 uses it.
     "ruamel.yaml>=0.19.0",
@@ -65,6 +78,7 @@ slife2-cli = "slife2.cli_server:main"
 slife2-mcp-tools = "slife2.mcp_tools:main"
 slife2-restapi-tools = "slife2.restapi_tools:main"
 slife2-toolhub = "slife2.toolhub:main"
+slife2-wechat = "slife2.wechat:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"
 slife2-llm-anthropic = "slife2.llm.anthropic_server:main"
 slife2-llm-openai-responses = "slife2.llm.openai_responses_server:main"

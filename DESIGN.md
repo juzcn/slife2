@@ -37,6 +37,8 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
   │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
+  │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
+  │                                 │                  └── MCP ──▶ slife2-agent   (what arrives, as a turn)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
   │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
@@ -59,7 +61,8 @@ would come to disagree about what an embedding is.
 speaks one wire protocol; the context store keeps a conversation's turns and
 decides which of them it runs on; the hub is where the tools come from; skills
 reads the playbooks, cli owns the command registry, and mcp-tools and
-restapi-tools hold the servers those two sections name; the agent loop runs
+restapi-tools hold the servers those two sections name; wechat holds a login per
+agent and turns what arrives on it into a turn; the agent loop runs
 turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
@@ -144,6 +147,76 @@ describe it — and the wrong one for a remote service. And it does not change
 with the number of agents: `--agent` is a label, the servers are shared by every
 instance (§4), so the multiplier for a library is the number of *processes* that
 import it, not the number of agents.
+
+### 1.2 The plugin that is not a family
+
+**`slife2-wechat` is the first plugin here that holds no section and declares no
+rows.**  Every other one is a *family*: it owns a config section, and what it
+does with it is hold connections (`tools:`, `rest-api:`) or build rows from
+documents (`skills:`, `cli:`) and declare them to the hub.  What this one holds
+is a credential and a conversation — the first table's
+"a credential, a provider SDK, somebody else's connection" row, with nothing
+else in it — which is also why the hub never asks it for sources: `_declares` is
+read off the listing (§8.2), `list_sources` is not in it, and a plugin with
+nothing to declare is a plugin with nothing to be asked.  Its four tools are the
+model's, under their own names, like any other plugin's.
+
+**A login is per agent, and that is the port's whole difference from v1.**  v1
+ran one wechat child per agent, so its module globals *were* that agent's: one
+`_client`, one queue, one dedup window, because there was exactly one agent in
+the process.  These servers are shared (§4), so the same four things live in a
+`Session` keyed by the **calling agent** — the first half of the client id every
+call already carries (§3) — and a second agent that scans its own code gets its
+own file, its own poll loop and its own conversation.  This is the contract
+`slife2.mcp_server` states, at the first plugin where it costs something: a
+process that cannot ask an operator which agent it is serving has to be told, per
+call, and a call that does not say is refused rather than guessed.
+
+**The plugin delivers its own turns.**  v1's harness polled the plugin for
+messages and injected them into the inbox, so the plugin's job ended at "here is
+what arrived" — and that seam was a tool named `__wechat_drain_incoming`.  There
+is no harness poll loop here, and there is something better: the agent server's
+`send_message` already takes a `channel`, "where this turn came in from … the
+caller is the only party that knows", so the poll loop calls it and a message
+becomes a turn with `channel=wechat` and no seam at all.  **That is why the drain
+tool has no port: it *was* the seam between two processes that are now one.**
+
+Two things follow, and both are the shape rather than an implementation detail:
+
+* **A turn is handed over, not awaited.**  `send_message` returns when its turn
+  is *finished*, and a turn is a model thinking — so awaiting it in the poll loop
+  would stop watching WeChat for the whole of every reply, and a second message
+  sent mid-turn would sit at the bridge instead of being folded into the turn
+  already running.  The agent server serialises one key's turns itself (§3), so
+  handing them all over is what it expects.  The bound on how many may be in
+  flight is the plugin's, because a person flooding a conversation is a fact the
+  plugin sees first.
+* **The reply is still the model's to send.**  Nothing here auto-dispatches an
+  answer, which is v1's rule unchanged: a turn that says nothing sends nothing.
+  What the plugin does do on its own is the typing indicator — up when a message
+  is handed over, down when the reply goes out — because that is a courtesy owed
+  to somebody holding a phone, not a decision about the conversation.
+
+**The prompt carries its own addressing, because the turn's record cannot.**
+`channel` says `wechat` and nothing more, and answering needs the peer's id and
+the conversation's `context_token` — so the message is prefixed
+`[Wechat:{"peer_wechat_id": …}]`, with the JSON keys *named after the arguments
+of `wechat_send_message`*, so that replying is copying two values rather than
+translating between two vocabularies.  v1's marker, kept verbatim, for the same
+reason its session file is: a habit and a file format both survive a port, and
+neither was the part that needed changing.
+
+**And it has no config section at all.**  Every other plugin here owns one, and
+this one owns none — not even a switch.  v1's `wechat: {enabled: false}`
+declined to *spawn* the plugin, and there is no gate to hang that on now that the
+launcher starts every plugin and shares it; a switch that only refused the *work*
+would have been a key whose whole content was "do not do what this process
+exists to do".  So the rule is the one the data already states: **a machine that
+should not talk to WeChat is a machine where nobody scans a code.**  There is no
+saved login to pick up until somebody does, and the `wechat_*.yaml` files are the
+whole of what this process resumes.  What is left in the config is an address
+under `servers:` and nothing else — `slife2-toolhub` is the only other plugin
+that reads no section of its own.
 
 ## 2. Streaming: one pattern, used twice
 
@@ -1036,6 +1109,14 @@ existed before their tools did. So `slife2-skills` and `slife2-cli` are plugins
 like any other, each owning its section, and the rule that survives is the one
 worth having: **everything with a server behind it goes through the one code
 path**, and a source that owns rows which are not tools *declares* them.
+
+**A plugin that declares nothing is asked for nothing, and that is read off the
+listing rather than configured.** `_declares` is one question — is `list_sources`
+among the tools this server offers — so `slife2-wechat`, which holds a login and
+no rows, is not a source the hub has to remember to skip: it is a server that
+never said it was one (§1.2). A flag in the config saying "this one has no rows"
+would be the second registry that §8.1 exists to avoid, and the first thing to
+disagree with the tools the server actually serves.
 
 **A source declares rows; the hub merges them, and the hub is still the only
 writer.** The declaring tool is `list_sources`, unmarked and so invisible to the

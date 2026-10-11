@@ -116,6 +116,16 @@ servers:
     host: 127.0.0.1
     port: 8032
     path: /mcp
+  # WeChat, over the iLink bridge.  Not a family: it declares no catalogue rows
+  # and has no section of entries — what it holds is a login per agent and the
+  # conversation that login is in.  Its tools are the model's under their own
+  # names (`wechat_login`, `wechat_send_message`), because there is one set of
+  # tools here and the plugin serving one is not something the model reasons
+  # about.  Port 8030, which v1's `builtins` had and nothing has had since.
+  wechat:
+    host: 127.0.0.1
+    port: 8030
+    path: /mcp
   # Other people's servers, held by the process that owns the section they are
   # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
   # the model anything — each holds its entries' connections and *declares* them
@@ -181,14 +191,6 @@ tools:
   # allowed directories.  Off by default: `.` below is the *data directory*, so
   # turning it on gives the model the config, the runtime state and the turn
   # databases.  Point it at something narrower if that is not what you want.
-  filesystem:
-    command: npx
-    args:
-      - -y
-      - '@modelcontextprotocol/server-filesystem'
-      - .
-    description: Local filesystem operations — read, write, list, and search files within allowed directories.
-    enabled: false
   serper:
     command: npx
     args:
@@ -235,20 +237,6 @@ tools:
   # OS-accessible path set.  slife2 has no equivalent, so it starts confined to
   # the data directory — which is a different tool from the one v1 ran, and the
   # reason it is off.
-  iflow-mcp:
-    command: uvx
-    args:
-      - --from
-      - iflow-mcp-mcp-claude-code
-      - claudecode
-    description: MCP implementation of Claude Code capabilities — directly execute instructions for modifying and improving project files.
-    enabled: false
-  file-search:
-    command: npx
-    args:
-      - -y
-      - file-search-mcp
-    description: 'Blazingly fast MCP server for searching files and content in large codebases — uses ripgrep (100x faster than grep), fuzzy find, and tree view. Tools: search_files, search_content, fuzzy_find, tree.'
   playwright:
     command: npx
     args:
@@ -308,20 +296,6 @@ tools:
       - -y
       - '@aryanbv/pdf-toolkit-mcp'
     description: 'PDF Toolkit MCP — 22-tool PDF suite: create PDFs from Markdown/structured data, render pages as images (for vision models to read scans), fill forms and extract values, split/merge/rotate/crop pages, add text/watermarks/annotations, extract and re-embed attachments.'
-  sqlite:
-    command: uvx
-    args:
-      - --with
-      - mcp>=1.0,<1.29
-      - mcp-server-sqlite
-    description: 'SQLite MCP (official modelcontextprotocol/servers reference) — query and manipulate SQLite databases via natural language: create tables, CRUD operations, schema inspection, and more.'
-  # v1 also carried `command: uvx` / `args: [arxiv-mcp-server]` beside this URL,
-  # and an entry with both is refused here — `transport` is read off which field
-  # is set, so two of them is a precedence rule nobody would remember.  The URL
-  # is what ran; the leftover command is what v1's file grew.  If the endpoint
-  # ever goes away, delete `url` and the command below is what brings it back:
-  #   command: uvx
-  #   args: [arxiv-mcp-server]
   arxiv:
     url: https://arxiv.mcp.brunosan.de/mcp
     description: arXiv paper search, download and reading for AI/ML/NLP/CV/robotics — free, no API key, uses the public arXiv API.
@@ -357,6 +331,12 @@ tools:
 # A spec is a large document and these proxies generate a tool per endpoint, so
 # one entry here can outweigh every other server in the list.  That is what
 # `enabled: false` is for.
+  desktop-commander:
+    command: npx
+    args:
+      - -y
+      - '@wonderwhy-er/desktop-commander@latest'
+    description: 'Swiss-army-knife for your own machine: run terminal commands with streaming output, drive long-running and interactive processes, and read/write/search/edit files (diff-based surgical edits, ripgrep search, Excel/PDF/DOCX).'
 rest-api:
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
@@ -454,6 +434,21 @@ context:
   recall_limit: 40
   min_similarity: 0.45
   timeout: 20.0
+
+# ── WeChat ──────────────────────────────────────────────────────────────────
+# **There is no `wechat:` section, and that is the design.**  WeChat is always
+# on — a login cannot be configured, it is *scanned*: `wechat_login` puts a QR
+# code in front of somebody, and the token that comes back lives in
+# `<data>/wechat_<agent>.yaml`, one per agent, written by the plugin and read by
+# it at the next start.  Those files are also how a shared process knows which
+# agents exist, so a section here would be a second answer to a question the
+# files already answer.  A machine that should not talk to WeChat is a machine
+# where nobody scans a code.
+#
+# The one thing written down about it is the address above, under `servers:`,
+# and there is nothing else to say about it — no entries, no switch, no keys.
+# See README.md's "WeChat" section, and DESIGN.md §1.2 for why this plugin owns
+# no section at all.
 
 skills:
   baidu-search:

@@ -182,6 +182,7 @@ SKILLS_SERVER_NAME = "slife2-skills"
 CLI_SERVER_NAME = "slife2-cli"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
+WECHAT_SERVER_NAME = "slife2-wechat"
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
@@ -215,6 +216,15 @@ EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 #: because the *catalogue sources* they declare under are `skills` and `cli`,
 #: which are also their config sections' names — and a source's rows must not
 #: share an id with the tools of the server that declares them.
+#:
+#: `wechat` is the first plugin here that is nobody's *family*, and the first
+#: with no config section at all: it declares no catalogue rows and owns no
+#: entries.  What it holds is a login per agent and a conversation with somebody
+#: who is not on this machine, and it is a plugin for the reason the first table
+#: in DESIGN.md §1.1 gives — it holds a credential, and a library would put the
+#: token in every importer.  The only thing written down about it is an address,
+#: here; a login is scanned rather than configured, and lives in a
+#: `wechat_<agent>.yaml` beside the data.
 LOCAL_SERVERS = (
     "embeddings",
     "context",
@@ -222,6 +232,7 @@ LOCAL_SERVERS = (
     "cli-server",
     "mcp-tools",
     "restapi-tools",
+    "wechat",
     "toolhub",
     "agent",
 )
@@ -873,6 +884,11 @@ def default_config() -> Config:
             # tool *set* and no link to anybody.
             "mcp-tools": ServerSettings(port=8033),
             "restapi-tools": ServerSettings(port=8034),
+            # WeChat, and the one plugin here that is nobody's family: it
+            # declares no rows and owns no entries, and what it holds is a login
+            # per agent and a conversation with somebody off this machine.  Port
+            # 8030, which v1's `builtins` had and nothing has had since.
+            "wechat": ServerSettings(port=8030),
             # The model's tools, and the only process that decides what they
             # are.  It holds no credential and no connection to anybody's
             # server: every plugin above is asked for a tool list and for the
@@ -1582,6 +1598,7 @@ __all__ = [
     "RESTAPI_TOOLS_SERVER_NAME",
     "SKILLS_SERVER_NAME",
     "TOOLHUB_SERVER_NAME",
+    "WECHAT_SERVER_NAME",
     "DEFAULT_CONFIG_NAME",
     "AgentSettings",
     "CliToolSettings",

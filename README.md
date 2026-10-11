@@ -102,6 +102,7 @@ uv run slife2-skills           # the playbooks,              :8031
 uv run slife2-cli              # the cli: registry,          :8032
 uv run slife2-mcp-tools        # holds the tools: servers,   :8033
 uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
+uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -279,6 +280,9 @@ context:                                # how a conversation's context is decide
   ceiling: 0.8
   floor: 0.2
 ```
+
+**There is no `wechat:` section**: a WeChat login is scanned rather than
+configured, and it lives in `<data>/wechat_<agent>.yaml` — see "WeChat" above.
 
 `command` starts a process and talks over its standard input; `url` connects to
 somebody else's over the network. A `rest-api` entry is the same thing said
@@ -480,6 +484,38 @@ than quietly continuing with fewer tools, while a server that is somebody else's
 is reported and left out. A model that has quietly lost `turn_read` is a
 failure nobody can see, and that is what makes the rule worth having.
 
+### WeChat
+
+`slife2-wechat` connects one WeChat account per agent, over iLink's hosted
+bridge. Nothing about it is configured: a login is *scanned*, so
+`wechat_login` puts a QR code in the model's reply, somebody points the WeChat
+app at it, and the token that comes back is saved to
+`<data>/wechat_<agent>.yaml` where the next start picks it up. A login lasts
+about a day; `wechat_check_status` says how much of it is left.
+
+Four tools, and the model uses all of them:
+
+| tool | what it does |
+|---|---|
+| `wechat_login` | Fetch a QR code and start watching for the scan |
+| `wechat_check_status` | Connected? How long left? And **who to reply to** |
+| `wechat_send_message` | Send a text to a peer |
+| `wechat_logout` | Forget this agent's login |
+
+A message somebody sends arrives as a **turn of that agent's own conversation**,
+with `channel=wechat` and a `[Wechat:{"peer_wechat_id": …}]` prefix naming who it
+is from. Answering is the model's job and only the model's: nothing here
+auto-dispatches a reply, so a turn that says nothing sends nothing — call
+`wechat_send_message` with the peer and the `context_token` the marker carried.
+While the turn runs the person on the other end sees *typing…*, and it stops when
+the reply goes out.
+
+Each agent logs in separately and gets its own account, its own file and its own
+poll loop; the plugin is one shared process (DESIGN.md §1.2). There is no
+`wechat:` section to write: a login is scanned rather than configured, and the
+`wechat_<agent>.yaml` files are the whole of what the plugin resumes. A machine
+that should not talk to WeChat is a machine where nobody scans a code.
+
 ## Where things live
 
 **One data directory holds everything** — the config that says what to run, the
@@ -494,6 +530,8 @@ runtime state of what is running, and the turns they produced:
                                    reconstructible); tools.db — the catalogue,
                                    one file for the data directory
   skills/                          <name>/SKILL.md — playbooks, written by you
+  wechat_<agent>.yaml              a WeChat login per agent, written by the
+                                   plugin when a scan is confirmed (~24h)
 ```
 
 **Where that folder is depends on what you are running.** In a checkout it is
@@ -557,6 +595,13 @@ slife2/
 ├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section — held, declared,
 │                     #   and editable by the `mcp_*` tools
 ├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, likewise
+├─ wechat.py          # slife2-wechat: a WeChat login per agent, the four tools
+│                     #   the model uses, and the poll loop that turns what
+│                     #   arrives into a turn — the one plugin here that holds
+│                     #   no section and declares no rows (DESIGN §1.2)
+├─ ilink.py           # the iLink ClawBot protocol, as a library: the QR
+│                     #   handshake, the long poll, and the two envelopes that
+│                     #   mean something other than what their status says
 ├─ toolhub.py         # slife2-toolhub: the model's tools and the *set* they
 │                     #   belong to — the naming rule, the gate, the budget, and
 │                     #   the calls, which it routes to whoever holds the source
