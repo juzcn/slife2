@@ -30,6 +30,24 @@ def test_an_iso_date_passes_through() -> None:
     assert normalize_bound("2026-01-31") == "2026-01-31"
 
 
+def test_a_non_canonical_iso_bound_is_the_date_it_names() -> None:
+    """**`fromisoformat` accepts spellings the column does not hold.**
+
+    The comparison against `created_at` is lexicographic, and `20261007` is
+    shorter than every `YYYY-MM-DDTHH:MM:SS+HH:MM` stamp — so as written it
+    sorts *before* all of them, which made `since=20261007` match no turn at all
+    and `until=20261007` match every one. A window silently empty one way and
+    silently unbounded the other, from a spelling the module claims to accept.
+    """
+    assert normalize_bound("20261007") == "2026-10-07"
+    assert normalize_bound("20261007", role="until") == "2026-10-08", "a day ends late"
+    assert normalize_bound("2026-W41-2") == "2026-10-06", "a week date is a date too"
+    assert normalize_bound("2026-10-07T09:30") == "2026-10-07T09:30:00"
+    # And something no parser knows is still a refusal rather than a window.
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound("2026-10")
+
+
 def test_a_utc_datetime_becomes_local() -> None:
     """The column holds local time, and the model may write any offset.
 

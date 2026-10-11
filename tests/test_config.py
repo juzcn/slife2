@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+import slife2.config
 from slife2.config import (
     API_BACKENDS,
     ConfigError,
@@ -145,25 +146,27 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
     assert SOURCE != CONFIG_KEY
 
 
-def test_a_document_source_is_spelled_on_both_sides() -> None:
-    """The two source names the boot pass has to be able to say on its own.
+def test_a_document_source_has_one_spelling() -> None:
+    """**One name, four readers, and no second copy to keep in step.**
 
-    `slife2.db.ToolStore.reset` runs before anything is asked over any wire — it
-    is handed the names the *config* carries, and withdraws the verdict on rows
-    whose source is not among them — so the hub spells `skills` and `cli` for
-    itself (`slife2.toolhub.configured_sources`, `SKILLS_SOURCE`).  A rename on
-    one side only would leave the boot pass reading every playbook and every
-    command as a source that has gone, which is the failure the whole set exists
-    to prevent: it would mark them `error` on the way up and nothing would ever
-    write the truth back, since no connection owns either family.
+    The boot pass needs these without asking anybody (`ToolStore.reset` withdraws
+    the verdict on rows whose source the config does not name), the hub files
+    rows under them, and the family plugins refuse a name that would collide with
+    one — so four modules read `skills` and `cli`.
+
+    This used to be three copies held together by this test, which is a test
+    standing in for a language feature.  Now the copies are *aliases*, and what
+    is asserted is that nothing has quietly grown a fourth.
     """
     from slife2.cli_server import SOURCE as CLI_SOURCE
+    from slife2.mcp_server import CLI_SOURCE as CONTRACT_CLI
+    from slife2.mcp_server import SKILLS_SOURCE as CONTRACT_SKILLS
     from slife2.skills_server import SOURCE as SKILLS_SOURCE
     from slife2.toolhub import CLI_SOURCE as HUB_CLI
     from slife2.toolhub import SKILLS_SOURCE as HUB_SKILLS
 
-    assert HUB_SKILLS == SKILLS_SOURCE
-    assert HUB_CLI == CLI_SOURCE
+    assert HUB_SKILLS is SKILLS_SOURCE is CONTRACT_SKILLS
+    assert HUB_CLI is CLI_SOURCE is CONTRACT_CLI
 
 
 def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
@@ -346,6 +349,62 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     path = write(tmp_path, "servers:\n  context:\n    port: 0\n")
     with pytest.raises(ConfigError, match="is not a port"):
         load(path)
+
+
+def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
+    """**A typo has to read like every other typo.**
+
+    The numeric readers were a bare `int()`/`float()`, so `max_steps: many`
+    raised `ValueError` — which nothing above catches, since the whole load path
+    reports `ConfigError` and the CLI's one handler is for that.  The user got a
+    traceback out of the `slife2` console script instead of the one line naming
+    the field.
+    """
+    for text, expected in [
+        ("agent:\n  max_steps: many\n", "agent.max_steps"),
+        ("tool_load:\n  threshold: lots\n", "tool_load.threshold"),
+        ("context:\n  ceiling: high\n", "context.ceiling"),
+        ("servers:\n  context:\n    port: eight\n", "servers.context.port"),
+    ]:
+        with pytest.raises(ConfigError, match=expected):
+            load(write(tmp_path, text))
+
+
+def test_an_empty_providers_section_is_refused(tmp_path) -> None:
+    """**Absent is the built-in provider; empty is a mistake.**
+
+    `providers: {}` fell through the same `if not raw` test as no section at
+    all, so a config that named no provider quietly ran on the built-in one and
+    called api.deepseek.com — with the operator's own file saying, in the
+    section they had just edited, that there was no such provider.
+    """
+    with pytest.raises(ConfigError, match="at least one provider"):
+        load(write(tmp_path, "providers: {}\n"))
+
+    # Absent is still the defaults, which is what a fresh checkout starts with.
+    assert load(write(tmp_path, "# nothing here\n")).providers
+
+
+def test_the_defaults_are_one_object_while_there_is_no_file(
+    tmp_path, monkeypatch
+) -> None:
+    """**Identity is promised to config-less installs too.**
+
+    `load_cached`'s whole contract is that an unchanged file hands back the
+    *same* `Config`, so a reader asks "did an edit happen" with `is`.  With no
+    file it returned a fresh `default_config()` per call, and `LiveProviders`
+    compares with `is` — so a machine with no `slife2.yaml`, which is every
+    fresh checkout, rebuilt the provider table and every cached SDK client on
+    every model call.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setattr(slife2.config, "_latest", None)
+
+    assert load_cached() is load_cached()
+
+    # And a file appearing is still picked up rather than cached past.
+    write(tmp_path, "agent:\n  max_steps: 7\n")
+    assert load_cached().agent.max_steps == 7
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:

@@ -31,7 +31,6 @@ has the reasoning block a live one had, expanded or folded by the same rule.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from slife2.context import turn_footnote
@@ -39,8 +38,6 @@ from slife2.events import preview
 from slife2.messages import ToolCall
 from slife2.tools import is_harness
 from slife2.tui.widgets import ChatView
-
-logger = logging.getLogger(__name__)
 
 
 def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:

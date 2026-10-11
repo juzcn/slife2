@@ -116,12 +116,23 @@ def sanitise(part: str) -> str:
     kept beside it (`UpstreamTool.tool`), because this one can no longer be used
     to address the far end.
 
+    **The alphabet is ASCII, and `isalnum` alone does not say so.**  It is
+    Unicode-aware, so `搜索` passed through unchanged and 400'd every request in
+    that conversation — the exact failure this exists to prevent, and one no
+    test caught because they all used punctuation.  What a provider accepts is
+    `[A-Za-z0-9_-]`, and that is what this now emits.
+
     Length is deliberately not trimmed.  A provider's limit is real, but
     truncation has to invent a rule for what happens when two names truncate to
     the same string, and a collision would silently point a tool call at the
     wrong tool — a worse failure than a request the provider refuses loudly.
+    Two names that sanitise alike are that same collision and take the same
+    answer: the catalogue refuses the second rather than letting one name mean
+    two tools.
     """
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in part)
+    return "".join(
+        c if (c.isascii() and c.isalnum()) or c in "-_" else "_" for c in part
+    )
 
 
 def proxied_name(server: str, tool: str) -> str:
@@ -143,8 +154,14 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
 
     The standard `mcpServers` document, which is the ecosystem's own config
     format rather than one invented here — so a block copied out of another
-    tool's documentation works after the names are checked, and `auth:` and the
-    other keys this build does not implement still reach the SDK.
+    tool's documentation works after the names are checked.
+
+    **The entry is written from the settings, so an unknown key does not reach
+    the SDK.**  This used to claim `auth:` and the rest passed through, and they
+    do not: `_tool_server` reads the keys it knows into `ToolServerSettings`, and
+    nothing carries the others — so a key this build does not implement is
+    dropped at load rather than at connect.  Supporting one is a field on the
+    settings and a line in the loader; this is the place that would hand it on.
 
     `cwd` is the fallback working directory for a stdio server.  It matters
     because an entry is likely to name a path, and `.` has to mean something:
@@ -509,6 +526,11 @@ class Connection:
         trying again is not superstition, and it is tried exactly once: a server
         that is down must not turn every call into two timeouts.
 
+        **A timeout is not one of those cases**, and `_call_once` answers for it
+        rather than returning `None`: the call was *made*, so the far end may
+        still be running it, and a retry is a second render, a second file
+        write, a second message sent.
+
         `meta` is the caller's identity, carried across unchanged.  This module
         does not read it and could not: one process serves every conversation in
         the system over one connection, so whose behalf a call is on is a fact
@@ -556,6 +578,22 @@ class Connection:
                 # carries it is a proxy, and this is the one thing it passes on
                 # that did not come from the model.
                 meta=meta,
+            )
+        except TimeoutError:
+            # **Not None, because a retry would run it twice.**  `None` means
+            # "the link is gone and nothing was asked of the far end", which is
+            # what makes the caller's rebuild safe; a timeout means the opposite
+            # — the request went out and the answer did not come back — so this
+            # is answered like any other failed call, and the sentence says
+            # which of the two happened.  `CALL_TIMEOUT_SECONDS` is well past
+            # every tool here, so this is a stuck peer rather than a slow one.
+            self._error = f"timed out after {CALL_TIMEOUT_SECONDS:g}s"
+            logger.warning("%s: calling %s timed out", self.settings.name, tool)
+            return (
+                f"{self.settings.name}: {tool} did not answer within "
+                f"{CALL_TIMEOUT_SECONDS:g}s. It may still be running: the call "
+                f"was made and was not retried.",
+                False,
             )
         except Exception as exc:  # noqa: BLE001 - a call that threw is a transport failure, and returns None
             logger.warning("%s: calling %s failed: %s", self.settings.name, tool, exc)

@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 import shutil
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Any
 
 from fastmcp import FastMCP
@@ -50,7 +49,9 @@ from slife2.config import (
     _cli_tool,
     load,
 )
-from slife2.mcp_server import LIST_SOURCES, house_server, serve_plugin
+from slife2.mcp_server import CLI_SOURCE as _SOURCE
+from slife2.mcp_server import serve_plugin
+from slife2.toolfamily import Documents, build_document_server
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,10 @@ CONFIG_KEY = "cli-server"
 #: documents would report its playbooks as broken whenever it faltered — and
 #: these rows have no connection whose state a verdict could come from, which is
 #: why their `status` is the config's to write and nothing else's.
-SOURCE = "cli"
+#: Re-exported from the plugin contract, because three other places need the
+#: same word: the hub files under it, and the two family plugins refuse a
+#: name that would collide with it.  See `slife2.mcp_server.SKILLS_SOURCE`.
+SOURCE = _SOURCE
 
 #: The category, and the namespace the row names carry (`cli:yt-dlp`).  The
 #: prefix is not decoration: a name is a row's identity, and `browser-harness` is
@@ -197,61 +201,37 @@ def _describe(name: str, raw: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: What `list_sources` says this source is, for the hub and for `servers()`.
+DESCRIPTION = (
+    "The commands this machine already has, as the `cli:` section records them."
+)
+
+
 def build_server(config: Config) -> FastMCP:
     """Build the cli server.
 
-    **The entries are held here and the tools change them in place**, which is
-    the one thing about this family that is not like the other two: a `cli:`
-    entry has no connection, so there is nothing to rebuild and nothing a
+    **The entries are held and the tools change them in place**, which is the
+    one thing about this family that is not like the connection families: a
+    `cli:` entry has no connection, so there is nothing to rebuild and nothing a
     restart is needed for — the row a search reads is derived from these entries
     on every `list_sources`, and the hub re-declares before every search.
     """
-    entries: dict[str, CliToolSettings] = dict(config.cli)
-    mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
+    return build_document_server(
+        name=SERVER_NAME,
+        instructions=INSTRUCTIONS,
+        source=SOURCE,
+        category=CATEGORY,
+        section=SECTION,
+        description=DESCRIPTION,
+        entries=config.cli,
+        rows=rows,
+        management=register_tools,
+    )
 
-    @mcp.tool(name=LIST_SOURCES)
-    def list_sources() -> dict[str, Any]:
-        """The `cli:` section as the one source this server holds.
 
-        **Not a tool for the model**, and so not marked as one: the hub asks for
-        this and records the answer, and the model never sees the name.  The
-        whole list rather than a difference, because that is what makes a deleted
-        entry stop being a hit — a merge reads an absent name as a row the source
-        no longer has.
-
-        **`up` and `enabled` are the same answer here and are still both said.**
-        A command is a program on this machine: there is no connection that could
-        be down, so what the section says is the whole truth about it — every
-        entry is enabled or it is not, and nothing is ever *unreachable*.  The
-        `enabled` flag is the operator's switch, and a switched-off entry is
-        still declared, with `status: disabled` on its rows, because a model
-        told "there is a command for this and somebody turned it off" is better
-        off than one told nothing.
-
-        `transport` is empty, and that is not a missing value: these rows have
-        nothing behind them to connect to, which is also why they are absent from
-        `servers()` — a source with no connection is not a server.
-
-        Returns:
-            `sources`: this server's whole holding — one source, `cli`, with its
-            rows, one per configured entry.
-        """
-        return {
-            "sources": [
-                {
-                    "name": SOURCE,
-                    "category": CATEGORY,
-                    "enabled": True,
-                    "up": True,
-                    "description": (
-                        "The commands this machine already has, as the `cli:` "
-                        "section records them."
-                    ),
-                    "transport": "",
-                    "rows": rows(entries),
-                }
-            ]
-        }
+def register_tools(mcp: FastMCP, family: Documents) -> None:
+    """The `cli_*` tools, which are this family's vocabulary."""
+    entries = family.entries
 
     @mcp.tool(name="cli_list", meta=FOR_THE_MODEL)
     async def cli_list() -> str:
@@ -262,7 +242,7 @@ def build_server(config: Config) -> FastMCP:
         `tool_search` finds a command by what it does, and nothing runs one yet
         (DESIGN.md §9).
         """
-        written = configfile.read_section(SECTION)
+        written = configfile.read_section(family.section)
         if not written:
             return "No commands are recorded under `cli:` yet. `cli_set` records one."
         return "\n".join(_describe(name, raw) for name, raw in written.items())
@@ -325,10 +305,10 @@ def build_server(config: Config) -> FastMCP:
         Args:
             name: The entry to forget, from `cli_list`.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in configfile.read_section(family.section):
             return f"'{name}' is not recorded under `cli:` — see `cli_list`."
-        configfile.remove(SECTION, name)
-        entries.pop(name, None)
+        configfile.remove(family.section, name)
+        family.forgotten(name)
         logger.info("cli_removed name=%s", name)
         return (
             f"`{name}` is forgotten; its row leaves the catalogue at your next search."
@@ -346,20 +326,18 @@ def build_server(config: Config) -> FastMCP:
             name: The entry, from `cli_list`.
             enabled: True records it as usable; False keeps it out of the catalogue.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in configfile.read_section(family.section):
             return (
                 f"'{name}' is not recorded under `cli:` — `cli_set` records one, "
                 f"`cli_list` shows what is there."
             )
-        configfile.set_enabled(SECTION, name, enabled)
-        current = entries.get(name)
-        if current is not None:
-            entries[name] = replace(current, enabled=enabled)
+        configfile.set_enabled(family.section, name, enabled)
+        # No `make`: an entry this process is not holding is one another instance
+        # wrote, and it is the file's answer that counts until the next start.
+        family.switched(name, enabled)
         logger.info("cli_set_enabled name=%s enabled=%s", name, enabled)
         state = "on" if enabled else "off"
         return f"`{name}` is {state}; its entry stays in `cli:`."
-
-    return mcp
 
 
 def main(argv: list[str] | None = None) -> int:

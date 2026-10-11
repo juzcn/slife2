@@ -96,6 +96,16 @@ ToolFunc = Callable[[dict[str, Any]], Awaitable[str]]
 #: module docstring is where the four questions it does *not* answer are listed.
 HARNESS_PREFIX = "_"
 
+#: The trim, by name.  The one `_`-prefixed tool the *model* also sees, because
+#: the trim is written into the conversation as a tool pair and a pair has to
+#: name a tool the request declares (the module docstring's exception).
+#:
+#: **Spelled once, because the two ends are a hop apart.**  The agent server
+#: calls it (`slife2.toolclient`) and the hub serves it (`slife2.toolhub`), and
+#: each used to carry its own copy of the string: a rename on one side would
+#: have been a trim that stopped working with a log line and nothing else.
+FUNC_TOOL_UNLOAD = "_func_tool_unload"
+
 
 def is_harness(name: str) -> bool:
     """Whether a tool name is the harness's rather than the model's.

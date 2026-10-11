@@ -334,7 +334,8 @@ class ModelSettings:
     #: Modalities accepted.  This is the config that says whether a model can
     #: read an image, and the agent server refuses an attachment against a model
     #: whose `input` does not list `image` — silently dropping one is worse than
-    #: saying the model cannot read it.  See `slife2.server.server._with_images`.
+    #: saying the model cannot read it.  The check is `attach_image`'s, in
+    #: `slife2.server.server`.
     input: tuple[str, ...] = ("text",)
     #: Token budget, used for the context percentage in the status bar.
     context_window: int = 0
@@ -710,7 +711,9 @@ class SkillSettings:
     and the same spelling, as on a server and on a `cli:` entry.
     """
 
-    name: str
+    #: **No `name` field**, unlike the other settings here: a skill's name is
+    #: the key the section holds it under, and every reader already has it —
+    #: a copy on the value was written by both writers and read by neither.
     env: dict[str, str] = field(default_factory=dict)
     #: `false` keeps the playbook installed and out of the catalogue.  Read by
     #: the plugin that owns the section, which declares the row `disabled`.
@@ -1143,8 +1146,10 @@ def load(explicit: str | Path | None = None) -> Config:
 
 
 #: The last file read, and what it looked like: `(path, (mtime_ns, size), config)`.
-#: One slot, because there is one config file and one process per reader.
-_latest: tuple[Path, tuple[int, int], Config] | None = None
+#: One slot, because there is one config file and one process per reader.  A
+#: `None` path is the *no file* state, which is a state like any other and is
+#: cached for the reason the docstring below gives.
+_latest: tuple[Path | None, tuple[int, int] | None, Config] | None = None
 
 
 def load_cached(explicit: str | Path | None = None) -> Config:
@@ -1159,12 +1164,23 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     way, which is the point of caching on the file rather than on a call.
 
     A stat on the common path and a parse only when something changed.  A
-    missing file is the built-in defaults, exactly as in `load`.
+    missing file is the built-in defaults, exactly as in `load` — and **the same
+    object**, which is the half that used to be missing: a config-less install
+    was handed a fresh `Config` per call, so `LiveProviders`, whose whole
+    staleness test is `config is not self._config`, rebuilt the provider table
+    and every cached SDK client on every model call.  That is the state a fresh
+    checkout starts in, so it was the common case rather than a corner.
     """
     global _latest
     path = find_config_path(explicit)
     if path is None or not path.is_file():
-        return load(explicit)
+        # `None` in the path slot means "there was no file", so a file appearing
+        # afterwards takes the reload path below rather than being missed.
+        if _latest is not None and _latest[0] is None:
+            return _latest[2]
+        config = load(explicit)
+        _latest = (None, None, config)
+        return config
     try:
         stat = path.stat()
     except OSError:
@@ -1204,17 +1220,33 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
         )
 
-    providers_raw = _mapping(raw.get("providers"), "providers")
-    providers = (
-        {str(name): _provider(spec, str(name)) for name, spec in providers_raw.items()}
-        if providers_raw
-        else dict(base.providers)
-    )
+    # **An absent section is the built-in provider; an *empty* one is a
+    # mistake.**  `providers: {}` used to fall through the same `if not raw`
+    # test as no section at all, so a config that named no provider quietly ran
+    # on the built-in one and called api.deepseek.com — with the operator's file
+    # saying, in the section they had just edited, that there was no such
+    # provider.  `embeddings.providers` already draws the line this way, and the
+    # section is the same shape.
+    if raw.get("providers") is None:
+        providers = dict(base.providers)
+    else:
+        providers_raw = _mapping(raw.get("providers"), "providers")
+        if not providers_raw:
+            raise ConfigError(
+                "providers: needs at least one provider — leave the section out "
+                "for the built-in one"
+            )
+        providers = {
+            str(name): _provider(spec, str(name))
+            for name, spec in providers_raw.items()
+        }
 
     agent_raw = _mapping(raw.get("agent"), "agent")
     agent = AgentSettings(
         server=servers["agent"],
-        max_steps=_int_or(agent_raw.get("max_steps"), base.agent.max_steps),
+        max_steps=_int_or(
+            agent_raw.get("max_steps"), base.agent.max_steps, "agent.max_steps"
+        ),
         system_prompt=_template_path(
             agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
         ),
@@ -1262,7 +1294,7 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
     if raw is None:
         return base
     section = _mapping(raw, "tool_load")
-    threshold = _int_or(section.get("threshold"), base.threshold)
+    threshold = _int_or(section.get("threshold"), base.threshold, "tool_load.threshold")
     if threshold < 1:
         raise ConfigError(
             f"tool_load.threshold: {threshold} would evict every tool the model "
@@ -1386,8 +1418,8 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     if raw is None:
         return base
     section = _mapping(raw, "context")
-    ceiling = _optional_float(section.get("ceiling"))
-    floor = _optional_float(section.get("floor"))
+    ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
+    floor = _optional_float(section.get("floor"), "context.floor")
     ceiling = base.ceiling if ceiling is None else ceiling
     floor = base.floor if floor is None else floor
     if not 0 < floor < ceiling <= 1:
@@ -1395,16 +1427,29 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
             f"context: floor={floor} and ceiling={ceiling} are not a window "
             f"(0 < floor < ceiling <= 1)"
         )
-    limit = _int_or(section.get("recall_limit"), base.recall_limit)
+    limit = _int_or(
+        section.get("recall_limit"), base.recall_limit, "context.recall_limit"
+    )
     if limit < 1:
         raise ConfigError(f"context.recall_limit: {limit} recalls nothing")
-    timeout = _optional_float(section.get("timeout"))
+    timeout = _optional_float(section.get("timeout"), "context.timeout")
     if timeout is not None and timeout <= 0:
         raise ConfigError(
             f"context.timeout: {timeout} would abandon every discriminator call "
             f"before it was made"
         )
-    similarity = _optional_float(section.get("min_similarity"))
+    similarity = _optional_float(
+        section.get("min_similarity"), "context.min_similarity"
+    )
+    if similarity is not None and not 0 <= similarity <= 1:
+        # Refused for the reason the window above is: a cosine is a similarity
+        # in [0, 1], so `min_similarity: 2` is a gate nothing can pass.  It
+        # would recall nothing from the meaning leg — and recall nothing
+        # *silently*, since a keyword hit is exempt and the turn would simply
+        # run on less context than the operator asked for.
+        raise ConfigError(
+            f"context.min_similarity: {similarity} is not a similarity (0-1)"
+        )
     return ContextSettings(
         ceiling=ceiling,
         floor=floor,
@@ -1584,7 +1629,10 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     if not command:
         command = OPENAPI_PROXY_COMMAND
         env = {OPENAPI_SPEC_URL: spec, **env}
-        args = (*OPENAPI_PROXY_ARGS, *_string_list(raw.get("args"), name))
+        args = (
+            *OPENAPI_PROXY_ARGS,
+            *_string_list(raw.get("args"), f"rest-api.{name}.args"),
+        )
     else:
         args = _string_list(raw.get("args"), f"rest-api.{name}.args")
         if spec:
@@ -1666,7 +1714,6 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     """
     return {
         str(name): SkillSettings(
-            name=str(name),
             env=_secrets(spec.get("env"), f"skills.{name}.env")
             if isinstance(spec, dict)
             else {},
@@ -1738,7 +1785,7 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping with host/port/path")
-    port = _int_or(raw.get("port"), default.port)
+    port = _int_or(raw.get("port"), default.port, f"{where}.port")
     if not 0 < port < 65536:
         # Refused rather than defaulted, and rather than passed on: a port is
         # how the launcher finds this server again — it probes the address it
@@ -1824,17 +1871,23 @@ def _model(raw: Any, provider: str) -> ModelSettings:
         name=str(raw.get("name") or ""),
         reasoning=bool(raw.get("reasoning", False)),
         input=inputs,
-        context_window=_int_or(raw.get("context_window"), 0),
-        max_tokens=_optional_int(raw.get("max_tokens")),
-        temperature=_optional_float(raw.get("temperature")),
-        top_p=_optional_float(raw.get("top_p")),
+        context_window=_int_or(
+            raw.get("context_window"), 0, f"providers.{provider}.{model}.context_window"
+        ),
+        max_tokens=_optional_int(
+            raw.get("max_tokens"), f"providers.{provider}.{model}.max_tokens"
+        ),
+        temperature=_optional_float(
+            raw.get("temperature"), f"providers.{provider}.{model}.temperature"
+        ),
+        top_p=_optional_float(raw.get("top_p"), f"providers.{provider}.{model}.top_p"),
         thinking=str(compat.get("thinking") or ""),
         stream_usage=str(compat.get("stream_usage") or ""),
         store=None if store_raw is None else bool(store_raw),
     )
 
 
-def _int_or(value: Any, default: int) -> int:
+def _int_or(value: Any, default: int, where: str) -> int:
     """`value` as an int, or `default` when the key is **absent**.
 
     Absent means absent, and that is the whole of what this adds over
@@ -1843,16 +1896,36 @@ def _int_or(value: Any, default: int) -> int:
     refuse — was silently replaced by the default, as were `max_steps: 0` (a
     turn with no model call in it) and `port: 0` (the kernel's "pick one for
     me", which is not something a server of ours should be handed by accident).
+
+    `where` names the field, because a value that is not a number is the
+    caller's typo and has to be reported like every other one.  A bare `int()`
+    raises `ValueError`, which nothing above this catches: `max_steps: many`
+    reached the user as a traceback out of the `slife2` console script rather
+    than as the one line every other bad value produces.
     """
-    return default if value is None else int(value)
+    return default if value is None else _as_int(value, where)
 
 
-def _optional_int(value: Any) -> int | None:
-    return None if value is None else int(value)
+def _optional_int(value: Any, where: str) -> int | None:
+    return None if value is None else _as_int(value, where)
 
 
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
+def _optional_float(value: Any, where: str) -> float | None:
+    return None if value is None else _as_float(value, where)
+
+
+def _as_int(value: Any, where: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{where}: expected a whole number, got {value!r}") from exc
+
+
+def _as_float(value: Any, where: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{where}: expected a number, got {value!r}") from exc
 
 
 __all__ = [

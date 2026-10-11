@@ -146,17 +146,31 @@ def _resolve_relative(key: str, role: str, today: date) -> date | None:
     return None
 
 
-def _is_iso(value: str) -> bool:
-    """Whether `value` is an ISO date or datetime we can compare against.
+def _canonical(value: str) -> str | None:
+    """An ISO date or datetime, in the exact shape the `created_at` column holds.
 
-    `fromisoformat` covers a bare date too (midnight), and from 3.11 accepts a
-    `Z` suffix as well as an explicit offset.
+    **Normalised rather than passed through, and that is the whole of what this
+    is for.**  The comparison is lexicographic against
+    `YYYY-MM-DDTHH:MM:SS+HH:MM`, and `fromisoformat` accepts several other
+    spellings of the same instant — `20261007`, `2026-W41-2` — which a model
+    does write.  Compared as written, `20261007` is shorter than every row's
+    stamp and sorts *before* all of them: `since=20261007` matched nothing and
+    `until=20261007` matched everything, which is a window silently empty one
+    way and silently unbounded the other.  The module's own rule is that
+    anything it cannot place raises.
+
+    A date and a datetime are told apart here because the caller's `until` rule
+    needs to know which it was: a date means a day, and a day ends at its end.
+    `None` for a string that is neither.
     """
     try:
-        datetime.fromisoformat(value)
+        return date.fromisoformat(value).isoformat()
     except ValueError:
-        return False
-    return True
+        pass
+    try:
+        return datetime.fromisoformat(value).isoformat(sep="T")
+    except ValueError:
+        return None
 
 
 def normalize_bound(value: str, *, role: str = "since") -> str:
@@ -189,10 +203,11 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
         day = _resolve_relative(key, role, today)
         if day is not None:
             resolved = day.isoformat()
-        elif _is_iso(value.strip()):
-            resolved = value.strip()
         else:
-            raise InvalidTimeBound(_bound_error(role, value))
+            canonical = _canonical(value.strip())
+            if canonical is None:
+                raise InvalidTimeBound(_bound_error(role, value))
+            resolved = canonical
 
     if role == "until" and len(resolved) == 10 and "T" not in resolved:
         resolved = (date.fromisoformat(resolved) + timedelta(days=1)).isoformat()

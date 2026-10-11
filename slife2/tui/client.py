@@ -8,7 +8,6 @@ built and verified without a server running.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -18,8 +17,6 @@ from fastmcp.exceptions import ToolError
 from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT
 from slife2.events import TurnEvent, decode
 from slife2.mcp_server import close_server, open_server
-
-logger = logging.getLogger(__name__)
 
 #: How long a whole turn may take.  A turn is several model calls plus tool
 #: runs, so the default client timeout would abandon it mid-stream and look

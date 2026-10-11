@@ -295,6 +295,19 @@ AUDIO_MIME: dict[str, str] = {
     ".silk": "audio/silk",
 }
 
+#: Image suffixes as media types, for the one place an image's bytes travel
+#: inline: a reference image that is a *local file*, which the far end has no way
+#: to fetch and so has to be handed.  Same list, and the same trade, as
+#: `slife2.attachments.MEDIA_TYPES` — the suffix decides, and a format not named
+#: here is refused rather than guessed at.
+IMAGE_MIME: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
 #: How much of a provider's error text is passed on.  Long enough to carry the
 #: vendor's own words, short enough not to spend a context window doing it.
 ERROR_CHARS = 500
@@ -446,12 +459,18 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                 )
             await asyncio.sleep(POLL_SECONDS)
 
-    async def _data_uri(self, path: Path) -> str:
+    async def _data_uri(self, path: Path, types: dict[str, str], what: str) -> str:
         """A local file as a `data:` URI, with its media type.
 
         The suffix decides the type and an unknown one is refused rather than
         guessed: the far end decodes the payload by that header, so a wrong one
         is bytes nobody can read.
+
+        `types` is the table for what is being sent and `what` names it, because
+        there are two callers and they are not the same kind of file: audio goes
+        out as `input_audio` for a transcript, and an image goes out as a
+        reference for image-to-image.  One table for both would refuse a `.png`
+        with a sentence about audio formats, which is what it used to say.
 
         **The read goes off the event loop**, and here that is the point rather
         than a formality: an audio file handed to `transcribe_audio` is
@@ -459,11 +478,11 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         is serving for as long as the disk takes — which is the same rule
         `slife2.cabinet`'s `file_read` follows with its own `to_thread` hop.
         """
-        media_type = AUDIO_MIME.get(path.suffix.lower(), "")
+        media_type = types.get(path.suffix.lower(), "")
         if not media_type:
             raise MediaAdapterError(
-                f"{path.suffix or '(no suffix)'} is not an audio format this "
-                f"adapter knows: {', '.join(sorted(AUDIO_MIME))}"
+                f"{path.suffix or '(no suffix)'} is not {what} this adapter "
+                f"knows: {', '.join(sorted(types))}"
             )
         data = await asyncio.to_thread(path.read_bytes)
         return f"data:{media_type};base64,{base64.b64encode(data).decode()}"
@@ -494,7 +513,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         where = await asyncio.to_thread(expanded)
         if where is None:
             raise MediaAdapterError(f"no such reference image: {path}")
-        return await self._data_uri(where)
+        return await self._data_uri(where, IMAGE_MIME, "an image format")
 
     async def generate_image(
         self,
@@ -603,7 +622,10 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         are read because the endpoint has three: `output.text`, a segmented
         `output.sentence.text`, and a `choices` list like a chat answer.
         """
-        if not await asyncio.to_thread(audio_path.is_file):
+        # `~` and the disk read in one hop, the same way `_reference` does it:
+        # a path a model wrote is a path a person would write, and `~/voice.mp3`
+        # is one this process's own cwd would otherwise make a lie of.
+        if not await asyncio.to_thread(lambda: audio_path.expanduser().is_file()):
             raise MediaAdapterError(f"no such audio file: {audio_path}")
         params = dict(extra_params or {})
         params.setdefault("format", "wav")
@@ -611,7 +633,11 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         content: list[dict[str, Any]] = [
             {
                 "type": "input_audio",
-                "input_audio": {"data": await self._data_uri(audio_path)},
+                "input_audio": {
+                    "data": await self._data_uri(
+                        audio_path.expanduser(), AUDIO_MIME, "an audio format"
+                    )
+                },
             }
         ]
         output = await self._generate(model, content, params)

@@ -4,13 +4,19 @@ v1 called this plugin `memfiles` and described it as four typed knowledge stores
 dual-written to a markdown file and a SQLite index.  This is that, built the way
 a plugin here is built: one process, `house_server` plus `serve_plugin`, the
 *store* as a library (`slife2.cabinet_store`), the embedder opened once against
-the embeddings server, every blocking store call off the event loop, and state
-keyed by the client id every call carries.
+the embeddings server, and state keyed by the client id every call carries.
+
+**The store's calls hop off the event loop where the hop pays**: opening a
+cabinet, a single read, and any listing, which are the calls that run while
+another agent's turn is being served.  A *write* does its SQLite inline — it is
+one transaction against a local file, it is already the shortest path through a
+sequence of awaited steps, and wrapping it would be a thread hop per write for a
+wait nobody is making.
 
 **Four kinds, one corpus.**  A note, a day, a saved file and a report are rows
 of one table with a `kind` column, so a search ranks them against each other
 rather than against their own kind — a rank only means something inside the
-corpus that produced it, and four indexes would be four corpora (§7.2).  What
+corpus that produced it, and four indexes would be four corpora (§5).  What
 differs per kind is what a *document* is, and that is `SPECS` in the store: its
 key, its time axis, whether a second write appends, and where its markdown goes.
 
@@ -47,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import os
 import shutil
 from datetime import date as _date
 from pathlib import Path
@@ -63,6 +70,7 @@ from slife2.cabinet_store import (
     NOTE,
     REPORT,
     CabinetStore,
+    discard_file,
     index_path,
     parse_tags,
     resolve,
@@ -173,22 +181,35 @@ def category_for(name: str) -> str:
 
 
 def unique_path(directory: Path, name: str) -> Path:
-    """A path in *directory* that is free, keeping the name where it can.
+    """A free path in *directory*, keeping the name where it can.  **Reserved.**
 
     A file is never overwritten, and never overwritten *silently*: two documents
     called `report.pdf` are two documents, and a cabinet that keeps one of them
     is a cabinet that lost the other.  v1's rule, and the reason a saved file's
     key is its path rather than its name.
+
+    **The name is claimed by creating it**, and that is the difference between a
+    rule and a rule that holds.  Asking `exists()` and returning the answer is a
+    check a second caller can pass at the same time as the first — and it does:
+    the copy that follows is awaited on a thread, so two `file_save` calls whose
+    sources share a name both saw the same free path and the second overwrote
+    the first.  `O_EXCL` is the same question asked by the kernel, which is the
+    only party that can answer it once.
+
+    The file is left empty for the caller to fill, and empty is what it stays if
+    the caller's own work fails — which is why the caller removes it on the way
+    out rather than assuming a failed save left nothing behind.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    candidate = directory / name
-    if not candidate.exists():
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for index in range(1, 1000):
+        candidate = directory / (name if index == 1 else f"{stem}-{index}{suffix}")
+        try:
+            handle = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        os.close(handle)
         return candidate
-    stem, suffix = candidate.stem, candidate.suffix
-    for index in range(2, 1000):
-        candidate = directory / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
-            return candidate
     raise ValueError(f"{directory} has a thousand files called {name}")
 
 
@@ -536,8 +557,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 )
             target = unique_path(opened.root / chosen, source.name)
             relative = target.relative_to(opened.root).as_posix()
-            await on_thread(shutil.copy2, source, target)
             try:
+                # The copy is inside the `try` because `unique_path` has already
+                # created the destination: a copy that fails leaves an empty file
+                # where a failed copy used to leave nothing at all.
+                await on_thread(shutil.copy2, source, target)
                 await opened.write(
                     FILE,
                     relative,
@@ -555,7 +579,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 # turn's save keeps.  The bytes are already on disk by now, so
                 # they are what has to be taken back; a row without its file, or
                 # a file the cabinet has forgotten, are both worse than a refusal.
-                await on_thread(_unlink, target)
+                await on_thread(discard_file, target)
                 raise
             saved.append(relative)
         logger.info("file_save count=%d", len(saved))
@@ -954,14 +978,6 @@ def _today() -> str:
 def _day(value: str) -> _date:
     """A diary key, parsed — refused rather than stored if it is not a day."""
     return _date.fromisoformat(value)
-
-
-def _unlink(path: Path) -> None:
-    """Remove a file, and do not care that it was not there."""
-    try:
-        path.unlink()
-    except OSError as exc:
-        logger.debug("cabinet: %s not removed: %s", path, exc)
 
 
 def main(argv: list[str] | None = None) -> int:

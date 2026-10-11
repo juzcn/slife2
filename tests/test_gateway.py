@@ -275,9 +275,10 @@ class DeadClient:
     faked, and the transport is a placeholder nothing looks at.
     """
 
-    def __init__(self, *, dies: bool, refuses: bool) -> None:
+    def __init__(self, *, dies: bool, refuses: bool, times_out: bool = False) -> None:
         self.dies = dies
         self.refuses = refuses
+        self.times_out = times_out
         self.calls = 0
 
     async def __aenter__(self) -> DeadClient:
@@ -297,17 +298,27 @@ class DeadClient:
         self.calls += 1
         if self.dies:
             raise ConnectionError("the link is gone")
+        if self.times_out:
+            raise TimeoutError("the call did not answer")
         return types.SimpleNamespace(
             content=[types.SimpleNamespace(text="answered")], is_error=self.refuses
         )
 
 
-def clients(*, dies: bool = False, refuses: bool = False, first_dies: bool = False):
+def clients(
+    *,
+    dies: bool = False,
+    refuses: bool = False,
+    first_dies: bool = False,
+    times_out: bool = False,
+):
     """A client factory, and the list of clients it built."""
     made: list[DeadClient] = []
 
     def make(_transport: Any, _handler: Any) -> Any:
-        client = DeadClient(dies=dies or (first_dies and not made), refuses=refuses)
+        client = DeadClient(
+            dies=dies or (first_dies and not made), refuses=refuses, times_out=times_out
+        )
         if first_dies and made:
             client.dies = False
         made.append(client)
@@ -345,6 +356,29 @@ async def test_a_server_that_is_down_costs_two_timeouts_not_more() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_is_neither_rebuilt_nor_retried() -> None:
+    """**A call that timed out was still made.**
+
+    The rebuild rule is about a link that died with nothing asked of the far
+    end — that is what makes trying again safe.  A timeout is the other case:
+    the request went out and the answer did not come back, so the far end may
+    still be running it, and calling again is a second `file_save`, a second
+    video render, a second message sent.  It is answered instead, and the answer
+    says which of the two happened, because "no answer" and "no attempt" are
+    things a caller acts on differently.
+    """
+    make, made = clients(times_out=True)
+    link = connection(client_factory=make)
+
+    text, ok = await link.call("echo", {})
+
+    assert ok is False
+    assert "did not answer within" in text
+    assert len(made) == 1, "a timeout is not a reason to rebuild"
+    await link.close()
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_does_not_rebuild_the_link() -> None:
     """The peer answered.  Rebuilding would only be told the same thing again."""
     make, made = clients(refuses=True)
@@ -368,6 +402,18 @@ def test_a_name_a_provider_would_reject_is_made_legal() -> None:
     assert sanitise("a-b_c") == "a-b_c"
     assert proxied_name("my.server", "read.file") == "my_server__read_file"
     assert proxied_name("arxiv", "search") == "arxiv__search"
+
+
+def test_the_legal_alphabet_is_ascii() -> None:
+    """**`isalnum` is not the rule a provider implements.**
+
+    It is Unicode-aware, so `搜索` passed through untouched and 400'd every
+    request in that conversation — the exact failure `sanitise` exists to
+    prevent, and one the punctuation cases above never reached.
+    """
+    assert sanitise("搜索") == "__"
+    assert sanitise("café") == "caf_", "a letter outside ASCII is still outside"
+    assert sanitise("read_file-2") == "read_file-2", "and the legal set survives"
 
 
 def test_the_config_document_carries_whichever_transport_the_entry_uses() -> None:

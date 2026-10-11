@@ -1016,6 +1016,12 @@ def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None
     found = asyncio.run(store.search(keywords=["keyword"], embedder=EMBEDDER))
     assert [row["name"] for row in found["results"]] == ["arxiv__search"]
     assert found["results"][0]["schema_bytes"] == 0
+    # **And it has a number, which is what the words being a question buys.**
+    # The routing used to live in `toolhub`, so this — a keyword-only call made
+    # against the store — came back with the strongest evidence on the page
+    # carrying no similarity at all, which is the state `_search_dict` says
+    # cannot happen.
+    assert "similarity" in found["results"][0], found["results"][0]
 
 
 def test_an_empty_query_browses_and_the_filters_narrow(tmp_path) -> None:

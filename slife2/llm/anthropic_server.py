@@ -24,16 +24,17 @@ belongs on this side of the wire: the agent loop stays free of it.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
-    LiveProviders,
-    build_llm_server,
+    Translate,
+    build_backend_server,
     read_int,
+    sdk_streamer,
     serve_backend,
 )
 from slife2.messages import Message, ToolSpec, Usage
@@ -52,6 +53,11 @@ DEFAULT_MAX_TOKENS = 4096
 #: How much of the output budget a thinking model may spend reasoning.  Half,
 #: because the other half is what the answer is made of.
 THINKING_BUDGET_SHARE = 0.5
+
+#: The smallest `budget_tokens` the Messages API accepts.  A floor of the
+#: protocol rather than a preference: a request below it is a 400, so a
+#: `max_tokens` that cannot hold it leaves no valid budget at all.
+MIN_THINKING_BUDGET = 1024
 
 
 def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
@@ -211,17 +217,24 @@ def thinking_parameter(
     """
     if not settings.reasoning or settings.thinking in ("omit", "disabled"):
         return None
-    # Clamped below `max_tokens`, not merely floored at 1024: the API refuses a
-    # budget that is not smaller than the cap, so a model configured with
-    # `max_tokens: 1024` or less would 400 on every call — asking for reasoning
-    # and then leaving it no room to answer in.  `max(1024, ..)` alone gives
-    # exactly that at the floor.
-    budget = min(max(1024, int(max_tokens * THINKING_BUDGET_SHARE)), max_tokens - 1)
-    if budget <= 0:
+    # **Both bounds, because the API has both.**  `budget_tokens` must be at
+    # least `MIN_THINKING_BUDGET` *and* smaller than `max_tokens`, so the two
+    # constraints leave a valid budget only when the cap is above the floor.
+    # The clamp used to guard the second alone — `max(1024, …)` then `min(…,
+    # max_tokens - 1)` — so a model with `max_tokens: 1024`, the very value the
+    # comment here names, came out at 1023 and 400'd on every call.  A cap that
+    # cannot hold a budget has no thinking to give, and saying so is the answer.
+    budget = min(
+        max(MIN_THINKING_BUDGET, int(max_tokens * THINKING_BUDGET_SHARE)),
+        max_tokens - 1,
+    )
+    if budget < MIN_THINKING_BUDGET:
         logger.warning(
-            "%s: max_tokens=%d is too small to reason in; thinking is off",
+            "%s: max_tokens=%d leaves no room for a %d-token thinking budget; "
+            "thinking is off",
             settings.model,
             max_tokens,
+            MIN_THINKING_BUDGET,
         )
         return None
     return {"type": "enabled", "budget_tokens": budget}
@@ -436,20 +449,12 @@ def _make_streamer() -> Streamer:
 
         return AsyncAnthropic(api_key=key, base_url=provider.base_url)
 
-    pool = LiveProviders(API, SERVER_NAME, sdk_client)
-
-    async def stream(
-        provider: str,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        model: str,
-    ) -> AsyncIterator[ProviderEvent]:
-        clients = pool.clients()
-        settings = clients.provider(provider).model(model)
-        request = build_request(messages, tools, settings)
-        response = await clients.client(provider).messages.create(**request)
+    def make_translator() -> Translate:
+        """One stream's translation, carrying its running output total."""
         produced = 0
-        async for event in response:
+
+        def one(event: Any) -> Iterable[ProviderEvent]:
+            nonlocal produced
             for out in translate(event):
                 # `isinstance`, because one raw event produces *both* kinds:
                 # `message_delta` yields a usage chunk and a `Finish`, and the
@@ -463,14 +468,22 @@ def _make_streamer() -> Streamer:
                     out, produced = as_delta(out, produced)
                 yield out
 
-    return stream
+        return one
+
+    return sdk_streamer(
+        api=API,
+        server_name=SERVER_NAME,
+        sdk_client=sdk_client,
+        build_request=build_request,
+        start=lambda client, request: client.messages.create(**request),
+        translator=make_translator,
+    )
 
 
 def build_server(*, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
-    return build_llm_server(
-        name=SERVER_NAME,
-        streamer=streamer if streamer is not None else _make_streamer(),
+    return build_backend_server(
+        name=SERVER_NAME, streamer=streamer, make=_make_streamer
     )
 
 

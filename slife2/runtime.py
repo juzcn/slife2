@@ -747,8 +747,18 @@ def terminate(pid: int, *, grace: float = 5.0) -> bool:
     if sys.platform != "win32":
         import signal
 
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pid, signal.SIGKILL)
+        # **The same branch the polite signal takes, and it has to be.**  A pid
+        # that is not a group leader — a server started by hand, which the
+        # comment above names — has no group to signal, so an unconditional
+        # `killpg` is suppressed ESRCH and this returns False with the daemon
+        # still running: the one case where the force is needed is the one where
+        # it was never sent.
+        if os.getpgid(pid) == pid:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
         time.sleep(0.2)
 
     return not pid_alive(pid)

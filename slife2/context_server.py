@@ -83,6 +83,7 @@ from slife2.mcp_server import (
 )
 from slife2.messages import StreamChatResult
 from slife2.paths import agents_dir
+from slife2.textindex import terms
 from slife2.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
@@ -748,8 +749,7 @@ def build_server(
         # turn's problem: the in-memory rebuild stands on its own, and the next
         # turn publishes the list again.  What it costs is a restart that comes
         # back one turn short — v1's trade, in the same place.
-        written = await _on_thread(store.set_context_turns, target)
-        changed = written != sorted(in_hand)
+        await _on_thread(store.set_context_turns, target)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d",
             len(target),
@@ -758,7 +758,11 @@ def build_server(
         return {
             "messages": rebuilt,
             "turn_ids": target,
-            "changed": changed,
+            # **Always a change here, and it is not a comparison any more.**  The
+            # branch above returns when the decision equals what is in hand, so
+            # reaching this point means the list this turn runs on is not the one
+            # the conversation had — which is the whole of what this reports.
+            "changed": True,
             # What survived the decision, and what came back from the log.  The
             # two add to `len(target)`, which is what the turn runs on.
             "kept": len(base),
@@ -781,6 +785,16 @@ def build_server(
         floor, so a live context sits at or above it for most of a session.
         """
         query = str(condition.get("query") or "")
+        if query and not terms(query):
+            # **A query with no term is not a query the store can run.**  The
+            # keyword leg refuses such a thing — `"***"`, `"—"` — with
+            # `EmptyQuery`, and an exception out of here fails the whole turn:
+            # the discriminator's answer is not a caller the harness can hand a
+            # refusal back to, so the recall is dropped and the decision's other
+            # half, the keep-list, runs on its own.  `toolhub` drops the same
+            # input for the same reason.
+            logger.info("recall_query_has_no_term")
+            query = ""
         since = condition.get("since") or None
         until = condition.get("until") or None
         anchor = condition.get("anchor") or None

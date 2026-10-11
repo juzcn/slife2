@@ -260,7 +260,6 @@ class Session:
         self.persisted: str = ""
         #: A QR login in progress, and v1's four words for where it is.
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
-        self.qr_content: str = ""
         self.qr_error: str = ""
         self.qr_task: asyncio.Task[None] | None = None
 
@@ -794,7 +793,6 @@ class Wechat:
             clear_session(session.agent)
 
         session.qr_state = "waiting"
-        session.qr_content = ""
         session.qr_error = ""
         try:
             data = await client.fetch_qrcode(ilink.BASE_URL)
@@ -807,7 +805,6 @@ class Wechat:
             session.qr_state = ""
             return "The server answered without a login QR; try again in a moment."
         content = str(data.get("qrcode_img_content") or qrcode)
-        session.qr_content = content
 
         self._cancel(session.qr_task)
         session.qr_task = self._spawn(
@@ -853,7 +850,6 @@ class Wechat:
                         "The QR expired and a new one could not be fetched."
                     )
                     return
-                session.qr_content = str(refreshed.get("qrcode_img_content") or fresh)
                 session.qr_state = "waiting"
                 session.qr_task = self._spawn(
                     self._qr_watch(session, fresh, base_url, attempts=attempts + 1)
@@ -864,6 +860,30 @@ class Wechat:
             if status.get("verify_code_blocked"):
                 session.qr_state = "error"
                 session.qr_error = "The server blocked the verify code."
+                return
+            if status.get("need_verifycode"):
+                # **Two states the poll can answer that this loop has to say
+                # something about**, and both used to fall through to the next
+                # poll — so the login sat here until the ten-minute deadline and
+                # then blamed the person for not scanning a code they had
+                # already scanned.
+                #
+                # This one wants a code typed into WeChat.  `poll_login_status`
+                # takes one; nothing in this build supplies it, so the honest
+                # answer is that the login cannot finish here rather than a wait
+                # that ends in the wrong sentence.
+                session.qr_state = "error"
+                session.qr_error = (
+                    "WeChat asked for a verification code, which this build has "
+                    "no way to send. Pair the account another way, or scan again "
+                    "and choose the option that does not ask for one."
+                )
+                return
+            if status.get("already_connected"):
+                session.qr_state = "error"
+                session.qr_error = (
+                    "This account is already bound to another WeChat login."
+                )
                 return
         session.qr_state = "error"
         session.qr_error = "Nobody scanned the code in ten minutes."
@@ -1084,7 +1104,6 @@ class Wechat:
         # "confirmed" from the login just ended reported a scan still pending —
         # and told the model to wait for one that had already happened.
         session.qr_state = ""
-        session.qr_content = ""
         session.qr_error = ""
         # A fresh client rather than a cleared one, so nothing of the old
         # session survives in a field somebody forgot to reset — which is what

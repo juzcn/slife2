@@ -1549,6 +1549,30 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unloading_a_document_row_is_not_a_refusal() -> None:
+    """**A playbook or a command is not a tool the system protects.**
+
+    `_func_tool_unload` matched `unloaded`/`already`/`unknown` and sent
+    everything else to the `refused` arm — and `set_load` answers
+    `no_load_state` for the two document categories, which are rows that never
+    had a load state to take away.  The model was told "refused (the system
+    needs them)" about a row nothing needs, which is a false statement about the
+    system made in the system's own voice.  `func_tool_load` has split this
+    outcome out from the start; this is the other half of the same answer.
+    """
+    hub = hub_with_documents({"yt-dlp": {"command": "yt-dlp", "description": "d"}})
+    async with Client(hub) as client:
+        # A search is what asks every family to declare, so it is also what puts
+        # the row in the catalogue this then trims.
+        await call(client, "tool_search", {"keywords": ["yt-dlp"], "sentences": []})
+        answer = await client.call_tool("_func_tool_unload", {"names": ["cli:yt-dlp"]})
+
+    assert answer.data["refused"] == [], "nothing was told a lie"
+    assert answer.data["no_load_state"] == ["cli:yt-dlp"]
+    assert "not a tool to unload" in answer.data["text"]
+
+
+@pytest.mark.asyncio
 async def test_a_call_reaches_the_upstream() -> None:
     async with Client(
         hub_for(connected={"fake": lambda settings: upstream_server()})

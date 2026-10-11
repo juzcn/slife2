@@ -32,15 +32,16 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import Iterable
 from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
-    LiveProviders,
-    build_llm_server,
+    Translate,
+    build_backend_server,
     read_int,
+    sdk_streamer,
     serve_backend,
 )
 from slife2.messages import Message, ToolSpec, Usage
@@ -65,7 +66,7 @@ def to_responses_parts(content: Any) -> list[dict[str, Any]]:
     A part this function does not recognise is dropped rather than passed
     through: an unknown item in the input list is a 400 on every call that
     carries one, and the neutral form has exactly two kinds because that is what
-    the agent server can produce.  See `slife2.server.server._with_images`.
+    the agent server can produce: `slife2.attachments.parts` builds them.
     """
     parts: list[dict[str, Any]] = []
     for part in content or []:
@@ -485,23 +486,14 @@ def _make_streamer() -> Streamer:
 
         return AsyncOpenAI(base_url=provider.base_url, api_key=key)
 
-    pool = LiveProviders(API, SERVER_NAME, sdk_client)
-
-    async def stream(
-        provider: str,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        model: str,
-    ) -> AsyncIterator[ProviderEvent]:
-        clients = pool.clients()
-        settings = clients.provider(provider).model(model)
-        request = build_request(messages, tools, settings)
-        response = await clients.client(provider).responses.create(**request)
+    def make_translator() -> Translate:
+        """One stream's translation, remembering which calls streamed."""
         # Which calls streamed their arguments.  Kept here and not in
         # `translate`, which stays a pure function of one event — see
         # `_arguments_that_never_streamed`.
         streamed: set[int] = set()
-        async for event in response:
+
+        def one(event: Any) -> Iterable[ProviderEvent]:
             for out in translate(event, streamed=streamed):
                 # One raw event produces both kinds — a usage chunk and a
                 # `Finish` — and `Finish` carries no deltas, so the union has
@@ -512,14 +504,22 @@ def _make_streamer() -> Streamer:
                             streamed.add(delta.index)
                 yield out
 
-    return stream
+        return one
+
+    return sdk_streamer(
+        api=API,
+        server_name=SERVER_NAME,
+        sdk_client=sdk_client,
+        build_request=build_request,
+        start=lambda client, request: client.responses.create(**request),
+        translator=make_translator,
+    )
 
 
 def build_server(*, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
-    return build_llm_server(
-        name=SERVER_NAME,
-        streamer=streamer if streamer is not None else _make_streamer(),
+    return build_backend_server(
+        name=SERVER_NAME, streamer=streamer, make=_make_streamer
     )
 
 

@@ -25,14 +25,13 @@ and so drop it, which is the arrangement v1 arrives at from the other side.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from typing import Any
 
 from slife2.config import ModelSettings, ProviderSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
-    LiveProviders,
-    build_llm_server,
+    build_backend_server,
+    sdk_streamer,
     serve_backend,
 )
 from slife2.messages import Message, ToolSpec, Usage
@@ -278,34 +277,30 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
 
         return AsyncOpenAI(base_url=provider.base_url, api_key=key)
 
-    pool = LiveProviders(API, SERVER_NAME, sdk_client)
+    def build(
+        messages: list[Message], tools: list[ToolSpec], settings: ModelSettings
+    ) -> dict[str, Any]:
+        """The body, with the one flag this wire has to close over."""
+        return build_request(messages, tools, settings, stream_usage=stream_usage)
 
-    async def stream(
-        provider: str,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        model: str,
-    ) -> AsyncIterator[ProviderEvent]:
-        clients = pool.clients()
-        settings = clients.provider(provider).model(model)
-        request = build_request(messages, tools, settings, stream_usage=stream_usage)
-        response = await clients.client(provider).chat.completions.create(**request)
-        async for event in response:
-            for out in translate(event):
-                yield out
-
-    return stream
+    return sdk_streamer(
+        api=API,
+        server_name=SERVER_NAME,
+        sdk_client=sdk_client,
+        build_request=build,
+        start=lambda client, request: client.chat.completions.create(**request),
+        # `translate` is a pure function of one event on this wire, so the
+        # factory hands back the same callable every time.
+        translator=lambda: translate,
+    )
 
 
 def build_server(*, streamer: Streamer | None = None, stream_usage: bool = True):
     """Build the MCP server.  `streamer` is injectable for tests."""
-    return build_llm_server(
+    return build_backend_server(
         name=SERVER_NAME,
-        streamer=(
-            streamer
-            if streamer is not None
-            else _make_streamer(stream_usage=stream_usage)
-        ),
+        streamer=streamer,
+        make=lambda: _make_streamer(stream_usage=stream_usage),
     )
 
 

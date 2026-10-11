@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Context, FastMCP
 
 from slife2.config import Config, ProviderSettings, find_config_path, load, load_cached
-from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
+from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.wire import encode_chunk
 from slife2.mcp_server import (
     configure_logging,
@@ -330,6 +330,76 @@ def unresolved_key(server_name: str, name: str, provider: Any) -> str:
         f"({provider.base_url!r}) did not resolve "
         f"(config value {provider.api_key_ref!r}). Export it, or "
         f"store it with `credstore set <NAME>`."
+    )
+
+
+#: How one stream is opened: the SDK client, and the request body to send it.
+StartStream = Callable[[Any, dict[str, Any]], Awaitable[Any]]
+#: How one provider event becomes zero or more of ours.
+Translate = Callable[[Any], Iterable[ProviderEvent]]
+#: A fresh translation for one stream.  A factory and not a function, because a
+#: translation carries state across the stream it is for.
+Translator = Callable[[], Translate]
+
+
+def sdk_streamer(
+    *,
+    api: str,
+    server_name: str,
+    sdk_client: Callable[[ProviderSettings, str], Any],
+    build_request: Callable[[list[Message], list[ToolSpec], Any], dict[str, Any]],
+    start: StartStream,
+    translator: Translator,
+) -> Streamer:
+    """The frame every model backend's streamer is, with four holes in it.
+
+    **Four servers wrote this out, and they differed in four places.**  Which SDK
+    class is constructed, which method opens the stream, how the request is
+    built, and how a provider event becomes one of ours.  Everything around
+    those — the pool that re-reads the config per call, the resolved settings,
+    the loop over the response — is one thing, and it was four copies of it.
+
+    `translator` is a *factory* rather than a function because a translation
+    carries state across one stream: which calls have streamed their arguments,
+    how many output tokens have already been counted.  Made per stream, so two
+    concurrent calls cannot share a counter.
+
+    `build_request` is passed in rather than called here because one wire has a
+    flag that has to be closed over before the request exists (`stream_usage`),
+    and closing over it is the caller's business.
+    """
+    pool = LiveProviders(api, server_name, sdk_client)
+
+    async def stream(
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
+    ) -> AsyncIterator[ProviderEvent]:
+        clients = pool.clients()
+        settings = clients.provider(provider).model(model)
+        request = build_request(messages, tools, settings)
+        response = await start(clients.client(provider), request)
+        translate = translator()
+        async for event in response:
+            for out in translate(event):
+                yield out
+
+    return stream
+
+
+def build_backend_server(
+    *, name: str, streamer: Streamer | None, make: Callable[[], Streamer]
+) -> FastMCP:
+    """`build_llm_server` with the injectable default every backend spells out.
+
+    Three servers wrote the same four lines: a `streamer` a test may pass in, and
+    otherwise the one this process builds.  It is small, and it is exactly the
+    thing a fourth backend gets wrong — forget the parameter and the test seam
+    closes silently, which is a whole test file that stops testing anything.
+    """
+    return build_llm_server(
+        name=name, streamer=streamer if streamer is not None else make()
     )
 
 

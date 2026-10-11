@@ -9,6 +9,7 @@ the cabinet, and a save that cannot embed stores nothing.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -537,9 +538,13 @@ async def test_sync_embeds_every_document_and_not_one_batch(
     for index in range(3):
         await store.write(NOTE, f"n{index}", body=f"body {index}", embedder=embedder)
     with store._connect() as connection:
-        # The state a changed embedding model leaves: rows, no vectors.
+        # The state a changed embedding model leaves: rows, no vectors.  The
+        # rebuild clears all three tables, and the third is the one that says
+        # what the pass has already tried — clearing only the first two would
+        # leave every document marked done.
         connection.execute("DELETE FROM cabinet_vec")
         connection.execute("DELETE FROM cabinet_chunk")
+        connection.execute("DELETE FROM cabinet_embedded")
 
     status = await store.sync(embedder)
 
@@ -549,6 +554,29 @@ async def test_sync_embeds_every_document_and_not_one_batch(
             "SELECT COUNT(*) AS n FROM cabinet_chunk"
         ).fetchone()["n"]
     assert int(chunks) == 3, "every document, not the first batch"
+
+
+@pytest.mark.asyncio
+async def test_sync_ends_with_a_document_that_has_nothing_to_embed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A document with nothing to embed is not one to try again.**
+
+    It places no chunk and never will, so a pass whose question is "has it a
+    chunk?" hands it back for ever — and `sync` loops over exactly that
+    question, so the plugin spent its whole life in `embed_missing` before it
+    answered anything.  The question is "have we tried", and what answers it is
+    a marker rather than a chunk.
+    """
+    monkeypatch.setattr(cabinet_store, "SYNC_BATCH", 1)
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    await store.write(NOTE, "empty", body="", embedder=embedder)
+
+    status = await asyncio.wait_for(store.sync(embedder), timeout=5.0)
+
+    assert status["ready"] is True, status["problems"]
 
 
 @pytest.mark.asyncio

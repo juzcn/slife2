@@ -163,13 +163,7 @@ def read_section(
     FastMCP can serialise.
     """
     target = path or config_path()
-    text = target.read_text(encoding="utf-8")
-    try:
-        document = YAML(typ="safe").load(text) or {}
-    except YAMLError as exc:
-        raise ConfigError(f"{target} is not YAML: {exc}") from exc
-    if not isinstance(document, dict):
-        raise ConfigError(f"{target} is not a mapping, so it has no sections")
+    document = _read(target)
     values = document.get(section)
     if not isinstance(values, dict):
         return {}
@@ -495,6 +489,22 @@ def read_scalar(name: str, *, default: str = "", path: Path | None = None) -> st
     reference rather than a secret.
     """
     target = path or config_path()
+    value = _read(target).get(name)
+    return default if value is None else str(value)
+
+
+def _read(target: Path) -> dict[str, Any]:
+    """The file, as plain data — *refused* rather than defaulted when unreadable.
+
+    Both readers below the writers need exactly this, and each spelled it out:
+    read the text, parse it safely, refuse a non-mapping.  One copy, because the
+    three failure messages are what a person sees and three copies is how they
+    come to disagree about which file they are describing.
+
+    Safe and not the round-trip loader on purpose — nothing here is written
+    back, and the round-trip document would carry comments into a value a tool
+    returns over a wire.
+    """
     text = target.read_text(encoding="utf-8")
     try:
         document = YAML(typ="safe").load(text) or {}
@@ -502,5 +512,4 @@ def read_scalar(name: str, *, default: str = "", path: Path | None = None) -> st
         raise ConfigError(f"{target} is not YAML: {exc}") from exc
     if not isinstance(document, dict):
         raise ConfigError(f"{target} is not a mapping, so it has no sections")
-    value = document.get(name)
-    return default if value is None else str(value)
+    return document

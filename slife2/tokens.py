@@ -111,15 +111,24 @@ def _content_tokens(content: Any) -> int:
 def estimate_message_tokens(message: Mapping[str, Any]) -> int:
     """About how many tokens one message costs in a request.
 
-    The three things a message can carry, which is what v1 counts too: its
-    content, and — for an assistant turn that asked for tools — the name and the
-    arguments of each call.
+    Content, a reasoner's thinking, and — for an assistant turn that asked for
+    tools — the name and the arguments of each call.
+
+    **`thinking` counts because it goes back on the wire.**  A turn stores it and
+    the `openai-completions` backend re-sends it as `reasoning_content` on every
+    assistant message once thinking has been asked for (the DeepSeek reasoners
+    require it), so a message the model is handed is larger than its visible
+    answer by exactly this.  Leaving it out is not a rounding error: the recall
+    budget is headroom below a ceiling, and a reasoner's thinking is the largest
+    single thing a stored turn carries, so a budget that ignored it would admit
+    the very overrun it exists to prevent.
 
     `arguments` is counted **as text**, not as its decoded length.  On the wire
     it is the JSON string the model emitted, and its own spelling is what the
     next request carries.
     """
     total = _content_tokens(message.get("content"))
+    total += estimate_text_tokens(str(message.get("thinking") or ""))
     for call in message.get("tool_calls") or ():
         if not isinstance(call, Mapping):
             continue

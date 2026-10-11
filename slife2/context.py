@@ -29,7 +29,7 @@ the explicit clear.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -129,11 +129,25 @@ class Decision:
         return self.keep is None and self.recall is None
 
 
-def _dedupe(values: Sequence[int]) -> list[int]:
-    """Those ids, duplicates collapsed to their first position.
+def normalise_ids(values: Iterable[Any]) -> list[int]:
+    """An id list with duplicates collapsed to their **first** position.
 
-    v1's rule and v1's reason: a keep-list is read in the order it was written,
-    and a repeat says nothing about where the turn belongs in time.
+    First and not last, which is the choice v1 made and the only one that keeps
+    the list's meaning: the order *is* the content, so a later mention of an id
+    already in the list is a repeat rather than a correction — nothing in a
+    second mention says where in time it belongs.
+
+    **The rule lives here and not in the store**, which has the same need and
+    used to carry a byte-identical copy of this: a turn's context is what this
+    module decides, and the list the decision produces *is* a context, so the
+    two answers to "which ids, in what order" being one answer is the point
+    rather than a convenience.  `slife2.db` imports it.
+
+    The ints are coerced rather than trusted, because the values arrive from two
+    directions that neither type-check the other: a model's reply, which is JSON
+    of whatever the encoder wrote, and a list read back out of the store, where
+    a stringly `"7"` reaching a `rowid IN (…)` query matches nothing — and the
+    failure would be a silently short context rather than an error.
     """
     seen: dict[int, None] = {}
     for value in values:
@@ -163,7 +177,7 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
             isinstance(item, int) and not isinstance(item, bool) for item in raw
         ):
             return REJECTED
-        return _dedupe(raw)
+        return normalise_ids(raw)
     return REJECTED
 
 
@@ -476,9 +490,10 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     list that is already correct changes nothing, which is what makes it safe to
     run unconditionally here rather than only where a problem is suspected.
 
-    The placeholder is the same sentence the agent server's own cancellation
-    repair leaves, because a model reading back a conversation should not be able
-    to tell which of the two interrupted a call.
+    The placeholder is `INTERRUPTED`, and it has exactly one producer — this
+    function.  The agent server's own cancellation repair *truncates* back to
+    the user's message and leaves nothing behind, so the two do not have to
+    agree on a sentence: they never both write one.
 
     **What is deliberately not ported is v1's second invariant** — a history
     ending on `user` or `tool` gets a closing assistant line.  That exists for a

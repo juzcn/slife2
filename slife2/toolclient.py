@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from slife2.audience import client_meta
 from slife2.mcp_server import tool_payload
 from slife2.messages import ToolSpec
+from slife2.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 from slife2.tools import Tool, ToolFailed
 
 logger = logging.getLogger(__name__)
@@ -58,14 +59,16 @@ if TYPE_CHECKING:  # the agent never imports a server, and this is a client one
 #: tools, under the names `UpstreamTool.name` carries.
 LIST_TOOLS = "list_tools"
 CALL_TOOL = "call_tool"
-SERVERS = "servers"
 
 #: The harness's own trim, and the one hub tool the *agent* calls on the hub's
 #: API rather than through `call_tool`.  Its leading underscore is the system's
 #: mark for a tool the machinery calls rather than one a model chooses, and the
 #: hub's docstring on it says why the trim is a call at all: the answer names
 #: what the model lost, and the harness is the party that has to know.
-FUNC_TOOL_UNLOAD = "_func_tool_unload"
+#: Taken from `slife2.tools` rather than spelled again: the hub serves this
+#: name and the agent server calls it, and two copies of a string across a
+#: wire is a rename that half-works.
+FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 
 #: What separates a server from a tool in a proxied name — which is only ever
 #: somebody else's tool: ours are the model's under their own names, because the
@@ -223,7 +226,6 @@ __all__ = [
     "FUNC_TOOL_UNLOAD",
     "LIST_TOOLS",
     "SEPARATOR",
-    "SERVERS",
     "UpstreamTool",
     "remote_tools",
     "unload_tools",

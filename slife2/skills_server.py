@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import replace
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -42,7 +41,9 @@ from fastmcp.exceptions import ToolError
 from slife2 import configfile, skills
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import Config, SkillSettings
-from slife2.mcp_server import LIST_SOURCES, house_server, serve_plugin
+from slife2.mcp_server import SKILLS_SOURCE as _SOURCE
+from slife2.mcp_server import serve_plugin
+from slife2.toolfamily import Documents, build_document_server
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,8 @@ CONFIG_KEY = "skills-server"
 #: documents would mark every playbook broken whenever the connection faltered —
 #: and these rows have no connection whose state a verdict could come from,
 #: which is why their `status` is the folder's to write and nothing else's.
-SOURCE = "skills"
+#: Re-exported from the plugin contract — see `slife2.mcp_server`.
+SOURCE = _SOURCE
 
 #: The category, and the namespace the row names carry (`skill:browser-harness`).
 #: The prefix is not decoration: a name is a row's identity, and
@@ -140,69 +142,42 @@ def catalogue(entries: Mapping[str, SkillSettings]) -> list[dict[str, object]]:
     return documents
 
 
+#: What `list_sources` says this source is, for the hub and for `servers()`.
+DESCRIPTION = (
+    "The playbooks installed on this machine, one directory each under the "
+    "data directory's `skills/`."
+)
+
+
 def build_server(config: Config) -> FastMCP:
     """Build the skills server.
 
-    **The entries are held here and the tools change them in place**, for the
-    reason the folder is re-read on every ask: a skill is installed by putting a
-    directory in a folder, and what is *given* to one is an entry in the config
-    — so neither half needs a restart, and the tool that changes either one is
+    **The entries are held and the tools change them in place**, for the reason
+    the folder is re-read on every ask: a skill is installed by putting a
+    directory in a folder, and what is *given* to one is an entry in the config —
+    so neither half needs a restart, and the tool that changes either one is
     answering about a state the next search will already see.
     """
-    entries: dict[str, SkillSettings] = dict(config.skills)
+    return build_document_server(
+        name=SERVER_NAME,
+        instructions=INSTRUCTIONS,
+        source=SOURCE,
+        category=CATEGORY,
+        section=SECTION,
+        description=DESCRIPTION,
+        entries=config.skills,
+        rows=catalogue,
+        management=register_tools,
+    )
+
+
+def register_tools(mcp: FastMCP, family: Documents) -> None:
+    """The `skill_*` tools — and `skill_use`, which no other family has."""
+    entries = family.entries
 
     def supplied_for(name: str) -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""
         return {one: dict(settings.env) for one, settings in entries.items()}
-
-    mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
-
-    @mcp.tool(name=LIST_SOURCES)
-    def list_sources() -> dict[str, object]:
-        """The skills folder as the one source this server holds.
-
-        **Not a tool for the model**, and so not marked as one: the hub asks for
-        this and records the answer, and the model never sees the name.  The
-        whole list rather than a difference, because that is what makes a
-        deleted skill stop being a hit — a merge reads an absent name as a row
-        the source no longer has — and it is asked for again before every
-        search, which is what keeps a skill dropped into the folder findable
-        without restarting anything.
-
-        **`up` is always true, and that is the honest answer.**  A skill is a
-        file: there is no connection that could be down, so the folder is as
-        reachable as the disk it is on.  A `SKILL.md` that cannot be read is a
-        *row* carrying `error`, which is a different thing and is said where it
-        belongs — the model is told the skill exists and is broken rather than
-        not told at all.
-
-        `transport` is empty, and that is not a missing value: these rows have
-        nothing behind them to connect to, which is also why they are absent from
-        `servers()` — a source with no connection is not a server.
-
-        Returns:
-            `sources`: this server's whole holding — one source, `skills`, with
-            one row per installed skill, each carrying the name a search reports,
-            the skill's own description, the name `skill_use` takes, the document
-            itself as what a search can match on, and the folder's verdict on
-            whether it can be read.
-        """
-        return {
-            "sources": [
-                {
-                    "name": SOURCE,
-                    "category": CATEGORY,
-                    "enabled": True,
-                    "up": True,
-                    "description": (
-                        "The playbooks installed on this machine, one directory "
-                        "each under the data directory's `skills/`."
-                    ),
-                    "transport": "",
-                    "rows": catalogue(entries),
-                }
-            ]
-        }
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
     async def skill_use(name: str) -> str:
@@ -389,8 +364,8 @@ def build_server(config: Config) -> FastMCP:
         if skill is None and name.strip() not in entries:
             return f"'{name}' is not installed — see `skill_list`."
         key = _key_for(name.strip(), skill, entries)
-        if key in configfile.read_section(SECTION):
-            configfile.set_enabled(SECTION, key, enabled)
+        if key in configfile.read_section(family.section):
+            configfile.set_enabled(family.section, key, enabled)
         elif not enabled:
             # **A skill with no entry is on**, so the only fact worth writing
             # down is that it is off — and switching one back on is the absence
@@ -399,19 +374,16 @@ def build_server(config: Config) -> FastMCP:
             # False for an entry that is not there, and a tool that reported
             # success over an unwritten file is the failure this whole section
             # is arranged to avoid.
-            configfile.upsert(SECTION, key, {"enabled": False})
-        current = entries.get(key)
-        entries[key] = (
-            replace(current, enabled=enabled)
-            if current is not None
-            else SkillSettings(name=key, enabled=enabled)
-        )
+            configfile.upsert(family.section, key, {"enabled": False})
+        # A skill with no entry at all gets one: the switch has to live
+        # somewhere, and the entry it lives in is what `skill_use` reads to know
+        # what the playbook is given.  A skill that *is* held keeps the rest of
+        # its entry — that is the operator's `env`, and this is a switch.
+        family.switched(key, enabled, make=lambda: SkillSettings(enabled=enabled))
         logger.info("skill_set_enabled name=%s key=%s enabled=%s", name, key, enabled)
         if enabled:
             return f"`{name}` is on again; a search finds it from your next one."
         return f"`{name}` is off and still installed; its files are untouched."
-
-    return mcp
 
 
 def main(argv: list[str] | None = None) -> int:

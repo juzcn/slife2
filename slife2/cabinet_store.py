@@ -75,6 +75,7 @@ from slife2 import textindex
 from slife2.clock import now
 from slife2.db import (
     MAX_PAGE,
+    NO_SIMILARITY,
     Embedder,
     as_similarity,
     connect_to,
@@ -403,6 +404,17 @@ CREATE TABLE IF NOT EXISTS cabinet_chunk (
 
 CREATE INDEX IF NOT EXISTS idx_cabinet_chunk_doc ON cabinet_chunk(doc_id);
 
+-- Documents the vector pass has *finished* with, whether or not it placed a
+-- chunk.  **"Has no chunk row" cannot answer "have we tried"**: a document with
+-- nothing to embed (`vectors` returns none for it) produces no chunks, so the
+-- pass that finishes the index would select it again — and, being a loop over
+-- what is still missing, would never end.  A row is written by `place`, which is
+-- every path that reaches the model, and dropped when the document is removed
+-- or the index is rebuilt.
+CREATE TABLE IF NOT EXISTS cabinet_embedded (
+    doc_id INTEGER PRIMARY KEY
+);
+
 -- What the two indexes were built with, so a changed embedding model or a
 -- changed rule is a rebuild rather than a migration.
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -481,6 +493,7 @@ class CabinetStore:
             with self._connect() as connection:
                 connection.execute("DROP TABLE IF EXISTS cabinet_vec")
                 connection.execute("DELETE FROM cabinet_chunk")
+                connection.execute("DELETE FROM cabinet_embedded")
                 connection.execute(vector_ddl(embedder.dimension, table="cabinet_vec"))
                 set_index_meta(
                     connection,
@@ -498,12 +511,19 @@ class CabinetStore:
         # batch with no vector, reported it once, and never tried again: the
         # cabinet answered meaning queries about part of its corpus, silently,
         # for as long as the process lived.
+        #
+        # **And it terminates, which is the other half of the same rule.**  The
+        # set `embed_missing` walks is "not yet tried" rather than "has no
+        # chunk", because a document with nothing to embed never gets one — so
+        # a loop over chunks would hand back the same document for ever.  The
+        # pass therefore ends with every document tried; a document the model
+        # cannot embed raises out of `vectors` rather than being skipped, so
+        # there is nothing left for `problems` to say and `ready` is the
+        # success path's `True`.  The shape is `slife2.db`'s `index_status`'s.
         while True:
-            missing, done = await self.embed_missing(embedder)
+            _, done = await self.embed_missing(embedder)
             if not done:
                 break
-        if missing:
-            problems.append(f"{missing} document(s) have no vector")
         return {
             "ready": not problems,
             "problems": problems,
@@ -522,16 +542,20 @@ class CabinetStore:
         from anywhere rather than only from `sync`: a document whose embedding
         failed at save time is found by the same query.
 
-        `(remaining, done)`: how many still have no vector, and how many this
-        call placed.  `remaining` is the count *after* the batch, read from the
-        same connection that wrote it, so it cannot disagree with itself.
+        `(remaining, done)`: how many are still to try, and how many this call
+        tried.  `remaining` is the count *after* the batch, read from the same
+        connection that wrote it, so it cannot disagree with itself.
+
+        **"Still to try" is `cabinet_embedded`, not "has no chunk."**  A document
+        with nothing to embed places no chunk and never will, so counting chunks
+        would hand it back for ever and the caller's loop would not end.
         """
         limit = limit or SYNC_BATCH  # read here, so a test can size the batch
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT id, kind, key, body, title, summary, tags, source, file_path"
                 " FROM cabinet_doc"
-                " WHERE id NOT IN (SELECT DISTINCT doc_id FROM cabinet_chunk)"
+                " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
                 " ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -548,7 +572,7 @@ class CabinetStore:
             remaining = int(
                 connection.execute(
                     "SELECT COUNT(*) AS n FROM cabinet_doc"
-                    " WHERE id NOT IN (SELECT DISTINCT doc_id FROM cabinet_chunk)"
+                    " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
                 ).fetchone()["n"]
             )
         return remaining, done
@@ -614,8 +638,15 @@ class CabinetStore:
         *second* write of one diary day.  The vector table may not exist yet (it
         is created with a width, which only an embedder knows), and nothing to
         clear is not an error.
+
+        **The document is marked as tried either way**, because this is every
+        path that reaches the model — so it is also what `sync` reads to decide
+        what is left.  See `cabinet_embedded`.
         """
         self._clear_vectors(connection, doc_id)
+        connection.execute(
+            "INSERT OR REPLACE INTO cabinet_embedded (doc_id) VALUES (?)", (doc_id,)
+        )
         for index, vector in enumerate(vectors):
             placed = connection.execute(
                 "INSERT INTO cabinet_chunk (doc_id, chunk_index) VALUES (?, ?)",
@@ -631,7 +662,12 @@ class CabinetStore:
 
     @staticmethod
     def _clear_vectors(connection: sqlite3.Connection, doc_id: int) -> None:
-        """Forget one document's vectors, then its chunks — in that order."""
+        """Forget one document's vectors, its chunks, and that it was tried.
+
+        The marker goes with them because a deleted rowid is reused: without
+        this, a new document taking the old id would be read as one the vector
+        pass had already finished with, and would never be embedded.
+        """
         if table_exists(connection, "cabinet_vec"):
             connection.execute(
                 "DELETE FROM cabinet_vec WHERE rowid IN"
@@ -639,6 +675,7 @@ class CabinetStore:
                 (doc_id,),
             )
         connection.execute("DELETE FROM cabinet_chunk WHERE doc_id = ?", (doc_id,))
+        connection.execute("DELETE FROM cabinet_embedded WHERE doc_id = ?", (doc_id,))
 
     def count(self) -> int:
         with self._connect() as connection:
@@ -824,7 +861,7 @@ class CabinetStore:
         if mirror := str(row.get("mirror") or ""):
             (self.root / mirror).unlink(missing_ok=True)
         if kind == FILE and (saved := str(row.get("file_path") or "")):
-            _unlink(self.root / saved)
+            discard_file(self.root / saved)
         return row
 
     async def annotate(
@@ -912,7 +949,7 @@ class CabinetStore:
         if category:
             clauses.append("file_path LIKE ?")
             values.append(f"{category}/%")
-        where = f"WHERE kind = ?{_and(clauses)}"
+        where = f"WHERE kind = ?{_and_clause(clauses)}"
         limit = page_limit(limit, MAX_PAGE)
         with self._connect() as connection:
             total = int(
@@ -987,7 +1024,7 @@ class CabinetStore:
 
         **One corpus, whatever `kind` says.**  A filter narrows what is *shown*
         and never what is ranked, because a rank only means something inside the
-        corpus that produced it (§7.2/§7.5): four indexes would be four corpora,
+        corpus that produced it (§5): four indexes would be four corpora,
         and a query spanning them would answer with an order nothing measured.
 
         The window is the one `listing` uses, per kind — and with no kind it is
@@ -1131,18 +1168,23 @@ class CabinetStore:
         first row for a document is the nearest of its chunks and is what it is
         worth — the same rule the tool catalogue's search applies.
         """
-        try:
-            rows = connection.execute(
-                "SELECT c.doc_id AS doc_id, v.distance AS distance"
-                " FROM cabinet_vec v JOIN cabinet_chunk c ON c.id = v.rowid"
-                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-                (sqlite_vec.serialize_float32(vector), k),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # No vector index yet — a cabinet nobody has written to under this
-            # embedder.  An empty leg rather than a failure: the keyword leg is
-            # still an answer, and `sync` is what says the index is incomplete.
+        # **Asked, rather than found out by catching the query's failure.**  A
+        # cabinet nobody has written to under this embedder has no `cabinet_vec`
+        # at all, which is an empty meaning leg rather than a failure — the
+        # keyword leg is still an answer, and `sync` is what says the index is
+        # incomplete.  A bare `except sqlite3.OperationalError` answered that
+        # question and every other one the same way: a malformed vector table, a
+        # width this build cannot read, a corrupt file all came back as "nothing
+        # matched by meaning", and the page then answered keyword-only without
+        # saying so.
+        if not table_exists(connection, "cabinet_vec"):
             return []
+        rows = connection.execute(
+            "SELECT c.doc_id AS doc_id, v.distance AS distance"
+            " FROM cabinet_vec v JOIN cabinet_chunk c ON c.id = v.rowid"
+            " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+            (sqlite_vec.serialize_float32(vector), k),
+        ).fetchall()
         found: dict[int, float] = {}
         for row in rows:
             doc_id = int(row["doc_id"])
@@ -1168,7 +1210,9 @@ class CabinetStore:
             for query in queries:
                 for doc_id, similarity in self._nearest(connection, query, MAX_PAGE):
                     if doc_id in ids:
-                        found[doc_id] = max(found.get(doc_id, 0.0), similarity)
+                        found[doc_id] = max(
+                            found.get(doc_id, NO_SIMILARITY), similarity
+                        )
             return found
 
     def _rows_in_order(
@@ -1192,7 +1236,7 @@ class CabinetStore:
         placeholders = ",".join("?" * len(ordered))
         where = f"WHERE d.id IN ({placeholders})"
         if clauses:
-            where += f" AND {_join(clauses)}"
+            where += _and_clause(clauses)
         rows = connection.execute(
             f"SELECT d.* FROM cabinet_doc d {where}", (*ordered, *values)
         ).fetchall()
@@ -1266,12 +1310,15 @@ def _found(
     return found
 
 
-def _and(clauses: list[str]) -> str:
+def _and_clause(clauses: list[str]) -> str:
+    """Those clauses as the tail of a query that already has a `WHERE`.
+
+    One helper and not two: `slife2.db` has the same pair (`where_clause`,
+    `filter_clause`) and this module cannot use them, because its own queries
+    put the fragments in the middle of a `WHERE` that already names a column
+    — but the join itself is one idiom and had two spellings here.
+    """
     return f" AND {' AND '.join(clauses)}" if clauses else ""
-
-
-def _join(clauses: list[str]) -> str:
-    return " AND ".join(clauses)
 
 
 def _section(stamp: str, body: str) -> str:
@@ -1300,8 +1347,16 @@ def _mirror_text(kind: str, row: Mapping[str, Any], added: str, *, first: bool) 
     return f"{added}\n"
 
 
-def _unlink(path: Path) -> None:
-    """Remove a file, and do not care that it was not there."""
+def discard_file(path: Path) -> None:
+    """Remove a file, and do not care that it was not there.
+
+    Public because both halves of the cabinet need it — the store when a
+    document's bytes go, the plugin when a save has to be taken back — and it
+    had been written out once in each for that reason.  A removal that fails is
+    logged rather than raised: the caller is unwinding something else that
+    already went wrong, and replacing that message with "and the file is still
+    there" helps nobody.
+    """
     try:
         path.unlink()
     except OSError as exc:

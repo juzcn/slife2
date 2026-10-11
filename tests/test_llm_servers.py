@@ -1382,27 +1382,34 @@ def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     """A model that spends everything thinking returns nothing.
 
-    The API requires `budget_tokens` to be *strictly* smaller than
-    `max_tokens`, so the floor matters as much as the share: a 1024-token model
-    is the case where `max(1024, half)` equals the cap exactly, and every call
-    would be a 400.
+    **Both of the API's bounds, and the second one is the trap.**  A budget has
+    to be at least 1024 *and* strictly smaller than `max_tokens`, so the two
+    together leave a window only when the cap is above the floor.  The clamp
+    guarded the second alone — `max(1024, half)` then `min(…, cap - 1)` — and so
+    answered 1023 for a `max_tokens: 1024` model, which is a 400 on every call:
+    the very case this test is named for, asserted as correct.  A cap that
+    cannot hold a budget has no thinking to give, and the honest answer is to
+    send none.
     """
     request = anthropic_build_request(
         [], [], ModelSettings(model="m", reasoning=True, max_tokens=2000)
     )
-    assert request["thinking"]["budget_tokens"] < 2000
+    assert request["thinking"]["budget_tokens"] == 1024, "the floor, under the cap"
 
-    floored = anthropic_build_request(
-        [], [], ModelSettings(model="m", reasoning=True, max_tokens=1024)
+    # The smallest cap that can hold a budget at all: 1025 leaves exactly 1024.
+    narrowest = anthropic_build_request(
+        [], [], ModelSettings(model="m", reasoning=True, max_tokens=1025)
     )
-    assert floored["thinking"]["budget_tokens"] < 1024
+    assert narrowest["thinking"]["budget_tokens"] == 1024
 
-    # Too small to reason in at all: asked for, and declined rather than sent
-    # as a request the endpoint is certain to refuse.
-    tiny = anthropic_build_request(
-        [], [], ModelSettings(model="m", reasoning=True, max_tokens=1)
-    )
-    assert "thinking" not in tiny
+    # 1024 and below: no budget is both >= 1024 and < the cap, so there is no
+    # thinking to ask for — declined rather than sent as a request the endpoint
+    # is certain to refuse.
+    for cap in (1024, 1):
+        at_the_floor = anthropic_build_request(
+            [], [], ModelSettings(model="m", reasoning=True, max_tokens=cap)
+        )
+        assert "thinking" not in at_the_floor, cap
 
 
 def test_responses_sends_only_what_was_configured() -> None:

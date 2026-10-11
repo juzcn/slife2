@@ -252,6 +252,14 @@ def scan(directory: Path | None = None) -> list[Skill]:
     order the filesystem happens to hand things back in.  A missing directory is
     an empty list rather than an error: a fresh install has no skills, and that
     is the honest answer to what is installed.
+
+    **A dot-directory is not a skill.**  `install` stages into `.name.installing`
+    and moves the old copy to `.name.replacing`, and a hard kill in that window
+    leaves one behind — a directory with a real `SKILL.md` in it, which would
+    otherwise be listed, could win `find(name)` (its frontmatter name wins, and
+    it sorts first), and would become the catalogue row for that name.  The
+    promise the swap makes is that an interrupted install does not exist; this is
+    the half of it that survives a `SIGKILL`.
     """
     root = skills_dir() if directory is None else directory
     if not root.is_dir():
@@ -259,7 +267,7 @@ def scan(directory: Path | None = None) -> list[Skill]:
 
     found: list[Skill] = []
     for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
+        if not entry.is_dir() or entry.name.startswith("."):
             continue
         manifest = entry / MANIFEST
         if not manifest.is_file():

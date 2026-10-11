@@ -406,8 +406,8 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
     The child is checked on **every** poll, not only at the deadline.  A server
     that dies at import — a bad config, a missing SDK, a port something grabbed
     in the meantime — reports that in about fifty milliseconds with its log, where
-    a launcher that only watched the clock would sit out the full thirty seconds
-    and then blame a timeout.
+    a launcher that only watched the clock would sit out the whole of
+    `READY_TIMEOUT_SECONDS` and then blame a timeout.
     """
     deadline = time.monotonic() + READY_TIMEOUT_SECONDS
     delay = 0.05
@@ -459,14 +459,18 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     path — almost every launch finds everything already running and never
     contends — and the probe inside the lock is what makes the wait meaningful:
     whoever held it has just started the server, so the answer changes.
+
+    **The port is asked about inside the lock and not before it**, which is a
+    correctness fix rather than a tidying.  A port that is bound and not yet
+    answering is what a *concurrent cold start* looks like from here — two
+    instances launched together, this one probing while the other's child is
+    between `bind` and `serve` — and answering `CONFLICT` there refused to start
+    against our own server coming up.  Inside the lock the question means what it
+    says: anyone else starting this server holds that lock, so by the time this
+    runs, bound-and-silent is somebody else's process and not ours mid-boot.
     """
     if probe(spec):
         return _reuse(spec, config_path=config_path)
-
-    if tcp_listening(spec.host, spec.port):
-        # Something is there and it is not us.  Spawning would fail to bind and
-        # surface as a traceback in a log nobody is reading.
-        return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
     try:
         with start_lock(spec.url):

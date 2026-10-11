@@ -46,7 +46,16 @@ from slife2 import configfile
 from slife2.audience import forwarded_client, request_meta
 from slife2.config import Config, ConfigError, ToolServerSettings
 from slife2.gateway import ClientFactory, Connection, mcp_config, proxied_name
-from slife2.mcp_server import CALL_SOURCE, LIST_SOURCES, house_server
+from slife2.mcp_server import (
+    CALL_SOURCE,
+    CLI_SOURCE,
+    LIST_SOURCES,
+    SKILLS_SOURCE,
+    house_server,
+)
+from slife2.mcp_server import (
+    LIST_SETTLE_SECONDS as _LIST_SETTLE_SECONDS,
+)
 from slife2.paths import data_dir
 
 logger = logging.getLogger(__name__)
@@ -57,7 +66,7 @@ logger = logging.getLogger(__name__)
 #: list of a session is missing every external tool; waiting without a bound
 #: means a cold `npx` holds a turn open for a minute.  So: wait, but briefly, and
 #: only for attempts that have already begun.
-LIST_SETTLE_SECONDS = 5.0
+LIST_SETTLE_SECONDS = _LIST_SETTLE_SECONDS
 
 #: How many of one server's tools a `*_list_tools` prints.  v1's number and v1's
 #: reason: a published server can carry four figures of tools (github: 1239),
@@ -296,13 +305,28 @@ class Family:
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
-        """Run one tool of one held entry.  `(text, ok)`, never raises."""
+        """Run one tool of one held entry.  `(text, ok)`, never raises.
+
+        **A switched-off entry refuses, and this is the one place that has to
+        say so.**  A disabled source's rows stay in the catalogue so a search
+        still finds them (`slife2.toolhub`), which means the model can call one
+        — and the hub routes by row without reading a status, so `Connection`
+        would happily connect and spawn the process the operator had switched
+        off.  The guard is on `call` rather than only on `settled` because this
+        is the path a *call* takes, and the whole of what `enabled: false`
+        promises is that a call is not a thing that starts it.
+        """
         one = self._held.get(source)
         if one is None:
             # The hub routes by what it was told, so this is a hub that has a row
             # this family did not declare — an entry removed in the last moment,
             # or a name it invented.  Said as what it is.
             return f"{source!r} is not a server this plugin holds any more", False
+        if not one.settings.enabled:
+            return (
+                f"{source!r} is switched off, so nothing was run. Its "
+                f"`set_enabled` tool turns it on."
+            ), False
         return await one.connection.call(tool, arguments, meta)
 
     def start(self) -> None:
@@ -444,11 +468,6 @@ def refusal(config: Config, name: str) -> str | None:
     loudly at declaration time (`Upstream._record`), and duplicating that list
     here would be a second copy to keep in step.
     """
-    # Imported here rather than at module scope: `slife2.toolhub` is the tool
-    # set's own process and opens a catalogue and a vector index, and this plugin
-    # wants two string constants from it.
-    from slife2.toolhub import CLI_SOURCE, SKILLS_SOURCE
-
     if name in config.plugins():
         return (
             f"[refused] '{name}' is a server slife2 itself runs, so its tools "
@@ -619,8 +638,18 @@ async def remove_entry(
             f"see `{words.list_tool}`."
         )
     removed = configfile.remove(words.section, name)
-    await family.remove(name)
+    stopped = await family.remove(name)
     if not removed:
+        # **Two ways to be here, and the old sentence was true of one.**  The
+        # entry can be held and no longer in the file — another instance removed
+        # it, or a person edited it out — and then a link *was* stopped, so
+        # "nothing was removed" is the opposite of what happened.
+        if stopped is not None:
+            return (
+                f"'{name}' was not written in `{words.section}:` any more, so "
+                f"there was no entry to delete — but this process was still "
+                f"holding it, and that link is stopped."
+            )
         return (
             f"'{name}' was not written in `{words.section}:`, so nothing was removed."
         )
@@ -681,6 +710,131 @@ async def list_entry_tools(
     return tools_as_text(
         one, name, limit if limit > 0 else TOOL_LIST_LIMIT, noun=words.unit
     )
+
+
+@dataclass
+class Documents:
+    """A family whose rows are documents: one config section, no connection.
+
+    `skills:` and `cli:` are the two (DESIGN.md §8.2 is the argument for giving
+    them servers at all).  What they share is not a *mechanism* — one writes
+    files into a folder and the other validates a command line against `PATH` —
+    but a shape, and the shape was written out twice:
+
+    * **one source declared to the hub from a mirror of the section**, held here
+      so that a tool's edit is visible to the next declaration without a restart;
+    * **a switch mirrored into that mirror**, which is the one write both
+      families make and neither can skip.
+
+    `declare` builds the whole `list_sources` answer rather than the family
+    assembling the envelope itself, because every key in it is a claim to the
+    hub — `up`, `transport`, `category` — and a second copy of the envelope is a
+    second place one of them can come out wrong.
+    """
+
+    source: str
+    category: str
+    section: str
+    entries: dict[str, Any]
+
+    def declare(self, description: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """This server's whole holding, as `list_sources` answers it.
+
+        **One source, and it is always up.**  There is no connection to be down,
+        so `up` is not a claim anybody has to check; a row that cannot be read is
+        a *row* carrying `error`, which is a different thing and is said where it
+        belongs.  `transport` is empty for the same reason, and that is why these
+        sources are absent from `servers()` — a source with no connection is not
+        a server.
+        """
+        return {
+            "sources": [
+                {
+                    "name": self.source,
+                    "category": self.category,
+                    "enabled": True,
+                    "up": True,
+                    "description": description,
+                    "transport": "",
+                    "rows": rows,
+                }
+            ]
+        }
+
+    def switched(
+        self, name: str, enabled: bool, make: Callable[[], Any] | None = None
+    ) -> None:
+        """Mirror one switch into the held entries.
+
+        `make` is what to put there when the mirror has no entry of that name —
+        a second instance wrote one, or the operator did — and a family that
+        should leave it alone passes nothing.  The switch has already been
+        written to the file by the caller: this is the in-memory half.
+        """
+        current = self.entries.get(name)
+        if current is not None:
+            self.entries[name] = replace(current, enabled=enabled)
+        elif make is not None:
+            self.entries[name] = make()
+
+    def forgotten(self, name: str) -> None:
+        """Drop one entry from the mirror, after the file has been changed."""
+        self.entries.pop(name, None)
+
+
+def build_document_server(
+    *,
+    name: str,
+    instructions: str,
+    source: str,
+    category: str,
+    section: str,
+    description: str,
+    entries: Mapping[str, Any],
+    rows: Callable[[Mapping[str, Any]], list[dict[str, Any]]],
+    management: Callable[[FastMCP, Documents], None],
+) -> FastMCP:
+    """One document family, as the MCP server slife2 starts.
+
+    The sibling of `build_family_server`, for the families that hold no
+    connection: one tool towards the hub (`list_sources`, unmarked and invisible
+    to the model) and `management` for what the model does get.
+
+    `management` is a callback for the reason the other builder's is: a tool's
+    parameter list *is* the schema the model reads, so `cli_set(name, command,
+    description, …)` and `skill_set(name, files)` belong with the section each
+    describes rather than in the code two sections share.  What *is* shared is
+    the mirror those tools mutate — so an edit is in front of the next search
+    without a restart — and the declaration built from it.
+
+    `entries` is the config's own mapping for that section, copied here; `rows`
+    turns the mirror into catalogue rows, which is the one thing a family cannot
+    share because a playbook's row *is* its document and a command's is its
+    invocation.
+    """
+    family = Documents(
+        source=source,
+        category=category,
+        section=section,
+        entries=dict(entries),
+    )
+
+    mcp: FastMCP = house_server(name, instructions=instructions)
+
+    @mcp.tool(name=LIST_SOURCES)
+    def list_sources() -> dict[str, Any]:
+        """Every source this plugin holds — one, with everything it declares.
+
+        **Not a tool for the model**, and so not marked as one: the hub asks for
+        this and records the answer, and the model never sees the name.  The
+        whole list rather than a difference, because that is what makes a
+        deleted document stop being a hit — a merge reads an absent name as a row
+        the source no longer has.
+        """
+        return family.declare(description, rows(family.entries))
+
+    management(mcp, family)
+    return mcp
 
 
 def build_family_server(

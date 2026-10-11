@@ -195,10 +195,25 @@ from slife2.gateway import (
     proxied_name,
     sanitise,
 )
-from slife2.mcp_server import CALL_SOURCE, LIST_SOURCES, house_server, serve_plugin
+from slife2.mcp_server import (
+    CALL_SOURCE,
+    LIST_SOURCES,
+    house_server,
+    serve_plugin,
+)
+from slife2.mcp_server import (
+    CLI_SOURCE as _CLI_SOURCE,
+)
+from slife2.mcp_server import (
+    LIST_SETTLE_SECONDS as _LIST_SETTLE_SECONDS,
+)
+from slife2.mcp_server import (
+    SKILLS_SOURCE as _SKILLS_SOURCE,
+)
 from slife2.paths import catalogue_db, data_dir
 from slife2.textindex import terms
 from slife2.toolclient import UpstreamTool
+from slife2.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 
 logger = logging.getLogger(__name__)
 
@@ -269,8 +284,12 @@ SKILL_USE = "skill_use"
 #: `CLI_SOURCE` and `CLI` are the same word and stay two names: a *source* is
 #: what a row is filed under, and a *category* is what it is — and for `cli:`
 #: entries the operator's section happens to be called the same thing twice.
-SKILLS_SOURCE = "skills"
-CLI_SOURCE = "cli"
+#: Re-exported rather than defined here: the two declaring plugins and the
+#: two family plugins need these names too, and a plugin reaching into this
+#: one for a string is how `slife2-mcp-tools` came to import the whole hub.
+#: See `slife2.mcp_server.SKILLS_SOURCE`.
+SKILLS_SOURCE = _SKILLS_SOURCE
+CLI_SOURCE = _CLI_SOURCE
 
 #: The trim, and the only name here with **two callers**.  The leading
 #: underscore is the convention — **a name beginning with `_` is a harness
@@ -286,7 +305,10 @@ CLI_SOURCE = "cli"
 #: rather than through `call_tool`, so the trim does not depend on the
 #: catalogue, the routing or the model's list being in any state.  See
 #: `build_server`'s `_func_tool_unload`.
-FUNC_TOOL_UNLOAD = "_func_tool_unload"
+#: Re-exported for the same reason, and one better: the *agent server* is the
+#: other end of this hop, and it holds `slife2.tools.FUNC_TOOL_UNLOAD`.  Two
+#: copies of a tool name across a wire is a rename that half-works.
+FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 
 #: What a model may not take out of its own list.  The three this process
 #: serves are how a tool list is managed at all — a budget that could take them
@@ -366,7 +388,7 @@ INSTRUCTIONS = (
 #: `npx` that has to download itself holds a turn open for a minute.  So: wait,
 #: but briefly and only for attempts that have already begun.  This is a cost
 #: paid once per daemon, not once per turn.
-LIST_SETTLE_SECONDS = 5.0
+LIST_SETTLE_SECONDS = _LIST_SETTLE_SECONDS
 
 #: How many names one `func_tool_load` may carry.  Each name is its own
 #: catalogue write and its own embedding call — the loop is a `for` over a hop
@@ -1171,7 +1193,7 @@ SEARCH_LIMIT = 10
 #: words.**  An earlier version of this comment said that, and it was measured
 #: and is false: a compact word list embeds as well as the sentence it was taken
 #: from — 36 of 36 either way on this catalogue — which is what makes the
-#: fallback in `local_tools.search` sound.  The two inputs are one call apart,
+#: words-as-a-sentence routing in `ToolStore.search` sound.  The two inputs are one call apart,
 #: not one being the other's poor relation.
 #:
 #: Measured on the live catalogue, splitting them is 20/20 against 18/20, and
@@ -1191,7 +1213,7 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
             # true of, which words are worth giving, and what empty means.  The
             # warning this used to carry ("guessing at words makes it find
             # nothing") was true while a keywords-only call was answered by the
-            # keyword leg alone; with the fallback in `local_tools.search` a
+            # keyword leg alone; with the routing in `ToolStore.search` a
             # guess costs nothing, so the sentence had become false and would
             # only talk a model out of the words it was sure of.
             "description": (
@@ -1304,7 +1326,7 @@ def local_tools(
     back are all questions about the *whole* catalogue — so the process that
     owns the set answers them, and no plugin can.  Everything else a model can
     *call* is served by a plugin: bare-named when it is that plugin's own tool
-    (`now`), `{server}__{tool}` when it is an entry under `tools:`.  What the hub
+    (`turn_read`), `{server}__{tool}` when it is an entry under `tools:`.  What the hub
     kept when `skill_use` moved out to `slife2-skills` is exactly this remainder,
     and the remainder is the reason `LocalTool` still exists at all.
 
@@ -1368,19 +1390,11 @@ def local_tools(
                 "them — both empty is not a search.",
                 False,
             )
-        if keywords and not sentences:
-            # **The words are a sentence when they are all there is.**  A
-            # keywords-only call used to be answered by the keyword leg alone,
-            # and measured on this catalogue that leg found 23 of the 36 tools a
-            # caller asks for — the same 23 whether the catalogue held 130 of
-            # them or 253, because what it misses is word forms and not choice.
-            # Routing the same words through both legs finds 34 to 36.
-            #
-            # The loss was never that words embed badly: a word list embeds as
-            # well as the sentence it was taken from.  It was that they never
-            # reached the leg that could answer them.  The cost of closing that
-            # is one embedding call on a call that used to make none.
-            sentences = [" ".join(keywords)]
+        # **A keywords-only call reaches both legs, and the rule is the store's.**
+        # `ToolStore.search` turns words with no sentence into a sentence of them
+        # — the measurement and the reason are there.  What is here is only the
+        # fact that this tool has nothing to add: the same call is both legs
+        # whether the model gave it one list or two.
         found = await catalogue.search(
             keywords=keywords, sentences=sentences, limit=SEARCH_LIMIT
         )
@@ -1486,23 +1500,28 @@ async def unload_tools(
 
     Returns:
         `unloaded`, `refused` (named but not unloadable: one of
-        `ALWAYS_LOADED`), `unknown` (no row has that name), and `not_loaded`
-        (named but already out of the list).
+        `ALWAYS_LOADED`), `no_load_state` (a playbook or an installed command —
+        a row with no load state to take away), `unknown` (no row has that
+        name), and `not_loaded` (named but already out of the list).
 
-        `unknown` is apart from `refused` on purpose.  Three of the four are
-        facts about a row's *state* — a skill has no load state, a switched-off
-        source is not the runtime's to touch — and one is a fact about the name
-        itself; a caller told "refused, the system needs them" about a name that
-        does not exist has been told something false.
+        The three that are not `unloaded` are apart on purpose.  Three of them
+        are facts about a row's *state* and one about the name itself, and each
+        reads as a different sentence: a caller told "refused, the system needs
+        them" about a name that does not exist has been told something false,
+        and the same sentence about `cli:yt-dlp` claims the system protects a
+        tool it never had.
     """
     if not names:
         return {
             "unloaded": await catalogue.evict(sources, autoload=autoload),
             "refused": [],
+            "no_load_state": [],
+            "unknown": [],
             "not_loaded": [],
         }
     unloaded: list[str] = []
     refused: list[str] = []
+    no_load_state: list[str] = []
     unknown: list[str] = []
     not_loaded: list[str] = []
     for name in names:
@@ -1519,11 +1538,18 @@ async def unload_tools(
             # be the opposite of true: "refused, the system needs them" tells a
             # caller that a tool it invented is a tool this process protects.
             unknown.append(name)
+        elif outcome == "no_load_state":
+            # The two document families, which are findable and not callable:
+            # they were never in the list, so nothing was taken out of it.  The
+            # sibling `_load_as_text` splits this outcome out for the same
+            # reason, and the fallback below used to answer for both of them.
+            no_load_state.append(name)
         else:
             refused.append(name)
     return {
         "unloaded": unloaded,
         "refused": refused,
+        "no_load_state": no_load_state,
         "unknown": unknown,
         "not_loaded": not_loaded,
     }
@@ -1540,6 +1566,12 @@ def _unload_as_text(found: Mapping[str, Any]) -> str:
     refused = [str(name) for name in found.get("refused") or []]
     if refused:
         parts.append("refused (the system needs them): " + ", ".join(refused))
+    documents = [str(name) for name in found.get("no_load_state") or []]
+    if documents:
+        parts.append(
+            "not a tool to unload (a playbook or an installed command): "
+            + ", ".join(documents)
+        )
     unknown = [str(name) for name in found.get("unknown") or []]
     if unknown:
         parts.append("no such tool: " + ", ".join(unknown))
@@ -1644,8 +1676,11 @@ def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
     if best >= MATCH_FLOOR:
         head = f"Best match {best:.2f} by meaning."
     elif best >= WEAK_FLOOR or worded:
+        # "your words match" and not "match one": the clause below counts them,
+        # and when every row was a word match the two sentences read as a
+        # correction of each other rather than as one verdict.
         why = (
-            "your words match one, but the meaning leg is close to none"
+            "your words match, but the meaning leg is close to none"
             if best < WEAK_FLOOR
             else f"nothing is above {MATCH_FLOOR:.2f} by meaning"
         )
@@ -1676,7 +1711,7 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
     reader is a model and a list whose entries cannot be counted or compared is a
     list it has to guess at:
 
-        Found 3. Best match 0.73 by meaning.
+        Best match 0.73 by meaning.
         1. name  (category, source; meaning 0.73)
            one line of description
 

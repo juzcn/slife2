@@ -203,7 +203,7 @@ class SlifeApp(App[None]):
             # rest of the app, not insert whitespace nobody can see.
             tab_behavior="focus",
         )
-        yield StatusBar(id="status")
+        yield StatusBar()
 
     def get_css_variables(self) -> dict[str, str]:
         """Publish the palette to the stylesheet.
@@ -250,10 +250,31 @@ class SlifeApp(App[None]):
             # Here rather than in `on_mount`, because a window opened before the
             # servers were is the ordinary case on a cold start: the connect
             # this ends is the lazy retry, and that is the first moment there is
-            # anything to ask.  It is also the last moment it may happen — the
-            # turn about to run opens its block next.
+            # anything to ask.  **It is also before anything is mounted** — see
+            # `_ensure_connected`, which is what keeps the history from landing
+            # under the prompt that triggered the connect.
             await self._restore()
         return self._connected
+
+    async def _ensure_connected(self) -> None:
+        """Connect if this window is not, and restore with it.
+
+        **Called before a turn mounts anything, and that is the whole point.**
+        `_restore` draws the conversation this name already had; a window that
+        had already mounted the prompt would draw that history *underneath* it,
+        so the transcript would read as though the old conversation had been
+        pasted into the middle of the new one.
+
+        The lazy retry, for the case the window opened before the servers were
+        up.  Both halves of the condition matter: the window's own flag says
+        whether the last attempt worked, and the client's says whether the
+        transport is still there — a turn that failed at the transport closes
+        the connection inside `run_turn`, so a window consulting only its own
+        flag would stay "connected" to a server nothing is talking to.
+        """
+        if self._connected and self._client is not None and self._client.connected:
+            return
+        await self._connect()
 
     async def _restore(self) -> None:
         """Show the conversation this name already had.  Once.
@@ -321,6 +342,12 @@ class SlifeApp(App[None]):
         """Run queued turns, one at a time, until the queue is empty."""
         try:
             while self._queue:
+                # **Connected — and therefore restored — before anything is
+                # mounted.**  On a cold start this is where the connect
+                # happens, and `_restore` draws the conversation this name
+                # already had; doing it after `add_user` would put the history
+                # between the prompt and its answer.
+                await self._ensure_connected()
                 # Taken off the queue *before* it runs, so the count in the
                 # status bar is what is still waiting rather than including the
                 # turn the user is already watching.
@@ -342,9 +369,12 @@ class SlifeApp(App[None]):
                 # `attach_image`, whose answer names it.
                 self._transcript.begin_assistant()
                 self._steps = 0
-                self._refresh_status()
-
+                # **The task before the refresh, so the bar can see it.**  The
+                # bar's "working" comes from `_turn` being set, and a refresh
+                # that ran first would find it `None` and draw an idle bar — for
+                # the whole turn, since nothing else refreshes until it ends.
                 self._turn = asyncio.create_task(self._send(prompt, ticket))
+                self._refresh_status()
                 try:
                     final = await self._turn
                 except asyncio.CancelledError:
@@ -377,15 +407,10 @@ class SlifeApp(App[None]):
         """
         assert self._client is not None
 
-        if not self._connected or not self._client.connected:
-            # Lazy retry: the server may have started since we launched.  The
-            # second half is what makes it work *again* — a turn that failed at
-            # the transport closes the connection inside `run_turn`, so a window
-            # consulting only its own flag would stay "connected" to a server
-            # nothing is talking to and fail every later turn the same way.
-            # Asking the client is also what keeps one drop from costing a
-            # restart, and ctrl+n does not help: reset goes down the same path.
-            await self._connect()
+        # Lazy retry, and the same call `_drain` makes before it mounts
+        # anything — asking the client is what keeps one drop from costing a
+        # restart, and ctrl+n does not help: reset goes down the same path.
+        await self._ensure_connected()
         if not self._connected:
             raise ConnectionError(
                 f"not connected to the agent server ({self._connection_text})"

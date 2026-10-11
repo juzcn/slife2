@@ -62,8 +62,8 @@ MEDIA_TYPES: dict[str, str] = {
 MAX_BYTES = 20 * 1024 * 1024
 
 
-def as_url(source: str) -> str:
-    """One source, as the URL a provider is given — or `""`.
+def _encode(source: str) -> tuple[str, str]:
+    """One source as `(url, refusal)` — exactly one of the two is filled in.
 
     **A `data:` URI and an `http(s)` URL pass straight through**, which is v1's
     rule and worth stating because it looks like a capability this process does
@@ -74,16 +74,19 @@ def as_url(source: str) -> str:
 
     Anything else is a path on this machine: read, capped, and base64-encoded.
 
-    **A failure is `""` rather than an exception**, and the caller turns it into a
-    sentence for whoever typed the `@`: one unreadable source among five must not
-    cost the other four, which v1 learned by dropping a whole batch on the first
-    missing file.
+    **The reason comes back with the failure, and that is the point of the
+    pair.**  This used to answer `""` and leave `resolve` to work out *why* from
+    a second `is_file` and a second `stat` — two policies about one file, and the
+    one that produced the URL was not the one that explained it.  A failure is
+    still a value rather than an exception, because one unreadable source among
+    five must not cost the other four: v1 learned that by dropping a whole batch
+    on the first missing file.
     """
     if source.startswith(("data:", "http://", "https://")):
-        return source
+        return source, ""
     path = Path(source).expanduser()
     if not path.is_file():
-        return ""
+        return "", f"{source}: no such file"
     media_type = MEDIA_TYPES.get(path.suffix.lower(), "image/png")
     # **Asked of the file before it is read**, not of the bytes afterwards: an
     # oversized source is refused *without* allocating it, which matters because
@@ -92,16 +95,19 @@ def as_url(source: str) -> str:
         size = path.stat().st_size
     except OSError as exc:
         logger.debug("attachment %s could not be stat'd: %s", path, exc)
-        return ""
+        return "", f"{source}: could not be read"
     if size > MAX_BYTES:
         logger.warning("attachment %s is %d bytes, over the cap", path, size)
-        return ""
+        return "", (
+            f"{source}: {size / 1_048_576:.1f} MB, over the "
+            f"{MAX_BYTES // 1_048_576} MB limit"
+        )
     try:
         data = path.read_bytes()
     except OSError as exc:
         logger.debug("attachment %s could not be read: %s", path, exc)
-        return ""
-    return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}"
+        return "", f"{source}: could not be read"
+    return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}", ""
 
 
 def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -129,19 +135,9 @@ def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
             # read twice.
             continue
         seen.add(source)
-        url = as_url(source)
-        if not url:
-            path = Path(source).expanduser()
-            if not path.is_file():
-                refusals.append(f"{source}: no such file")
-            elif path.stat().st_size > MAX_BYTES:
-                size = path.stat().st_size
-                refusals.append(
-                    f"{source}: {size / 1_048_576:.1f} MB, over the "
-                    f"{MAX_BYTES // 1_048_576} MB limit"
-                )
-            else:
-                refusals.append(f"{source}: could not be read")
+        url, refusal = _encode(source)
+        if refusal:
+            refusals.append(refusal)
             continue
         pairs.append((source, url))
     return pairs, refusals

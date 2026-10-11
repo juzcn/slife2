@@ -109,6 +109,23 @@ LIST_SOURCES = "list_sources"
 #: caller's identity is forwarded on through, exactly as the hub forwards it.
 CALL_SOURCE = "call_source"
 
+#: The two source names the *documents* are filed under — a playbook's rows and
+#: a command's.  A source is a name and not a process, so these are not the
+#: plugins' own names (`skills-server` serves, `skills` is what its rows are
+#: filed under), and they are contract rather than any one plugin's business
+#: for the same reason `LIST_SOURCES` is: the hub merges under them, the two
+#: declaring plugins write them, and the family plugins that hold *other*
+#: people's servers refuse a name that would collide with one.  Three copies of
+#: `"cli"` and a test to hold them together is what this replaces.
+SKILLS_SOURCE = "skills"
+CLI_SOURCE = "cli"
+
+#: How long to wait for a plugin to answer a `list_sources` attempt it has
+#: already begun.  Bounded on purpose: asking what a server offers must not be
+#: the thing that holds a turn open, and an answer that is late is the same
+#: answer as one that is absent — "not answering yet".
+LIST_SETTLE_SECONDS = 5.0
+
 
 def describe(client: ClientId) -> str:
     """A client id as one readable token, for a log line.

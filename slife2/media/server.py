@@ -42,7 +42,6 @@ from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import Config, ConfigError, MediaProviderSettings, MediaSettings
 from slife2.mcp_server import house_server, serve_plugin
 from slife2.media.adapters import (
-    ArtifactSaver,
     MediaAdapter,
     MediaAdapterError,
     create_adapter,
@@ -117,11 +116,6 @@ class Media:
     ) -> None:
         self._settings: MediaSettings = config.media
         self._adapters: dict[str, MediaAdapter] = dict(adapters or {})
-        self._saver = ArtifactSaver()
-
-    @property
-    def settings(self) -> MediaSettings:
-        return self._settings
 
     def adapter(self, provider: MediaProviderSettings) -> MediaAdapter:
         """The adapter for one provider, built on first use."""

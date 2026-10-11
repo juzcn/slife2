@@ -295,6 +295,16 @@ class Loop:
     lock: asyncio.Lock
     last_used: float
     inbox: deque[Pending] = field(default_factory=deque)
+    #: Whether this conversation has been put back on the context it had when it
+    #: last stopped.  A property of the *loop* rather than of the call that
+    #: created it, which is the fix rather than a detail: two callers can arrive
+    #: on one brand-new key at the same time, and only one of them is the caller
+    #: that created it — so a per-call flag left the other running a turn on the
+    #: empty list the restore was about to replace.  Set under the lock, and only
+    #: once the restore has actually answered, so a store that failed is tried
+    #: again by the next turn rather than leaving the conversation blank for the
+    #: life of the process.
+    restored: bool = False
     #: The entries this turn has folded in, in the order it took them.  Held for
     #: exactly one turn: it is how the turn's own end reaches them (their `result`
     #: is set there), and it is cleared by the same `finally`, so a later turn can
@@ -657,8 +667,8 @@ def build_server(
                 logger.info("reaping idle conversation %s", describe(client))
                 loops.pop(client, None)
 
-    def conversation(agent: str, subagent: str, model: str) -> tuple[Loop, bool]:
-        """The conversation for this key, and whether this call started it.
+    def conversation(agent: str, subagent: str, model: str) -> Loop:
+        """The conversation for this key, created on demand.
 
         Created on demand rather than opened by a separate call, because a key
         that cannot go stale is worth more than the round trip it costs: there is
@@ -666,16 +676,16 @@ def build_server(
         caller to handle.  The idle sweep may have dropped the state; the caller
         cannot tell, and does not have to.
 
-        **`started` is the restore's trigger, and it is why this answers a pair.**
-        A loop that already exists is one whose context is in hand; a loop that
-        has just been built holds the system prompt and nothing else, and that is
-        exactly the moment to ask the store what this conversation was made of —
-        which is the same event as "a process restarted" and "a reaped
-        conversation came back", at the only level this server can see.
+        **A pair is not answered here, and the reason is the fix rather than a
+        tidying.**  This used to return `(loop, started)`, and the caller used
+        `started` to decide whether to restore — which is a fact about *this
+        call*, while the restore is a fact about the *loop*: two callers arriving
+        on one brand-new key are one starter and one not, and the second one
+        would have run a turn on the empty list the restore was about to replace.
+        `Loop.restored` is the claim, and it is made under the lock.
         """
         client = (agent, subagent)
         loop = loops.get(client)
-        started = loop is None
         if loop is None:
             live = current()
             name, provider, settings = live.resolve(model)
@@ -700,7 +710,7 @@ def build_server(
                 "started %s on %s", describe(client), model or "the default model"
             )
         loop.last_used = time.monotonic()
-        return loop, started
+        return loop
 
     def detach(coro: Coroutine[Any, Any, Any]) -> None:
         """Run a write that must outlive the cancellation that prompted it.
@@ -1223,6 +1233,16 @@ def build_server(
             )
 
         pairs, refusals = attachments.resolve(wanted)
+        if not pairs:
+            # **Every source failed, and the refusals are the whole answer.**
+            # Asked the other way round this reported "there is no message to
+            # attach it to" — a claim about the conversation, made when the
+            # fault is the file's, and one that threw away the sentence naming
+            # the fault: a model that named a path that is not there was told
+            # nothing about the path.
+            return "Nothing attached:\n" + "\n".join(
+                f"Not attached — {refusal}" for refusal in refusals
+            )
         if not attachments.inject(loop.messages, [url for _source, url in pairs]):
             return "Nothing attached: there is no message to attach it to."
         logger.info(
@@ -1249,7 +1269,16 @@ def build_server(
         there is none — and it takes what it hands over.
         """
         client_id = request_client(ctx)
-        return take_waiting(client_id) if client_id else NOTHING_WAITING
+        if not client_id:
+            return NOTHING_WAITING
+        # **`or`, because `""` is not an answer here.**  `take_waiting` returns
+        # the empty string for the one thing it refuses — a head that carries
+        # images, which cannot ride a tool result — and *this* is a tool result:
+        # a blank one reads as a failure rather than as "nothing was handed
+        # over", which is the whole reason `NOTHING_WAITING` is a sentence.  Its
+        # own comment has said it covers that case from the beginning; the code
+        # did not.
+        return take_waiting(client_id) or NOTHING_WAITING
 
     # ── The model config tools ───────────────────────────────────────────
     # v1's `model_*` set, on the process that *resolves* the model rather than
@@ -1670,8 +1699,9 @@ def build_server(
                 model is ignored, because the model, the system prompt and the
                 recorded name are all properties of the conversation.  Change it
                 by resetting the conversation.
-            images: Images to send with it, each a `data:` URL.  Refused unless
-                the model's config lists `image` under `input` — silently
+            images: Images to send with it — a local path, an `http(s)` URL or a
+                `data:` URI, the same three `attach_image` takes.  Refused unless
+                the model's config lists `image` under `input`; silently
                 dropping an attachment somebody made is worse than saying the
                 model cannot read it.
             channel: Where this turn came in from — `tui`, or the key of
@@ -1694,13 +1724,7 @@ def build_server(
         # write, when the answer exists and has nowhere to go.
         await memory()
         reap()
-        loop, started = conversation(agent, subagent, model)
-        if started:
-            # A conversation that has just been built is one that has no context
-            # in hand, and this is the only moment that is true.  Done here and
-            # not under the lock because nothing else can be holding one: the
-            # loop was created by *this* call and no other caller has its key.
-            await restore_into(loop)
+        loop = conversation(agent, subagent, model)
 
         if len(loop.inbox) >= MAX_QUEUED:
             raise ToolError(
@@ -1731,11 +1755,24 @@ def build_server(
                 # seen by the running turn as steering nobody asked for.
                 with contextlib.suppress(ValueError):
                     loop.inbox.remove(item)
-                # **Before the turn, and inside the lock.**  It replaces the
-                # message list wholesale — anything appended first, which
-                # includes this very prompt, would be destroyed by it — and it
-                # reads the list the previous turn's write maintains, so it has
-                # to wait for that write the way the next turn does.
+                # **Inside the lock, and here rather than when the loop is
+                # built.**  Both halves are the same correction.  A restore
+                # replaces the message list wholesale, so it has to happen before
+                # the turn that runs on it — and it has to happen under the lock,
+                # because two callers can arrive on one brand-new key at once:
+                # one creates the loop and the other does not, and a restore
+                # awaited outside the lock lands *underneath* whichever of them
+                # got in first, reassigning the list a running turn is reading.
+                # The claim is on the loop for the same reason a per-call flag
+                # was not enough.
+                if not loop.restored:
+                    await restore_into(loop)
+                    loop.restored = True
+                # **Before the turn.**  It replaces the message list wholesale —
+                # anything appended first, which includes this very prompt, would
+                # be destroyed by it — and it reads the list the previous turn's
+                # write maintains, so it has to wait for that write the way the
+                # next turn does.
                 chosen = await rebuild_into(loop, item.prompt)
                 observer = ProgressObserver(ctx)
                 # **Reported before the turn**, because it is a fact about what
@@ -1744,6 +1781,10 @@ def build_server(
                 # discriminator is one model call the caller never sees, so this
                 # is the only place its decision is visible at all.
                 await observer.on_event(chosen)
+                # How long the list was when this turn began.  What the write
+                # below covers is what the turn *appends*, and the difference is
+                # the whole of it — see `covered` in the success branch.
+                before = len(loop.messages)
                 try:
                     await run_turn_into(loop, item, observer, outcome)
                 except BaseException:
@@ -1774,9 +1815,15 @@ def build_server(
                     turn_id = await record(loop, item, outcome)
                     if turn_id is not None:
                         loop.turn_ids.append(turn_id)
-                        # The turn's own messages are covered now, so what was
-                        # carried stays carried and nothing else does.
-                        loop.covered = len(loop.messages)
+                        # **Only what this turn appended is covered.**  Setting
+                        # `covered` to the whole list counted the carried tail
+                        # with it — a cancelled turn's unbacked messages, which
+                        # no id here accounts for — and the next rebuild reads
+                        # `carried = len(messages) - covered`, so its tail came
+                        # out zero and the user's own message was dropped from
+                        # the conversation.  The turn's own messages are exactly
+                        # the ones appended since `before`.
+                        loop.covered += len(loop.messages) - before
                         # ...and it is addressable now, which is what the next
                         # turn's discriminator needs: a turn it cannot name is
                         # one a keep-list cannot keep.

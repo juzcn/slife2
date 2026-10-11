@@ -161,6 +161,30 @@ def test_a_turn_with_nothing_to_embed_gets_no_vector() -> None:
     assert embed_chunks(embed_text(messages)) == []
 
 
+@pytest.mark.asyncio
+async def test_a_turn_with_nothing_to_embed_is_not_pending(tmp_path) -> None:
+    """**And it does not make the index unready, which it used to.**
+
+    "No vector" was the whole of the state a pending turn had, so a turn with
+    nothing to embed was pending for ever: no sync could place a vector for it,
+    `index_status` never came back clean, and the context plugin refuses to
+    serve an index that is not.  One bare `send_message(agent, "")` the model
+    answered with neither text nor a tool call was enough to keep the whole
+    plugin down.  What a turn owes is a vector for its *text*.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    await store.save_turn(
+        messages=[{"role": "tool", "content": "4", "tool_call_id": "c1"}],
+        embedder=embedder,
+    )
+
+    status = store.index_status(embedder)
+
+    assert status["pending"] == 0
+    assert status["ready"] is True, status["problems"]
+
+
 def test_the_two_indexes_do_not_hold_the_same_text() -> None:
     """The keyword leg keeps the summary; the vector leg must not.
 

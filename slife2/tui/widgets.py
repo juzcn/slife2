@@ -151,7 +151,7 @@ class ChatView(VerticalScroll):
     can_focus = True
 
     def __init__(self, agent: str = "") -> None:
-        super().__init__(id="chat-view")
+        super().__init__()
         #: Used to sign the assistant's messages, so a conversation reads
         #: `You> ...` / `jack> ...` rather than only marking one side of it.
         self._agent = agent
@@ -518,10 +518,12 @@ class AssistantMessage(Static):
         #: does to the block it closes.
         self._thinking_open = True
         self._tokens = 0
-        # Painted once at construction, so an empty block shows the agent's
-        # signature while the first delta is still in flight.  Without this the
-        # block renders nothing at all until text arrives, and the signature
-        # that says who is answering is the only affordance there is.
+        # Painted once at construction, so the block is there before the first
+        # delta lands: an empty one renders the dim ellipsis `_refresh` draws for
+        # "working", which is the only affordance a model that has not said
+        # anything yet can offer.  The *signature* is not painted here — a block
+        # is opened before anything is known about it, so signing at construction
+        # would leave a bare `jack>` row per step (see `_refresh`).
         self._refresh()
 
     @property

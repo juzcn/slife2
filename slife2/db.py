@@ -38,9 +38,9 @@ that does *not* reach the database: turning a turn into text is what a model
 reads back, so the bytes become a note saying they were there, and the file they
 came from is still named in the prompt (`strip_images`).
 
-**Agents are isolated by file.**  `<agent>.turn.db` — there is no agent column
-and no query that can reach another agent's turns, because there is no other
-agent's turns in the file.  `who_helped` records the name for display.
+**Agents are isolated by file.**  `agents/<agent>/turns.db` — there is no agent
+column and no query that can reach another agent's turns, because there is no
+other agent's turns in the file.  `who_helped` records the name for display.
 
 **No migration layer.**  This is a decision, not an omission: schema changes
 land in `_SCHEMA` for fresh databases, and an old one is deleted and rebuilt
@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -90,6 +91,7 @@ import sqlite_vec
 
 from slife2 import textindex
 from slife2.clock import now
+from slife2.context import normalise_ids
 from slife2.paths import agent_dir
 from slife2.timeutil import normalize_bound
 
@@ -154,9 +156,39 @@ _OVERFETCH = 4
 #: which is the number that has to stay under this.
 _MAX_SQL_VARS = 900
 
+#: What a row carries before anything has measured it, while a page's
+#: similarities are being gathered.  Below every cosine there is, so a row
+#: nobody measured sorts under one the meaning leg scored minus something —
+#: and `max` can collect the best of several measurements without a branch.
+#:
+#: **One sentinel, and it used to be two**: the collection seeded with `0.0`
+#: and the leg with `-1.0`, so a row the vector leg scored below zero was
+#: reported and ordered as `0.0` — a number `_nearest` never measured, on
+#: the line a model reads.
+NO_SIMILARITY = -1.0
+
+#: How many rows one embedding request may carry when an index is being built
+#: back up.  **Bounded because the answer is one request**: a first start with a
+#: published server in the config is thousands of tools, and the embedding
+#: server's own timeout is what a request that size runs into — which fails the
+#: whole tool list rather than embedding the rest.  The cabinet's `SYNC_BATCH`
+#: is the same number for the same reason.
+#:
+#: Reading the catalogues is bounded by this, not by the model: `embed` takes a
+#: list and makes one call, and how much text it can carry is the endpoint's
+#: business rather than something this file could compute.
+SYNC_BATCH = 64
+
+#: How long an agent name may be as a path component.  Most filesystems stop at
+#: 255, so this is a house limit rather than one anybody hits by accident.
+MAX_AGENT_NAME = 64
+
+#: How much of the digest survives truncation, plus the `-` in front of it.
+_DIGEST_CHARS = 9
+
 
 def safe_agent_name(name: str) -> str:
-    """An agent name fit to be a filename.
+    """An agent name fit to be a filename.  **Injective, because it is a path.**
 
     `--agent` comes from a command line, and `jack` becoming `jack.turn.db` is
     exactly the kind of thing a `..` in the wrong place turns into a write
@@ -165,13 +197,25 @@ def safe_agent_name(name: str) -> str:
     — is refused, because silently writing to a surprising path is worse than
     saying no.
 
+    **A name that is too long keeps a digest.**  Truncating alone would be a
+    many-to-one function, and this one names a *directory*: two long names
+    sharing their first 64 characters would be two agents with one `turns.db`
+    between them, which is the isolation `database_path` exists to provide.  The
+    digest is taken of the cleaned name, so two raw spellings that already
+    collide here still collide — this narrows the collisions it can fix to the
+    one it introduces.
+
     Raises:
         ValueError: If the name has no characters that can be kept.
     """
     cleaned = _SAFE_NAME.sub("_", name).strip("._-")
     if not cleaned:
         raise ValueError(f"agent name {name!r} cannot name a database file")
-    return cleaned[:64]
+    if len(cleaned) <= MAX_AGENT_NAME:
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
+    keep = MAX_AGENT_NAME - _DIGEST_CHARS - 1
+    return f"{cleaned[:keep]}-{digest}"
 
 
 def database_path(agent: str, subagent: str = "") -> Path:
@@ -728,6 +772,17 @@ def where_clause(clauses: list[str]) -> str:
     return f"AND {' AND '.join(clauses)}" if clauses else ""
 
 
+def filter_clause(clauses: list[str]) -> str:
+    """Those clauses as a query's own `WHERE`, or nothing to filter by.
+
+    Both stores need both forms — the turn store filters a match and then a
+    rowid list, the catalogue browses and then filters — and each spelled the
+    two out by hand.  One of the six was a copy of this and the other five are
+    the same expression with a different leading word.
+    """
+    return f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+
 class VectorIndexUnavailable(RuntimeError):
     """The vector extension could not be loaded, so nothing here can work.
 
@@ -1095,7 +1150,7 @@ class TurnStore:
         limit = page_limit(limit)
         offset = max(0, int(offset))
         clauses, params = time_window(since, until)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = filter_clause(clauses)
         with self._connect() as connection:
             # One read transaction for both statements.  They are two reads of a
             # table a turn can be saved to at any moment, and a save landing
@@ -1221,7 +1276,7 @@ class TurnStore:
         them all (see `recall`).
         """
         clauses, params = time_window(since, until)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = filter_clause(clauses)
         order = "DESC" if newest_first else "ASC"
         with self._connect() as connection:
             rows = connection.execute(
@@ -1395,11 +1450,20 @@ class TurnStore:
             self.set_index_meta(connection, text_version=textindex.RULES_VERSION)
 
     def _turns_without_vectors(self) -> list[tuple[int, str]]:
-        """Every turn the vector index does not hold, oldest first.
+        """Every turn with a vector still owed, oldest first.
 
         The index is derived, so "has no vector" is the whole of the state a
         pending turn has — there is no column to keep in step and nothing to
         mark, and a turn whose embedding failed is simply found here.
+
+        **A turn with nothing to embed owes no vector, and is not one of
+        these.**  `embed_text` is empty for a turn whose only message is blank —
+        a bare `send_message(agent, "")` that the model answered with neither
+        text nor a tool call — and no model can be asked for a vector of
+        nothing.  Counted as pending it would be pending for ever: no sync could
+        ever place a vector for it, so `index_status` would never be clean and
+        the context plugin, which refuses to serve an index that is not, would
+        never come up.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -1408,7 +1472,9 @@ class TurnStore:
                 "ORDER BY rowid"
             ).fetchall()
         return [
-            (int(row["rowid"]), embed_text(_loads(row["messages"], []))) for row in rows
+            (int(row["rowid"]), text)
+            for row in rows
+            if (text := embed_text(_loads(row["messages"], []))).strip()
         ]
 
     def index_status(self, embedder: Embedder) -> dict[str, Any]:
@@ -1420,9 +1486,10 @@ class TurnStore:
         that, because a sync that died halfway leaves nothing to remember it by.
         Both halves of the plugin that owns this store ask it before they serve
         and refuse to if the answer is not clean: there is no mode in which a
-        turn is stored that
-        semantic search cannot find, so an index that is not ready is a system
-        that has come apart rather than a plugin working with less.
+        turn with text is stored that semantic search cannot find, so an index
+        that is not ready is a system that has come apart rather than a plugin
+        working with less.  A turn with nothing to embed is the one exception
+        and is not a problem — see `_turns_without_vectors`.
 
         `problems` is written to be read by a person looking at a startup
         failure, so each entry names what is wrong rather than which check ran.
@@ -1441,13 +1508,14 @@ class TurnStore:
             keyword = int(
                 connection.execute("SELECT COUNT(*) FROM turn_fts").fetchone()[0]
             )
-            pending = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM turn WHERE rowid NOT IN"
-                    " (SELECT DISTINCT turn_id FROM turn_chunk)"
-                ).fetchone()[0]
-            )
             meta = self.index_meta(connection)
+        # **Asked of the same helper `sync_indexes` uses, not of a second copy
+        # of the query.**  "Pending" has to mean what the sync can fix: a turn
+        # with nothing to embed is not one of these (see
+        # `_turns_without_vectors`), and a count read straight off `turn_chunk`
+        # would call it pending for ever — which is the whole of what this
+        # reports, so the two answers must not be able to disagree.
+        pending = len(self._turns_without_vectors())
 
         problems: list[str] = []
         if meta.get("vector_identity", "") != vector_identity(embedder):
@@ -1658,6 +1726,9 @@ def vector_identity(embedder: Embedder) -> str:
     a function of the text it was made from: changing what goes into one makes
     every stored vector the wrong vector for its turn, which is the same failure
     as changing the model and takes the same rebuild.
+
+    The catalogue's index asks the same question of the same three things,
+    and used to have a byte-identical copy of this to ask it with.
     """
     return f"{textindex.RULES_VERSION}|{embedder.identity}|{embedder.dimension}"
 
@@ -1686,25 +1757,6 @@ def _write_vectors(
 
 
 # --- the live context ---------------------------------------------------------
-
-
-def normalise_ids(turn_ids: Iterable[int]) -> list[int]:
-    """An id list with duplicates collapsed to their **first** position.
-
-    First and not last, which is the choice v1 made and the only one that keeps
-    the list's meaning: the order *is* the content (see the `context` DDL), so a
-    later mention of an id already in the list is a repeat rather than a
-    correction — nothing in a second mention says where in time it belongs.
-
-    The ints are coerced here rather than at each call site because a list that
-    arrives over a wire as JSON is a list of whatever the encoder wrote, and a
-    stringly `"7"` that reaches a `rowid IN (…)` query matches nothing — so the
-    failure would be a silently short context rather than an error.
-    """
-    seen: dict[int, None] = {}
-    for turn_id in turn_ids:
-        seen.setdefault(int(turn_id), None)
-    return list(seen)
 
 
 def read_context(connection: sqlite3.Connection) -> list[int]:
@@ -2084,12 +2136,6 @@ _SEARCH_COLUMNS = (
 
 #: The five columns the keyword index holds, in `BM25_WEIGHTS`'s order.
 _FTS_FIELDS = ("name", "description", "category", "source_id", "schema")
-
-#: How many candidates each leg of a search brings to the fusion, as a multiple
-#: of what was asked for.  A fusion is a vote between ranked lists, so the lists
-#: want to be deeper than the answer; and one leg needs the slack for a second
-#: reason, since a KNN counts *chunks* and several of them belong to one tool.
-_TOOL_OVERFETCH = 4
 
 
 def _in_list(values: Any) -> str:
@@ -3085,7 +3131,26 @@ class ToolStore:
             ]
             return {"results": rows, "browsed": True}
 
-        over = min(limit * _TOOL_OVERFETCH, _MAX_SQL_VARS)
+        # **The words are a sentence when they are all there is.**  A
+        # keywords-only call used to be answered by the keyword leg alone, and
+        # measured on the live catalogue that leg found 23 of the 36 tools a
+        # caller asks for — the same 23 whether the catalogue held 130 of them or
+        # 253, because what it misses is word forms and not choice.  Routing the
+        # same words through both legs finds 34 to 36.
+        #
+        # The loss was never that words embed badly — a word list embeds as well
+        # as the sentence taken from it.  It was that they never reached the leg
+        # that could answer them.  The cost of closing that is one embedding call
+        # on a call that used to make none.
+        #
+        # Here rather than in `toolhub`, which had it: this is a fact about the
+        # *search* and not about the tool, and a second caller of this method got
+        # rows with no number on them because the words had been routed by the
+        # caller that remembered to.
+        if keywords and not any(s.strip() for s in sentences):
+            sentences = [" ".join(str(word) for word in keywords)]
+
+        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
@@ -3116,7 +3181,7 @@ class ToolStore:
             # number is how close the row came to the nearest thing the caller
             # asked for — not whichever sentence happened to be looked at first.
             for rowid, measured in hits:
-                meaning[rowid] = max(meaning.get(rowid, 0.0), measured)
+                meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
         if keyword_hits is not None and not shortlist:
             # Words with no sentence are one question with one view.
             shortlist = list(dict.fromkeys(keyword_hits))
@@ -3129,7 +3194,7 @@ class ToolStore:
         for rowid, value in self._meaning_of(
             [rowid for rowid in shortlist if rowid not in meaning], queries
         ).items():
-            meaning[rowid] = max(meaning.get(rowid, 0.0), value)
+            meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), value)
 
         # **The page is ordered by two things the caller can see.**  The words
         # first, because a row whose own text contains them is certain where a
@@ -3151,7 +3216,7 @@ class ToolStore:
         worded = set(keyword_hits or ())
         ordered = sorted(
             shortlist,
-            key=lambda rowid: (rowid not in worded, -meaning.get(rowid, 0.0)),
+            key=lambda rowid: (rowid not in worded, -meaning.get(rowid, NO_SIMILARITY)),
         )
         rows = await asyncio.to_thread(
             self._rows_in_order, ordered, clauses, values, limit
@@ -3251,14 +3316,14 @@ class ToolStore:
             for query in queries:
                 value = _cosine(vector, query)
                 rowid = int(row["rowid"])
-                if value > best.get(rowid, -1.0):
+                if value > best.get(rowid, NO_SIMILARITY):
                     best[rowid] = value
         return best
 
     def _browse(
         self, limit: int, clauses: list[str], values: list[Any]
     ) -> list[sqlite3.Row]:
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = filter_clause(clauses)
         with self._connect() as connection:
             return connection.execute(
                 f"SELECT rowid AS rowid, * FROM tool {where}"
@@ -3276,7 +3341,7 @@ class ToolStore:
         to the limit afterwards still returns the best rows inside the filter.
         """
         weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
-        where = f"AND {' AND '.join(clauses)}" if clauses else ""
+        where = where_clause(clauses)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT f.rowid AS rowid FROM tool_fts f"
@@ -3337,9 +3402,15 @@ class ToolStore:
 
         `k` counts *chunks*, and a tool with a long schema has several, so the
         best chunk per tool is what is kept — a KNN in `vec0` refuses the
-        `GROUP BY` that would say so.  A vector of another width is skipped
-        rather than compared: rows from two models cannot be ranked against each
-        other, and a distance between them is a number with no meaning at all.
+        `GROUP BY` that would say so.
+
+        **Rows from two models cannot be ranked against each other, and this
+        does not have to check.**  It used to say it skipped a vector of another
+        width, and nothing did: what makes that impossible is `ensure_index`,
+        which drops and rebuilds the whole table when the identity changes — so
+        one table is one model's, and the width is fixed by its DDL.  A second
+        guarantee here would be a second thing to keep true, for a state the
+        first one cannot reach.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -3377,7 +3448,7 @@ class ToolStore:
         """
         if not rowids:
             return []
-        where = f"AND {' AND '.join(clauses)}" if clauses else ""
+        where = where_clause(clauses)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT rowid AS rowid, * FROM tool"
@@ -3411,12 +3482,33 @@ class ToolStore:
         """
         await asyncio.to_thread(self._sync_text_index)
         await asyncio.to_thread(self.ensure_index, embedder)
-        missing = await asyncio.to_thread(self.tools_without_vectors)
-        vectors = await self._embed(missing, embedder)
-        await asyncio.to_thread(self._place, vectors)
+        # **A batch at a time, and the loop is what finishes the index.**  A
+        # first start over a config with a published server in it is thousands
+        # of tools, and one request carrying every one of them is the request
+        # that times out — which fails the tool list rather than embedding the
+        # rest, since the caller is the hub's own startup.  `SYNC_BATCH` is what
+        # bounds a call, and the loop belongs here for the reason the cabinet
+        # states: the store bounds, the caller finishes.
+        #
+        # It terminates because `_place` writes a chunk row for every tool it
+        # was handed, and every tool has at least a name to be a chunk of
+        # (`tool_document`) — so a row that was selected is a row that is no
+        # longer missing.  The `not vectors` arm is the guard on that: if the
+        # model ever answers with nothing for a batch, stopping is the only
+        # alternative to selecting the same batch for ever.
+        placed = 0
+        while True:
+            missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
+            if not missing:
+                break
+            vectors = await self._embed(missing, embedder)
+            if not vectors:
+                break
+            await asyncio.to_thread(self._place, vectors)
+            placed += len(vectors)
         return {
-            "vectors": len(vectors),
-            "identity": _tool_index_identity(embedder),
+            "vectors": placed,
+            "identity": vector_identity(embedder),
         }
 
     def ensure_index(self, embedder: Embedder) -> None:
@@ -3428,7 +3520,7 @@ class ToolStore:
         back is `sync_indexes`, and the two are separate for the same reason
         they are in the turn store.
         """
-        identity = _tool_index_identity(embedder)
+        identity = vector_identity(embedder)
         with self._connect() as connection:
             if index_meta(connection, "meta").get("vector_identity", "") == identity:
                 return
@@ -3481,8 +3573,8 @@ class ToolStore:
                 )
             set_index_meta(connection, "meta", text_version=textindex.RULES_VERSION)
 
-    def tools_without_vectors(self) -> list[tuple[str, str]]:
-        """Every row the vector index does not hold, as `(name, document)`.
+    def tools_without_vectors(self, limit: int | None = None) -> list[tuple[str, str]]:
+        """Rows the vector index does not hold, as `(name, document)`.
 
         Oldest first, so a first run embeds a server's tools in the order they
         were first seen rather than in whatever order the table happens to be
@@ -3490,6 +3582,11 @@ class ToolStore:
         its text moved — because those are the only two paths that leave a row
         without one; a rebuild for a changed model leaves them all without one,
         which is how the same query fills the index back in.
+
+        `limit` is how many one call may carry, and the caller loops until this
+        returns nothing (`sync_indexes`).  Bounded because a first run is every
+        tool of every server, and one request for all of them is the request
+        that times out.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -3497,20 +3594,11 @@ class ToolStore:
                 " t.schema AS schema FROM tool t"
                 " LEFT JOIN tool_chunk c ON c.name = t.name"
                 " WHERE c.id IS NULL"
-                " ORDER BY t.rowid",
+                " ORDER BY t.rowid"
+                " LIMIT ?",
+                (limit or -1,),
             ).fetchall()
         return [(str(row["name"]), tool_document(dict(row))) for row in rows]
-
-
-def _tool_index_identity(embedder: Embedder) -> str:
-    """What the vector index was built with, as one comparable string.
-
-    The text contract is part of it and not only the model, because a vector is
-    a function of the text it was made from: changing what goes into one makes
-    every stored vector the wrong vector for its tool, which is the same failure
-    as changing the model and takes the same rebuild.
-    """
-    return f"{textindex.RULES_VERSION}|{embedder.identity}|{embedder.dimension}"
 
 
 def _chunk_documents(
