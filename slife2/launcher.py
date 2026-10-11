@@ -41,6 +41,7 @@ from slife2.config import (
     EMBEDDINGS_SERVER_NAME,
     LOCAL_SERVERS,
     MCP_TOOLS_SERVER_NAME,
+    MEDIA_SERVER_NAME,
     RESTAPI_TOOLS_SERVER_NAME,
     SKILLS_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
@@ -119,6 +120,9 @@ WECHAT_SERVER = ("slife2.wechat", WECHAT_SERVER_NAME, "wechat_check_status")
 #: The cabinet.  It identifies itself by `note_list`, which is a tool it serves
 #: before anything has been written to it — the state a fresh cabinet is in.
 CABINET_SERVER = ("slife2.cabinet", CABINET_SERVER_NAME, "note_list")
+#: The media plugin.  It identifies itself by `generate_image`, which is the
+#: first of the four capabilities and the one a config is most likely to have.
+MEDIA_SERVER = ("slife2.media.server", MEDIA_SERVER_NAME, "generate_image")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -130,6 +134,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "toolhub": TOOLHUB_SERVER,
     "wechat": WECHAT_SERVER,
     "cabinet": CABINET_SERVER,
+    "media": MEDIA_SERVER,
     "agent": AGENT_SERVER,
 }
 
@@ -620,6 +625,7 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "restapi-tools",
         "wechat",
         "cabinet",
+        "media",
     ),
 }
 

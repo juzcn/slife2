@@ -184,6 +184,7 @@ TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 WECHAT_SERVER_NAME = "slife2-wechat"
 CABINET_SERVER_NAME = "slife2-cabinet"
+MEDIA_SERVER_NAME = "slife2-media"
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
@@ -235,6 +236,7 @@ LOCAL_SERVERS = (
     "restapi-tools",
     "wechat",
     "cabinet",
+    "media",
     "toolhub",
     "agent",
 )
@@ -715,6 +717,157 @@ class SkillSettings:
     enabled: bool = True
 
 
+#: The four things a media provider can be asked for.  A closed set, and it is
+#: v1's: each one names a *capability* rather than a model family, because that
+#: is what a caller knows it wants — "make me a picture" — while which model
+#: draws it is the config's business.
+MEDIA_KINDS = ("image", "video", "tts", "asr")
+
+
+@dataclass(frozen=True)
+class MediaModelSettings:
+    """One model in a `media:` provider's list.
+
+    `kind` is what the model is *for*, and asking for the wrong kind is refused
+    rather than tried: a video model handed an image prompt is a paid failure
+    with a provider-side error message, and the config already said which one
+    draws pictures.
+
+    `params` is free-form and is the model's own defaults — a resolution, an
+    aspect ratio, a duration — merged under whatever the call passes.  v1's
+    shape, and it is what lets a config carry "this model always renders 720P"
+    without the tool growing a field per provider.
+    """
+
+    model: str
+    kind: str
+    params: dict[str, Any] = field(default_factory=dict)
+    voice: str = ""
+
+
+@dataclass(frozen=True)
+class MediaProviderSettings:
+    """One `media:` provider: an endpoint, a key, and what it can do.
+
+    **Not a `ProviderSettings` and not one of the `providers:`.**  A media
+    endpoint speaks no chat protocol — it renders, synthesizes and transcribes —
+    and its models are declared per *kind*, which nothing in `providers:` has.
+    Putting one there would start a chat backend for a model no conversation can
+    call.
+
+    `api_key` is resolved lazily like every other key here, so credstore is
+    consulted only when a call needs it.
+    """
+
+    name: str
+    api: str
+    base_url: str
+    models: tuple[MediaModelSettings, ...] = ()
+    api_key_ref: str = ""
+
+    @property
+    def api_key(self) -> str:
+        """The resolved key.  Touches credstore, so call it where it is needed."""
+        return resolve_secret(self.api_key_ref)
+
+    def kinds(self) -> tuple[str, ...]:
+        """What this provider can be asked for, in `MEDIA_KINDS` order."""
+        found = {entry.kind for entry in self.models}
+        return tuple(kind for kind in MEDIA_KINDS if kind in found)
+
+
+@dataclass(frozen=True)
+class MediaSettings:
+    """Where images, video, speech and transcripts come from.  May be empty.
+
+    **No `enabled` switch and no requirement**, unlike `embeddings:` — and the
+    difference is what each one is *for*.  A turn cannot be stored without a
+    vector, so an embeddings config that is absent is a system that cannot run;
+    nothing here is on any other plugin's path, so a config with no `media:`
+    section is a system where the model has four fewer tools and everything else
+    works.  The tools refuse, and say what to add.
+    """
+
+    providers: dict[str, MediaProviderSettings] = field(default_factory=dict)
+    #: kind -> `"provider/model"`, the model a call gets when it names none.
+    defaults: dict[str, str] = field(default_factory=dict)
+
+    def resolve(
+        self, kind: str, reference: str = ""
+    ) -> tuple[MediaProviderSettings, MediaModelSettings]:
+        """The provider and model one request should use.
+
+        v1's four steps, in its order: an explicit `provider/model`, then the
+        bare model name across providers, then this section's `defaults[kind]`,
+        then the first configured model of that kind.  Each step is a *weaker*
+        statement than the one before it, so nothing here can override something
+        the caller said.
+
+        Raises:
+            ConfigError: If nothing can answer — including the case of a
+                reference that names a model of the wrong kind, which is
+                refused here rather than at the provider, where it costs money.
+        """
+        if reference:
+            return self._named(reference, kind)
+        default = self.defaults.get(kind, "")
+        if default:
+            try:
+                return self._named(default, kind)
+            except ConfigError:
+                # A stale `defaults:` entry falls through to the first model of
+                # the kind rather than stopping the call: the failure it
+                # prevents is a config that stops answering because one word
+                # went stale, and what it allows is visible in the answer's own
+                # `provider/model`.
+                pass
+        for provider in self.providers.values():
+            for entry in provider.models:
+                if entry.kind == kind:
+                    return provider, entry
+        raise ConfigError(
+            f"No {kind} model configured. Add one with `kind: {kind}` under "
+            f"`media:` in the config."
+        )
+
+    def _named(
+        self, reference: str, kind: str
+    ) -> tuple[MediaProviderSettings, MediaModelSettings]:
+        """`provider/model`, or a bare model name found across providers."""
+        name, _, wanted = reference.partition("/")
+        if wanted:
+            provider = self.providers.get(name)
+            if provider is None:
+                known = ", ".join(sorted(self.providers)) or "(none)"
+                raise ConfigError(
+                    f"Unknown media provider {name!r} in {reference!r}; "
+                    f"configured: {known}"
+                )
+            for entry in provider.models:
+                if entry.model == wanted:
+                    return self._checked(provider, entry, kind, reference)
+            known = ", ".join(entry.model for entry in provider.models) or "(none)"
+            raise ConfigError(
+                f"Unknown model {wanted!r} for provider {name!r}; it has: {known}"
+            )
+        for provider in self.providers.values():
+            for entry in provider.models:
+                if entry.model == name:
+                    return self._checked(provider, entry, kind, reference)
+        raise ConfigError(f"Unknown media model {reference!r}")
+
+    @staticmethod
+    def _checked(
+        provider: MediaProviderSettings,
+        entry: MediaModelSettings,
+        kind: str,
+        reference: str,
+    ) -> tuple[MediaProviderSettings, MediaModelSettings]:
+        if entry.kind != kind:
+            raise ConfigError(f"{reference!r} is a {entry.kind} model, not {kind}")
+        return provider, entry
+
+
 @dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
@@ -752,6 +905,10 @@ class Config:
     #: section rather than entries under `providers:`, for the reason
     #: `EmbeddingProviderSettings` gives.
     embeddings: EmbeddingsSettings = field(default_factory=EmbeddingsSettings)
+    #: Where generated media come from, from `media:`.  Read by `slife2-media`,
+    #: which is the plugin that owns the section and the only one that holds a
+    #: rendering provider's key.
+    media: MediaSettings = field(default_factory=MediaSettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -896,6 +1053,11 @@ def default_config() -> Config:
             # section of its own — a cabinet is written by the model and by a
             # person, never configured — so what is here is its address.
             "cabinet": ServerSettings(port=8035),
+            # Rendering, speech and transcription, behind `media:`.  A plugin
+            # for the reason §1.1's table gives — it holds a provider's key and
+            # speaks to somebody else's endpoint — and a *family* of endpoints
+            # rather than one, which is why it has a module of its own.
+            "media": ServerSettings(port=8036),
             # The model's tools, and the only process that decides what they
             # are.  It holds no credential and no connection to anybody's
             # server: every plugin above is asked for a tool list and for the
@@ -1083,6 +1245,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
+        media=_media(raw.get("media"), base.media),
         default=str(raw.get("default") or _first_reference(providers)),
     )
 
@@ -1106,6 +1269,108 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
             f"loads, leaving it a search it cannot keep"
         )
     return ToolLoadSettings(threshold=threshold)
+
+
+def _media(raw: Any, base: MediaSettings) -> MediaSettings:
+    """The `media:` section.  Absent is empty, and empty is a working system.
+
+    **Refused rather than skipped**, which is the opposite of v1 and right for
+    where the parsing happens.  v1's plugin read the section itself at call
+    time, so a bad entry had to be skipped — refusing would have taken the whole
+    plugin down over one provider.  Here the config is parsed once, at load,
+    where this project's rule is that the loader is the judge: a `media:` entry
+    naming no model is a typo worth refusing before anything is asked of a
+    provider, and the file a person reads is the file that would have to be
+    fixed either way.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "media")
+    providers = {
+        str(name): _media_provider(spec, str(name))
+        for name, spec in _mapping(section.get("providers"), "media.providers").items()
+    }
+    defaults_raw = _mapping(section.get("defaults"), "media.defaults")
+    defaults = {
+        str(kind): str(reference)
+        for kind, reference in defaults_raw.items()
+        if str(reference)
+    }
+    for kind in defaults:
+        if kind not in MEDIA_KINDS:
+            raise ConfigError(
+                f"media.defaults.{kind}: not a kind of media "
+                f"(known: {', '.join(MEDIA_KINDS)})"
+            )
+    return MediaSettings(providers=providers, defaults=defaults)
+
+
+def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
+    """One `media.providers:` entry: an endpoint, a key and what it can do.
+
+    `api` is required and is a *wire*, not a brand: it selects the adapter that
+    speaks to this endpoint, and a name with no adapter behind it is refused at
+    the first call rather than silently falling back to another one.  `base_url`
+    is required for the reason `_embedding_provider` gives — an entry carrying a
+    key with nowhere to send it posts that key to somebody else's host.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"media.providers.{name}: expected a mapping")
+    api = str(raw.get("api") or "")
+    base_url = str(raw.get("base_url") or "").rstrip("/")
+    if not api:
+        raise ConfigError(
+            f"media.providers.{name}: needs `api` — the wire adapter that "
+            f"speaks to this endpoint"
+        )
+    if not base_url:
+        raise ConfigError(
+            f"media.providers.{name}: needs `base_url` — without one the "
+            f"client would send this provider's key to its own default host"
+        )
+    models_raw = raw.get("models")
+    if not isinstance(models_raw, list) or not models_raw:
+        raise ConfigError(
+            f"media.providers.{name}: needs `models` — a provider with no model "
+            f"is a key and an endpoint nobody can ask for anything"
+        )
+    return MediaProviderSettings(
+        name=name,
+        api=api,
+        base_url=base_url,
+        models=tuple(
+            _media_model(entry, f"media.providers.{name}.models")
+            for entry in models_raw
+        ),
+        api_key_ref=str(raw.get("api_key") or ""),
+    )
+
+
+def _media_model(raw: Any, where: str) -> MediaModelSettings:
+    """One entry of a provider's `models:` list.
+
+    `kind` is checked here rather than at the call: an entry whose kind nothing
+    knows is a model no tool can ever ask for, and finding that out at load is
+    the difference between a typo and a capability that quietly does not exist.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}: expected a mapping")
+    model = str(raw.get("model") or "")
+    kind = str(raw.get("kind") or "")
+    if not model:
+        raise ConfigError(f"{where}: an entry needs `model`")
+    if kind not in MEDIA_KINDS:
+        raise ConfigError(
+            f"{where}.{model or '?'}: `kind` must be one of "
+            f"{', '.join(MEDIA_KINDS)} — not {kind!r}"
+        )
+    params = _mapping(raw.get("params"), f"{where}.{model}.params")
+    return MediaModelSettings(
+        model=model,
+        kind=kind,
+        params={str(key): value for key, value in params.items()},
+        voice=str(raw.get("voice") or ""),
+    )
 
 
 def _context(raw: Any, base: ContextSettings) -> ContextSettings:
@@ -1601,6 +1866,8 @@ __all__ = [
     "EmbeddingProviderSettings",
     "EmbeddingsSettings",
     "CABINET_SERVER_NAME",
+    "MEDIA_KINDS",
+    "MEDIA_SERVER_NAME",
     "LOCAL_SERVERS",
     "MCP_TOOLS_SERVER_NAME",
     "RESTAPI_TOOLS_SERVER_NAME",
@@ -1613,6 +1880,9 @@ __all__ = [
     "Config",
     "ConfigError",
     "ContextSettings",
+    "MediaModelSettings",
+    "MediaProviderSettings",
+    "MediaSettings",
     "ModelSettings",
     "ProviderSettings",
     "ServerSettings",

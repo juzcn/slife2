@@ -136,6 +136,14 @@ servers:
     host: 127.0.0.1
     port: 8035
     path: /mcp
+  # Generation: images, video, speech and transcripts, from the `media:` section
+  # at the bottom of this file.  One process for every provider, because which
+  # vendor draws a picture is a fact about a *model* and not about a process —
+  # the same arrangement as the model backends, and for the same reason.
+  media:
+    host: 127.0.0.1
+    port: 8036
+    path: /mcp
   # Other people's servers, held by the process that owns the section they are
   # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
   # the model anything — each holds its entries' connections and *declares* them
@@ -620,3 +628,65 @@ embeddings:
   # endpoint here, so the endpoint is the choice being made.  A value naming
   # nothing falls back to the first provider.
   active_model: siliconflow
+
+# ── Generation (images, video, speech, transcripts) ─────────────────────────
+# A provider table like `providers:`, with one difference that matters: an entry
+# declares what each of its models is *for* (`kind:`), because "which model
+# draws pictures" is a fact about a model rather than about a vendor.  The four
+# kinds are `image`, `video`, `tts` and `asr`.
+#
+# `api:` selects the wire adapter, not a brand: today `dashscope-aigc` (Bailian
+# / DashScope: images, video, speech and transcription) and `openai-images` (an
+# OpenAI-compatible `/images/generations`, which draws pictures and nothing
+# else).  A model of a kind its adapter cannot do is refused with a sentence
+# naming the adapter, rather than failing at the vendor.
+#
+# `defaults:` is which model a call gets when it names none — a `provider/model`
+# reference.  A call may still name its own, and a stale entry here falls
+# through to the first model of that kind rather than stopping the call.
+#
+# `params:` is the model's own defaults (a resolution, a ratio, a duration),
+# merged *under* whatever the call passes; `voice:` is the same for speech.
+# `api_key:` resolves through the usual chain — `${VAR}` from the shell, then
+# credstore — and a key that does not resolve is reported when a call needs it.
+#
+# Generated files are written under `<data>/media/` and nowhere else: they are
+# work products rather than cabinet documents, nothing registers them, and the
+# answer is a path somebody can open.
+media:
+  defaults:
+    image: bailian_personal/wan2.7-image
+    video: bailian_personal/happyhorse-1.1-t2v
+  providers:
+    bailian_personal:
+      api: dashscope-aigc
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
+      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+      models:
+        - model: wan2.7-image
+          kind: image
+        - model: wan2.7-image-pro
+          kind: image
+        - model: qwen-image-3.0-pro
+          kind: image
+        - model: happyhorse-1.1-t2v
+          kind: video
+          params:
+            resolution: 720P
+            ratio: 16:9
+            duration: 5
+        - model: happyhorse-1.1-i2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: happyhorse-1.1-r2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: qwen-audio-3.0-tts-plus
+          kind: tts
+          voice: longanhuan_v3.6
+        - model: qwen-audio-3.0-asr-flash
+          kind: asr

@@ -288,6 +288,50 @@ its title instead of by a task and is otherwise the log it always was); and
 **`USER.md`** (v1 served the profile *and* rendered it into the system prompt,
 and wiring a file into a prompt is a change to the prompt).
 
+### 1.4 A second provider table, and what a *kind* is on
+
+**`slife2-media` is the embeddings server's shape applied to four capabilities
+that are not embeddings** — an image, a video, speech and a transcript — and the
+differences are the port's whole content.
+
+**The kind is declared per model, not per provider.**  `providers:` and
+`embeddings:` are tables of *endpoints*, and an endpoint is one thing: a wire
+protocol, an embedding model.  A media vendor is several things at once —
+Bailian serves all four kinds — so a `media:` entry declares what each of its
+models is *for* (`kind: image`), and the four-step search in `MediaSettings.resolve`
+(named reference, bare name, `defaults:`, first of the kind) is what turns "make
+me a picture" into an endpoint, a key and a model id.  The rule the table keeps
+is that a *capability* is what a caller knows it wants and which model provides
+it is the config's business.
+
+**Two wires, one contract, and a registry of two.**  `api:` names an adapter
+rather than a brand — that is the extension point, and it exists because the
+vendor gap is real rather than hypothetical: an OpenAI-compatible images endpoint
+has no video, speech or transcription service behind it, so the second adapter
+implements one capability and refuses the other three *by name*.  A refusal that
+names the adapter is a config to revisit; a 404 from a vendor is a mystery.
+
+**Artifacts go under `<data>/media/`, and that is where this port departs from
+v1.**  v1 wrote them to the process's working directory, which was the main
+process's — a person's shell.  A daemon here is spawned with its working
+directory set to `<data>/runtime/`, which this design documents as
+*reconstructible — delete it and the next start rebuilds whatever it needs*, so
+v1's rule would put every generated image in the one directory guaranteed to lose
+it.  What is kept is the distinction underneath: a generated file is a **work
+product**, not a cabinet document — nothing registers it, the answer is a path,
+and saving it somewhere durable is a separate call by whoever wants that.  And
+`folder=` is *contained* inside that root, because it is a model-written string:
+`folder="../../.."` would be a model choosing where on the operator's machine to
+write a file, which is the same line `cabinet_store.resolve` draws.
+
+**A failure is a `ToolError` rather than an `"Error: …"` string.**  v1 returned
+the latter, which was its convention for a tool failure; here the convention is
+the exception, for the reason `slife2.skills_server` states — a refusal returned
+as text reaches the transcript as a *success*.  The three failures are told
+apart because a person does three different things about them: an adapter that
+cannot do this at all (a config choice), a provider that answered badly (worth a
+retry), and a path that is not there (the caller's own typo).
+
 ## 2. Streaming: one pattern, used twice
 
 MCP `tools/call` is a request/response. A TUI needs tokens as they arrive. Both

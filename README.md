@@ -104,6 +104,7 @@ uv run slife2-mcp-tools        # holds the tools: servers,   :8033
 uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-cabinet          # notes, diary, files,        :8035
+uv run slife2-media            # images, video, speech,      :8036
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -493,6 +494,47 @@ than quietly continuing with fewer tools, while a server that is somebody else's
 is reported and left out. A model that has quietly lost `turn_read` is a
 failure nobody can see, and that is what makes the rule worth having.
 
+### Media
+
+Four capabilities behind one config section: **draw an image, render a video,
+say something out loud, write down what an audio file says**.
+
+```yaml
+media:
+  defaults:                              # which model a call gets unnamed
+    image: bailian_personal/wan2.7-image
+    video: bailian_personal/happyhorse-1.1-t2v
+  providers:
+    bailian_personal:
+      api: dashscope-aigc                # the wire, not a brand
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
+      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+      models:
+        - { model: wan2.7-image, kind: image }
+        - { model: happyhorse-1.1-t2v, kind: video, params: { resolution: 720P, duration: 5 } }
+        - { model: qwen-audio-3.0-tts-plus, kind: tts, voice: longanhuan_v3.6 }
+        - { model: qwen-audio-3.0-asr-flash, kind: asr }
+```
+
+**What a model is *for* is a fact about the model**, which is the one place this
+differs from `providers:` and `embeddings:` — a vendor may serve all four kinds
+and its entries say which is which, so "switch to the cheap image model" is a
+config edit rather than a different call. `defaults:` is which one a call gets
+when it names none, and a call may always name its own.
+
+**`api:` selects the wire**, and there are two today: `dashscope-aigc` (Bailian:
+images, video, speech and transcription) and `openai-images` (an OpenAI-compatible
+`/images/generations`, which draws pictures and refuses the other three by name —
+better than a 404 from the vendor).
+
+Generated files are written under **`<data>/media/`** and nowhere else. They are
+work products rather than cabinet documents: nothing registers them, the answer
+is a path, and `folder=` sorts them into subdirectories *inside* that root — a
+model does not get to choose where on your disk a file is written. A video can
+take minutes and the wait is bounded: past `timeout` the call is refused with the
+provider's job id rather than its result, because the render carries on there and
+asking again would pay for it twice.
+
 ### The cabinet
 
 Your own notes, a diary, saved files and reports, in one place that a search
@@ -658,6 +700,9 @@ slife2/
 │                     #   mean something other than what their status says
 ├─ attachments.py     # how an image reaches the model: the three kinds of
 │                     #   source, and the content parts they become
+├─ media/             # slife2-media: generation, one process for every vendor
+│  ├─ server.py       #   the four tools and the config's four-step search
+│  └─ adapters.py     #   one contract, and the vendor HTTP behind it
 ├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
 │                     #   as sixteen tools, and the byte half of a saved file —
 │                     #   what is copied in, what is read back, what is refused
