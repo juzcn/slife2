@@ -150,6 +150,13 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
 #: Where an unknown extension goes.
 OTHER = "other"
 
+#: Names a `category` may not take, because they are the cabinet's own
+#: directories.  **The flattening is what makes this necessary**: the categories
+#: sit beside `notes/`, `diary/` and `reports/` at the cabinet root, so
+#: `category="notes"` would put a saved file among the notes' own mirrors and
+#: `file_list(category="notes")` would list both as one thing.
+RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports"})
+
 
 def category_for(name: str) -> str:
     """Which directory a file belongs in, by its extension.
@@ -495,8 +502,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             summary: What the file is, in your words — the text its semantic
                 search is built from. Write one; it is the difference between a
                 file found by its name and one found by what it is.
-            category: The directory inside `files/`. Empty picks one from the
-                extension.
+            category: The directory inside the cabinet — `images`, `documents`
+                and so on. Empty picks one from the extension.
         """
         opened, refusal = await cabinet(ctx)
         if refusal:
@@ -507,10 +514,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             return "Not saved — no such file: " + ", ".join(missing)
         saved: list[str] = []
         for source in wanted:
-            folder = (
-                opened.root / "files" / (category.strip() or category_for(source.name))
-            )
-            target = unique_path(folder, source.name)
+            chosen = category.strip() or category_for(source.name)
+            if chosen in RESERVED_CATEGORIES:
+                return (
+                    f"Not saved — {chosen!r} is where the cabinet keeps its "
+                    f"{chosen}, so a file cannot be filed under it. Choose "
+                    f"another category, or leave it out to file by extension."
+                )
+            target = unique_path(opened.root / chosen, source.name)
             relative = target.relative_to(opened.root).as_posix()
             await on_thread(shutil.copy2, source, target)
             try:

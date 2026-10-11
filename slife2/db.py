@@ -90,7 +90,7 @@ import sqlite_vec
 
 from slife2 import textindex
 from slife2.clock import now
-from slife2.paths import db_dir
+from slife2.paths import agent_dir
 from slife2.timeutil import normalize_bound
 
 logger = logging.getLogger(__name__)
@@ -189,10 +189,16 @@ def database_path(agent: str, subagent: str = "") -> Path:
     own conversation keeps the bare name it always had, so the common case does
     not pay for the one that is not.
     """
-    safe = safe_agent_name(agent)
+    directory = agent_dir(agent)
     if subagent:
-        safe = f"{safe}{_CLIENT_SEPARATOR}{safe_agent_name(subagent)}"
-    return db_dir() / f"{safe}.turn.db"
+        # A worker's store sits **beside its parent's**, and not in a directory of
+        # its own: a subagent is a means to an end inside one of that agent's
+        # turns rather than an agent that owns anything.  (Its turns are not
+        # written at all — `Loop.records` — so this file is a schema and nothing
+        # more, and the name it carries is the worker's because a directory
+        # cannot carry it for two stores.)
+        return directory / f"{safe_agent_name(subagent)}.turns.db"
+    return directory / "turns.db"
 
 
 @dataclass(frozen=True)

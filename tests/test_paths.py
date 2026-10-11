@@ -11,8 +11,8 @@ import pytest
 
 from slife2.paths import (
     DATA_ENV_VAR,
+    agents_dir,
     data_dir,
-    db_dir,
     in_checkout,
     runtime_dir,
     skills_dir,
@@ -89,9 +89,9 @@ def test_the_parts_live_under_the_root(
 ) -> None:
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     assert runtime_dir() == tmp_path / "runtime"
-    assert db_dir() == tmp_path / "slife2.db"
+    assert agents_dir() == tmp_path / "agents"
     assert skills_dir() == tmp_path / "skills"
     # ...and are made on demand, so a first run has somewhere to write.
     assert runtime_dir().is_dir()
-    assert db_dir().is_dir()
+    assert agents_dir().is_dir()
     assert skills_dir().is_dir()

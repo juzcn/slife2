@@ -35,10 +35,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2.audience import FOR_THE_MODEL
+from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import Config, ConfigError, MediaProviderSettings, MediaSettings
 from slife2.mcp_server import house_server, serve_plugin
 from slife2.media.adapters import (
@@ -143,10 +143,22 @@ class Media:
         except ConfigError as exc:
             raise ToolError(f"[refused] {exc}") from exc
 
-    def output(self, folder: str) -> Path:
-        """Where this call's artifact goes: `<data>/media[/folder]/`."""
+    def output(self, ctx: Context, folder: str) -> Path:
+        """Where this call's artifact goes: `agents/<agent>/media[/folder]/`.
+
+        The agent comes from the call, like every other per-agent fact in this
+        system: one process serves every agent, so "whose work is this" is
+        something only the caller can say — and a call that does not say is
+        refused rather than written under somebody else's name.
+        """
+        found = request_client(ctx)
+        if not found or not found[0]:
+            raise ToolError(
+                "[refused] this call did not say which conversation it is for, "
+                "so there is no agent directory to write into."
+            )
         try:
-            return media_dir(folder)
+            return media_dir(found[0], folder)
         except MediaAdapterError as exc:
             raise ToolError(f"[refused] {exc}") from exc
 
@@ -184,6 +196,7 @@ def build_server(
 
     @mcp.tool(name="generate_image", meta=FOR_THE_MODEL)
     async def generate_image(
+        ctx: Context,
         prompt: str,
         model: str = "",
         size: str = "",
@@ -219,7 +232,7 @@ def build_server(
                 prompt=prompt,
                 size=wanted,
                 image=image or None,
-                outputs_dir=media.output(folder),
+                outputs_dir=media.output(ctx, folder),
                 extra_params=params,
             ),
         )
@@ -227,6 +240,7 @@ def build_server(
 
     @mcp.tool(name="generate_video", meta=FOR_THE_MODEL)
     async def generate_video(
+        ctx: Context,
         prompt: str,
         model: str = "",
         image: str = "",
@@ -271,7 +285,7 @@ def build_server(
                 model=entry.model,
                 prompt=prompt,
                 image=image or None,
-                outputs_dir=media.output(folder),
+                outputs_dir=media.output(ctx, folder),
                 extra_params=params,
                 deadline_s=timeout if timeout > 0 else None,
             ),
@@ -280,7 +294,7 @@ def build_server(
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
-        text: str, model: str = "", voice: str = "", folder: str = ""
+        ctx: Context, text: str, model: str = "", voice: str = "", folder: str = ""
     ) -> str:
         """Say something out loud, into an audio file, and say where it is.
 
@@ -300,14 +314,14 @@ def build_server(
                 model=entry.model,
                 text=text,
                 voice=voice or entry.voice,
-                outputs_dir=media.output(folder),
+                outputs_dir=media.output(ctx, folder),
                 extra_params=dict(entry.params),
             ),
         )
         return f"Audio written to {output}"
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
-    async def transcribe_audio(path: str, model: str = "") -> str:
+    async def transcribe_audio(ctx: Context, path: str, model: str = "") -> str:
         """Write down what an audio file says, and answer with the text.
 
         The one tool here that produces no file: what it makes is words, and

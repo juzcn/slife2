@@ -196,7 +196,7 @@ from slife2.gateway import (
     sanitise,
 )
 from slife2.mcp_server import CALL_SOURCE, LIST_SOURCES, house_server, serve_plugin
-from slife2.paths import data_dir, tools_db
+from slife2.paths import catalogue_db, data_dir
 from slife2.textindex import terms
 from slife2.toolclient import UpstreamTool
 
@@ -2033,7 +2033,7 @@ def build_server(
         """
         store = await asyncio.to_thread(
             ToolStore,
-            tools_db(),
+            catalogue_db(),
             threshold=config.tool_load.threshold,
             known=configured_sources(config),
         )

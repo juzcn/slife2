@@ -292,7 +292,7 @@ context:                                # how a conversation's context is decide
 ```
 
 **There is no `wechat:` section**: a WeChat login is scanned rather than
-configured, and it lives in `<data>/wechat_<agent>.yaml` — see "WeChat" above.
+configured, and it lives in `agents/<agent>/wechat.yaml` — see "WeChat" above.
 
 `command` starts a process and talks over its standard input; `url` connects to
 somebody else's over the network. A `rest-api` entry is the same thing said
@@ -362,7 +362,7 @@ server with ninety tools costs nothing until one of them is wanted.
 `tool_search` searches the whole catalogue by keyword *and* by meaning, one
 hybrid search; `func_tool_load` puts one or several names in the list, and they
 are there from the next step of the same turn. The catalogue is
-`<data>/slife2.db/tools.db`, one file for the data directory rather than one per
+`<data>/agents/tools.db`, one file for the data directory rather than one per
 agent: a tool loaded in one conversation is loaded for the next, and still loaded
 after a restart.
 
@@ -455,7 +455,7 @@ directory into `skills/` is found at once and not at the next restart.
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
 rule above, who may call one — and the record is a file the hub itself opens,
-`<data>/slife2.db/tools.db` through `slife2.db.ToolStore`: rows and two indexes
+`<data>/agents/tools.db` through `slife2.db.ToolStore`: rows and two indexes
 over them, and the same machinery the turns use, because a store has one writer
 and one writer is what a SQLite file already is. It answers the questions about
 the rows — which are loaded, what one is called at the far end, and the two
@@ -555,7 +555,7 @@ replaces. That is why only the two document kinds have a remove tool.
 
 **Everything is written twice**, and one of the two is for you: the row is what
 `cabinet_search` reads, and the same document lands as markdown under
-`<data>/<agent>.files/` — `notes/Python.md`, `diary/2026-10-11.md`,
+`agents/<agent>/cabinet/` — `notes/Python.md`, `diary/2026-10-11.md`,
 `reports/weekly.md` — which is what you open, edit or delete without asking
 anybody. A saved file's bytes live there too (`files/<category>/`) and are never
 put in the index: `file_read` returns a file's *text*, and refuses a PDF or an
@@ -583,7 +583,7 @@ that rather than growing a second regex engine).
 bridge. Nothing about it is configured: a login is *scanned*, so
 `wechat_login` puts a QR code in the model's reply, somebody points the WeChat
 app at it, and the token that comes back is saved to
-`<data>/wechat_<agent>.yaml` where the next start picks it up. A login lasts
+`agents/<agent>/wechat.yaml` where the next start picks it up. A login lasts
 about a day; `wechat_check_status` says how much of it is left.
 
 Four tools, and the model uses all of them:
@@ -606,7 +606,7 @@ the reply goes out.
 Each agent logs in separately and gets its own account, its own file and its own
 poll loop; the plugin is one shared process (DESIGN.md §1.2). There is no
 `wechat:` section to write: a login is scanned rather than configured, and the
-`wechat_<agent>.yaml` files are the whole of what the plugin resumes. A machine
+`agents/<agent>/wechat.yaml` files are the whole of what the plugin resumes. A machine
 that should not talk to WeChat is a machine where nobody scans a code.
 
 ## Where things live
@@ -618,17 +618,21 @@ runtime state of what is running, and the turns they produced:
 <data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
   slife2.yaml                      the config; absent means the defaults
   runtime/                         records, locks, logs — reconstructible
-  slife2.db/                       <agent>.turn.db — a conversation's turns, and
-                                   the context the next turn runs on (not
-                                   reconstructible); tools.db — the catalogue,
-                                   one file for the data directory
   skills/                          <name>/SKILL.md — playbooks, written by you
-  wechat_<agent>.yaml              a WeChat login per agent, written by the
-                                   plugin when a scan is confirmed (~24h)
-  <agent>.files/                   the cabinet: notes/, diary/, reports/ as
-                                   markdown and files/ as the bytes themselves,
-                                   with `.index.db` (the search index) inside
+  agents/                          everything that belongs to one agent
+    tools.db                       the tool catalogue — the one shared file
+    <agent>/                       one directory is the whole of one agent
+      turns.db                     its conversation, and what it runs on
+      cabinet/                     notes/, diary/, reports/ as markdown and the
+                                   saved files by category, with `.index.db`
+                                   (the search index) inside
+      media/                       what it generated
+      wechat.yaml                  its WeChat login (~24h, written on a scan)
 ```
+
+**Nothing inside an agent's directory repeats its name** — the directory says
+whose it is — and the catalogue is the exception that proves the rule: it sits
+beside the agent directories because it is everybody's and therefore nobody's.
 
 **Where that folder is depends on what you are running.** In a checkout it is
 the checkout itself — which is what makes the `slife2.yaml` in front of you the
@@ -637,16 +641,16 @@ wherever the command happened to be started. `--data-dir DIR` (or
 `$SLIFE2_DATA_DIR`) overrides both.
 
 A checkout therefore keeps generated state in the working tree, which is why
-`.gitignore` covers `runtime/` and `slife2.db/`. It does *not* cover `slife2.yaml`
+`.gitignore` covers `runtime/` and `agents/`. It does *not* cover `slife2.yaml`
 or `skills/`: those are written by a person rather than produced by a run, and
 they are the point of the arrangement.
 
 The split that remains is the one that matters: deleting `runtime/` costs
-nothing, deleting `slife2.db/` costs the record. The two files in there are kept
-differently on purpose: a turn is one conversation's and there is one per agent,
-while the tool catalogue is the whole data directory's — the tools are not
-anybody's, so one hub serves them to every conversation, and a tool loaded in one
-is loaded for the next.
+nothing, deleting an agent's directory costs that agent — its conversation, its
+cabinet and its logins, in one place, which is what makes backing one up or
+moving one to another machine one operation. The catalogue is kept differently
+on purpose and sits outside them: the tools are not anybody's, so one hub serves
+them to every conversation, and a tool loaded in one is loaded for the next.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data

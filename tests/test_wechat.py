@@ -30,7 +30,7 @@ from fastmcp import Client, FastMCP
 from slife2 import ilink, wechat
 from slife2.audience import client_meta, for_the_model
 from slife2.config import Config, load
-from slife2.paths import data_dir
+from slife2.paths import agent_dir
 from slife2.wechat import (
     Wechat,
     build_server,
@@ -164,7 +164,6 @@ def signed_in(
 ) -> Path:
     """A session file, as a login that already happened would leave one."""
     return save_session(
-        data_dir(),
         agent,
         {
             "bot_token": "bot-token-1",
@@ -274,10 +273,10 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
     made = rig(monkeypatch, bridge=bridge)
     async with Client(served(http=bridge, deliver=made.delivery)) as client:
         shown = await ask(client, "wechat_login")
-        await until(lambda: session_path(data_dir(), "jack").exists())
+        await until(lambda: session_path("jack").exists())
         after = await ask(client, "wechat_check_status")
 
-    saved = load_session(data_dir(), "jack")
+    saved = load_session("jack")
     assert "Show this in your reply" in shown
     assert saved["bot_token"] == "bot-token-9"
     assert saved["ilink_user_id"] == "bot-user-9"
@@ -454,21 +453,17 @@ async def test_a_cursor_write_does_not_restamp_the_login(
     is left.  So the field is carried across, and this is the test that says so.
     """
     signed_in("jack", saved_at=time.time() - 3600)
-    before = load_session(data_dir(), "jack")["saved_at"]
+    before = load_session("jack")["saved_at"]
     made = rig(monkeypatch)
     made.bridge.cursor = "cursor-1"
     await made.plugin.start()
     try:
-        await until(
-            lambda: (
-                load_session(data_dir(), "jack").get("get_updates_buf") == "cursor-1"
-            )
-        )
+        await until(lambda: load_session("jack").get("get_updates_buf") == "cursor-1")
         started = made.plugin.session("jack").saved_at
     finally:
         await made.close()
 
-    assert load_session(data_dir(), "jack")["saved_at"] == before
+    assert load_session("jack")["saved_at"] == before
     assert abs(started - before) < 1.0, "the session's age is the file's, not now"
 
 
@@ -520,7 +515,7 @@ async def test_a_rejected_login_is_forgotten_rather_than_retried(
         await made.close()
 
     assert "rejected" in answer
-    assert not session_path(data_dir(), "jack").exists(), "a dead token is not kept"
+    assert not session_path("jack").exists(), "a dead token is not kept"
 
 
 # --- sending ------------------------------------------------------------------
@@ -573,7 +568,7 @@ async def test_a_rejected_send_is_not_reported_as_sent(
     assert "rejected" in answer
     assert "Sent to" not in answer
     assert "rejected" in after
-    assert not session_path(data_dir(), "jack").exists()
+    assert not session_path("jack").exists()
 
 
 @pytest.mark.asyncio
@@ -642,14 +637,14 @@ async def test_logging_out_forgets_the_login_and_the_scan(
         await until(lambda: session.polling)
         session.qr_state = "confirmed"
         answer = await made.plugin.logout(session)
-        forgotten = load_session(data_dir(), "jack")
+        forgotten = load_session("jack")
     finally:
         await made.close()
 
     assert "Logged out" in answer
     assert session.qr_state == ""
     assert forgotten == {}, "the file goes with the login"
-    assert not session_path(data_dir(), "jack").exists()
+    assert not session_path("jack").exists()
 
 
 @pytest.mark.asyncio
@@ -670,8 +665,8 @@ async def test_two_agents_are_two_logins(monkeypatch: pytest.MonkeyPatch) -> Non
         await made.plugin.logout(made.plugin.session("jill"))
         jack = made.plugin.session("jack")
         still_running = jack.polling
-        still_saved = session_path(data_dir(), "jack").exists()
-        jill_saved = session_path(data_dir(), "jill").exists()
+        still_saved = session_path("jack").exists()
+        jill_saved = session_path("jill").exists()
     finally:
         await made.close()
 
@@ -690,7 +685,7 @@ def test_a_login_file_from_v1_is_adopted_as_it_stands() -> None:
     `slife/plugins/wechat` is a session this plugin resumes, which is the only
     reason the format was kept rather than improved.
     """
-    (data_dir() / "wechat_jack.yaml").write_text(
+    (agent_dir("jack") / "wechat.yaml").write_text(
         "bot_token: d834a0dbf318@im.bot:0600\n"
         f"base_url: {ilink.BASE_URL}\n"
         "saved_at: 1790833171.72\n"
@@ -700,7 +695,7 @@ def test_a_login_file_from_v1_is_adopted_as_it_stands() -> None:
         encoding="utf-8",
     )
 
-    saved = load_session(data_dir(), "jack")
+    saved = load_session("jack")
 
     assert saved["bot_token"] == "d834a0dbf318@im.bot:0600"
     assert saved["get_updates_buf"] == "ChAICBC7"
@@ -716,8 +711,8 @@ def test_a_login_file_from_v1_is_adopted_as_it_stands() -> None:
 
 def test_a_torn_session_file_is_a_cache_miss_rather_than_a_crash() -> None:
     """A file that cannot be read must not be able to stop the plugin starting."""
-    (data_dir() / "wechat_jack.yaml").write_text(
+    (agent_dir("jack") / "wechat.yaml").write_text(
         "bot_token: [unclosed\n", encoding="utf-8"
     )
 
-    assert load_session(data_dir(), "jack") == {}
+    assert load_session("jack") == {}

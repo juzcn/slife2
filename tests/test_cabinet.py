@@ -28,7 +28,7 @@ from slife2.cabinet_store import (
     vector_text,
 )
 from slife2.config import load
-from slife2.paths import data_dir
+from slife2.paths import agent_dir, data_dir
 from tests.fakes import FailingEmbedder, StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -54,7 +54,7 @@ async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) 
 
 def bag(agent: str = "jack") -> Path:
     """The agent's cabinet directory."""
-    return data_dir() / f"{agent}.files"
+    return agent_dir(agent) / "cabinet"
 
 
 def store(agent: str = "jack") -> CabinetStore:
@@ -215,11 +215,11 @@ async def test_a_saved_file_is_copied_never_moved() -> None:
         saved = await ask(
             client, "file_save", paths=[str(source)], summary=f"a {WORD} file"
         )
-        read = await ask(client, "file_read", path="files/documents/report.txt")
-        await ask(client, "file_remove", path="files/documents/report.txt")
+        read = await ask(client, "file_read", path="documents/report.txt")
+        await ask(client, "file_remove", path="documents/report.txt")
         listed = await ask(client, "file_list")
 
-    assert "files/documents/report.txt" in saved
+    assert "documents/report.txt" in saved
     assert read == "the contents\n"
     assert source.read_bytes() == b"the contents\n", "the original stays"
     assert "No files" in listed
@@ -239,14 +239,10 @@ async def test_two_files_of_one_name_are_two_files() -> None:
         await ask(client, "file_save", paths=[str(second)])
         listed = await ask(client, "file_list")
 
-    assert "files/documents/notes.txt" in listed
-    assert "files/documents/notes-2.txt" in listed
-    assert (bag() / "files" / "documents" / "notes.txt").read_text(
-        encoding="utf-8"
-    ) == "one"
-    assert (bag() / "files" / "documents" / "notes-2.txt").read_text(
-        encoding="utf-8"
-    ) == "two"
+    assert "documents/notes.txt" in listed
+    assert "documents/notes-2.txt" in listed
+    assert (bag() / "documents" / "notes.txt").read_text(encoding="utf-8") == "one"
+    assert (bag() / "documents" / "notes-2.txt").read_text(encoding="utf-8") == "two"
 
 
 @pytest.mark.asyncio
@@ -261,11 +257,11 @@ async def test_a_file_with_no_text_is_refused_not_decoded() -> None:
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(binary)])
-        answer = await ask(client, "file_read", path="files/documents/scan.pdf")
+        answer = await ask(client, "file_read", path="documents/scan.pdf")
 
     assert "is not text" in answer
     assert "application/pdf" in answer
-    assert str(bag() / "files" / "documents" / "scan.pdf") in answer
+    assert str(bag() / "documents" / "scan.pdf") in answer
 
 
 @pytest.mark.asyncio
@@ -283,8 +279,8 @@ async def test_text_in_another_encoding_is_read_and_the_encoding_named() -> None
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(gbk), str(utf8)])
-        decoded = await ask(client, "file_read", path="files/documents/gbk.txt")
-        plain = await ask(client, "file_read", path="files/documents/utf8.txt")
+        decoded = await ask(client, "file_read", path="documents/gbk.txt")
+        plain = await ask(client, "file_read", path="documents/utf8.txt")
 
     assert decoded.startswith("[decoded as gb18030; the file is not utf-8]\n")
     assert "中文记录" in decoded
@@ -299,7 +295,7 @@ async def test_a_binary_sniff_beats_a_wrong_guess() -> None:
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(utf16)])
-        answer = await ask(client, "file_read", path="files/documents/utf16.txt")
+        answer = await ask(client, "file_read", path="documents/utf16.txt")
 
     assert "记录" in answer
     assert "is not text" not in answer
@@ -320,8 +316,8 @@ async def test_a_save_that_cannot_embed_stores_nothing() -> None:
         with pytest.raises(Exception, match="down"):
             await ask(client, "file_save", paths=[str(source)])
 
-    assert not (bag() / "files" / "documents" / "orphan.txt").exists()
-    assert store().get(FILE, "files/documents/orphan.txt") is None
+    assert not (bag() / "documents" / "orphan.txt").exists()
+    assert store().get(FILE, "documents/orphan.txt") is None
 
 
 # --- finding ---------------------------------------------------------------
@@ -405,14 +401,14 @@ async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
             client,
             "cabinet_summarize",
             kind=FILE,
-            key="files/documents/spec.txt",
+            key="documents/spec.txt",
             summary=f"about {OTHER}",
         )
         after = await ask(client, "cabinet_search", sentences=[OTHER])
 
     assert "spec sheet" not in before, "nothing describes it yet but its name"
     assert "re-embedded" in written
-    assert "files/documents/spec.txt" in after
+    assert "documents/spec.txt" in after
 
 
 @pytest.mark.asyncio
@@ -469,9 +465,9 @@ def test_an_orphan_file_is_never_mistaken_for_the_source() -> None:
     Two documents called `report.pdf` are two documents; the second gets a
     different key rather than overwriting the first.
     """
-    target = unique_path(bag() / "files" / "documents", "report.pdf")
+    target = unique_path(bag() / "documents", "report.pdf")
     target.write_bytes(b"x")
-    second = unique_path(bag() / "files" / "documents", "report.pdf")
+    second = unique_path(bag() / "documents", "report.pdf")
 
     assert target.name == "report.pdf"
     assert second.name == "report-2.pdf"
@@ -495,7 +491,7 @@ def test_a_file_is_what_it_is_when_it_has_nothing_else() -> None:
         "kind": FILE,
         "title": "spec sheet",
         "source": "C:/tmp/spec.pdf",
-        "file_path": "files/documents/spec.pdf",
+        "file_path": "documents/spec.pdf",
         "summary": "",
     }
 

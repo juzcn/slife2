@@ -13,12 +13,13 @@ why the port needed no change to `pyproject.toml`: a media endpoint is three or
 four JSON calls, a poll, and a download, and an SDK would be a dependency that
 exists to spell them differently.
 
-**Artifacts land in `<data>/media/`**, and that is the one place this port
+**Artifacts land in the agent's own directory**, and that is where this port
 deliberately differs from v1.  v1 wrote them to the process's working directory;
 here a daemon's working directory is `<data>/runtime/`, which this project
 documents as *reconstructible — delete it and the next start rebuilds whatever
 it needs*, so a generated image left there would be the one file guaranteed to
-be lost.  The bytes are still work products rather than cabinet documents (v1's
+be lost.  What it is instead is the agent's own (`agents/<agent>/media/`):
+generated work belongs to whoever asked for it.  The bytes are still work products rather than cabinet documents (v1's
 distinction, kept): nothing is registered anywhere, and the answer is a path a
 person can open.
 
@@ -40,7 +41,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx2
 
-from slife2.paths import data_dir
+from slife2.paths import agent_dir
 
 logger = logging.getLogger(__name__)
 
@@ -63,20 +64,22 @@ DEADLINE_SECONDS = 1200.0
 #: How often an asynchronous job is asked about.
 POLL_SECONDS = 15.0
 
-#: Where generated artifacts go, under the data directory.
+#: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
 
 
-def media_dir(folder: str = "") -> Path:
-    """The directory an artifact is written to: `<data>/media[/folder]/`.
+def media_dir(agent: str, folder: str = "") -> Path:
+    """Where an artifact goes: `agents/<agent>/media[/folder]/`.
 
-    **Contained**, and that is not decoration: `folder` is a model-written
-    string, and `folder="../../.."` would be a model choosing where on this
-    machine to write a file.  Resolved before it is compared, refused rather
-    than rewritten — a silently corrected path is a file somewhere other than
-    where the model said (`slife2.cabinet_store.resolve` draws the same line).
+    **Per agent**, because what it holds is what that agent generated in its own
+    turns — and **contained**, which is not decoration: `folder` is a
+    model-written string, and `folder="../../.."` would be a model choosing
+    where on this machine to write a file.  Resolved before it is compared,
+    refused rather than rewritten — a silently corrected path is a file
+    somewhere other than where the model said (`slife2.cabinet_store.resolve`
+    draws the same line).
     """
-    root = data_dir() / MEDIA_DIR
+    root = agent_dir(agent) / MEDIA_DIR
     if not folder.strip():
         root.mkdir(parents=True, exist_ok=True)
         return root

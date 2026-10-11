@@ -45,12 +45,16 @@ module's: a row without its mirror is a note that exists and cannot be read by
 the person it was written for, and the mirror path is stored in the row rather
 than derived, so two subjects that slugify alike cannot silently share one file.
 
-**The cabinet is one directory per agent**, `<data>/<agent>.files/`, which is
-v1's name and v1's layout — the markdown and the bytes are the same files v1
-wrote, so a v1 cabinet's documents are adopted by copying the directory.  The
-index (`.index.db`) is this build's own and is not promised to be v1's: a vector
-index is not portable across embedding models anyway, and slife2's rule for a
-changed model is a rebuild rather than a migration.
+**The cabinet is one directory per agent** — `agents/<agent>/cabinet/` — and it
+is one *directory* rather than a set of files, which is what makes copying or
+deleting a cabinet one operation.  Its contents are v1's (`notes/`, `diary/`,
+`reports/`, and the saved files by category) so a v1 cabinet's documents are
+adopted by copying them in; what is dropped from v1's layout is the `files/`
+level that used to wrap the categories, which only existed because the cabinet's
+*own* directory was called `<agent>.files/`.  The index (`.index.db`) is this
+build's own and is not promised to be v1's: a vector index is not portable
+across embedding models anyway, and slife2's rule for a changed model is a
+rebuild rather than a migration.
 """
 
 from __future__ import annotations
@@ -78,14 +82,13 @@ from slife2.db import (
     fuse_ranked,
     index_meta,
     page_limit,
-    safe_agent_name,
     set_index_meta,
     storable,
     table_exists,
     vector_ddl,
     vector_identity,
 )
-from slife2.paths import data_dir
+from slife2.paths import agent_dir
 from slife2.timeutil import normalize_bound
 
 logger = logging.getLogger(__name__)
@@ -101,6 +104,11 @@ KINDS = (NOTE, DIARY, FILE, REPORT)
 
 #: The index file, inside the cabinet it indexes.
 INDEX_NAME = ".index.db"
+
+#: The cabinet's directory inside one agent's own.  **Not `files/`**, which is
+#: what the cabinet *contains* (the saved attachments): two of those in one path
+#: — `agents/jack/files/files/images/a.png` — read as nothing at all.
+CABINET_DIR = "cabinet"
 
 #: How many documents one `sync` will embed before it says it is not finished.
 #: Not a bound on correctness — every document is embedded eventually, because a
@@ -175,7 +183,7 @@ def cabinet_dir(agent: str) -> Path:
     *directory* is exactly the kind of thing a `..` in the wrong place turns
     into a write somewhere nobody intended.
     """
-    path = data_dir() / f"{safe_agent_name(agent)}.files"
+    path = agent_dir(agent) / CABINET_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -887,7 +895,7 @@ class CabinetStore:
         clauses, values = self._window(spec, since, until)
         if category:
             clauses.append("file_path LIKE ?")
-            values.append(f"files/{category}/%")
+            values.append(f"{category}/%")
         where = f"WHERE kind = ?{_and(clauses)}"
         limit = page_limit(limit, MAX_PAGE)
         with self._connect() as connection:

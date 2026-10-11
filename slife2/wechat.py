@@ -69,7 +69,7 @@ from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import AGENT_SERVER_NAME, Config
 from slife2.ilink import Http, IlinkClient
 from slife2.mcp_server import house_server, open_server, serve_plugin
-from slife2.paths import data_dir
+from slife2.paths import agent_dir, agents_dir
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,11 @@ MAX_INFLIGHT = 16
 #: the bridge's own ~24h expiry and left an hour of margin.  Past this a saved
 #: token is not offered to the far end at all.
 SESSION_MAX_AGE = 82_800.0
+
+#: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
+#: the directory is the agent, and a filename repeating it is a name to keep in
+#: step with a rename.
+SESSION_NAME = "wechat.yaml"
 #: The QR handshake: how often its status is asked, how long the whole thing may
 #: take, and how many times an expired code is replaced before giving up.
 QR_POLL_SECONDS = 2.0
@@ -278,18 +283,24 @@ def _yaml() -> YAML:
     return yaml
 
 
-def session_path(directory: Path, agent: str) -> Path:
-    return directory / f"wechat_{agent}.yaml"
+def session_path(agent: str) -> Path:
+    """One agent's login: `agents/<agent>/wechat.yaml`.
+
+    The agent is the *directory* now, so the file does not repeat its name —
+    which is also what lets the startup scan find the agent in the path it
+    already has instead of parsing it back out of a filename.
+    """
+    return agent_dir(agent) / SESSION_NAME
 
 
-def load_session(directory: Path, agent: str) -> dict[str, Any]:
+def load_session(agent: str) -> dict[str, Any]:
     """A saved login, or `{}` — for a file that is missing or unreadable.
 
     Unreadable reads as absent rather than raising: the file is a cache of a
     login, the login can be had again by scanning, and a torn write must not be
     able to stop the plugin from starting.
     """
-    path = session_path(directory, agent)
+    path = session_path(agent)
     try:
         raw = _yaml().load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -300,7 +311,7 @@ def load_session(directory: Path, agent: str) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def save_session(directory: Path, agent: str, session: Mapping[str, Any]) -> Path:
+def save_session(agent: str, session: Mapping[str, Any]) -> Path:
     """Write a login down, atomically.
 
     A temp file in the same directory and `os.replace`, so a reader sees the old
@@ -308,9 +319,9 @@ def save_session(directory: Path, agent: str, session: Mapping[str, Any]) -> Pat
     `slife2.runtime` gives its records, for the same reason: the poll loop
     rewrites this file every time the cursor moves.
     """
-    path = session_path(directory, agent)
-    directory.mkdir(parents=True, exist_ok=True)
-    handle, tmp = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
+    path = session_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as opened:
             _yaml().dump(dict(session), opened)
@@ -324,10 +335,10 @@ def save_session(directory: Path, agent: str, session: Mapping[str, Any]) -> Pat
     return path
 
 
-def clear_session(directory: Path, agent: str) -> bool:
+def clear_session(agent: str) -> bool:
     """Forget a login — the ack cursor goes with it, as it is only meaningful
     alongside a live session."""
-    path = session_path(directory, agent)
+    path = session_path(agent)
     if not path.exists():
         return False
     with contextlib.suppress(OSError):
@@ -355,7 +366,7 @@ class Wechat:
         self._config = config
         self._http = http
         self._deliver = deliver or self._ask_agent
-        self._directory = directory or data_dir()
+        self._agents = directory or agents_dir()
         self._sessions: dict[str, Session] = {}
         #: The one connection to the agent server, opened when it is first
         #: needed.  A hop to a peer is `open_server`'s business, and this is
@@ -391,8 +402,10 @@ class Wechat:
         must not stop the plugin from coming up, and every one of these is
         re-triggerable by any tool call.
         """
-        for path in sorted(self._directory.glob("wechat_*.yaml")):
-            agent = path.stem[len("wechat_") :]
+        for path in sorted(self._agents.glob(f"*/{SESSION_NAME}")):
+            # The agent is the directory's name, read off the path already in
+            # hand rather than parsed back out of a filename.
+            agent = path.parent.name
             if not agent:
                 continue
             self._spawn(self._resume(self.session(agent)))
@@ -449,7 +462,7 @@ class Wechat:
         """
         if session.client.is_logged_in:
             return
-        saved = load_session(self._directory, session.agent)
+        saved = load_session(session.agent)
         if saved.get("bot_token"):
             await self._adopt(session, saved)
 
@@ -482,7 +495,7 @@ class Wechat:
                 # status read a phantom `connected`, which is the failure this
                 # whole check exists to prevent.
                 client.reject_session()
-                clear_session(self._directory, session.agent)
+                clear_session(session.agent)
                 session.restore_note = (
                     "the server rejected the saved login, so it has been forgotten"
                 )
@@ -662,7 +675,7 @@ class Wechat:
         written["saved_at"] = session.saved_at or written["saved_at"]
         written["get_updates_buf"] = cursor
         try:
-            save_session(self._directory, session.agent, written)
+            save_session(session.agent, written)
         except OSError as exc:
             logger.debug("wechat %s: cursor not saved: %s", session.agent, exc)
             return
@@ -767,7 +780,7 @@ class Wechat:
             # A token the far end refused is not a session to build on; drop it
             # and let the scan replace it, rather than refusing the login.
             client.reject_session()
-            clear_session(self._directory, session.agent)
+            clear_session(session.agent)
 
         session.qr_state = "waiting"
         session.qr_content = ""
@@ -863,7 +876,7 @@ class Wechat:
             session.client.last_contact = {"from_id": owner, "context_token": ""}
         session.client.clear_session_faults()
         saved = session.client.get_session_dict()
-        save_session(self._directory, session.agent, saved)
+        save_session(session.agent, saved)
         session.saved_at = float(saved["saved_at"])
         session.persisted = ""
         session.heard_from = False
@@ -919,7 +932,7 @@ class Wechat:
         # reported as one that does.
         if client.auth_failed:
             client.reject_session()
-            clear_session(self._directory, session.agent)
+            clear_session(session.agent)
             session.restore_note = (
                 "the server rejected the login, so it has been forgotten"
             )
@@ -1069,7 +1082,7 @@ class Wechat:
         session.persisted = ""
         session.saved_at = 0.0
         session.restore_note = ""
-        clear_session(self._directory, session.agent)
+        clear_session(session.agent)
         logger.info("wechat %s: logged out", session.agent)
         return (
             "Logged out of WeChat, and the saved login is gone. Call "
@@ -1207,7 +1220,7 @@ def _saved_note() -> str:
     `serve_plugin` asks for this before it builds the server — which is the
     point of it being text about a *start* rather than about the process.
     """
-    count = len(list(data_dir().glob("wechat_*.yaml")))
+    count = len(list(agents_dir().glob(f"*/{SESSION_NAME}")))
     return f"{count} saved login(s)" if count else "no logins saved"
 
 

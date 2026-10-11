@@ -82,7 +82,7 @@ from slife2.mcp_server import (
     serve_plugin,
 )
 from slife2.messages import StreamChatResult
-from slife2.paths import db_dir
+from slife2.paths import agents_dir
 from slife2.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
@@ -243,7 +243,9 @@ def build_server(
         schema, and a startup pass is part of owning one.
         """
         model = await embedding.get()
-        for path in sorted(db_dir().glob("*.turn.db")):
+        # Every per-agent store, the agent's own and its workers': two
+        # levels down is what keeps the cabinet's own index out of it.
+        for path in sorted(agents_dir().glob("*/*.db")):
             await indexed(await _on_thread(TurnStore, path), model)
         try:
             yield {}
@@ -849,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
         config_key=CONFIG_KEY,
         build=build_server,
         logger=logger,
-        note=lambda _config: f"turns in {db_dir()}",
+        note=lambda _config: f"turns in {agents_dir()}",
     )
 
 

@@ -1057,5 +1057,8 @@ def test_the_catalogue_is_one_file_for_the_whole_data_directory(
     from slife2 import paths
 
     monkeypatch.setenv(paths.DATA_ENV_VAR, str(tmp_path))
-    assert paths.tools_db().name == "tools.db"
-    assert paths.tools_db().parent == paths.db_dir()
+    # **One file, and not inside any agent's directory**: the catalogue is the
+    # tool *set*, which every conversation is served from, so it sits beside the
+    # agents rather than in one.
+    assert paths.catalogue_db().name == "tools.db"
+    assert paths.catalogue_db().parent == paths.agents_dir()

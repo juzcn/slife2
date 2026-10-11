@@ -25,7 +25,7 @@ from slife2.config import default_config
 from slife2.context import turn_footnote, turn_note
 from slife2.context_server import build_server
 from slife2.db import MAX_PAGE, TurnStore
-from slife2.paths import DATA_ENV_VAR, db_dir
+from slife2.paths import DATA_ENV_VAR, agent_dir
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -132,7 +132,7 @@ async def test_a_saved_turn_joins_the_live_context(tmp_path, monkeypatch) -> Non
         )
 
     assert first.data["turn_id"] == 1
-    store = TurnStore(db_dir() / "jack.turn.db")
+    store = TurnStore(agent_dir("jack") / "turns.db")
     assert store.context_turns() == [1, 2]
 
 
@@ -414,7 +414,7 @@ async def test_a_restore_keeps_the_lists_order_and_not_the_rowids(
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         ids = await _seed(client, "jack", ("first", "1"), ("second", "2"))
-        TurnStore(db_dir() / "jack.turn.db").set_context_turns(list(reversed(ids)))
+        TurnStore(agent_dir("jack") / "turns.db").set_context_turns(list(reversed(ids)))
         answer = await client.call_tool(
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
@@ -439,7 +439,7 @@ async def test_a_restore_drops_a_turn_that_is_no_longer_stored(
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("kept", "yes"))
-        TurnStore(db_dir() / "jack.turn.db").set_context_turns([1, 404])
+        TurnStore(agent_dir("jack") / "turns.db").set_context_turns([1, 404])
         answer = await client.call_tool(
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
@@ -539,7 +539,7 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing(
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
-    assert TurnStore(db_dir() / "jack.turn.db").context_turns() == [1]
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
 @pytest.mark.asyncio
@@ -573,7 +573,7 @@ async def test_a_clear_empties_the_context_and_is_published(
     assert answer.data["messages"] == [SYSTEM]
     assert answer.data["turn_ids"] == []
     assert answer.data["changed"] is True
-    assert TurnStore(db_dir() / "jack.turn.db").context_turns() == []
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == []
 
 
 @pytest.mark.asyncio
@@ -747,7 +747,7 @@ async def test_startup_leaves_a_current_index_alone(tmp_path, monkeypatch) -> No
     milliseconds and one that re-embeds a history every time it is launched.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    store = TurnStore(db_dir() / "jack.turn.db")
+    store = TurnStore(agent_dir("jack") / "turns.db")
     for said in ("工具", "trump"):
         await store.save_turn(
             messages=[{"role": "user", "content": said}], embedder=EMBEDDER
@@ -772,7 +772,7 @@ async def test_startup_reindexes_every_turn_when_the_model_changed(
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     first = StubEmbedder()
-    store = TurnStore(db_dir() / "jack.turn.db")
+    store = TurnStore(agent_dir("jack") / "turns.db")
     for said in ("工具", "trump", "792"):
         await store.save_turn(
             messages=[{"role": "user", "content": said}], embedder=first

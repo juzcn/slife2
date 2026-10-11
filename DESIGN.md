@@ -311,13 +311,14 @@ has no video, speech or transcription service behind it, so the second adapter
 implements one capability and refuses the other three *by name*.  A refusal that
 names the adapter is a config to revisit; a 404 from a vendor is a mystery.
 
-**Artifacts go under `<data>/media/`, and that is where this port departs from
-v1.**  v1 wrote them to the process's working directory, which was the main
+**Artifacts go under the agent's own directory**, and that is where this port
+departs from v1.  v1 wrote them to the process's working directory, which was the main
 process's — a person's shell.  A daemon here is spawned with its working
 directory set to `<data>/runtime/`, which this design documents as
 *reconstructible — delete it and the next start rebuilds whatever it needs*, so
 v1's rule would put every generated image in the one directory guaranteed to lose
-it.  What is kept is the distinction underneath: a generated file is a **work
+it.  They land in `agents/<agent>/media/`, and
+what is kept from v1 is the distinction underneath: a generated file is a **work
 product**, not a cabinet document — nothing registers it, the answer is a path,
 and saving it somewhere durable is a separate call by whoever wants that.  And
 `folder=` is *contained* inside that root, because it is a model-written string:
@@ -916,7 +917,7 @@ is what additions need.
 **And the second thing worth keeping is kept here, which is what this module's
 own docstring said it would be.** `ToolStore` is the tool catalogue — v1's
 `tools.db`, rows plus a keyword index and a vector index — in
-`<data>/slife2.db/tools.db`, beside the turn files and for the same reason: the
+`<data>/agents/tools.db`, beside the agents rather than inside one, for the same reason: the
 store, the embedder, the text normalization and the vector index are already
 here, and a catalogue needs all four. It is served over MCP by this plugin
 (`tool_merge`, `tool_injectable`, `tool_search`, …) and §8 has what it is for.

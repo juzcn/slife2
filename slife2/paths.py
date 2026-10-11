@@ -9,11 +9,16 @@ it.
     <data>/
       slife2.yaml   the config; absent means the built-in defaults
       runtime/      records, locks, logs, claims — a daemon's bookkeeping
-      slife2.db/    <agent>.turn.db — the turns, one file per agent
-                    tools.db — the tool catalogue, one file for the data dir
       skills/       <name>/SKILL.md — the playbooks the model may read
-      <agent>.files/  the cabinet: notes/, diary/, files/, reports/ as markdown
-                    and bytes a person can open, with `.index.db` beside them
+      agents/       everything that belongs to one agent, one directory each
+        tools.db      the tool catalogue — one file for the data dir, and the
+                      only thing here that is not an agent's own
+        <agent>/      turns.db    the conversation, and what it runs on
+                      cabinet/    notes, diary, saved files, reports — as
+                                  markdown and bytes a person can open, with
+                                  the index over them (`.index.db`) inside
+                      media/      what this agent generated
+                      wechat.yaml this agent's WeChat login
 
 **Where that root is depends on what you are running.**  A checkout keeps it
 beside itself, so the checked-in `slife2.yaml` is the one in use and the
@@ -21,9 +26,20 @@ databases are directories you can open; an installation keeps it at `~/.slife2`,
 per-user and independent of wherever it was started from.  See `data_dir`.
 
 The split that remains is the one that matters: `runtime/` is *reconstructible*
-— delete it and the next start rebuilds whatever it needs — while `slife2.db/`,
-`skills/` and a cabinet are not.  Anything that would be a disaster to lose does
-not go in `runtime/`.
+— delete it and the next start rebuilds whatever it needs — while `agents/` and
+`skills/` are not.  Anything that would be a disaster to lose does not go in
+`runtime/`.
+
+**`agents/` is one directory per agent, and the whole of one agent.**  A
+conversation, a cabinet, a login and whatever it generated live under the name
+they belong to, so backing one up, copying one to another machine or deleting
+one is one operation — the property a cabinet already claimed for itself, one
+level up.  **Nothing inside is named after the agent**: the directory says whose
+it is, and a file repeating it would be a name to keep in step with a rename.
+
+The catalogue is the exception, and it is why it sits beside the agent
+directories rather than in one: `tools.db` describes the tool *set*, which is
+everybody's and therefore nobody's.
 
 `skills/` is the third kind of thing, and it is beside the config rather than
 under `runtime/` for the reason the config is: it is **written by a person**,
@@ -135,34 +151,38 @@ def runtime_dir() -> Path:
     return path
 
 
-def db_dir() -> Path:
-    """Where the databases live.  Not safe to delete.
-
-    Two kinds of thing, and the difference is who they belong to: the turns are
-    one file per agent (`<agent>.turn.db`) because a turn belongs to a
-    conversation, and the tool catalogue is **one file for the whole data
-    directory**, because the tools are not anybody's — one hub serves every
-    conversation and cannot tell them apart, so what is installed and what has
-    been loaded is a property of the machine, not of a conversation.
-    """
-    path = data_dir() / "slife2.db"
+def agents_dir() -> Path:
+    """Where every agent's own files live.  Not safe to delete."""
+    path = data_dir() / "agents"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def tools_db() -> Path:
-    """The tool catalogue — `<data>/slife2.db/tools.db`.
+def agent_dir(agent: str) -> Path:
+    """One agent's directory: its conversation, its cabinet, its logins, its work.
 
-    Beside the turns rather than in a plugin of its own, which is what
-    `slife2.db`'s own docstring said the second thing worth keeping would be:
-    the catalogue is rows and two indexes over them, and the machinery for that
-    (the embedder, the vector index, the text normalization) is already here.
-
-    **One file, not one per agent.**  `--agent` partitions the *turns* and
-    nothing else — the servers are shared, the hub is shared, and a tool one
-    conversation loaded is one the next conversation can call.
+    **The name is sanitised here**, so that no caller has to remember to: it
+    comes off a command line, and `..` is a directory too.  `safe_agent_name` is
+    imported inside this function rather than at the top because it lives in
+    `slife2.db` and `db` imports this module — a local import is what keeps one
+    implementation of "a name fit to be a file", instead of a second copy in the
+    leaf that cannot reach the first.
     """
-    return db_dir() / "tools.db"
+    from slife2.db import safe_agent_name
+
+    path = agents_dir() / safe_agent_name(agent)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def catalogue_db() -> Path:
+    """The tool catalogue: one file, beside the agents rather than in one.
+
+    **Not safe to delete**, and not an agent's: the catalogue is the tool *set*,
+    which every conversation is served from, and a per-agent copy would be a copy
+    to keep in step.
+    """
+    return agents_dir() / "tools.db"
 
 
 def skills_dir() -> Path:

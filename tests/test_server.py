@@ -881,7 +881,7 @@ async def test_an_interrupted_turn_is_still_recorded(
     heard of.
     """
     from slife2.context_server import build_server as build_context
-    from slife2.paths import DATA_ENV_VAR, db_dir
+    from slife2.paths import DATA_ENV_VAR, agent_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     backend = FakeBackend(text_turn("never finished", delay=0.4))
@@ -901,7 +901,7 @@ async def test_an_interrupted_turn_is_still_recorded(
         await asyncio.sleep(0.5)
 
     rows = (
-        sqlite3.connect(db_dir() / f"{DEFAULT_AGENT}.turn.db")
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
         .execute("SELECT messages FROM turn ORDER BY rowid")
         .fetchall()
     )
@@ -925,7 +925,7 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     keyed on the turn having happened, not on how it ended.
     """
     from slife2.context_server import build_server as build_context
-    from slife2.paths import DATA_ENV_VAR, db_dir
+    from slife2.paths import DATA_ENV_VAR, agent_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
@@ -949,7 +949,7 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
         await asyncio.sleep(0.5)
 
     rows = (
-        sqlite3.connect(db_dir() / f"{DEFAULT_AGENT}.turn.db")
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
         .execute("SELECT messages FROM turn ORDER BY rowid")
         .fetchall()
     )
@@ -1053,7 +1053,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     tell those apart.
     """
     from slife2.context_server import build_server as build_context
-    from slife2.paths import DATA_ENV_VAR, db_dir
+    from slife2.paths import DATA_ENV_VAR, agent_dir, agents_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     cfg = config()
@@ -1086,7 +1086,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         )
         await send(server, "what is 2+2?", agent="jack", channel="tui")
 
-    jack = db_dir() / "jack.turn.db"
+    jack = agent_dir("jack") / "turns.db"
     assert jack.is_file(), "the turn was not recorded"
     row = (
         sqlite3.connect(jack)
@@ -1136,9 +1136,9 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     assert turns_messages[0]["content"] == "what is 2+2?"
 
     # ...and no other agent's database was created along the way.  Only the
-    # context store's files are here: the tool catalogue is the hub's own now,
-    # and the hub in this test is injected, so nothing opened that file.
-    assert sorted(p.name for p in db_dir().glob("*.db")) == ["jack.turn.db"]
+    # agents that were named have a directory: the tool catalogue is the hub's
+    # own now, and the hub in this test is injected, so nothing opened that file.
+    assert sorted(p.name for p in agents_dir().iterdir()) == ["jack"]
 
 
 @pytest.mark.asyncio
@@ -1166,7 +1166,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
 
     from slife2.config import ToolLoadSettings, ToolServerSettings
     from slife2.context_server import build_server as build_context
-    from slife2.paths import DATA_ENV_VAR, db_dir
+    from slife2.paths import DATA_ENV_VAR, agent_dir
     from slife2.toolhub import build_server as build_hub
     from tests.fakes import plugin_transports
 
@@ -1221,7 +1221,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
         await send(server, "look something up", agent="jack", channel="tui")
 
     stored = json.loads(
-        sqlite3.connect(db_dir() / "jack.turn.db")
+        sqlite3.connect(agent_dir("jack") / "turns.db")
         .execute("SELECT messages FROM turn")
         .fetchone()[0]
     )

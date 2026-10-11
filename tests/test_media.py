@@ -35,7 +35,7 @@ from slife2.media.adapters import (
     merge_params,
 )
 from slife2.media.server import build_server, check_size
-from slife2.paths import data_dir
+from slife2.paths import agent_dir
 
 pytestmark = pytest.mark.unit
 
@@ -157,7 +157,7 @@ async def test_an_image_call_reaches_the_configured_default() -> None:
     assert call["prompt"] == "a cat"
     assert call["size"] == "1024*1024"
     assert call["extra_params"] == {"size": "1024*1024"}
-    assert call["outputs_dir"] == data_dir() / "media"
+    assert call["outputs_dir"] == agent_dir("jack") / "media"
 
 
 @pytest.mark.asyncio
@@ -196,7 +196,9 @@ async def test_a_folder_is_a_subdirectory_of_the_media_root() -> None:
             client, "generate_image", prompt="x", folder="../../elsewhere"
         )
 
-    assert adapter.calls["image"]["outputs_dir"] == data_dir() / "media" / "project"
+    assert (
+        adapter.calls["image"]["outputs_dir"] == agent_dir("jack") / "media" / "project"
+    )
     assert "[refused]" in escaped, "a model does not choose where to write"
     assert "not a folder inside the media directory" in escaped
 
