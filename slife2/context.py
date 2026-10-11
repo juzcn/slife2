@@ -85,10 +85,27 @@ INTERRUPTED = "(Tool execution interrupted)"
 #: makes the footnote *findable* rather than merely present: a reader looking for
 #: one has a string to look for.
 #:
-#: v1 spells this `[INFO: …]` and shares the envelope with a second thing — the
-#: trim note — that this build does not have.  With one occupant the envelope can
-#: say what it holds, and `TURN` is what it holds: which turn this message opened.
-TURN_PREFIX = "[TURN: "
+#: **One of this build's two markers**, and the other is
+#: `slife2.wechat.marker`'s `[WECHAT:{…}]` on a turn somebody sent over WeChat.
+#: The name is what the port changed: v1 spelled this envelope `[INFO: …]` and
+#: put two things in it — this footnote, on the user message a turn opened with,
+#: and a trim note saying how many old turns had just been cut, which went on the
+#: **last assistant message**.  That note was runtime-only (stripped before the
+#: turn was saved, so no stored row ever held one) and the trim is deferred here
+#: (§9), which is what leaves this envelope with one occupant — and an envelope
+#: with one occupant can say what it holds.  `TURN` is what it holds: the turn
+#: this message opened.
+#:
+#: **A name in capitals, a colon, and the payload hard against it.**  The other
+#: marker is spelled the same way, and a model reading the conversation is the
+#: reader both are written for.  That is a convention and not a coupling: this
+#: one is derived every time a message list is built and never stored, that one
+#: is part of a stored turn's content, and neither is ever parsed back.  Nothing
+#: goes inside the brackets but the payload, because the payload is the part a
+#: model copies out — one more character in it is one more character to copy
+#: wrong.  The space that sets a marker off from the text beside it is outside
+#: the bracket, and it belongs to whoever joins the two.
+TURN_PREFIX = "[TURN:"
 TURN_SUFFIX = "]"
 
 
@@ -365,7 +382,7 @@ def turn_footnote(
 ) -> str:
     """The footnote's *payload* — the part of it that is not the envelope.
 
-    The same string the model reads inside `[TURN: …]`, and it is one function
+    The same string the model reads inside `[TURN:{…}]`, and it is one function
     `turn_note` calls rather than a copy, because the two readers must not
     disagree: a window showing a turn's id beside a message is showing the id a
     keep-list will be written with, and a second spelling of it would be a

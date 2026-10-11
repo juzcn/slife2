@@ -193,7 +193,7 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
 def without_footnote(content: Any) -> Any:
     """One message's content with the turn footnote taken off the end.
 
-    A `[TURN: {…}]` footnote is on every user message after its turn is saved,
+    A `[TURN:{…}]` footnote is on every user message after its turn is saved,
     so leaving it in would make every assertion about *which turns are in hand*
     longer and clock-dependent without making it stronger — the same argument
     `prompts_seen` makes for the system prompt below, and the footnote has its
@@ -363,8 +363,8 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
     # A turn's own call cannot see its own footnote — it has no id until it is
     # saved, which is after that call — and the call after it must.
     assert as_sent[0] == ["user:one"]
-    assert as_sent[1][0].startswith("user:one [TURN: ")
-    footnote = json.loads(as_sent[1][0].split("[TURN: ", 1)[1].rstrip("]"))
+    assert as_sent[1][0].startswith("user:one [TURN:")
+    footnote = json.loads(as_sent[1][0].split("[TURN:", 1)[1].rstrip("]"))
     assert footnote["turn_id"] > 0
     assert footnote["channel"] == "tui"
     assert footnote["begin"], "a turn that cannot say when it happened"

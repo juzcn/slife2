@@ -366,7 +366,7 @@ async def test_a_restore_replays_the_list_and_names_its_turns(
     ]
     assert messages[1]["content"].startswith("first")
     assert (
-        json.loads(messages[1]["content"].split("[TURN: ")[1].rstrip("]"))["turn_id"]
+        json.loads(messages[1]["content"].split("[TURN:")[1].rstrip("]"))["turn_id"]
         == ids[0]
     )
 
@@ -386,7 +386,7 @@ def test_the_footnote_a_screen_shows_is_the_one_the_model_reads() -> None:
     ended = "2026-08-10T14:05:00+08:00"
 
     assert turn_note(12, when, ended, "tui") == (
-        f"[TURN: {turn_footnote(12, when, ended, 'tui')}]"
+        f"[TURN:{turn_footnote(12, when, ended, 'tui')}]"
     )
     assert json.loads(turn_footnote(12, when, ended, "tui")) == {
         "turn_id": 12,

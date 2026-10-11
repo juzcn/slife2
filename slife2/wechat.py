@@ -37,14 +37,24 @@ the person holding the phone can see that something is happening.
 An incoming message arrives as model input, and the model has to be able to
 answer it: that takes the peer's id and the conversation's `context_token`, and
 neither is anything the turn's own record carries (`channel` says `wechat` and
-nothing more).  So the prompt is prefixed, in v1's exact form —
+nothing more).  So the prompt is prefixed —
 
-    [Wechat:{"peer_wechat_id": "…", "context_token": "…"}] 你好
+    [WECHAT:{"peer_wechat_id": "…", "context_token": "…"}] 你好
 
 — with the JSON keys *named after the arguments of `wechat_send_message`*, so
 that replying is copying two values across rather than translating between two
-vocabularies.  v1 kept the same marker in `slife/agent/message_history.py` and
-the shape is kept verbatim: a session file and a habit both survive the port.
+vocabularies.  v1 kept the same marker in `slife/agent/message_history.py`, keys
+and all, because a session file and a habit both survive a port.  What the port
+changed is the case of the name, to the spelling this build gives a marker — the
+turn footnote `[TURN:{…}]` is the other one, and capitals are what make either
+read as a marker rather than as something a person typed.
+
+**And of the two, this is the one that is stored.**  A footnote is derived every
+time a message list is built and is never written down; this marker is content —
+it goes into the turn's row along with the message and comes back out of it
+verbatim, capitals included.  That is the difference worth knowing about them,
+and it is why the spelling is not something the two have to agree on: nothing
+parses either.
 """
 
 from __future__ import annotations
@@ -136,11 +146,17 @@ def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
 
     See the module docstring: the keys mirror `wechat_send_message`'s arguments
     so that a model replying to this does not have to translate anything.
+
+    **The whole envelope, and nothing else.**  `[WECHAT:{…}]`: the name in
+    capitals, the payload hard against the colon, which is how a marker is
+    spelled here (`slife2.context.TURN_PREFIX` is the other).  The space that
+    sets a marker off from what it sits beside is outside the bracket, and it is
+    the joiner's to add — `_hand_over` here, `slife2.context.with_note` there.
     """
     payload: dict[str, str] = {"peer_wechat_id": peer_wechat_id}
     if context_token is not None:
         payload["context_token"] = context_token
-    return f"[Wechat:{json.dumps(payload, ensure_ascii=False)}] "
+    return f"[WECHAT:{json.dumps(payload, ensure_ascii=False)}]"
 
 
 def render_qr(content: str) -> str:
@@ -636,7 +652,10 @@ class Wechat:
                 peer,
             )
             return
-        prompt = f"{marker(peer, token)}{text}"
+        # The space that sets the marker off from the message is added *here*:
+        # outside the bracket is the joiner's side of the seam, which is where
+        # `slife2.context.with_note` puts the one before a footnote.
+        prompt = f"{marker(peer, token)} {text}"
         task = self._spawn(self._answer(session, peer, token, prompt))
         session.inflight.add(task)
         task.add_done_callback(session.inflight.discard)
@@ -1190,7 +1209,7 @@ def build_server(
         """Send a WeChat message to somebody who has written to you.
 
         Use this to answer. An incoming message arrives with its peer and
-        context token in a `[Wechat:{...}]` prefix, so pass those back here and
+        context token in a `[WECHAT:{...}]` prefix, so pass those back here and
         the reply lands in the conversation it belongs to; `wechat_check_status`
         gives the same two values if you have lost them. Sending is the only way
         anything reaches WeChat — nothing here forwards your reply for you, so a

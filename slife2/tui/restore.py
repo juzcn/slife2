@@ -97,12 +97,12 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # looking like the live transcript is the rule that settles it.
     asked = turn.get("created_at") or None
     # The turn's id, channel and span, shown beside the words that opened it.  It
-    # is the *same* footnote `messages_from_turns` wraps in `[TURN: …]` for the
+    # is the *same* footnote `messages_from_turns` wraps in `[TURN:{…}]` for the
     # model — one function, two readers — and that is the point of showing it at
     # all: the ids a keep-list is written with are then visible to the person
     # watching, instead of being a number only the model ever sees.
     #
-    # No `[TURN: ]` envelope here: that is the machine's marker, and a screen
+    # No `[TURN:]` envelope here: that is the machine's marker, and a screen
     # renders the payload (`turn_footnote`), the way v1's does.
     footnote = turn_footnote(
         int(turn.get("turn_id") or 0),

@@ -990,11 +990,11 @@ async def test_a_restored_message_is_stamped_when_it_was_sent() -> None:
 async def test_a_restored_message_says_which_turn_it_opened() -> None:
     """The id the model addresses turns by, shown to the person watching.
 
-    It is the *same* footnote the model reads inside `[TURN: …]` — one function,
+    It is the *same* footnote the model reads inside `[TURN:{…}]` — one function,
     two readers — and showing it is what makes a keep-list legible from the
     outside: a model that says it is keeping turn 12 is naming a number its
     reader can point at, and a channel besides.  What a screen shows is the
-    payload; `[TURN: ` is the machine's marker and stays behind.
+    payload; `[TURN:` is the machine's marker and stays behind.
     """
     client = answering_with(
         stored(

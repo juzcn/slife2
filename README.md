@@ -193,7 +193,7 @@ not a detail: the turn being recalled is usually a follow-up, and "what about th
 other one" names its subject only through the turns above it. Its answer is a
 selection, never a dump — the context is bounded, so a recall that matched more
 than fits returns what fits, and the keep-list is how a model says which of the
-turns in hand it is still working from. Every turn it reads carries a `[TURN: …]`
+turns in hand it is still working from. Every turn it reads carries a `[TURN:{…}]`
 footnote naming its id, its channel and its span, which is where those ids come
 from — and every turn the process ran itself gets one too, written the moment it
 is saved, so the newest turns are as addressable as the restored ones.
@@ -598,7 +598,7 @@ Four tools, and the model uses all of them:
 | `wechat_logout` | Forget this agent's login |
 
 A message somebody sends arrives as a **turn of that agent's own conversation**,
-with `channel=wechat` and a `[Wechat:{"peer_wechat_id": …}]` prefix naming who it
+with `channel=wechat` and a `[WECHAT:{"peer_wechat_id": …}]` prefix naming who it
 is from. Answering is the model's job and only the model's: nothing here
 auto-dispatches a reply, so a turn that says nothing sends nothing — call
 `wechat_send_message` with the peer and the `context_token` the marker carried.

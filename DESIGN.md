@@ -203,11 +203,22 @@ Two things follow, and both are the shape rather than an implementation detail:
 **The prompt carries its own addressing, because the turn's record cannot.**
 `channel` says `wechat` and nothing more, and answering needs the peer's id and
 the conversation's `context_token` — so the message is prefixed
-`[Wechat:{"peer_wechat_id": …}]`, with the JSON keys *named after the arguments
+`[WECHAT:{"peer_wechat_id": …}]`, with the JSON keys *named after the arguments
 of `wechat_send_message`*, so that replying is copying two values rather than
-translating between two vocabularies.  v1's marker, kept verbatim, for the same
-reason its session file is: a habit and a file format both survive a port, and
-neither was the part that needed changing.
+translating between two vocabularies.  v1's marker, keys and all, for the same
+reason its session file is: a habit and a file format both survive a port.  The
+port capitalised the name, which is how a marker is spelled here — the turn
+footnote `[TURN:{…}]` is the other one, and capitals are what make either read as
+a marker rather than as something a person typed.
+
+**And of the marker and the footnote, this is the one that is stored.**  A
+footnote is derived every time a message list is built and is never written down
+(§5); this marker is content — it goes into the turn's row along with the message
+and comes back out of it verbatim.  So the capitalisation is in the record here:
+a turn saved before it keeps the spelling it was saved with, while a restored
+conversation renders its footnotes in the new one.  Nothing parses either marker,
+so nothing has to be migrated, and the two do not have to agree — the spelling is
+a convention they share, not a coupling.
 
 **And it has no config section at all.**  Every other plugin here owns one, and
 this one owns none — not even a switch.  v1's `wechat: {enabled: false}`
@@ -736,7 +747,7 @@ the floor is where a live context already sits.
 **Restore is the same replay at the other end.** When a conversation starts — a
 restarted process, a conversation the idle sweep let go — the list is replayed
 verbatim, in its own order, with no ceiling re-slicing. Each turn contributes a
-copy of its first message carrying a `[TURN: {…}]` footnote naming its id, its
+copy of its first message carrying a `[TURN:{…}]` footnote naming its id, its
 channel and its span, which is **how a turn id reaches the model at all** and
 therefore how a keep-list is expressible. The footnote is added when a message
 list is built and never stored, so it cannot drift from the row it describes.
@@ -751,9 +762,15 @@ is known: after the save and never into it, and with the timestamps and channel
 the row was written with, because the rebuilt spelling and the in-memory one have
 to agree to the character or every rebuild costs a prompt-cache miss.
 
-v1 spells the marker `[INFO: …]` and shares that envelope with a second thing —
-the trim note — that this build does not have (§9). With one occupant the
-envelope can say what it holds, so it says `TURN`.
+v1 spelled the envelope `[INFO: …]` and put two things in it: this footnote, on
+the user message a turn opened with, and a trim note — *N oldest turns have been
+removed from context* — on the **last assistant message**, written by the loop
+after a cut and stripped before the save, so no stored row ever held one. This
+build has no trim (§9), so the envelope has one occupant, and one occupant is
+what lets it say what it holds: `TURN`. The other thing that changed is where the
+footnote lives: v1's rode the stored user message, and this build's is derived
+when a list is built — so a row holds the user's own words, plus the marker a
+plugin put on them where one did, and no footnote.
 
 **Both live behind one tool each, and neither is the model's.** A model may read
 its history (`turn_list`, `turn_read`); it may not decide what its context is. It
