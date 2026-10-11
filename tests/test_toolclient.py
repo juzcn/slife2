@@ -212,21 +212,19 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
     async with Client(hub_with_upstream()) as hub:
         registry = ToolRegistry(await remote_tools(hub))
         # In the catalogue's order, which is the name's.  **Ours are bare** —
-        # the builtins' and the db's read the same as the hub's own, because
-        # there is one set of tools here — and `fake__echo`, an entry under
-        # `tools:`, is the one name that says whose it is.  The hub's four cross
-        # this hop like everything else, `_func_tool_unload` included: it is the
-        # one `_`-prefixed name a model sees, and the reason is in its own test.
+        # a plugin's tools read the same as the hub's own, because there is one
+        # set of tools here — and `fake__echo`, an entry under `tools:`, is the
+        # one name that says whose it is.  The hub's four cross this hop like
+        # everything else, `_func_tool_unload` included: it is the one
+        # `_`-prefixed name a model sees, and the reason is in its own test.
         assert [spec.name for spec in registry.specs] == [
             "_func_tool_unload",
-            "calc",
             # `cli-server` records programs already on this machine, and offers
             # the model the tools that edit that record.
             "cli_list",
             "cli_remove",
             "cli_set",
             "cli_set_enabled",
-            "echo",
             "fake__echo",
             "func_tool_load",
             # The `mcp_*` and `rest_api_*` fives are here too: each family
@@ -237,7 +235,6 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
             "mcp_remove",
             "mcp_set",
             "mcp_set_enabled",
-            "now",
             "rest_api_list",
             "rest_api_list_tools",
             "rest_api_remove",
@@ -259,12 +256,12 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         )
         assert (text, ok) == ("through", True)
 
-        # A builtin, through the hub, through the builtins server: two hops and
-        # the same answer, which is what makes them not a special case.
+        # One of ours, through the hub, through the plugin that serves it: two
+        # hops and the same answer, which is what makes ours not a special case.
         text, ok = await registry.execute(
-            ToolCall(id="c2", name="calc", arguments={"e": "2+2"})
+            ToolCall(id="c2", name="skill_list", arguments={})
         )
-        assert (text, ok) == ("4", True)
+        assert ok is True and "No skills are installed" in text
 
 
 @pytest.mark.asyncio

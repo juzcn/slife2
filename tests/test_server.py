@@ -56,9 +56,9 @@ def config(**agent_overrides):
 
 
 def tool_then_answer() -> FakeBackend:
-    """One scripted turn that calls `calc`, then one that answers."""
+    """One scripted turn that calls a tool, then one that answers."""
     return FakeBackend(
-        asks_for_calc(),
+        asks_for_a_tool(),
         ScriptedTurn(
             result=StreamChatResult(text="It is 42.", stop_reason="stop"),
             chunks=[Chunk(text="It is 42.")],
@@ -70,7 +70,7 @@ def answering(text: str) -> FakeBackend:
     return FakeBackend(ScriptedTurn(result=StreamChatResult(text=text)))
 
 
-def asks_for_calc(*, delay: float = 0.0) -> ScriptedTurn:
+def asks_for_a_tool(*, delay: float = 0.0) -> ScriptedTurn:
     """The step that calls a tool — and so gives the turn a second boundary.
 
     A turn that answers in one step has no boundary after its first, which is
@@ -82,7 +82,7 @@ def asks_for_calc(*, delay: float = 0.0) -> ScriptedTurn:
     return ScriptedTurn(
         result=StreamChatResult(
             text="checking",
-            tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "6*7"}),),
+            tool_calls=(ToolCall(id="c1", name="skill_list", arguments={}),),
             stop_reason="tool_calls",
         ),
         chunks=[Chunk(text="checking")],
@@ -116,8 +116,8 @@ async def hub():
     """A toolhub that actually answers, over the in-memory transport.
 
     A turn cannot run without one, for the same reason it cannot run without
-    the store — the model's tool list comes from here, builtins included, so a
-    missing hub is a broken system rather than a conversation with no tools.
+    the store — the model's tool list comes from here, our plugins included, so
+    a missing hub is a broken system rather than a conversation with no tools.
 
     No upstreams: these tests are about the agent, and the tool servers behind a
     hub are `tests/test_toolhub.py`'s subject.  What it does prove here is that
@@ -131,7 +131,7 @@ async def hub():
 
     # The hub asks every plugin for a tool list and refuses when one does not
     # answer, so all of them need something behind them.  In-memory, which keeps
-    # `calc` and `now` real without a port.
+    # `skill_list` real without a port.
     async with Client(
         build_hub(
             default_config(),
@@ -660,7 +660,7 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
 ) -> None:
     """v1's cut-in: the arrival is handed to the turn that is already running.
 
-    The first turn here takes two steps — the model asks for `calc` and is told
+    The first turn here takes two steps — the model asks for `skill_list` and is told
     — so there *is* a boundary after the message arrives, and at it the message
     is delivered as a call to `_check_new_input` and answered with its own words.
     The model reads it as something that arrived mid-turn, which is what it is.
@@ -673,7 +673,7 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     happened to say the same thing.
     """
     backend = FakeBackend(
-        asks_for_calc(delay=0.1),
+        asks_for_a_tool(delay=0.1),
         text_turn("It is 42, and yes to that too."),
         # Scripted so that a second turn *can* run: if the message were not
         # folded in, this test would fail on the assertion below rather than on
@@ -731,7 +731,7 @@ async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
             return super().stream(messages, tools)
 
     backend = FailsOnTheSecondCall(
-        asks_for_calc(delay=0.1),
+        asks_for_a_tool(delay=0.1),
         text_turn("second answer"),
     )
     hub_client, server = wired(backend, context)
@@ -1000,7 +1000,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
         ScriptedTurn(
             result=StreamChatResult(
                 text="checking",
-                tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "6*7"}),),
+                tool_calls=(ToolCall(id="c1", name="skill_list", arguments={}),),
                 usage=Usage(prompt_tokens=100, completion_tokens=10),
                 stop_reason="tool_calls",
             ),
@@ -1352,7 +1352,7 @@ async def test_max_steps_comes_from_the_config(context, hub) -> None:
         *[
             ScriptedTurn(
                 result=StreamChatResult(
-                    tool_calls=(ToolCall(id=f"c{i}", name="now", arguments={}),),
+                    tool_calls=(ToolCall(id=f"c{i}", name="skill_list", arguments={}),),
                     stop_reason="tool_calls",
                 )
             )

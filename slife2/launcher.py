@@ -35,7 +35,6 @@ from slife2.config import (
     AGENT_SERVER_NAME,
     API_BACKENDS,
     API_SERVER_NAMES,
-    BUILTINS_SERVER_NAME,
     CLI_SERVER_NAME,
     CONTEXT_SERVER_NAME,
     EMBEDDINGS_SERVER_NAME,
@@ -92,7 +91,6 @@ AGENT_SERVER = ("slife2.server.server", AGENT_SERVER_NAME, "send_message")
 #: runs on.  It identifies itself by `remember`, which is the write everything
 #: else about a conversation follows from.
 CONTEXT_SERVER = ("slife2.context_server", CONTEXT_SERVER_NAME, "remember")
-BUILTINS_SERVER = ("slife2.builtins", BUILTINS_SERVER_NAME, "echo")
 #: The two plugins whose families are not tools: a folder of playbooks and a
 #: list of programs already installed.  Their identifying tool is what the
 #: fallback check looks for when a server reports no name of its own, so it has
@@ -114,7 +112,6 @@ EMBEDDINGS_SERVER = ("slife2.llm.embeddings_server", EMBEDDINGS_SERVER_NAME, "de
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
     "context": CONTEXT_SERVER,
-    "builtins": BUILTINS_SERVER,
     "skills-server": SKILLS_SERVER,
     "cli-server": CLI_SERVER,
     "mcp-tools": MCP_TOOLS,
@@ -581,7 +578,6 @@ NEEDS: dict[str, tuple[str, ...]] = {
     "toolhub": (
         "embeddings",
         "context",
-        "builtins",
         "skills-server",
         "cli-server",
         "mcp-tools",

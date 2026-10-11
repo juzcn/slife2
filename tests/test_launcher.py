@@ -40,7 +40,7 @@ REPO = str(Path(__file__).resolve().parents[1])
 
 
 def test_there_is_one_plugin_per_job() -> None:
-    """One agent loop, one context store, one builtins server, one hub,
+    """One agent loop, one context store, one hub,
     one process per wire protocol.
 
     The granularity is the point: a backend speaks one wire protocol and does
@@ -60,7 +60,6 @@ def test_there_is_one_plugin_per_job() -> None:
         "llm:openai-responses",
         "embeddings",
         "context",
-        "builtins",
         "skills-server",
         "cli-server",
         "mcp-tools",
@@ -75,7 +74,6 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.llm.openai_responses_server",
         "slife2.llm.embeddings_server",
         "slife2.context_server",
-        "slife2.builtins",
         "slife2.skills_server",
         "slife2.cli_server",
         "slife2.mcp_tools",
@@ -142,7 +140,7 @@ def test_a_server_is_asked_for_only_once_what_it_needs_is_up(
     # Everything the table says nothing about was in the first wave — which is
     # the whole reason for having a table rather than a sequence.
     first_wave = attempted[: attempted.index("context")]
-    assert "agent" in first_wave and "builtins" in first_wave
+    assert "agent" in first_wave and "skills-server" in first_wave
 
 
 def test_a_server_whose_dependency_failed_is_reported_and_not_started(
@@ -265,7 +263,6 @@ def test_one_server_per_wire_protocol() -> None:
         "llm:openai-responses",
         "embeddings",
         "context",
-        "builtins",
         "skills-server",
         "cli-server",
         "mcp-tools",
@@ -315,7 +312,6 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "llm:openai-completions",
         "embeddings",
         "context",
-        "builtins",
         "skills-server",
         "cli-server",
         "mcp-tools",
@@ -336,7 +332,7 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
     Starting them together races, and the failure is confusing rather than
     obvious: the agent server comes up healthy and every turn fails.  The peers
     are its model, the context store (which needs `embeddings` in turn, which
-    is why that one starts first), and the toolhub with the builtins behind it —
+    is why that one starts first), and the toolhub with the plugins behind it —
     all of which it now *needs*, since the model's tool list comes from the hub.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
@@ -346,7 +342,6 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
         "llm:openai-completions",
         "embeddings",
         "context",
-        "builtins",
         "skills-server",
         "cli-server",
         "mcp-tools",

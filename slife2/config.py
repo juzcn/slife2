@@ -176,7 +176,6 @@ DEFAULT_AGENT = "slife2"
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
 CONTEXT_SERVER_NAME = "slife2-context"
-BUILTINS_SERVER_NAME = "slife2-builtins"
 MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
 RESTAPI_TOOLS_SERVER_NAME = "slife2-restapi-tools"
 SKILLS_SERVER_NAME = "slife2-skills"
@@ -219,7 +218,6 @@ EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 LOCAL_SERVERS = (
     "embeddings",
     "context",
-    "builtins",
     "skills-server",
     "cli-server",
     "mcp-tools",
@@ -618,7 +616,7 @@ class ToolLoadSettings:
 
     Eviction never touches a tool of ours (a plugin's) or a server marked
     `autoload: true`: those are loaded because the operator said so, and a
-    budget that could take `now` and `calc` away is the failure DESIGN.md §8 is
+    budget that could take `turn_read` away is the failure DESIGN.md §8 is
     about.  See `slife2.db.ToolStore.injectable`.
     """
 
@@ -860,12 +858,6 @@ def default_config() -> Config:
             # protocol like the model backends.  This is v1's `memdb`, and it
             # took the port the db plugin had.
             "context": ServerSettings(port=8010),
-            # The tools slife2 ships — `echo`, `now`, `calc` — served like
-            # anybody else's, because the hub is the one place that decides what
-            # the model may call; see `slife2.builtins` and DESIGN.md §8.  It is
-            # not special to the hub, which asks every plugin above for a
-            # tool list and keeps the ones marked for the model.
-            "builtins": ServerSettings(port=8030),
             # The two families that are not tools but have to be findable, each
             # owned by the process that owns its config section: the playbooks
             # in `<data>/skills/` (`slife2.skills_server`) and the programs the
@@ -1544,7 +1536,6 @@ __all__ = [
     "AGENT_SERVER_NAME",
     "API_BACKENDS",
     "API_SERVER_NAMES",
-    "BUILTINS_SERVER_NAME",
     "CLI_SERVER_NAME",
     "CONTEXT_SERVER_NAME",
     "DEFAULT_AGENT",

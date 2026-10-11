@@ -12,7 +12,9 @@ owns it — see `plugin_transports`.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import operator
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -296,23 +298,20 @@ def plugin_transports(
     nothing, which is what most plugins are: asking them is how "nothing for
     you" becomes a fact rather than an assumption.
 
-    **Six are the real servers**, because the hub is not merely a client of
+    **Five are the real servers**, because the hub is not merely a client of
     them — each is the only process that knows something the hub has to ask
-    for.  `db` holds the catalogue, and a stand-in with no `tool_*` tools would
-    be a catalogueless hub; it runs on the deterministic `StubEmbedder`, so a
-    test gets the real merge, the real search and the real budget with no
-    embedding endpoint behind them.  `builtins`, `skills-server` and
-    `cli-server` are where every tool and row in a default config comes from,
-    and `mcp-tools` and `restapi-tools` are where the entries under `tools:` and
-    `rest-api:` are reached and declared — a `blank_plugin` in any of their
-    places would leave the model with an empty list and a search with nothing to
-    find, which is a hub under test only if what is being tested is a hub with no
-    plugins.
+    for.  `context` holds the turn log, on the deterministic `StubEmbedder`, so
+    a test gets the real merge, the real search and the real budget with no
+    embedding endpoint behind them.  `skills-server` and `cli-server` are where
+    the rows in a default config come from, and `mcp-tools` and `restapi-tools`
+    are where the entries under `tools:` and `rest-api:` are reached and
+    declared — a `blank_plugin` in any of their places would leave the model
+    with an empty list and a search with nothing to find, which is a hub under
+    test only if what is being tested is a hub with no plugins.
 
     `overrides` replaces or adds a transport by name — a plugin the test
     wants to misbehave, or an entry under `tools:` it wants wired.
     """
-    from slife2.builtins import build_server as build_builtins
     from slife2.cli_server import build_server as build_cli
     from slife2.context_server import build_server as build_context
     from slife2.mcp_tools import build_server as build_mcp_tools
@@ -320,8 +319,6 @@ def plugin_transports(
     from slife2.skills_server import build_server as build_skills
 
     def for_plugin(name: str) -> Any:
-        if name == "builtins":
-            return lambda settings: build_builtins(config)
         if name == "context":
             return lambda settings: build_context(
                 config, embedder=StubEmbedder(), ask=keep_the_context
@@ -380,3 +377,38 @@ def blank_plugin() -> Any:
     from fastmcp import FastMCP
 
     return FastMCP("plugin")
+
+
+_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+
+
+def evaluate(expression: str) -> int | float:
+    """The four operations, for tests that want *a* tool and not a calculator.
+
+    `calc` used to be served by `slife2.builtins`, and two test modules used its
+    evaluator to build a local tool whose result they can assert (`2+2` is `4`)
+    and whose failure they can provoke (`1/0` raises `ZeroDivisionError`).  The
+    plugin is gone and the evaluator went with it; this is the little of it those
+    tests need — no security bounds, because the only expression it ever sees is
+    a test's own.
+    """
+
+    def walk(node: ast.AST) -> int | float:
+        if isinstance(node, ast.Expression):
+            return walk(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp):
+            left, right = walk(node.left), walk(node.right)
+            operate = _OPERATORS[type(node.op)]
+            return operate(left, right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -walk(node.operand)
+        raise ValueError(f"unsupported expression: {ast.dump(node)}")
+
+    return walk(ast.parse(expression, mode="eval"))

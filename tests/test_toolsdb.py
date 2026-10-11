@@ -489,7 +489,7 @@ def test_the_gate_answers_with_loaded_tools_of_live_sources(tmp_path) -> None:
     assert injected == ["arxiv__search"]
 
     # A source that is not live contributes nothing, however loaded it is.
-    assert store.injectable(["builtins"])["tools"] == []
+    assert store.injectable(["ours"])["tools"] == []
 
 
 def test_the_count_of_what_the_model_holds_is_gated_on_liveness(tmp_path) -> None:
@@ -509,7 +509,7 @@ def test_the_count_of_what_the_model_holds_is_gated_on_liveness(tmp_path) -> Non
     store.set_load("arxiv__search", LOADED)
 
     assert store.source_counts(["arxiv"]) == {"arxiv": {"tools": 2, "loaded": 1}}
-    assert store.source_counts(["builtins"]) == {"arxiv": {"tools": 2, "loaded": 0}}
+    assert store.source_counts(["ours"]) == {"arxiv": {"tools": 2, "loaded": 0}}
     assert store.source_counts([]) == {"arxiv": {"tools": 2, "loaded": 0}}
 
 
@@ -631,14 +631,14 @@ def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
     because somebody asked for it must not be evicted by the count either.
     """
     store = store_at(tmp_path)
-    merge(store, "builtins", "plugin", [tool("calc")])
+    merge(store, "ours", "plugin", [tool("turn_list")])
     merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
 
     assert rows_in(store) == [
         ("arxiv__search", "enabled", "unloaded"),
-        ("calc", "enabled", LOADED),
         ("serper__search", "enabled", LOADED),
+        ("turn_list", "enabled", LOADED),
     ]
 
 
@@ -741,10 +741,10 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
     the section they were written in belongs to a plugin:
     the budget exists to stop somebody else's ninety tools crowding the request,
     not to take away a tool slife2 guarantees — a model that has quietly lost
-    `now` and `calc` is the failure DESIGN.md §8 is built around.
+    `turn_read` is the failure DESIGN.md §8 is built around.
     """
     store = store_at(tmp_path, threshold=4)
-    merge(store, "builtins", "plugin", [tool("calc")])
+    merge(store, "ours", "plugin", [tool("turn_list")])
     merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
     merge(
         store,
@@ -758,11 +758,11 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
     stamp(store, "arxiv__also", "2026-01-02T00:00:00+00:00")
     stamp(store, "arxiv__new", "2026-01-03T00:00:00+00:00")
 
-    taken = store.evict(["builtins", "serper", "arxiv"], autoload=["serper"])
+    taken = store.evict(["ours", "serper", "arxiv"], autoload=["serper"])
 
     assert taken == ["arxiv__old"], "the oldest of the three, and only it"
     loaded = {row[0]: row[2] for row in rows_in(store)}
-    assert loaded["calc"] == LOADED
+    assert loaded["turn_list"] == LOADED
     assert loaded["serper__search"] == LOADED
 
 

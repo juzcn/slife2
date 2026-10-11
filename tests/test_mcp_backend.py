@@ -11,9 +11,9 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+from fakes import evaluate
 from fastmcp import Client
 
-from slife2.builtins import evaluate
 from slife2.llm.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.llm.client import MCPBackend
 from slife2.llm.server_common import build_llm_server
@@ -51,8 +51,8 @@ def registry() -> ToolRegistry:
     """One tool, local.
 
     `calc` is convenient here and is not the subject: what this file is about is
-    the model hop, and the real calculator is behind a server now — a second hop
-    in front of a test about the first one would be noise.
+    the model hop, and a second hop in front of a test about the first one would
+    be noise.  `fakes.evaluate` is the little arithmetic it needs.
     """
     return ToolRegistry(
         [

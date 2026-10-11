@@ -98,13 +98,13 @@ apart, and — the first time it appears — the question of which tools may run
 without asking the user, are all questions about the *set*, and a set assembled
 in two places is a set that will disagree with itself.
 
-That is why `now` and `calc` are not served by this process but by
-`slife2-builtins`, which the hub reaches exactly as it reaches somebody else's
-arxiv server — over the plugin that holds it.  **Nothing that has a server behind
-it is served by this process.**  A builtin that took a shortcut would be the
-second mechanism this whole arrangement exists to avoid, and the first thing to
-drift: it would not be in `servers()`, it would not have a connection to fail,
-and it would not be a row in the catalogue the model's search reads.
+That is why no plugin's tools are served by this process — each one is reached
+exactly as somebody else's arxiv server is, over the plugin that holds it.
+**Nothing that has a server behind it is served by this process.**  A tool that
+took a shortcut would be the second mechanism this whole arrangement exists to
+avoid, and the first thing to drift: it would not be in `servers()`, it would not
+have a connection to fail, and it would not be a row in the catalogue the model's
+search reads.
 
 `skill_use` used to be the exception, and it is one no longer: a skill is a
 document and `slife2-skills` serves it (`slife2.skills_server`), because a family
@@ -112,9 +112,9 @@ that owns a config section *and* its own tool is a family whose next change has
 somewhere to land.  So the hub's own tools are exactly the set-level three —
 `tool_search`, `func_tool_load`, `_func_tool_unload` — and they are named as
 themselves rather than `{server}__{tool}`, because there is no server to name.
-Neither are ours for the neighbouring reason that the server is slife2: `now`,
-not `builtins__now`.  `model_name` is that rule and DESIGN.md §8 is the argument
-for it.
+Neither are ours for the neighbouring reason that the server is slife2:
+`turn_read`, not `context__turn_read`.  `model_name` is that rule and DESIGN.md
+§8 is the argument for it.
 
 They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
@@ -374,9 +374,9 @@ def model_name(server: str, tool: str, category: str) -> str:
     """What the model calls one tool: **the bare name for ours**, `server__tool`
     for everybody else's.
 
-    `builtins__now` was a name telling the model about a division it has no
-    business reasoning about: there is one set of tools here, slife2's, and
-    `now` is the name of one of them.  A server in front of a name earns its
+    `context__turn_read` would be a name telling the model about a division it
+    has no business reasoning about: there is one set of tools here, slife2's,
+    and `turn_read` is the name of one of them.  A server in front of a name earns its
     place by keeping two of *somebody else's* tools apart — the operator may
     write down four servers that each offer a `search`, and `arxiv__search`
     against `serper__search` is the difference between a call reaching the tool
@@ -1864,8 +1864,7 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
     from anyway, because a label costs nothing and nothing else would.
 
     Doing it here rather than in `_advertise` is what makes it happen once: the
-    two ends both doing it is how the model came to read `[builtins]
-    [builtins] Evaluate an arithmetic expression`.
+    two ends both doing it is how the model came to read the same label twice.
     """
     server = str(row.get("source_id") or "")
     description = str(row.get("description") or "")

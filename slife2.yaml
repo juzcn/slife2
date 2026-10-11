@@ -97,15 +97,6 @@ servers:
     host: 127.0.0.1
     port: 8010
     path: /mcp
-  # The tools slife2 ships — `echo`, `now`, `calc` — served like anybody else's
-  # and reached through the hub below, because the hub is the one place that
-  # decides what the model may call.  There is no config for it: adding a tool is
-  # one decorated function in `slife2/builtins.py`, carrying `meta=FOR_THE_MODEL`
-  # so that the hub offers it to the model.
-  builtins:
-    host: 127.0.0.1
-    port: 8030
-    path: /mcp
   # The playbooks: `<data>/skills/`, one directory per skill, each with a
   # `SKILL.md`.  It serves `skill_use` — the tool that reads one — and one
   # catalogue row per installed skill, so that a search finds a playbook by what

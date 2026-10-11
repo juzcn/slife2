@@ -3,9 +3,9 @@
 This is the loop's *vocabulary* for tools and nothing more — `Tool` is a spec
 and a function, `ToolRegistry` looks one up and runs it, and both are unaware
 that anything is served over a socket.  The tools themselves live where they are
-served: `slife2.builtins` for the ones slife2 ships, and whatever server the
-toolhub reaches for everything else.  That split is deliberate — `loop.py`
-imports this module, and the loop must not import a server.
+served: whatever server the toolhub reaches, our plugins and somebody else's
+alike.  That split is deliberate — `loop.py` imports this module, and the loop
+must not import a server.
 
 The registry's one interesting property is that :meth:`ToolRegistry.execute`
 **never raises**.  A tool that fails produces error *text*, which is handed back

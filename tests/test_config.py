@@ -86,7 +86,6 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     from slife2.config import (
         AGENT_SERVER_NAME,
         API_SERVER_NAMES,
-        BUILTINS_SERVER_NAME,
         CLI_SERVER_NAME,
         CONTEXT_SERVER_NAME,
         EMBEDDINGS_SERVER_NAME,
@@ -101,9 +100,6 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     )
     assert importlib.import_module("slife2.context_server").SERVER_NAME == (
         CONTEXT_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.builtins").SERVER_NAME == (
-        BUILTINS_SERVER_NAME
     )
     assert importlib.import_module("slife2.skills_server").SERVER_NAME == (
         SKILLS_SERVER_NAME

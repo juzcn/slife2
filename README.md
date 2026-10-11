@@ -98,7 +98,6 @@ without passing an argument:
 ```bash
 uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-toolhub          # the model's tools,          :8020
-uv run slife2-builtins         # echo, now, calc,            :8030
 uv run slife2-skills           # the playbooks,              :8031
 uv run slife2-cli              # the cli: registry,          :8032
 uv run slife2-mcp-tools        # holds the tools: servers,   :8033
@@ -237,11 +236,6 @@ loaded, which is the section after the config:
 ### The config
 
 ```yaml
-# The tools slife2 ships, served by `slife2-builtins`: `echo`, `now`, `calc`.
-# There is no config for them — adding one is a decorated function in
-# `slife2/builtins.py`, and it arrives at the model the same way as everything
-# below.
-#
 # Every section below is written by hand *and* by the model: each family serves
 # the tools that edit its own (`mcp_set`, `rest_api_set`, `cli_set`, `skill_set`
 # with `remove` / `list` / `set_enabled` beside them, v1's names).  Either way
@@ -328,8 +322,8 @@ first (DESIGN.md §9, "Tool approval").
 
 A tool's name carries the server it came from when there is one to carry: an
 entry under `tools:` reaches the model as `{name}__{tool}` —
-`arxiv__arxiv_search_papers`. **Ours do not.** `now`, `calc` and `turn_read` are
-slife2's tools, and `builtins__now` was this system's own arrangement leaking
+`arxiv__arxiv_search_papers`. **Ours do not.** `turn_read` and `tool_search` are
+slife2's tools, and `context__turn_read` was this system's own arrangement leaking
 into the one thing the model reads on every request: which plugin serves a tool
 is a fact about us, and `servers()` reports it to whoever is debugging. So our
 tools are bare, and they are one namespace — two plugins cannot offer one name
@@ -338,7 +332,7 @@ between them — which the catalogue refuses loudly rather than resolving.
 **What the model is handed is the tools it has loaded, not the tools that
 exist.** The list is re-read from the hub before *every model call*, and what
 starts in it is slife2's own: `tool_search`, `func_tool_load`,
-`_func_tool_unload`, `skill_use`, the builtins, the two history tools, and the
+`_func_tool_unload`, `skill_use`, the two history tools, and the
 eighteen tools that edit the four config sections — that last group is why the
 list is noticeably longer than it was, and it is the one group whose being
 always-loaded is worth a second look. Everything else is loaded on demand — a
@@ -351,7 +345,7 @@ agent: a tool loaded in one conversation is loaded for the next, and still loade
 after a restart.
 
 Two things decide what starts loaded. **Ours always do** — a model that has
-quietly lost `now` and `calc` is a failure nobody can see — and somebody else's
+quietly lost `turn_read` is a failure nobody can see — and somebody else's
 do when their entry says `autoload: true`, which is how a server whose tools are
 wanted every turn is written down as such. Everything else arrives on demand.
 
@@ -385,7 +379,7 @@ name (DESIGN.md §9) — and the conversation has it either way.
 ### How a plugin contributes
 
 Which of a plugin's tools the model may call is said on the tool —
-`@mcp.tool(meta=FOR_THE_MODEL)`, which `now`, `calc` and `echo` carry and the
+`@mcp.tool(meta=FOR_THE_MODEL)`, which `skill_use` carries and the
 context store's `remember` does not. A plugin's tools are its own code's until one of
 them says otherwise, so a tool you forget to mark is invisible rather than
 dangerous.
@@ -475,9 +469,8 @@ stops takes the child processes that plugin started with it.
 A plugin is required and everything in `tools:` is optional: the hub asks
 each plugin for a tool list, and one that cannot answer fails the turn rather
 than quietly continuing with fewer tools, while a server that is somebody else's
-is reported and left out. The builtins are the case that makes the rule worth
-having — a model that has quietly lost `now` and `calc` is a failure nobody can
-see.
+is reported and left out. A model that has quietly lost `turn_read` is a
+failure nobody can see, and that is what makes the rule worth having.
 
 ## Where things live
 
@@ -538,8 +531,6 @@ slife2/
 ├─ events.py          # the turn event vocabulary, and its progress encoding
 ├─ tools.py           # the tool registry: what the loop can call, and how a
 │                     #   failure reaches the model as text
-├─ builtins.py        # slife2-builtins: `echo`, `now`, `calc`, and `calc`'s
-│                     #   AST walker — a tool is one decorated function
 ├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
 │                     #   a listed tool as one the loop can run, and the trim
 │                     #   the harness makes before a turn is saved

@@ -31,8 +31,8 @@ has to live here, on the side of the hop that does not speak a wire protocol.
 call — the list goes out with each request, so it is read with each request.
 That is why this server holds no tool registry of its own and why `loop.py`
 still knows nothing about MCP: it is handed a coroutine, and where the registry
-came from is nobody else's business.  The builtins included: one owner for the
-model's whole tool list is worth one hop.  See DESIGN.md §8.
+came from is nobody else's business.  Our own plugins included: one owner for
+the model's whole tool list is worth one hop.  See DESIGN.md §8.
 
 Two consequences of owning the history are paid for here rather than avoided,
 because they are the price of the state:
@@ -383,8 +383,8 @@ def build_server(
         """The client for the toolhub, opened on first use.
 
         **Never optional.**  There used to be a branch here for a config with no
-        tools at all, and it was wrong for the reason the builtins are in the hub
-        rather than here: the model's tool list has one owner, so a system whose
+        tools at all, and it was wrong for the reason every plugin's tools are in
+        the hub rather than here: the model's tool list has one owner, so a system whose
         toolhub is missing is not a system with no tools — it is a system that
         has come apart, and it fails the turn like any other missing peer.
 

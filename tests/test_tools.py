@@ -7,7 +7,7 @@ back as text with `ok` false — because the model reads the result and corrects
 itself, where an exception would end the turn and lose the thread.
 
 The tools themselves live with the server that serves them, so the tests for
-what they *do* are next to it.  See `tests/test_builtins.py`.
+what they *do* are next to it.  See `tests/test_skills_server.py`.
 """
 
 from __future__ import annotations

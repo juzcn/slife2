@@ -37,7 +37,6 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
   │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
-  │                                 ├── :8030/mcp ──▶ slife2-builtins      (`echo`, `now`, `calc`)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
   │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
@@ -68,14 +67,11 @@ process *does*, not in how many there are.  The count in the diagram is what one
 config uses, not a fixed number: a protocol no provider speaks is not started at
 all, and the hub is one process whether one plugin holds a source or twenty do.
 
-The builtins being a server of their own is the same rule applied to the one
-place it looks like overkill: they have no credential and no network, and they
-are still behind the hub, because "where the tools come from" is a job and a
-plugin that is sometimes the answer to it is a plugin with a branch in it.
-`slife2-cli` is that rule taken one step further — a family with no connection,
-no tool and nothing but rows to declare — and the reason is the same in both
-directions: a job belongs to the process that does it, and a process that has
-one is a process that can grow the tool the family is missing. See §8.
+`slife2-cli` is that rule at its most extreme — a family with no connection,
+no tool and nothing but rows to declare, and still a process of its own — and
+the reason is the same in both directions: a job belongs to the process that
+does it, and a process that has one is a process that can grow the tool the
+family is missing. See §8.
 
 The two OpenAI entries are the point worth checking, because they look like
 duplication and are not.  **Responses is a different wire format, not a flag on
@@ -914,7 +910,7 @@ is a port of v1's `mcp-gateway` with one thing moved out of it, and the shape
 that survived the port is the whole of the rest:
 
 ```
-slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins            (ours; `builtins`, `context`, …)
+slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins      (ours; `context`, `skills-server`, …)
                           list_tools        └──▶  what they declare   (their servers, their rows,
                           call_tool                                   and the families that are
                           servers                                      not servers at all)
@@ -986,11 +982,11 @@ harness gets it on the API, because the trim is the one thing here that is
 *recorded* — see the budget, below.
 
 **A name carries a server only where it has to, and for ours it never does.**
-`now`, `calc`, `turn_read` and `tool_search` are slife2's tools, and
-`builtins__now` was the system's own arrangement leaking into the one thing the
-model reads on every request: a plugin is a process slife2 starts, which is a
-fact about us and not about the tool — the model choosing `calc` has no use for
-it, and `servers()` reports it to the person who does. What the prefix is *for*
+`turn_read` and `tool_search` are slife2's tools, and `context__turn_read` would
+be the system's own arrangement leaking into the one thing the model reads on
+every request: a plugin is a process slife2 starts, which is a fact about us and
+not about the tool — the model choosing `turn_read` has no use for it, and
+`servers()` reports it to the person who does. What the prefix is *for*
 is somebody else's tools, where the operator may write down four servers that
 each offer a `search`: `arxiv__search` against `serper__search` is the
 difference between reaching the tool the model read about and reaching a
@@ -1000,15 +996,14 @@ listing both. Its cost is that ours are one namespace: two plugins cannot offer
 one name between them, and the catalogue refuses the second loudly (`merge`)
 rather than letting a name mean two things.
 
-**Nothing with a server behind it is served by the hub process, and the builtins
-are why that is worth saying.** `echo`, `now` and `calc` have no credential, no
-config and no network, so a hop to reach them buys nothing — and they are behind
-one anyway, served by `slife2-builtins` and reached through exactly the code path
-that reaches arxiv. The alternative, a hub that served `calc` itself, is the
-second mechanism this whole arrangement exists to avoid: those tools would not be
-in `servers()`, they would not have a connection that can fail, they would not be
-in whatever a tool search is eventually built on, and the first thing to drift
-would be the one place the tool table has a branch in it. What the hop costs is
+**Nothing with a server behind it is served by the hub process.** Every plugin's
+tools come up through a connection and reach the model by the same road a
+`tools:` entry's do — `skill_use` and `arxiv__search` alike. The alternative, a
+hub that served one of them itself, is the second mechanism this whole
+arrangement exists to avoid: that tool would not be in `servers()`, it would not
+have a connection that can fail, it would not be in whatever a tool search is
+eventually built on, and the first thing to drift would be the one place the
+tool table has a branch in it. What the hop costs is
 one loopback call per model call; what it buys is that "where the tools come
 from" has one answer and no exceptions.
 
@@ -1126,8 +1121,8 @@ to land.
 this), the naming rule that keeps two servers' `search` apart, and — the first
 time it appears — which tools may run without asking, are all questions about
 the *set*, and a set assembled in two places disagrees with itself. That is why
-the agent holds no registry of its own and why the builtins are not exempt from
-it.
+the agent holds no registry of its own and why a plugin's own tools are not
+exempt from it.
 
 **The list is read before every model call, and that is what keeps it in sync.**
 The tool list goes out *with* each request, so it is asked for with each request:
@@ -1356,8 +1351,8 @@ else, and both are in the whitelist that is never evicted — which is the hub's
 own three plus `skill_use`, the one entry there that a plugin serves
 (`ALWAYS_LOADED`, and `_func_tool_unload` is the third of the hub's because the
 harness's trim is a pair under its name). A plugin's tools start loaded, because
-a model that has quietly lost
-`now` and `calc` is the failure this section is built around; a server's do not
+a model that has quietly lost `turn_read` is the failure this section is built
+around; a server's do not
 unless its entry says `autoload: true`, which is the operator saying that this
 one is wanted every turn.
 
@@ -1411,15 +1406,16 @@ which is what makes asking before every model call affordable.
 
 **Every connection the hub holds is one of ours, and that is a rule rather
 than a coincidence.** A hub that cannot read a plugin's tool list *refuses to
-list anything* — because a model that has quietly lost `now` and `calc` is a
+list anything* — because a model that has quietly lost `turn_read` is a
 failure nobody can see, and a shorter tool list is exactly what that failure
 looks like. That rule is what the `required` flag used to carry, and it now
 carries the other half of the same fact: the only links this process holds are
 the ones it is allowed to be strict about, because everything else is behind a
 plugin that declares what it holds and can be reported without failing a turn.
-The builtins are the worked example of it being ordinary — the URL, the
-connection and the mark are all `mcp-tools`'s, or would be if the builtins were
-somebody else's. And the one thing a declaration cannot say is `plugin`, which is
+Ours are the worked example of it being ordinary: a plugin's tools are declared
+rows like any source's, findable by search and countable, and nothing about them
+is special but the category they are filed under. And the one thing a declaration
+cannot say is `plugin`, which is
 the category of exactly these: a plugin may not mint a source meaning *the
 servers slife2 starts*, because that is the category whose rows the audience gate
 decides about.
@@ -1627,9 +1623,9 @@ Named so they are decisions rather than oversights:
   Python over a bounded scan, unranked — for the queries neither index can
   describe: a partial spelling, a path, a symbol. It is not here, and it is the
   mode v1's notes say the model reached for most often.
-- **Tool approval, and the trigger is no longer hypothetical.** `now` and `calc`
-  are side-effect-free precisely so this cut does not have to answer it — and
-  then the four families of management tools landed (§8), which are the tools
+- **Tool approval, and the trigger is no longer hypothetical.** This cut was
+  deferrable while slife2's own tools were side-effect-free — and then the four
+  families of management tools landed (§8), which are the tools
   this design was deferring the question for: `skill_set` writes files a model
   chose the paths of, `mcp_set` writes a `command:` that slife2 will start, and
   neither asks anybody first. What §8 argues there is that the write is

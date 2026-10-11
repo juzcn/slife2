@@ -1,7 +1,7 @@
 """slife2-skills: reading a playbook, and declaring the folder.
 
 The server is a plugin like any other, so what is worth testing is not that MCP
-works — `test_builtins.py` does that for the shape — but the two decisions it
+works — `test_mcp_tools.py` does that for the shape — but the two decisions it
 owns and the hub used to: that `skill_use` is *derived* from a signature rather
 than hand-written, and that `list_sources` answers with the folder's whole
 list, which is what makes a deleted skill stop being a hit.

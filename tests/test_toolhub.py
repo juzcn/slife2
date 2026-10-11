@@ -157,7 +157,8 @@ async def call(hub: Client, name: str, arguments: dict[str, Any] | None = None):
 #: It is a marker rather than `None` because a client factory is handed what the
 #: transport *returned*, not the transport itself.  That is how it tells the
 #: upstream it is meant to misbehave for from the ones that must keep working —
-#: the builtins being the one that must, since a hub without them lists nothing.
+#: the plugins being the ones that must, since a hub with one of them down
+#: lists nothing.
 UNUSED = object()
 
 
@@ -338,39 +339,37 @@ async def test_a_document_answers_for_itself_when_it_is_called(
 
 
 @pytest.mark.asyncio
-async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> None:
-    """Not as a shortcut in the hub, which is the whole point of them being here.
+async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() -> None:
+    """Not as a shortcut in the hub, which is the whole point of a plugin.
 
-    They are somebody's server — slife2's own — reached the way every other tool
-    is, so they are in `servers()`, they have a connection that can fail, and
-    they would appear in whatever a tool search is eventually built on.
+    It is somebody's server — slife2's own — reached the way every other tool
+    is, so it is in `servers()`, it has a connection that can fail, and it would
+    appear in whatever a tool search is eventually built on.
 
-    **And they arrive under their own names.**  A hop is not something the model
-    is told about: `now` came through a connection the same way `arxiv__search`
-    does, and a name carrying the server would be the one place the hop leaked
-    into what the model reads.
+    **And its tools arrive under their own names.**  A hop is not something the
+    model is told about: `turn_read` came through a connection the same way
+    `arxiv__search` does, and a name carrying the server would be the one place
+    the hop leaked into what the model reads.
     """
     async with Client(hub_for()) as hub:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
     # Named rather than compared against the whole list: the hub also serves
-    # tools of its own (below), and this test is about where the builtins come
-    # from, not about the list being exactly this.  The `server` field is what
-    # says whose they are — the name no longer does.
+    # tools of its own (below), and this test is about where a plugin's tools
+    # come from, not about the list being exactly this.  The `server` field is
+    # what says whose they are — the name no longer does.
     ours = {
-        tool["name"] for tool in listed.data["tools"] if tool["server"] == "builtins"
+        tool["name"] for tool in listed.data["tools"] if tool["server"] == "context"
     }
-    assert ours == {"echo", "now", "calc"}
-    # Seven sources, and each is a real one: the builtins are a plugin, the
-    # context store offers the model its two history tools (they carry the
-    # mark), `skills-server` offers `skill_use` and the four tools that install,
-    # remove and switch a playbook, and `mcp-tools`, `restapi-tools` and
-    # `cli-server` offer the tools a model uses to edit those three sections
-    # itself.  The last is this process's own — `tool_search`, `func_tool_load`
-    # and `_func_tool_unload`.
+    assert ours == {"turn_list", "turn_read"}
+    # Six sources, and each is a real one: `context` offers the model its two
+    # history tools (they carry the mark), `skills-server` offers `skill_use`
+    # and the four tools that install, remove and switch a playbook, and
+    # `mcp-tools`, `restapi-tools` and `cli-server` offer the tools a model uses
+    # to edit those three sections itself.  The last is this process's own —
+    # `tool_search`, `func_tool_load` and `_func_tool_unload`.
     assert {tool["server"] for tool in listed.data["tools"]} == {
-        "builtins",
         "cli-server",
         "context",
         "mcp-tools",
@@ -379,14 +378,14 @@ async def test_the_builtins_arrive_through_a_connection_like_anything_else() -> 
         "toolhub",
     }
 
-    # Found by name, not by position: the hub asks every plugin, so the
-    # builtins are one row among several and are not first.
-    row = next(one for one in reported.data["servers"] if one["name"] == "builtins")
+    # Found by name, not by position: the hub asks every plugin, so each is one
+    # row among several and none is first.
+    row = next(one for one in reported.data["servers"] if one["name"] == "context")
     assert row["kind"] == "plugin"
     assert row["required"] is True
     assert row["state"] == "ready"
-    assert row["tools"] == 3
-    assert row["loaded"] == 3, "a plugin's tools are in the model's list"
+    assert row["tools"] == 2
+    assert row["loaded"] == 2, "a plugin's tools are in the model's list"
 
 
 def write_skill(
@@ -797,10 +796,10 @@ async def test_a_plugins_tool_is_named_as_itself() -> None:
     """Bare, where somebody else's carries its server — in the same list.
 
     A plugin is a server slife2 starts, which is a fact about this system's
-    arrangement and not about the tool: `builtins__now` told the model about a
-    division it has no use for, and the plugin a tool is served by is reported
-    in `servers()` to whoever is debugging.  What the prefix is *for* is here
-    too: two of somebody else's servers may each offer a `search`.
+    arrangement and not about the tool: `context__turn_read` told the model
+    about a division it has no use for, and the plugin a tool is served by is
+    reported in `servers()` to whoever is debugging.  What the prefix is *for*
+    is here too: two of somebody else's servers may each offer a `search`.
     """
     async with Client(
         hub_for(connected={"fake": lambda settings: upstream_server()})
@@ -814,7 +813,7 @@ async def test_a_plugins_tool_is_named_as_itself() -> None:
 
     # The same list, the same hop, the same `_advertise`: only the category
     # differs, and it is what the name is decided by.
-    assert called("builtins") == {"echo", "now", "calc"}
+    assert called("context") == {"turn_list", "turn_read"}
     assert called("fake") == {"fake__echo", "fake__boom", "fake__read_file"}
 
 
@@ -831,7 +830,7 @@ async def test_two_plugins_cannot_offer_one_name() -> None:
     **Which of the two loses is not asserted, because it is a race.**  Both
     plugins are asked at once (the hub starts every connect together), so either
     can be the one that merges second, and the second is the one refused —
-    whether the catalogue catches it while planning ("already `builtins`'s
+    whether the catalogue catches it while planning ("already `context`'s
     tool") or the insert trips its own primary key.  What is not a race is the
     outcome: one of them holds the name, and the model's list does not come back
     short.
@@ -839,9 +838,9 @@ async def test_two_plugins_cannot_offer_one_name() -> None:
     server = FastMCP("plugin")
 
     @server.tool(meta=FOR_THE_MODEL)
-    def echo(text: str) -> str:
-        """A second `echo`, which the builtins already offer."""
-        return text
+    def turn_list() -> str:
+        """A second `turn_list`, which the context store already offers."""
+        return ""
 
     async with Client(hub_for(connected={"agent": lambda settings: server})) as hub:
         with pytest.raises(ToolError, match="a plugin is not answering"):
@@ -851,7 +850,7 @@ async def test_two_plugins_cannot_offer_one_name() -> None:
     owners = {
         one["name"]: one
         for one in reported.data["servers"]
-        if one["name"] in ("builtins", "agent")
+        if one["name"] in ("context", "agent")
     }
     assert len([one for one in owners.values() if one["state"] == "ready"]) == 1
     refused = next(one for one in owners.values() if one["state"] != "ready")
@@ -1560,7 +1559,7 @@ async def test_a_call_reaches_the_upstream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_builtin_is_called_through_the_hub_like_any_other() -> None:
+async def test_a_plugins_own_tool_is_called_through_the_hub_like_any_other() -> None:
     """Through the same proxy a third-party tool goes through: one hop to the
     server that serves it, and no branch in `call_tool` that knows it is ours.
 
@@ -1568,9 +1567,10 @@ async def test_a_builtin_is_called_through_the_hub_like_any_other() -> None:
     which of the connections behind its list a name came down.
     """
     async with Client(hub_for()) as hub:
-        result = await call(hub, "calc", {"e": "6*7"})
+        result = await call(hub, "skill_list", {})
 
-    assert result == {"text": "42", "ok": True}
+    assert result["ok"] is True
+    assert "No skills are installed" in result["text"]
 
 
 @pytest.mark.asyncio
@@ -1597,7 +1597,7 @@ async def test_an_unknown_name_says_what_is_available() -> None:
 
     assert result["ok"] is False
     assert "weather" in result["text"]
-    assert "calc" in result["text"]
+    assert "turn_list" in result["text"]
 
 
 @pytest.mark.asyncio
@@ -1639,7 +1639,7 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
-    # The builtins are still there, and the model simply has fewer tools.  So
+    # Our plugins are still there, and the model simply has fewer tools.  So
     # is everything the hub serves itself, which never depended on anybody
     # connecting — including `_func_tool_unload`, the one `_`-prefixed name a
     # model sees, because the harness's trim is recorded as a call to it.
@@ -1660,7 +1660,7 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
         for tool in listed.data["tools"]
         if tool["server"] == "skills-server"
     }
-    assert "now" in names(listed.data)
+    assert "turn_list" in names(listed.data)
     assert "broken__anything" not in names(listed.data)
 
     rows = {row["name"]: row for row in reported.data["servers"]}
@@ -1692,7 +1692,7 @@ async def test_servers_says_which_are_ready_and_what_they_offer() -> None:
 async def test_a_plugin_that_is_not_answering_fails_the_list() -> None:
     """The rule that separates a plugin from an entry in `tools:`.
 
-    A model that has quietly lost `now` and `calc` is a failure nobody can see,
+    A model that has quietly lost `turn_read` is a failure nobody can see,
     so the hub refuses rather than serving a shorter list.  An upstream that is
     merely down is the opposite case and is left out instead — see
     `test_a_broken_upstream_leaves_the_hub_working`, which is the same setup
@@ -1702,14 +1702,16 @@ async def test_a_plugin_that_is_not_answering_fails_the_list() -> None:
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("no such program: python")
 
-    async with Client(hub_for(connected={"builtins": refuses_to_start})) as hub:
+    async with Client(hub_for(connected={"skills-server": refuses_to_start})) as hub:
         with pytest.raises(ToolError, match="a plugin is not answering"):
             await hub.call_tool("list_tools", {})
 
         # The report still works, and says which one and why.
         reported = await hub.call_tool("servers", {})
 
-    row = next(one for one in reported.data["servers"] if one["name"] == "builtins")
+    row = next(
+        one for one in reported.data["servers"] if one["name"] == "skills-server"
+    )
     assert row["state"] == "failed"
     assert "no such program" in row["error"]
 
@@ -1727,7 +1729,7 @@ async def test_a_tool_from_a_server_that_never_started_is_unknown() -> None:
 
     assert result["ok"] is False
     assert "unknown tool" in result["text"]
-    assert "echo" in result["text"]
+    assert "turn_list" in result["text"]
 
 
 # --- the link, and what is done about a bad one -------------------------------
@@ -1772,7 +1774,7 @@ def clients(*, dies: bool = False, refuses: bool = False, first_dies: bool = Fal
     """A client factory, and the list it appends each client it builds to.
 
     **Fake only for the upstream under test**, which it recognises by the
-    marker its transport returned: the builtins are a required upstream, and a
+    marker its transport returned: the plugins are required upstreams, and a
     hub whose every client misbehaved would fail `list_tools` before reaching
     the case being tested.  So `made` is exactly the connections to one server,
     which is what the assertions are counts of.
@@ -1981,7 +1983,7 @@ def test_the_naming_rule_is_one_question_about_the_category() -> None:
     Stated here once because both paths ask it — the listing names a tool on the
     way in, and the row's own name is what the model reads on the way back out.
     """
-    assert model_name("builtins", "now", PLUGIN) == "now"
+    assert model_name("context", "turn_read", PLUGIN) == "turn_read"
     # Sanitised either way: a plugin is our code, and our code can still name a
     # tool something a provider rejects.
     assert model_name("db", "read.file", PLUGIN) == "read_file"
@@ -2056,15 +2058,12 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
         listed = await client.call_tool("list_tools", {})
         assert names(listed.data) == {
             "_func_tool_unload",
-            "calc",
-            "echo",
-            "now",
-            # The db's two history tools are the model's — they carry the mark —
-            # so the real db plugin brings them along.  **Ours are bare**, and
-            # `spawned__greet` below is the only name on this surface with
-            # somebody else's server in front of it: there is one set of tools
-            # here, slife2's, and a plugin's name in front of one would be a
-            # division the model has no use for.
+            # The context store's two history tools are the model's — they carry
+            # the mark — so the real plugin brings them along.  **Ours are
+            # bare**, and `spawned__greet` below is the only name on this
+            # surface with somebody else's server in front of it: there is one
+            # set of tools here, slife2's, and a plugin's name in front of one
+            # would be a division the model has no use for.
             "turn_list",
             "turn_read",
             "skill_use",

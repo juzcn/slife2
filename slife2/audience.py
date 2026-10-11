@@ -133,7 +133,8 @@ def request_meta(ctx: Any) -> Mapping[str, Any] | None:
 
     Duck-typed on purpose, so this module stays a leaf: `ctx` is a FastMCP
     `Context`, and importing that here would put a server framework in the
-    import graph of everything that reads a mark — `slife2.builtins` included.
+    import graph of everything that reads a mark — `slife2.skills_server`
+    included.
     `request_context` is `None` outside a session, which is why the chain stops
     at the first missing link rather than assuming one.
     """

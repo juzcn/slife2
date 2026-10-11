@@ -13,9 +13,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from fakes import FakeBackend, ListObserver, RaisingObserver, ScriptedTurn, text_turn
+from fakes import (
+    FakeBackend,
+    ListObserver,
+    RaisingObserver,
+    ScriptedTurn,
+    evaluate,
+    text_turn,
+)
 
-from slife2.builtins import evaluate
 from slife2.events import TextDelta, ToolCallFinished, ToolCallStarted, TurnFinished
 from slife2.llm.base import Chunk, ToolCallDelta
 from slife2.loop import AgentLoop
@@ -40,10 +46,11 @@ def tools() -> list[Tool]:
     """Two tools, defined here rather than fetched from a server.
 
     The loop is handed a registry and must not care where it came from, so its
-    tests build one instead of talking to the builtins server — what is under
-    test is the round trip, not the arithmetic.  `evaluate` is borrowed because
-    writing a second expression parser to test a loop would be silly, and `now`
-    is real because a tool that returns text is all this file needs.
+    tests build one instead of talking to a server — what is under test is the
+    round trip, not the arithmetic.  `evaluate` is `fakes`' four-function
+    calculator because writing an expression parser to test a loop would be
+    silly, and `now` is real because a tool that returns text is all this file
+    needs.
     """
 
     async def calc(arguments: dict[str, Any]) -> str:
