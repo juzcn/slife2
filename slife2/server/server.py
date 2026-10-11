@@ -50,6 +50,10 @@ because they are the price of the state:
   assistant message whose tool calls are only partly answered, which is a 400
   from every provider.  `run_turn_into` truncates back to the user's own message,
   inside the lock.
+* **Repair on a failure.**  A turn that died at the provider keeps its messages —
+  a message somebody typed must not vanish because a provider answered 500 — but
+  not its pictures: an image the provider refuses is refused by every turn after
+  it, so `send_message` drops them and says so in the error the caller reads.
 
 What statelessness bought and is now given up deliberately: a conversation store
 that can grow without bound.  See DESIGN.md §9 — trimming is the next thing, not
@@ -172,7 +176,8 @@ CHECK_NEW_INPUT = "_check_new_input"
 #: too, and the only place a wire here can carry an image: a tool result is text
 #: on every backend this system speaks.  Those parts are live-session state and
 #: nothing more; what is stored is the text plus a note naming every file
-#: (`slife2.db.strip_images`).
+#: (`slife2.attachments.image_note`), which is also what the repair below leaves
+#: when a provider refuses the picture.
 ATTACH_IMAGE = "attach_image"
 
 #: What that tool answers when there is nothing to hand over — an empty queue, or
@@ -1154,6 +1159,61 @@ def build_server(
             outcome.messages = list(loop.messages[snapshot:])
             outcome.completed_at = now()
 
+    def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
+        """What a turn that died at the provider leaves behind, and what it says.
+
+        **A failed turn stays in the conversation.**  That is `remember_turn`'s
+        rule — a message somebody typed must not vanish because a provider
+        answered 500 — and it is not what this changes.  What it changes is the
+        one part of a failed turn that can make every *later* turn fail the same
+        way: an attached image the provider refuses is carried by every request
+        that follows, because a failed turn's messages are left unbacked and ride
+        the next rebuild's carried tail verbatim.  There is then no way forward
+        at all — not a retry, not a new terminal, because the loop lives in this
+        process — and that is the state this repairs.
+
+        **The pixels go and the text stays**, which is what a restore would
+        already have left: storage never keeps an image (`db.strip_images`), so
+        the live list is brought to the shape the conversation comes back in, and
+        the note left where the picture was still names its size.  What makes
+        that affordable is that no pixel is the whole of anything: the sentence
+        that named the file is still there, and a caller that held bytes still
+        holds them — so sending it again costs one sentence or one call.
+
+        **Returned rather than raised** so `send_message` keeps one `raise` and
+        the original exception stays the chain's cause: the provider's own words
+        are the diagnosis, and a repair that swallowed them would leave a person
+        with a note about images and no reason the turn failed.
+
+        **A cancellation is not this.**  That path keeps the user's message *for*
+        the retry — the `+ 1` in `run_turn_into` is the same decision — and its
+        picture is what the retry is for, so it is returned untouched.  The test
+        is `Exception` rather than `CancelledError` for the same reason and one
+        more: an exit is not a failure either, and both derive straight from
+        `BaseException` (`slife2.loop` relies on that for the same purpose).
+
+        **Every other failure drops**, not only a provider's own error — a tool
+        hub that could not be reached would take the picture with it, and the
+        picture was never the problem.  The trade is deliberate and it is the
+        cheap one: what is lost is one attachment the person can send again in a
+        sentence, where the alternative is a conversation that cannot run at all
+        until somebody is told to kill the server.  The repairs that could tell
+        the difference are worth making the day a transient failure can be shown
+        to cost somebody their picture.
+        """
+        if not isinstance(exc, Exception):
+            return exc
+        dropped = attachments.drop(loop.messages)
+        if not dropped:
+            return exc
+        logger.warning(
+            "turn failed and %d attached image(s) were dropped for %s: %s",
+            dropped,
+            loop.agent,
+            exc,
+        )
+        return ToolError(f"{exc}\n{attachments.DROPPED_IMAGES}")
+
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
         nonlocal context_conn, hub_conn
@@ -1773,26 +1833,35 @@ def build_server(
                 if not loop.restored:
                     await restore_into(loop)
                     loop.restored = True
-                # **Before the turn.**  It replaces the message list wholesale —
-                # anything appended first, which includes this very prompt, would
-                # be destroyed by it — and it reads the list the previous turn's
-                # write maintains, so it has to wait for that write the way the
-                # next turn does.
-                chosen = await rebuild_into(loop, item.prompt)
-                observer = ProgressObserver(ctx)
-                # **Reported before the turn**, because it is a fact about what
-                # the turn runs on and not about how it went — and because the
-                # answer that follows is the thing it is about.  The
-                # discriminator is one model call the caller never sees, so this
-                # is the only place its decision is visible at all.
-                await observer.on_event(chosen)
-                # How long the list was when this turn began.  What the write
-                # below covers is what the turn *appends*, and the difference is
-                # the whole of it — see `covered` in the success branch.
-                before = len(loop.messages)
                 try:
+                    # **The rebuild is inside this `try` too**, and not for
+                    # tidiness: when the discriminator is asked a question it
+                    # makes a model call carrying these same messages
+                    # (`slife2.context_server._ask_model`), so the very failure
+                    # this block repairs can arrive from here rather than from the
+                    # turn.  Anything that reaches a provider on this
+                    # conversation's behalf belongs on the repaired side of the
+                    # line.
+                    #
+                    # **Before the turn.**  It replaces the message list
+                    # wholesale — anything appended first, which includes this
+                    # very prompt, would be destroyed by it — and it reads the
+                    # list the previous turn's write maintains, so it has to wait
+                    # for that write the way the next turn does.
+                    chosen = await rebuild_into(loop, item.prompt)
+                    observer = ProgressObserver(ctx)
+                    # **Reported before the turn**, because it is a fact about
+                    # what the turn runs on and not about how it went — and
+                    # because the answer that follows is the thing it is about.
+                    # The discriminator is one model call the caller never sees,
+                    # so this is the only place its decision is visible at all.
+                    await observer.on_event(chosen)
+                    # How long the list was when this turn began.  What the write
+                    # below covers is what the turn *appends*, and the difference
+                    # is the whole of it — see `covered` in the success branch.
+                    before = len(loop.messages)
                     await run_turn_into(loop, item, observer, outcome)
-                except BaseException:
+                except BaseException as exc:
                     # A turn that happened is recorded however it ended, and this
                     # is deliberately one clause rather than a handler per ending
                     # — see `remember_turn` for why the rule is written that way.
@@ -1813,9 +1882,18 @@ def build_server(
                     # rather than fetching a turn whose id the list on disk may or
                     # may not have by then.  Appending here would race that write
                     # and could count the same messages twice.
+                    # **Repaired before it is recorded**, so the row and the live
+                    # conversation are one list and not two: the record writes
+                    # `outcome.messages`, which holds this same list's own
+                    # objects, and a write that serialised the refused bytes
+                    # while the live list had already let them go is the
+                    # disagreement `repaired_error` exists to prevent.
+                    repaired = repaired_error(loop, exc)
                     if outcome.messages:
                         detach(record(loop, item, outcome))
-                    raise
+                    if repaired is exc:
+                        raise
+                    raise repaired from exc
                 else:
                     turn_id = await record(loop, item, outcome)
                     if turn_id is not None:

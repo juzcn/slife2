@@ -142,3 +142,55 @@ def test_nothing_to_attach_to_is_answered_rather_than_raised() -> None:
     )
     assert attachments.inject([], ["data:x"]) is False
     assert attachments.inject([Message(role="user", content="hi")], []) is False
+
+
+# --- taking them back off -----------------------------------------------------
+
+
+def test_dropping_an_image_leaves_a_note_and_says_how_many_went() -> None:
+    """The repair a turn that died at the provider needs, and it is in place.
+
+    In place because what it repairs is the live list the *next* turn runs on:
+    a copy would leave the refused parts exactly where they were, which is the
+    state this exists to end.  The count is the answer because it is what a
+    caller has to say out loud — a failure with a picture in it is not an
+    ordinary failure.
+    """
+    messages: list[Message] = [
+        Message(role="user", content="earlier"),
+        Message(
+            role="user",
+            content=attachments.parts(
+                "看看这个", ["data:image/png;base64," + "A" * 4000]
+            ),
+        ),
+    ]
+
+    assert attachments.drop(messages) == 1
+    assert messages[0].content == "earlier", "a message with no image is untouched"
+    assert messages[1].content[0] == {"type": "text", "text": "看看这个"}
+    note = messages[1].content[1]
+    assert note["type"] == "text"
+    assert "image/png" in note["text"] and "not stored" in note["text"]
+    assert "~2 KB" in note["text"], "the size is what a reader decides on"
+    assert "A" * 100 not in note["text"], "the payload does not survive as text"
+    assert attachments.drop(messages) == 0, "there is nothing left to drop"
+
+
+def test_the_drop_understands_the_wire_shape_too() -> None:
+    """`inject` duck-types a dict and a `Message`; so does the drop.
+
+    Both shapes are real here: the live conversation is `Message` objects and
+    what a store hands back is the wire's dicts.
+    """
+    wire = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA"}}
+            ],
+        }
+    ]
+
+    assert attachments.drop(wire) == 1
+    assert wire[0]["content"][0]["text"].startswith("[image not stored: image/jpeg")

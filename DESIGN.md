@@ -507,6 +507,15 @@ avoided:
   message. The `+ 1` is load-bearing: the loop appends the user's message itself,
   so truncating to the snapshot would delete the very message this arrangement
   exists to not lose.
+- **The image repair**, which is that same edge from the other side and no
+  cancellation at all. A turn that dies at the provider keeps its messages — that
+  is `remember_turn`'s rule — and one part of it can make every later turn the
+  same 400: an attached image the provider refuses is carried by every request
+  that follows, because a failed turn's messages are unbacked and ride the next
+  rebuild's carried tail verbatim. In a process that outlives the terminal there
+  is then no way back to a usable conversation. So the repair drops the pixels
+  and keeps the text, which is exactly what a restore would have left — storage
+  never keeps an image — and says so in the error the caller reads.
 - **A context that has to be decided rather than accumulated**, which is the
   fifth and the one this design arrived at last. A conversation's turns are
   *stored* — that is what makes the state survivable — and which of them a turn
@@ -639,6 +648,16 @@ again. What the
 rule buys is that a turn is text a model can read back: a ten-megabyte
 screenshot in the row would be megabytes carried into every later read of that
 turn, to say what one line already says.
+
+**A picture leaves the live conversation the same way, and for a sharper
+reason.** A provider that refuses one refuses it on every request that carries
+it, and a failed turn's messages are re-sent by every turn after it — so one bad
+attachment is a conversation with no way forward at all. The agent server drops
+the pixels when a turn dies there and names what it did in the error
+(`slife2.attachments.drop`, whose note is the one the row keeps). What that buys
+is that the live list and the record never disagree about whether a picture is
+still in hand: the picture is live state and nothing else, on either side of the
+save.
 
 So a question the schema cannot answer today can be asked of the same rows later
 without a migration — and the columns the later features need already exist,

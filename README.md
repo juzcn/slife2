@@ -180,6 +180,13 @@ a turn that needs the picture again attaches it again from that name.
 Attaching it again is what sends it again — the file is named in the prompt, so
 a turn read back a month later still says which picture it was about.
 
+**A picture the provider will not read is the one thing that could take the
+conversation with it**, because the bytes it refused would be sent again by every
+turn that follows, and each one would fail the same way. So a turn that dies
+there leaves the pixels behind: the live conversation drops them, with the same
+note the log keeps and a word in the error saying so. Nothing is lost that the
+prompt does not already name.
+
 ## Context
 
 A conversation does not accumulate a context; it **chooses** one. `slife2-context`

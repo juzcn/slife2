@@ -40,6 +40,7 @@ from fakes import (
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2 import attachments
 from slife2.config import DEFAULT_AGENT, ModelSettings, default_config
 from slife2.context import TURN_PREFIX, TURN_SUFFIX
 from slife2.events import TurnEvent, decode
@@ -1361,6 +1362,132 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
     assert isinstance(asked.content, str)
     assert asked.content.startswith("look")
     assert "data:image" not in asked.content
+
+
+def carries_an_image(messages) -> bool:
+    """Whether a request would carry a picture — the one thing this fake refuses.
+
+    Of *parts* and not of content: a message repaired by the drop is still a list
+    of parts, and a list of text is what every provider accepts.
+    """
+    return any(
+        isinstance(message.content, list)
+        and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in message.content
+        )
+        for message in messages
+    )
+
+
+class RefusesImages(FakeBackend):
+    """A provider that answers a request carrying an image with a 400.
+
+    **Nothing is scripted for that call and none is consumed**, because the
+    request itself is the failure: it is not one turn's bad luck but the request
+    every later turn would send, which is what the repair is about.
+    """
+
+    def stream(self, messages, tools) -> Stream:
+        if carries_an_image(messages):
+            self.calls.append((list(messages), list(tools)))
+            raise RuntimeError("400: You have uploaded an unsupported image")
+        return super().stream(messages, tools)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_image_does_not_end_the_conversation(context, hub) -> None:
+    """The repair: the pixels go, the words stay, and the next turn runs.
+
+    What is wrong without it is not the failed turn — that is recorded, and the
+    person's own message stays in the conversation — but every turn *after* it.
+    A failed turn's messages are left unbacked, so the next rebuild carries them
+    verbatim, and a picture the provider refused is refused again by every
+    request that follows.  The loop lives in the server process and outlives the
+    terminal, so there is no restart that gets back to a usable conversation:
+    that is the state this asserts against.
+    """
+    backend = RefusesImages(text_turn("the answer after"))
+    server = build_server(
+        default_config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    with pytest.raises(Exception, match="unsupported image") as failed:
+        await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
+    # Told, rather than left to notice later that the picture stopped being sent.
+    assert attachments.DROPPED_IMAGES in str(failed.value)
+
+    answer = await send(server, "hi")
+
+    assert answer.data["text"] == "the answer after"
+    sent = next(m for m in backend.calls[1][0] if m.role == "user")
+    assert without_footnote(sent.content[0]["text"]) == "what is this?"
+    assert sent.content[1]["type"] == "text"
+    assert "image not stored" in sent.content[1]["text"]
+    assert "data:image" not in sent.content[1]["text"], "the bytes are gone"
+
+
+@pytest.mark.asyncio
+async def test_the_models_own_attachment_is_repaired_the_same_way(context) -> None:
+    """The route the report came in on: `attach_image`, then a refused call.
+
+    Nothing here distinguishes a picture the model attached from one a caller
+    passed — the repair works on the conversation rather than on who put the
+    picture in it — and that is the property worth having, since naming a file
+    in a sentence is the way a person actually sends one.
+    """
+    backend = RefusesImages(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="let me look",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="attach_image",
+                        arguments={"sources": ["data:image/png;base64,AAAA"]},
+                    ),
+                ),
+                stop_reason="tool_calls",
+            )
+        ),
+        text_turn("a cat, and the next turn works"),
+    )
+    hub_client, server = wired(backend, context)
+
+    async with hub_client:
+        with pytest.raises(Exception, match="unsupported image"):
+            await send(server, "看看这张图 D:\\shots\\a.png")
+        answer = await send(server, "hi")
+
+    assert answer.data["text"] == "a cat, and the next turn works"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_with_no_image_anywhere_is_raised_as_it_was(
+    context, hub
+) -> None:
+    """The repair stays quiet when there is nothing to repair.
+
+    One handler catches every failure, so this is the branch that keeps an
+    ordinary one ordinary: a sentence about pictures on a turn that never had one
+    is the system explaining a thing that did not happen.
+    """
+
+    class Refusing(FakeBackend):
+        """The `:932` shape: a model call that fails the way a 500 does."""
+
+        def stream(self, messages, tools) -> Stream:
+            self.calls.append((list(messages), list(tools)))
+            raise RuntimeError("the provider answered 500")
+
+    server = build_server(
+        default_config(), context_client=context, hub_client=hub, backend=Refusing()
+    )
+
+    with pytest.raises(Exception, match="500") as failed:
+        await send(server, "one")
+
+    assert attachments.DROPPED_IMAGES not in str(failed.value)
 
 
 # --- the system prompt -------------------------------------------------------

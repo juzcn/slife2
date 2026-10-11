@@ -15,6 +15,7 @@ import sqlite3
 
 import pytest
 
+from slife2 import attachments
 from slife2.clock import now
 from slife2.db import (
     TOOL_RESULT_CHARS,
@@ -23,6 +24,7 @@ from slife2.db import (
     message_text,
     safe_agent_name,
     store_for,
+    strip_images,
 )
 from slife2.paths import DATA_ENV_VAR
 from slife2.timeutil import InvalidTimeBound
@@ -507,6 +509,21 @@ async def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> N
     await store.save_turn(embedder=EMBEDDER, messages=messages, created_at=now())
 
     assert messages[0]["content"][1]["type"] == "image_url"
+
+
+def test_the_stored_note_is_the_one_the_live_drop_leaves() -> None:
+    """One sentence for one attachment, whichever side dropped the pixels.
+
+    Two spellings would be two claims about the same picture, and the model has
+    no way to tell which of them is the lie — the stored note is what a restored
+    turn reads, and after a turn dies at the provider it is what the live
+    conversation reads too.
+    """
+    part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+    stored = strip_images([{"role": "user", "content": [part]}])
+
+    assert stored[0]["content"][0]["text"] == attachments.image_note(part)
 
 
 @pytest.mark.asyncio

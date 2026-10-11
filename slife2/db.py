@@ -89,7 +89,7 @@ from typing import Any, Protocol
 
 import sqlite_vec
 
-from slife2 import textindex
+from slife2 import attachments, textindex
 from slife2.clock import now
 from slife2.context import normalise_ids
 from slife2.paths import agent_dir
@@ -483,7 +483,10 @@ def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Returns new dicts; the caller's list is untouched, because the live
     conversation is still using the image — the model that just read it may be
-    reasoning about it in this very turn.
+    reasoning about it in this very turn.  That is the one difference between
+    this and `slife2.attachments.drop`, which answers the same question in place
+    for a turn that has already ended badly; the note they leave is one function,
+    so the row and the live list cannot come to describe one attachment two ways.
     """
     stripped: list[dict[str, Any]] = []
     for message in messages:
@@ -494,25 +497,11 @@ def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "image_url":
-                parts.append({"type": "text", "text": _image_note(part)})
+                parts.append({"type": "text", "text": attachments.image_note(part)})
             else:
                 parts.append(part)
         stripped.append({**message, "content": parts})
     return stripped
-
-
-def _image_note(part: dict[str, Any]) -> str:
-    """What one attached image leaves behind."""
-    url = part.get("image_url")
-    url = url.get("url") if isinstance(url, dict) else None
-    media_type, _, payload = str(url or "").partition(";base64,")
-    media_type = media_type.removeprefix("data:") or "image"
-    # Three quarters: base64 carries four characters per three bytes.
-    size = f", ~{len(payload) * 3 // 4 // 1024} KB" if payload else ""
-    return (
-        f"[image not stored: {media_type}{size} — the prompt names the file, "
-        f"and attaching it again sends it]"
-    )
 
 
 # --- reading a turn back ------------------------------------------------------

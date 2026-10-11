@@ -27,9 +27,17 @@ worse than either.
 **user message** — the only place a wire here can carry an image, since a tool
 result is text on every backend this system speaks.  They are live-session state
 and nothing more: what is stored is the text plus a note naming every file
-(`slife2.db`'s `strip_images`), so a restored conversation is text-only and a
-turn that needs the picture again attaches it again — the tool's own answer in
-its history is what names the file to re-attach.
+(`image_note`, which `slife2.db`'s save path uses too), so a restored conversation
+is text-only and a turn that needs the picture again attaches it again — the
+tool's own answer in its history is what names the file to re-attach.
+
+**And a turn that dies at the provider drops them.**  A picture a provider
+refuses is refused again on every request that carries it, and a failed turn's
+messages are re-sent by every turn that follows — so one bad attachment would
+otherwise end the conversation, and in a server process that outlives the
+terminal there would be no way back.  The repair is `drop`, and what it leaves is
+exactly what a restore would have left: the live list and the stored row must
+never disagree about whether a picture is still in hand.
 """
 
 from __future__ import annotations
@@ -196,3 +204,81 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
         {"type": "text", "text": prompt},
         *({"type": "image_url", "image_url": {"url": url}} for url in urls),
     ]
+
+
+def image_note(part: dict[str, Any]) -> str:
+    """What one image part leaves behind when the pixels are not kept.
+
+    **One function for both keepers**, because the sentence is model-facing text
+    twice over: a restored turn reads it, and — after `drop` — the live
+    conversation reads it.  Two spellings would be two claims about one
+    attachment, and the model has no way to tell which of them is the lie.
+
+    The size is derived from the payload rather than stored: base64 carries four
+    characters per three bytes, so the arithmetic is exact enough for a reader
+    deciding whether to ask for the picture again.
+    """
+    url = part.get("image_url")
+    url = url.get("url") if isinstance(url, dict) else None
+    media_type, _, payload = str(url or "").partition(";base64,")
+    media_type = media_type.removeprefix("data:") or "image"
+    size = f", ~{len(payload) * 3 // 4 // 1024} KB" if payload else ""
+    return (
+        f"[image not stored: {media_type}{size} — the prompt names the file, "
+        f"and attaching it again sends it]"
+    )
+
+
+#: What a *person* is told when `drop` has just taken their picture away, as
+#: opposed to what the model reads where the picture was (`image_note`).
+#:
+#: Two audiences and so two sentences, which is not the two spellings
+#: `image_note` exists to prevent: that rule is about one attachment described
+#: twice *to the model*.  This one is an error line, and it has to say what the
+#: note cannot — that something went wrong, and that nothing is broken.
+DROPPED_IMAGES = (
+    "The turn failed, so the attached image(s) were dropped from the "
+    "conversation — a picture the provider refuses is refused by every turn "
+    "after it. Naming the file again in a new message attaches it again."
+)
+
+
+def drop(messages: MutableSequence[Any]) -> int:
+    """Replace every attached image in *messages* with a note.  `how many went`.
+
+    **In place, which is the caller's need rather than a convenience.**  This runs
+    when a turn has died at the provider, and what it repairs is the live list the
+    *next* turn runs on — a copy would leave the poisoned parts exactly where they
+    were.  `slife2.db.strip_images` answers the same question for a list on its way
+    to disk and it copies instead, because its caller's conversation may still be
+    reasoning about the picture; that is the whole of the difference between them,
+    and the note they leave is `image_note`.
+
+    **The count rather than a boolean, because it is what the caller has to say.**
+    A turn that failed with a picture in the conversation has been repaired, and
+    the person waiting on it is owed that fact; a turn that failed with no picture
+    anywhere is an ordinary failure, and a sentence about images there would be
+    noise about something that did not happen.
+
+    **Whole messages, not the tail.**  The caller hands the conversation rather
+    than the turn, because a picture an earlier turn already got an answer about
+    is still re-sent by every request — and because what this produces is what a
+    restore would have produced, where no turn keeps one.  The cost is that the
+    model cannot look at that older picture again without being given it again,
+    which is the same cost restoring has always had.
+
+    Only parts can hold an image, so a message whose content is still a plain
+    string is left alone rather than rewritten into parts it does not need.
+    """
+    dropped = 0
+    for message in messages:
+        content = (
+            message.get("content") if isinstance(message, dict) else message.content
+        )
+        if not isinstance(content, list):
+            continue
+        for index, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                content[index] = {"type": "text", "text": image_note(part)}
+                dropped += 1
+    return dropped
