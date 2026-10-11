@@ -35,6 +35,7 @@ from slife2.config import (
     AGENT_SERVER_NAME,
     API_BACKENDS,
     API_SERVER_NAMES,
+    CABINET_SERVER_NAME,
     CLI_SERVER_NAME,
     CONTEXT_SERVER_NAME,
     EMBEDDINGS_SERVER_NAME,
@@ -115,6 +116,9 @@ EMBEDDINGS_SERVER = ("slife2.llm.embeddings_server", EMBEDDINGS_SERVER_NAME, "de
 #: offers the model is its own four tools, and the status tool is the one that
 #: works before any login exists, which is the state it starts in.
 WECHAT_SERVER = ("slife2.wechat", WECHAT_SERVER_NAME, "wechat_check_status")
+#: The cabinet.  It identifies itself by `note_list`, which is a tool it serves
+#: before anything has been written to it — the state a fresh cabinet is in.
+CABINET_SERVER = ("slife2.cabinet", CABINET_SERVER_NAME, "note_list")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -125,6 +129,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "restapi-tools": RESTAPI_TOOLS,
     "toolhub": TOOLHUB_SERVER,
     "wechat": WECHAT_SERVER,
+    "cabinet": CABINET_SERVER,
     "agent": AGENT_SERVER,
 }
 
@@ -602,6 +607,10 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # messages it cannot deliver.  Its own call is what notices, so this is
     # ordering rather than correctness, which is what every edge here is.
     "wechat": ("agent",),
+    # The cabinet embeds through the embeddings server, like the context store:
+    # a write places its vector in the same call, so a cabinet that cannot embed
+    # stores nothing.
+    "cabinet": ("embeddings",),
     "toolhub": (
         "embeddings",
         "context",
@@ -610,6 +619,7 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "mcp-tools",
         "restapi-tools",
         "wechat",
+        "cabinet",
     ),
 }
 

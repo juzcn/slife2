@@ -103,6 +103,7 @@ uv run slife2-cli              # the cli: registry,          :8032
 uv run slife2-mcp-tools        # holds the tools: servers,   :8033
 uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-wechat           # WeChat, a login per agent,  :8030
+uv run slife2-cabinet          # notes, diary, files,        :8035
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -484,6 +485,48 @@ than quietly continuing with fewer tools, while a server that is somebody else's
 is reported and left out. A model that has quietly lost `turn_read` is a
 failure nobody can see, and that is what makes the rule worth having.
 
+### The cabinet
+
+Your own notes, a diary, saved files and reports, in one place that a search
+covers all at once and a person can read in an editor. Four kinds, and the
+difference between them is what a *document* is:
+
+| kind | keyed by | a second write |
+|---|---|---|
+| **note** | a subject you choose | replaces it |
+| **diary** | the date | appends a section |
+| **file** | its path inside the cabinet | copies the file in |
+| **report** | a title | appends a section |
+
+A note and a saved file are documents — the second write *is* what it holds —
+and a day and a title are logs, because two entries under one date are two facts
+about it and nothing in the later text says which part of the earlier one it
+replaces. That is why only the two document kinds have a remove tool.
+
+**Everything is written twice**, and one of the two is for you: the row is what
+`cabinet_search` reads, and the same document lands as markdown under
+`<data>/<agent>.files/` — `notes/Python.md`, `diary/2026-10-11.md`,
+`reports/weekly.md` — which is what you open, edit or delete without asking
+anybody. A saved file's bytes live there too (`files/<category>/`) and are never
+put in the index: `file_read` returns a file's *text*, and refuses a PDF or an
+image by saying what it is rather than decoding it into a page of replacement
+characters. Text in another encoding is read and the encoding named on the first
+line, because a *silent* wrong decode is the one outcome worth refusing.
+
+**`cabinet_search` takes words or sentences**, the same two inputs
+`tool_search` takes: `keywords` are words that must all be there (a name, a
+path, a symbol), and `sentences` are questions matched by meaning — several are
+several questions, and each one can only add results. A file has no text of its
+own, so `cabinet_summarize` is how it becomes findable by what it *is* rather
+than by its name; writing a summary for a file re-embeds it, because its
+description is part of what its vector was built from.
+
+Two things it does not do, both by name: **`file_save` does not fetch a URL**
+(it copies files already on this machine — v1's URL half came with an SSRF guard
+that is a change of its own), and **there is no `grep` leg** (DESIGN.md §9
+defers v1's third search mode for the whole system, and the cabinet inherits
+that rather than growing a second regex engine).
+
 ### WeChat
 
 `slife2-wechat` connects one WeChat account per agent, over iLink's hosted
@@ -532,6 +575,9 @@ runtime state of what is running, and the turns they produced:
   skills/                          <name>/SKILL.md — playbooks, written by you
   wechat_<agent>.yaml              a WeChat login per agent, written by the
                                    plugin when a scan is confirmed (~24h)
+  <agent>.files/                   the cabinet: notes/, diary/, reports/ as
+                                   markdown and files/ as the bytes themselves,
+                                   with `.index.db` (the search index) inside
 ```
 
 **Where that folder is depends on what you are running.** In a checkout it is
@@ -602,6 +648,12 @@ slife2/
 ├─ ilink.py           # the iLink ClawBot protocol, as a library: the QR
 │                     #   handshake, the long poll, and the two envelopes that
 │                     #   mean something other than what their status says
+├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
+│                     #   as sixteen tools, and the byte half of a saved file —
+│                     #   what is copied in, what is read back, what is refused
+├─ cabinet_store.py   # the cabinet's index, as a library: one table for four
+│                     #   kinds, one FTS index, one vector index, and the
+│                     #   markdown mirror written in the same operation
 ├─ toolhub.py         # slife2-toolhub: the model's tools and the *set* they
 │                     #   belong to — the naming rule, the gate, the budget, and
 │                     #   the calls, which it routes to whoever holds the source

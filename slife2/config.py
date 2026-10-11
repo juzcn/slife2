@@ -183,6 +183,7 @@ CLI_SERVER_NAME = "slife2-cli"
 TOOLHUB_SERVER_NAME = "slife2-toolhub"
 EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 WECHAT_SERVER_NAME = "slife2-wechat"
+CABINET_SERVER_NAME = "slife2-cabinet"
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
@@ -233,6 +234,7 @@ LOCAL_SERVERS = (
     "mcp-tools",
     "restapi-tools",
     "wechat",
+    "cabinet",
     "toolhub",
     "agent",
 )
@@ -889,6 +891,11 @@ def default_config() -> Config:
             # per agent and a conversation with somebody off this machine.  Port
             # 8030, which v1's `builtins` had and nothing has had since.
             "wechat": ServerSettings(port=8030),
+            # The private cabinet: notes, a diary, saved files and reports, one
+            # corpus per agent under `<data>/<agent>.files/`.  It reads no config
+            # section of its own — a cabinet is written by the model and by a
+            # person, never configured — so what is here is its address.
+            "cabinet": ServerSettings(port=8035),
             # The model's tools, and the only process that decides what they
             # are.  It holds no credential and no connection to anybody's
             # server: every plugin above is asked for a tool list and for the
@@ -1593,6 +1600,7 @@ __all__ = [
     "EMBEDDINGS_SERVER_NAME",
     "EmbeddingProviderSettings",
     "EmbeddingsSettings",
+    "CABINET_SERVER_NAME",
     "LOCAL_SERVERS",
     "MCP_TOOLS_SERVER_NAME",
     "RESTAPI_TOOLS_SERVER_NAME",

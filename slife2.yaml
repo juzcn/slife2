@@ -126,6 +126,16 @@ servers:
     host: 127.0.0.1
     port: 8030
     path: /mcp
+  # The private cabinet: notes, a diary, saved files, reports — the four kinds
+  # are one searchable corpus, and each agent's is its own directory
+  # (`<data>/<agent>.files/`) with markdown mirrors a person can read.  Like
+  # `wechat`, it reads no config section at all: a cabinet is written, not
+  # configured.  Its bytes and mirrors live beside the data, not in a database
+  # anyone has to open.
+  cabinet:
+    host: 127.0.0.1
+    port: 8035
+    path: /mcp
   # Other people's servers, held by the process that owns the section they are
   # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
   # the model anything — each holds its entries' connections and *declares* them

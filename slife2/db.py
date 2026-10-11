@@ -576,7 +576,7 @@ def searchable_text(
     normalized by the same rule (`slife2.textindex`) and this is the one place
     that rule is applied to stored text.
 
-    Through `_storable` like the turn itself, and for the same reason: this
+    Through `storable` like the turn itself, and for the same reason: this
     string is bound to SQLite too, so a lone surrogate arriving in an answer
     would fail the insert and take the turn with it.
     """
@@ -586,7 +586,7 @@ def searchable_text(
         summary,
         tags,
     ]
-    return _storable(textindex.normalize("\n".join(part for part in parts if part)))
+    return storable(textindex.normalize("\n".join(part for part in parts if part)))
 
 
 def _tool_call_text(messages: list[dict[str, Any]]) -> list[str]:
@@ -624,7 +624,7 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     turn, and a vector index that depended on them would have to be rebuilt
     every time one was added.
 
-    Through `_storable` for the reason `searchable_text` gives: this string goes
+    Through `storable` for the reason `searchable_text` gives: this string goes
     out as JSON on its way to a model, and a lone surrogate cannot be encoded.
     """
     parts = [
@@ -632,7 +632,7 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
         *_tool_call_text(messages),
         assistant_message(messages),
     ]
-    return _storable("\n\n".join(part for part in parts if part))
+    return storable("\n\n".join(part for part in parts if part))
 
 
 def embed_chunks(
@@ -697,7 +697,7 @@ def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, f
     return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
 
 
-def _time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
+def time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
     """`(clauses, params)` for a `created_at` window.
 
     **Clauses and not a `WHERE`**, because there are three readers of this one
@@ -723,7 +723,7 @@ def _time_window(since: str | None, until: str | None) -> tuple[list[str], list[
     return clauses, params
 
 
-def _where(clauses: list[str]) -> str:
+def where_clause(clauses: list[str]) -> str:
     """Those clauses as the tail of a query that already has a `WHERE`."""
     return f"AND {' AND '.join(clauses)}" if clauses else ""
 
@@ -765,7 +765,7 @@ class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
-def _vector_ddl(dimension: int, table: str = "turn_vec") -> str:
+def vector_ddl(dimension: int, table: str = "turn_vec") -> str:
     """The vector index's DDL, for one width.
 
     `distance_metric=cosine` is declared rather than left to the default, and
@@ -800,7 +800,7 @@ def as_similarity(distance: float) -> float:
     the farthest candidates and drop the nearest, and the keyword leg's exempt
     candidates would hide it.
 
-    Derived rather than assumed: `_vector_ddl` is where the metric is declared,
+    Derived rather than assumed: `vector_ddl` is where the metric is declared,
     and its docstring is where the arithmetic is argued.
     """
     return 1.0 - distance
@@ -858,7 +858,9 @@ def _load_vector_index(connection: sqlite3.Connection) -> None:
         connection.enable_load_extension(False)
 
 
-def _meta(connection: sqlite3.Connection, table: str = "index_meta") -> dict[str, str]:
+def index_meta(
+    connection: sqlite3.Connection, table: str = "index_meta"
+) -> dict[str, str]:
     """What each index was built with, as recorded in the file itself.
 
     `table` is a parameter because the catalogue has a `meta` table of its own:
@@ -871,7 +873,7 @@ def _meta(connection: sqlite3.Connection, table: str = "index_meta") -> dict[str
     }
 
 
-def _set_meta(
+def set_index_meta(
     connection: sqlite3.Connection, table: str = "index_meta", **values: str
 ) -> None:
     connection.executemany(
@@ -881,7 +883,7 @@ def _set_meta(
     )
 
 
-def _connect_to(path: Path) -> sqlite3.Connection:
+def connect_to(path: Path) -> sqlite3.Connection:
     """One connection to one database file, with this module's pragmas.
 
     A connection per call rather than one held open.  SQLite connections are
@@ -922,7 +924,7 @@ class TurnStore:
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        return _connect_to(self.path)
+        return connect_to(self.path)
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -980,11 +982,11 @@ class TurnStore:
         head-and-tail digest, and an attached image becomes a note saying it was
         there (`strip_images`).
 
-        The document is passed through `_storable` first, for the reason given
+        The document is passed through `storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of
         what was in it.  `ensure_ascii=False` is kept — the alternative escapes
         every non-Latin character, and a Chinese conversation should not pay six
-        bytes a character to sit in the database — because `_storable` handles
+        bytes a character to sit in the database — because `storable` handles
         the one thing the escaping would have protected against.
 
         **The embedding is awaited before the transaction opens.**  A write
@@ -998,7 +1000,7 @@ class TurnStore:
         """
         stored = strip_images(messages)
         record = _Stored(
-            document=_storable(
+            document=storable(
                 json.dumps(compact_tool_results(stored), ensure_ascii=False)
             ),
             search=searchable_text(stored),
@@ -1092,7 +1094,7 @@ class TurnStore:
         """
         limit = page_limit(limit)
         offset = max(0, int(offset))
-        clauses, params = _time_window(since, until)
+        clauses, params = time_window(since, until)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
             # One read transaction for both statements.  They are two reads of a
@@ -1202,7 +1204,7 @@ class TurnStore:
                 marks = ",".join("?" * len(chunk))
                 rows = connection.execute(
                     f"SELECT rowid AS turn_id FROM turn WHERE rowid IN ({marks})"
-                    f" {_where(clauses)}",
+                    f" {where_clause(clauses)}",
                     (*chunk, *params),
                 ).fetchall()
                 allowed |= {int(row["turn_id"]) for row in rows}
@@ -1218,7 +1220,7 @@ class TurnStore:
         lets the caller exempt these from a similarity floor rather than drop
         them all (see `recall`).
         """
-        clauses, params = _time_window(since, until)
+        clauses, params = time_window(since, until)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order = "DESC" if newest_first else "ASC"
         with self._connect() as connection:
@@ -1285,7 +1287,7 @@ class TurnStore:
                 "embedder was given"
             )
         expression = textindex.match_expression(query)
-        clauses, params = _time_window(since, until)
+        clauses, params = time_window(since, until)
         over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
         # The keyword leg is windowed in SQL (its `rank` orders every match, so
         # limiting after the window is still the best inside it); the semantic
@@ -1343,14 +1345,14 @@ class TurnStore:
         caller is a save that is embedding one turn — putting the rest back is
         `sync_indexes`, which startup runs before anything is served.
         """
-        identity = _vector_identity(embedder)
+        identity = vector_identity(embedder)
         with self._connect() as connection:
-            if self._meta(connection).get("vector_identity", "") == identity:
+            if self.index_meta(connection).get("vector_identity", "") == identity:
                 return
             connection.execute("DROP TABLE IF EXISTS turn_vec")
             connection.execute("DELETE FROM turn_chunk")
-            connection.execute(_vector_ddl(embedder.dimension))
-            self._set_meta(
+            connection.execute(vector_ddl(embedder.dimension))
+            self.set_index_meta(
                 connection,
                 vector_identity=identity,
                 vector_dim=str(embedder.dimension),
@@ -1370,7 +1372,7 @@ class TurnStore:
         """
         with self._connect() as connection:
             if (
-                self._meta(connection).get("text_version", "")
+                self.index_meta(connection).get("text_version", "")
                 == textindex.RULES_VERSION
             ):
                 return
@@ -1390,7 +1392,7 @@ class TurnStore:
                     for row in rows
                 ],
             )
-            self._set_meta(connection, text_version=textindex.RULES_VERSION)
+            self.set_index_meta(connection, text_version=textindex.RULES_VERSION)
 
     def _turns_without_vectors(self) -> list[tuple[int, str]]:
         """Every turn the vector index does not hold, oldest first.
@@ -1445,10 +1447,10 @@ class TurnStore:
                     " (SELECT DISTINCT turn_id FROM turn_chunk)"
                 ).fetchone()[0]
             )
-            meta = self._meta(connection)
+            meta = self.index_meta(connection)
 
         problems: list[str] = []
-        if meta.get("vector_identity", "") != _vector_identity(embedder):
+        if meta.get("vector_identity", "") != vector_identity(embedder):
             problems.append(
                 "the vector index was built by a different model or a different "
                 "text contract than the configured one"
@@ -1476,13 +1478,13 @@ class TurnStore:
         }
 
     @staticmethod
-    def _meta(connection: sqlite3.Connection) -> dict[str, str]:
+    def index_meta(connection: sqlite3.Connection) -> dict[str, str]:
         """What each index was built with, as recorded in the file itself."""
-        return _meta(connection)
+        return index_meta(connection)
 
     @staticmethod
-    def _set_meta(connection: sqlite3.Connection, **values: str) -> None:
-        _set_meta(connection, **values)
+    def set_index_meta(connection: sqlite3.Connection, **values: str) -> None:
+        set_index_meta(connection, **values)
 
     # --- finding a turn by what it was about ----------------------------------
 
@@ -1514,7 +1516,7 @@ class TurnStore:
                 speaks, for the reason `turns` gives.
         """
         expression = textindex.match_expression(query)
-        clauses, params = _time_window(since, until)
+        clauses, params = time_window(since, until)
         limit = page_limit(limit)
         over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
 
@@ -1552,7 +1554,7 @@ class TurnStore:
             rows = connection.execute(
                 "SELECT f.rowid AS turn_id FROM turn_fts f"
                 " JOIN turn t ON t.rowid = f.rowid"
-                f" WHERE turn_fts MATCH ? {_where(clauses)}"
+                f" WHERE turn_fts MATCH ? {where_clause(clauses)}"
                 " ORDER BY rank LIMIT ?",
                 (expression, *params, limit),
             ).fetchall()
@@ -1608,7 +1610,7 @@ class TurnStore:
 
         `1 - distance` is a similarity only because the DDL says `cosine` — on an
         L2 table that arithmetic yields numbers that are plausible and wrong
-        rather than visibly broken, which is what `_vector_ddl` exists to
+        rather than visibly broken, which is what `vector_ddl` exists to
         prevent.
         """
         with self._connect() as connection:
@@ -1642,14 +1644,14 @@ class TurnStore:
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT rowid AS turn_id, * FROM turn WHERE rowid IN ({marks})"
-                f" {_where(clauses)}",
+                f" {where_clause(clauses)}",
                 (*turn_ids, *params),
             ).fetchall()
         found = {int(row["turn_id"]): _row_to_record(row) for row in rows}
         return [found[turn_id] for turn_id in turn_ids if turn_id in found][:limit]
 
 
-def _vector_identity(embedder: Embedder) -> str:
+def vector_identity(embedder: Embedder) -> str:
     """What the vector index was built with, as one comparable string.
 
     The text contract is part of it and not only the model, because a vector is
@@ -1752,7 +1754,7 @@ def append_context(connection: sqlite3.Connection, turn_id: int) -> list[int]:
     return write_context(connection, [*read_context(connection), int(turn_id)])
 
 
-def _storable(text: str) -> str:
+def storable(text: str) -> str:
     """Text SQLite will encode.
 
     Surrogates cannot be encoded to UTF-8, so binding one raises
@@ -2118,7 +2120,7 @@ def tool_document(row: Mapping[str, Any]) -> str:
     Name, description and the parameter schema, and nothing else: those are the
     three things a model chooses a tool by, and the rest of the row is
     bookkeeping (`source_id`, `status`) that describes the record rather than the
-    tool.  Through `_storable` for the reason the turn's text is: this string
+    tool.  Through `storable` for the reason the turn's text is: this string
     goes out as JSON on its way to an embedding model, and a lone surrogate
     cannot be encoded.
 
@@ -2133,7 +2135,7 @@ def tool_document(row: Mapping[str, Any]) -> str:
     schema = _indexable(row.get("schema"))
     if schema.strip():
         parts.append(schema)
-    return _storable("\n\n".join(part for part in parts if part))
+    return storable("\n\n".join(part for part in parts if part))
 
 
 def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -2233,7 +2235,7 @@ class ToolStore:
         self.reset()
 
     def _connect(self) -> sqlite3.Connection:
-        return _connect_to(self.path)
+        return connect_to(self.path)
 
     # --- the file -------------------------------------------------------------
 
@@ -3428,12 +3430,12 @@ class ToolStore:
         """
         identity = _tool_index_identity(embedder)
         with self._connect() as connection:
-            if _meta(connection, "meta").get("vector_identity", "") == identity:
+            if index_meta(connection, "meta").get("vector_identity", "") == identity:
                 return
             connection.execute("DROP TABLE IF EXISTS tool_vec")
             connection.execute("DELETE FROM tool_chunk")
-            connection.execute(_vector_ddl(embedder.dimension, "tool_vec"))
-            _set_meta(
+            connection.execute(vector_ddl(embedder.dimension, "tool_vec"))
+            set_index_meta(
                 connection,
                 "meta",
                 vector_identity=identity,
@@ -3460,7 +3462,7 @@ class ToolStore:
         """
         with self._connect() as connection:
             if (
-                _meta(connection, "meta").get("text_version", "")
+                index_meta(connection, "meta").get("text_version", "")
                 == textindex.RULES_VERSION
             ):
                 return
@@ -3477,7 +3479,7 @@ class ToolStore:
                         "schema": str(row["schema"]),
                     },
                 )
-            _set_meta(connection, "meta", text_version=textindex.RULES_VERSION)
+            set_index_meta(connection, "meta", text_version=textindex.RULES_VERSION)
 
     def tools_without_vectors(self) -> list[tuple[str, str]]:
         """Every row the vector index does not hold, as `(name, document)`.
@@ -3591,7 +3593,7 @@ def _table_ddl(connection: sqlite3.Connection, table: str) -> str | None:
     return None if row is None else str(row["sql"] or "")
 
 
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+def table_exists(connection: sqlite3.Connection, table: str) -> bool:
     """Whether a table (or a virtual one) is there at all.
 
     Asked for the vector index, which cannot be created with the rest of the
@@ -3667,7 +3669,7 @@ def _clear_vectors(connection: sqlite3.Connection, names: Sequence[str]) -> None
     if not names:
         return
     marks = _marks(names)
-    if _table_exists(connection, "tool_vec"):
+    if table_exists(connection, "tool_vec"):
         connection.execute(
             f"DELETE FROM tool_vec WHERE rowid IN"
             f" (SELECT id FROM tool_chunk WHERE name IN ({marks}))",

@@ -39,6 +39,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
   │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
   │                                 │                  └── MCP ──▶ slife2-agent   (what arrives, as a turn)
+  │                                 ├── :8035/mcp ──▶ slife2-cabinet       (notes, diary, files, reports)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
   │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
@@ -62,7 +63,8 @@ speaks one wire protocol; the context store keeps a conversation's turns and
 decides which of them it runs on; the hub is where the tools come from; skills
 reads the playbooks, cli owns the command registry, and mcp-tools and
 restapi-tools hold the servers those two sections name; wechat holds a login per
-agent and turns what arrives on it into a turn; the agent loop runs
+agent and turns what arrives on it into a turn; the cabinet keeps four kinds of
+private document and searches them as one corpus; the agent loop runs
 turns.  A provider is a row in a backend's config
 rather than a process of its own, so three providers that happen to speak two
 protocols are two model processes and not three — the smallness is in what each
@@ -217,6 +219,74 @@ saved login to pick up until somebody does, and the `wechat_*.yaml` files are th
 whole of what this process resumes.  What is left in the config is an address
 under `servers:` and nothing else — `slife2-toolhub` is the only other plugin
 that reads no section of its own.
+
+### 1.3 The cabinet, and what four kinds of document cost
+
+**`slife2-cabinet` is the first plugin here that owns a store of its own and
+nothing else** — not a family (it declares no catalogue rows), not a connection
+(it holds nobody's server), not a model.  v1's `memfiles`, ported: a **note**, a
+**diary**, a **saved file** and a **report**, which are four kinds of document
+and, deliberately, **one corpus**.
+
+**One table, because four kinds are one thing to search.**  v1 had four tables, a
+`cabinet_docs` view that unioned them and twelve triggers keeping a shared FTS
+table in step.  What all of that was *for* is the rule §7.2 states for the
+fusion: a rank only means something inside the corpus that produced it, so four
+indexes would be four corpora and a query spanning them would answer with an
+order nothing had measured.  Here the corpus is literal — one `cabinet_doc` table
+with a `kind` column — and two things fall out of that which v1 had to build:
+the **rowid is the corpus id**, so the two legs fuse on it exactly as the turns
+and the catalogue do (`fuse_ranked`), where v1 synthesised a global id from a
+per-kind offset; and the keyword text is written **in the same transaction as the
+row that produced it**, which is why this store, like both of slife2's others,
+has no trigger at all.  What is per-kind is a row in `SPECS`: which column is the
+key, which is the time axis a list orders by, whether a second write appends, and
+where the markdown mirror goes.
+
+**A document is written twice, and the mirror is the half a person reads.**  The
+row is what a search finds; `notes/Python.md`, `diary/2026-10-11.md`,
+`reports/weekly.md` are the same document as a file somebody can open, edit or
+delete without asking a process.  The store owns both writes because they are one
+operation, and the mirror's path is *stored* rather than derived, because two
+subjects slugify to one stem and a derived path would let the second overwrite
+the first's markdown while both rows stayed correct.  A saved file is the one
+kind with no mirror: its bytes are the document, and a text copy of a PDF is a
+copy of something that is not text.
+
+**A file's bytes are never in the index, and its identity is.**  What is indexed
+and embedded for a file is what it *is* — its name, the paths that place it, and
+the summary once a model writes one — never the bytes.  That composition is
+load-bearing rather than tidy: measured while porting, a file embedded from its
+summary alone left every summary-less file with **no vector at all**, which
+`sync` then reported forever as a document it could never catch up.  Which is
+also the one asymmetry of `cabinet_summarize`: writing a summary **re-embeds** a
+file, because the stored vector was built from the text without it, and does not
+re-embed a note, whose vector is its body and unchanged by a description.
+
+**And there is no drainer.**  v1's cabinet shared `memdb`'s `SemanticManager`, a
+background drainer that walked unembedded documents and caught them up on its own
+schedule.  This has none, and the difference is where the work went: **nothing is
+written until the embedding is in hand**, so a write that cannot embed stores
+nothing — the same contract a turn's save keeps, and what lets `file_save` take
+back the bytes it copied.  What is left of the drainer is one pass at open
+(`sync`): it does not remember which rows are missing (the index is derived, so
+"missing" is a query) and it does not run in the background, and a document that
+*is* missing is reported rather than quietly caught up later, because a cabinet
+whose meaning leg is silently incomplete is a search that lies.
+
+**What is deliberately not ported**, each as a nameable change rather than a
+half-built one: **the URL half of `file_save`** (v1 downloaded public `http(s)`
+URLs behind an SSRF guard of its own, in `slife/net.py` — a library with a threat
+model, a config switch and its own tests, and one whose justification is a
+measured property of *this* machine's resolver, so it belongs in a change that
+argues for it); **the `grep` leg** (§9 defers v1's third search mode for the
+whole system, and a cabinet of files is exactly where it is wanted, so the
+cabinet inherits the deferral rather than growing a second regex engine);
+**the schedule half** (v1's plugin also owned the scheduled-task tables and
+sixteen tools over them; nothing here schedules anything, so a report is keyed by
+its title instead of by a task and is otherwise the log it always was); and
+**`USER.md`** (v1 served the profile *and* rendered it into the system prompt,
+and wiring a file into a prompt is a change to the prompt).
 
 ## 2. Streaming: one pattern, used twice
 
