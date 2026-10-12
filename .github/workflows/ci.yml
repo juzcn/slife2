@@ -33,29 +33,31 @@ jobs:
       # failing test but the whole product.  Windows and Linux builds have the
       # feature, which is why this is invisible anywhere but here.
       #
-      # `UV_PYTHON` is what the later steps read, so every `uv run` below
-      # resolves the same interpreter.  `brew --prefix <formula>` rather than
-      # `$(brew --prefix)/bin/python3.13`: the keg's own path does not depend on
-      # which Homebrew Python happens to own the unversioned `python3` symlink.
+      # Three things about the two lines below, each of which was a red run:
       #
-      # **And a venv has to be made from it, rather than installed into it.**
-      # Homebrew marks its Python externally managed (PEP 668), because
-      # `brew upgrade` owns that tree; uv honours the marker and refuses with
-      # "The interpreter ... is externally managed".  `uv venv --python` is the
-      # way through.
+      # * **A venv, not an install into the interpreter.**  Homebrew marks its
+      #   Python externally managed (PEP 668), because `brew upgrade` owns that
+      #   tree, and uv honours the marker: "The interpreter ... is externally
+      #   managed".
+      # * **`--clear`,** because `setup-uv` has already left a `.venv` built
+      #   from its own managed interpreter — the one with no loadable SQLite.
+      #   Replacing it is the point of the step, and nothing is installed into
+      #   it until `Install` below.
+      # * **`UV_PYTHON` is deliberately NOT set.**  It reads like the way to
+      #   point the whole job at this interpreter, and it is the opposite: with
+      #   it set, `uv pip install` targets that interpreter *directly* instead
+      #   of discovering `.venv`, which is the PEP 668 failure above.  The venv
+      #   is what routes every later step, and `uv run` prefers it already.
       #
-      # `--clear` because `setup-uv` has already left a `.venv` built from its
-      # own managed interpreter — which is the whole problem, since that is the
-      # build with no loadable SQLite.  Replacing it is the point of the step;
-      # nothing is installed into it until the `Install` step below.
+      # `brew --prefix <formula>` rather than `$(brew --prefix)/bin/python3.13`:
+      # the keg's own path does not depend on which Homebrew Python happens to
+      # own the unversioned `python3` symlink.
       - name: A Python that can load SQLite extensions
         if: runner.os == 'macOS'
         shell: bash
         run: |
           brew install python@3.13
-          brew_python="$(brew --prefix python@3.13)/bin/python3.13"
-          echo "UV_PYTHON=$brew_python" >> "$GITHUB_ENV"
-          uv venv --clear --python "$brew_python"
+          uv venv --clear --python "$(brew --prefix python@3.13)/bin/python3.13"
 
       - name: Build wheel
         run: uv build --out-dir dist
