@@ -62,13 +62,18 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx2
 from fastmcp import Client, FastMCP
+from fastmcp.client.transports.base import ClientTransport, TransportOptions
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from slife2 import __version__
 from slife2.config import Config, ServerSettings, find_config_path, load
@@ -204,6 +209,74 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     return fallback_tool in names
 
 
+class _Ours(ClientTransport):
+    """One connection to one of *our* servers, with no bound on a single event.
+
+    **The 1 MiB ceiling on an SSE event is not ours to apply.**  It is the MCP
+    SDK's default (`mcp.client.streamable_http.DEFAULT_MAX_SSE_EVENT_SIZE`), the
+    *client* enforces it, and what it is for is keeping a peer from making this
+    process buffer an unbounded message — which is exactly the right guard for a
+    server nobody here started, and no guard at all on loopback to a daemon we
+    did.  So `slife2.gateway`, which dials the entries under `tools:` and
+    `rest-api:`, keeps it; every hop that goes through `open_server` does not.
+    That split is the point of this class rather than a global setting: the
+    question is *who is on the other end*, and the two paths are the two answers.
+
+    **And this system needs it off.**  Whole conversations travel in single
+    messages here by design — `rebuild` sends the context a turn runs on,
+    `remember` sends a turn, `transcript` sends a conversation to a screen — so
+    1 MiB is a ceiling on how long a conversation may be.  It was reached in a
+    real session, as `send_message` failing with "Server-sent event exceeded the
+    1048576 byte limit".
+
+    `None` rather than a large number, because a number is the same wall further
+    away and there is no size at which one of our own conversations is too big.
+    What is given up is the *reporting*: an overrun is now the machine's memory
+    instead of a named `SSEError`.  That is the trade, and it is only acceptable
+    because the peer is a process this system started.
+
+    **Why this is a transport of its own rather than an argument**: FastMCP
+    4.0.11 does not pass `max_sse_event_size` to `streamable_http_client`
+    (`fastmcp/client/transports/http.py`), and its own `StreamableHttpTransport`
+    takes no such parameter — so `Client(url)` cannot reach the knob at all.
+    Everything else here is what that transport does: the same http client from
+    the same helper, the same timeout, and the caller's session class.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    @asynccontextmanager
+    async def connect_session(
+        self,
+        *,
+        transport_options: TransportOptions | None = None,
+        **session_kwargs: Any,
+    ) -> AsyncGenerator[ClientSession]:
+        options = transport_options or TransportOptions()
+        # The request timeout arrives as a *session* argument rather than as a
+        # transport one — `Client(url, timeout=…)` turns it into
+        # `read_timeout_seconds` and carries it in `session_kwargs` — so it is
+        # read from there and turned into the http client's own timeout, exactly
+        # as FastMCP's transport does it.  None means the SDK's defaults: 30s to
+        # connect, 300s to read, the second of which exists because a server may
+        # hold a response stream open.
+        read_timeout_seconds = session_kwargs.get("read_timeout_seconds")
+        timeout = (
+            httpx2.Timeout(30.0, read=read_timeout_seconds)
+            if read_timeout_seconds is not None
+            else None
+        )
+        async with create_mcp_http_client(timeout=timeout) as http_client:
+            async with streamable_http_client(
+                self.url, http_client=http_client, max_sse_event_size=None
+            ) as (read_stream, write_stream):
+                async with options.session_class(
+                    read_stream, write_stream, **session_kwargs
+                ) as session:
+                    yield session
+
+
 async def open_server(
     url: str,
     *,
@@ -248,7 +321,7 @@ async def open_server(
             f"{url}: nothing is listening on {parts.hostname}:{parts.port}"
         )
 
-    client: Client = Client(url, timeout=timeout)
+    client: Client = Client(_Ours(str(url)), timeout=timeout)
     try:
         await client.__aenter__()
         if name and not await identifies(client, name, fallback_tool=fallback_tool):
