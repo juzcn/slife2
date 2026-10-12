@@ -891,53 +891,77 @@ ephemeral case §1.3 deliberately kept stateless — and §1.3 is an essay on wh
 second loop *costs*, so the test to apply is whether the object is genuinely
 different.  It is: durable, timed and repeatable against ephemeral and one-shot.
 
-**What it does not own is the loop, and that is the decision that makes this
-plugin small.**  v1 split the feature three ways — *timing* | *execution* |
-*record* — and the execution half was a dispatch into its subagent worker pool.
-slife2 has no pool: what hangs a worker off its parent is §9's deferred half, and
-there is nothing here to dispatch into.  So the fire does what §1.2 is for —
-`slife2-tui`'s `submit` puts the task in front of the agent as a turn of its own,
-with the agent server's `send_message` as the fallback when no window is showing
-— and **the template is an order rather than a notification.**  It names the call
-to make (`agent_task_start`, under the scheduled task's *own* name, so the answer
-comes back on `agent-task:<name>` and the marker says which task it was), tells
-the agent not to wait or poll, and names **one** ending: `schedule_run_settle`
-with the due time and a one-line note, once the answer arrives.  That is v1's
-three-way split kept exactly — timing here, execution there — with `agent-task`
-standing in for the worker pool this build does not have, and the *dispatch*
-written in prose because prose is what a prompt is made of.
+**It does not own the loop, and it does own the dispatch — which is the whole
+trick.**  v1 split the feature three ways — *timing* | *execution* | *record* —
+and the execution half was a dispatch into its subagent worker pool.  slife2 has
+no pool: what hangs a worker off its parent is §9's deferred half.  What it has
+instead is `agent-task`, a plugin whose entire job is "a loop of the agent's own,
+answering by a message" — so the fire does what §1.2 is for (`slife2-tui`'s
+`submit` opens a turn of the agent's own, with the agent server's `send_message`
+as the fallback when no window is showing) and that turn has **one instruction**:
+
+> call `schedule_run_now` with the due time the trigger carried.
+
+**That call is this plugin starting the work itself**, as an ordinary agent task
+under the scheduled task's own name — the same thing a model would get by calling
+`agent_task_start`, except that here *this process* is the caller.  And that is
+what makes the ledger close itself, which is the reason the dispatch is here
+rather than in the prompt's prose:
+
+```
+clock fires → run written `pending` → trigger turn → schedule_run_now
+                                                        └─ agent_task_start → id
+poll (30s)  → agent_task_list → finished → ran, at the task's own finished_at
+```
+
+**A prompt that told the model to start the work *and* close the run when the
+answer came back would be asking it to remember something across turns.**  The
+answer arrives later, in whatever turn the person happens to be in, wearing
+`[AsyncTaskResult:…]` — a marker that says nothing about schedules — and a run
+nobody closes is `pending` forever, which is the one state this ledger cannot
+account for.  Nothing ever asks again (the reconciliation below is deliberately
+not announced), so the failure is silent and permanent.  Making the *plugin* the
+caller removes the whole class: it is handed the id, so a later poll can ask what
+became of it, and the model's job is one synchronous call it cannot half-do.
 
 **A task that has come due is not the agent's to decline**, which is why the
-trigger offers no way out of it: one instruction, one ending.  `schedule_run_skip`
-is still in the tool set, and it is for the runs that *did not happen* — one that
-could not be started, one whose moment passed while slife2 was down — where the
+trigger names one thing to do and no way out of it.  `schedule_run_skip` is still
+in the tool set, and it is for the runs that *did not happen* — one that could not
+be started, one whose moment passed while slife2 was down — where the
 alternatives are doing it late or leaving a `pending` row that the ledger cannot
 account for.  The difference is the one this section keeps making: what a prompt
 tells the agent to do is a decision about the common case, and a tool that exists
 is a decision about the rest.
 
-Nothing in this plugin makes a model call, and the loop it assembles is no loop
-at all: a poll, a store, and seven tools.
+Nothing in this plugin makes a model call, and the loop it assembles is no loop at
+all: a poll, a store, and **six tools — v1's six.**  The seventh it had,
+`schedule_run_settle`, is gone rather than merely unused: with the harness closing
+runs, a tool for a model to close one would be a second writer of the same row,
+and the honest account of a run is the one the peer's own `finished_at` gives.
 
-**The product of a run is not its business either.**  v1's `memfiles` owned the
+**The product of a run is not this plugin's either.**  v1's `memfiles` owned the
 `reports` table *and* the schedules, so `report_save` backfilled `report_id` and
-flipped the run to `ran` inside one write — the store was the thing that knew a
+flipped a run to `ran` inside one write — the store was the thing that knew a
 report meant a run had succeeded.  §1.4 records that the split is already made:
-slife2's cabinet has a report keyed by its **title**, and it knows nothing about
-schedules.  What replaces the backfill is one explicit call, `schedule_run_settle`
-with a one-line **note** of what the run produced.  That is one tool v1 did not
-have to expose, and it is the honest price of two plugins where there was one
-rather than a coupling invented to hide it.
+the cabinet is a plugin of its own, keyed by title, and knows nothing about
+schedules.  And the work here is an agent task, whose answer `slife2-agent-task`
+delivers back to the conversation — so what this ledger holds is that the run
+happened and when it ended, and **what came of it is read where it was said**.
+The price is the one v1 paid differently: there is no link from a run to its
+output, and a person who wants both reads two places.  What it buys is that
+neither plugin has to know the other exists.
 
 **The ledger's rules, which are v1's, are the whole of the correctness here:**
 
-* **`pending → ran | failed | missed | skipped`, and no note means failed.**  The
-  row is written *before* the hand-over, so a fire cannot be repeated on the next
-  poll: the anchor is the newest `due_at` on record, and recording is what moves
-  it.  A hand-over that *refuses* proved nothing was written and the run is
-  marked `failed`; a hand-over that does not come back is §1.2's third answer and
-  leaves the row `pending`, because a run whose fate is unknown must not be
-  reported as either.
+* **`pending → ran | failed | missed | skipped`.**  The row is written *before*
+  the trigger is handed over, so a fire cannot be repeated on the next poll: the
+  anchor is the newest `due_at` on record, and recording is what moves it.  A
+  hand-over that *refuses* proved nothing was written and the run is marked
+  `failed`; a hand-over that does not come back is §1.2's third answer and leaves
+  the row `pending`, because a run whose fate is unknown must not be reported as
+  either.  A **dispatch** that fails closes the run too, with the peer's own
+  words as the error — a `pending` row with no task behind it being the one state
+  nothing can resolve.
 * **A gap is recorded once, not once per fire.**  Coming up after a week down, a
   five-minute task has fourteen hundred fires behind it; v1's sweep would have
   written a row for each, which is a ledger that makes the gap *less* visible.
@@ -955,19 +979,18 @@ rather than a coupling invented to hide it.
   look is the cost, and DESIGN.md §9 holds it rather than this section quietly
   growing a second message.
 
-**And neither of those messages wears a marker, which is a decision rather than
-an omission.**  A marker exists so a *result* can be matched to what produced it
-— `[AsyncTaskResult:{…}]` carries the task's id, name and state — and the
+**And that one message wears no marker, which is a decision rather than an
+omission.**  A marker exists so a *result* can be matched to what produced it —
+`[AsyncTaskResult:{…}]` carries the task's id, name and state — and the
 vocabulary is per-writer precisely because each writer's marker says something
 different.  A trigger is not a result: it carries no id a caller needs back, and
-what produced it is a clock.  The two facts it does have to carry are already
-carried by other means — **the channel** says a message did not come from the
-person (`schedule:daily`, drawn as its own bubble by
+what produced it is a clock.  The two facts it does have to carry are carried by
+other means — **the channel** says the words did not come from the person
+(`schedule:daily`, drawn as its own bubble by
 `slife2.tui.widgets.channel_prefix`), and the **template's own first line** says
 which task, exactly as `agent_task.j2` opens with `▸ Agent task: {{ name }}`.
-And the long case this feature exists for — a run the agent hands to
-`agent_task_start` — comes back wearing `[AsyncTaskResult:{…}]` anyway, because
-that is what an agent task's answer wears.
+The answer, when it comes, wears `[AsyncTaskResult:{…}]` — because it *is* an
+agent task's answer, and that is the plugin that produced it.
 
 **The cron parser is `croniter`, which is v1's dependency and v1's decision made
 twice.**  Its design notes for this feature say "no apscheduler, no croniter,
@@ -2634,10 +2657,18 @@ cannot say all three is a wish rather than a decision.
   which is why `schedule` has none yet.
 - **A word to the agent about runs nobody closed.** A `missed` or `failed` run is
   recorded and findable with `schedule_runs`, and **nothing says so** (§1.7): the
-  agent has to think to look. The change is small and the seam is obvious — a
-  message handed over on the trigger's own channel, which is a template and one
-  call in `sweep_once` — and it is deferred because the ledger already holds the
-  answer and nobody has watched a missed run go unnoticed yet.
+  agent has to think to look. The seam is obvious and already carries one message
+  — a trigger is handed over on `schedule:<name>` by `slife2.handover`, so this is
+  one more template and one more call, from the poll that records a gap or the
+  sweep that fails what a stopped process left. It is deferred because the ledger
+  already holds the answer and nobody has watched a missed run go unnoticed yet.
+- **A trigger nobody acted on.** A run whose turn ended without calling
+  `schedule_run_now` has no background task, so the poll has nothing to ask about
+  and the row stays `pending`. Making the dispatch a single synchronous call is
+  what shrinks this to one turn's worth of inattention, and the rule that would
+  close it — a `pending` run with no task id, older than some number of minutes,
+  is `failed` — is the number still missing, for the same reason §9's other bounds
+  are deferred: neither of them is worth guessing before somebody has watched one.
 - **Subagents.** `Loop.records` exists, so a worker's round trips are the ones
   not written to the log, and `send_message` takes a `subagent`: a worker's
   conversation is a separate key with its own history, inbox and lock, in the

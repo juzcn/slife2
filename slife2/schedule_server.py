@@ -16,37 +16,47 @@ task twice and a task one process wrote is invisible to the next; in the agent
 server it would be a loop the conversation owns, which is the arrangement §3
 exists to argue against.
 
-**What it does not own is the loop, and that is why there is no model call in
-this file.**  v1 split the feature three ways — *timing* | *execution* | *record*
-— and the execution half was a dispatch into its subagent worker pool.  There is
-no pool here (§9), so a fire does what §1.2 is for: `slife2-tui`'s `submit` puts
-the task in front of the agent as a turn of its own, the agent server's
-`send_message` is the fallback when no window is showing, and **the agent decides
-what to do about it**.  Work that must run long is handed to `agent_task_start`
-by the agent, in the turn the trigger opened.  So this plugin is a poll, a store
-and seven tools, and the loop it assembles is no loop at all.
+**It does not own the loop, and it does own the dispatch.**  v1 split the feature
+three ways — *timing* | *execution* | *record* — and the execution half was a
+dispatch into its subagent worker pool, which this build has no equivalent of
+(§9).  So a fire does what §1.2 is for: `slife2-tui`'s `submit` puts the task in
+front of the agent as a turn of its own, the agent server's `send_message` is the
+fallback when no window is showing — and that turn has **one** instruction, to
+call `schedule_run_now`, which is this plugin *starting the work itself* as an
+ordinary agent task.  Nothing in this file makes a model call: the loop is
+`slife2-agent-task`'s, exactly as it is when a model asks for one.
 
-**What it does not own either is the product.**  v1's `memfiles` owned the
+**That split is what makes the ledger close itself, and it is the whole reason
+the dispatch is here rather than in the prompt.**  The model's job is one
+synchronous call it cannot half-do; the plugin is the caller, so the plugin is
+handed the task's id, so a later poll can ask what became of it.  A prompt that
+told a model to start the work *and close the run when the answer comes back*
+would leave the id in a conversation and the run's fate to that model's memory —
+and the answer arrives in a later turn, wearing a marker that says nothing about
+schedules.  A run that is forgotten there is `pending` forever, which is the one
+state the ledger cannot account for.
+
+**The product is not this plugin's either.**  v1's `memfiles` owned the
 `schedules` *and* the `reports`, so `report_save` flipped a run to `ran` inside
 the one write that stored the report.  Here the cabinet is a plugin of its own
-and knows nothing about schedules (§1.4), so a run is closed by an explicit
-`schedule_run_settle` carrying a one-line **note** of what it produced.  That is
-one tool v1 did not have to expose, and it is the price of the split rather than a
-coupling invented to hide it.
+and knows nothing about schedules (§1.4), and the work is an agent task whose
+answer is delivered back to the conversation by *that* plugin — so this ledger
+records that a run happened, not what it produced.  What came of it is read where
+it was said.
 
-**The ledger is the feature.**  `pending → ran | failed | missed | skipped`, and
-*no note means it failed*: a run is written **before** the hand-over, so the
-anchor advances and a fire cannot repeat on the next poll; a hand-over that
-refuses proves nothing was written and the run is `failed`; a hand-over that does
-not come back is §1.2's third answer and leaves the row **pending**, because a
-run whose fate is unknown must not be reported as either.  Coming up again, the
-sweep fails what a stopped process left pending, and the poll records the newest
-fire each task missed — and **neither is announced**.  v1 printed unsettled runs
-into every turn's prompt; a note handed over on the trigger's channel is the
-change that would replace it, and it is deferred rather than half-built
-(DESIGN.md §9).  The ledger is already where the answer is and `schedule_runs` is
-how it is read, so a **fire is the only thing this plugin ever says to a
-conversation** — one path, one template, and a prompt nobody had to edit.
+**The ledger is the feature.**  `pending → ran | failed | missed | skipped`.  A
+run is written **before** the trigger is handed over, so the anchor advances and
+a fire cannot repeat on the next poll; a hand-over that refuses proves nothing was
+written and the run is `failed`; a hand-over that does not come back is §1.2's
+third answer and leaves the row **pending**, because a run whose fate is unknown
+must not be reported as either.  Coming up again, the sweep fails what a stopped
+process left pending, and the poll records the newest fire each task missed — and
+**neither is announced**.  v1 printed unsettled runs into every turn's prompt; a
+note handed over on the trigger's channel is the change that would replace it, and
+it is deferred rather than half-built (DESIGN.md §9).  The ledger is where the
+answer is and `schedule_runs` is how it is read, so a **fire is the only thing
+this plugin ever says to a conversation** — one path, one template, and a prompt
+nobody had to edit.
 
 **No marker, and that is deliberate.**  A message handed over here wears only its
 **channel** (`schedule:<name>`), which is what tells the window and the model
@@ -73,11 +83,27 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2 import schedule as expressions
-from slife2.audience import FOR_THE_MODEL, request_client
+from slife2.agent_task_server import (
+    AGENT_TASK_LIST,
+    AGENT_TASK_START,
+)
+from slife2.agent_task_server import (
+    FINISHED as TASK_FINISHED,
+)
+from slife2.agent_task_server import (
+    RUNNING as TASK_RUNNING,
+)
+from slife2.audience import FOR_THE_MODEL, client_meta, request_client
 from slife2.clock import at, now
-from slife2.config import Config, load_cached
+from slife2.config import AGENT_TASK_SERVER_NAME, Config, load_cached
 from slife2.handover import hand_over
-from slife2.mcp_server import house_server, serve_plugin
+from slife2.mcp_server import (
+    close_server,
+    house_server,
+    open_server,
+    serve_plugin,
+    tool_payload,
+)
 from slife2.paths import schedule_dbs
 from slife2.prompt import render
 from slife2.schedule_store import (
@@ -106,15 +132,24 @@ SERVER_NAME = "slife2-schedule"
 #: nobody writes one.
 CONFIG_KEY = "schedule"
 
-#: The seven tools.  v1's six over its own tables, plus the one it got for free —
-#: `schedule_run_settle`, which there was the cabinet reporting a success.
+#: The six tools, which is v1's six over its own tables.  The seventh it had —
+#: `schedule_run_settle` — is *gone*, and its absence is the design: a run is
+#: closed by the harness when the background task doing it ends, so nothing asks
+#: a model to remember anything after the turn it was handed the trigger in.
 SCHEDULE_SET = "schedule_set"
 SCHEDULE_REMOVE = "schedule_remove"
 SCHEDULE_LIST = "schedule_list"
 SCHEDULE_RUNS = "schedule_runs"
 SCHEDULE_RUN_NOW = "schedule_run_now"
-SCHEDULE_RUN_SETTLE = "schedule_run_settle"
 SCHEDULE_RUN_SKIP = "schedule_run_skip"
+
+#: How long to wait on the agent-task plugin.  The agent server's number for the
+#: agent server's reason: a listing may wait briefly for a peer that is still
+#: connecting, and a timeout shorter than that turns "starting" into "failed".
+#: The two tools themselves and the states they answer with are **imported**
+#: rather than re-spelled — `slife2.agent_task_server` is the module that writes
+#: them, and a second copy here is the copy that drifts.
+TASKS_TIMEOUT_SECONDS = 30.0
 
 #: The channel a trigger arrives on, and the first half of what it is keyed by:
 #: `schedule:daily_diary`.  The window draws a bubble from the channel alone
@@ -250,18 +285,25 @@ async def fire(
     window_client: Client | None = None,
     agent_client: Client | None = None,
 ) -> Run:
-    """Hand one due task to its agent, and record what came of it.
+    """Hand one due task to its agent, and open the run it will be answered in.
+
+    **What is handed over is a trigger, not the work.**  The turn it opens has one
+    instruction — call `schedule_run_now` with this due time — and the starting of
+    the work happens there, so that the run cannot be opened by a process and
+    started by nothing (the module docstring has the argument for splitting it
+    that way rather than dispatching here).
 
     **The record comes first.**  A run is written as `pending` before anything is
-    handed over, which is what makes an interrupted fire *visible*: the anchor
-    has moved, so the poll will not try it again, and a row that says `pending`
-    is a thing the next start can find and the model can act on.  A row written
-    after the hand-over would simply not exist in the case that matters.
+    handed over, which is what makes an interrupted fire *visible*: the anchor has
+    moved, so the poll will not try it again, and a `pending` row is a thing the
+    next start can find.  A row written after the hand-over would simply not exist
+    in the case that matters.
 
-    **A run that is already settled is not re-fired**, which is what makes
-    `schedule_run_now` idempotent and what stops a poll that ran twice from
-    handing the same work over twice.  See the module docstring for the three
-    answers to a hand-over and why only one of them is an error.
+    **A run that is already settled is not re-fired**, which is what stops a poll
+    that ran twice from handing the same work over twice.  `True` and `None` both
+    leave it `pending`: the first because a turn is what closes it, the second
+    because nothing is known — and a run whose fate is unknown must not be
+    reported as either.
     """
     run = store.record(task, due_at)
     if run.status != PENDING:
@@ -299,14 +341,195 @@ async def fire(
     return run
 
 
+async def tasks_server(
+    config: Config, client: Client | None = None
+) -> tuple[Client, bool]:
+    """The agent-task plugin, and whether this call is the one that opened it.
+
+    `slife2-agent-task` is the plugin that holds loops, and this one hands a run
+    to it rather than running anything itself (§1.7).  Opened per call and closed
+    after it, the way a hand-over is: a dispatch happens once per run rather than
+    once per turn, and a long-lived connection to a plugin that may restart is a
+    connection to re-establish.  An injected client is used as it is and left
+    open — it belongs to whoever handed it in.
+    """
+    if client is not None:
+        return client, False
+    return (
+        await open_server(
+            config.server("agent-task").url,
+            name=AGENT_TASK_SERVER_NAME,
+            fallback_tool=AGENT_TASK_LIST,
+            timeout=TASKS_TIMEOUT_SECONDS,
+        ),
+        True,
+    )
+
+
+async def dispatch(
+    config: Config,
+    store: ScheduleStore,
+    task: Task,
+    due_at: str,
+    *,
+    tasks_client: Client | None = None,
+) -> Run:
+    """Start one run's work as a background task of the agent's own.
+
+    **This is the half that makes the ledger need nothing from a model later.**
+    The plugin makes the call, so it is handed the task's id, so it can ask what
+    became of it on a later poll — where a prompt that told a *model* to start one
+    would leave the id in a conversation and the run's fate to that model's
+    memory (DESIGN.md §1.7).
+
+    The work is an ordinary agent task: it runs as the agent, on the agent's own
+    context, with the agent's prompt and tools, and its answer is delivered back
+    to the conversation by `slife2-agent-task` — this plugin never hands the
+    answer anywhere, and never sees it.
+
+    **A dispatch that fails closes the run**, with the peer's own words as the
+    error, and then raises so the turn that asked is told.  The alternative — a
+    `pending` row with no task behind it — is the one state nothing can resolve:
+    the poll cannot ask about a task that was never started, and the sweep would
+    have to guess.
+    """
+    # The row exists before the call does, so that a dispatch which fails has
+    # something to record the failure against — and so that the anchor moves
+    # whether or not the work ever starts.
+    store.record(task, due_at)
+    client, owned = await tasks_server(config, tasks_client)
+    try:
+        answer = await client.call_tool(
+            AGENT_TASK_START,
+            {"name": task.name, "description": task.description},
+            # The identity rides in `_meta` because a task is *an agent's*, and
+            # this process serves every agent: without it the peer would have to
+            # guess whose loop to start, and would refuse (its `UNADDRESSED`).
+            meta=client_meta(store.agent),
+            timeout=TASKS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - refusals and a missing peer alike
+        store.settle(task.name, due_at, FAILED, error=str(exc))
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at} could not be started: {exc}"
+        ) from exc
+    finally:
+        if owned:
+            await close_server(client)
+    payload = tool_payload(answer)
+    started = str(payload.get("task_id") or "")
+    attached = store.attach(task.name, due_at, started)
+    assert attached is not None  # the run was read a moment ago
+    logger.info(
+        "scheduled run of %s started for %s as %s", task.name, store.agent, started
+    )
+    return attached
+
+
+async def reconcile(config: Config, *, tasks_client: Client | None = None) -> list[str]:
+    """Close the runs whose background task has ended.
+
+    The other half of the dispatch: a run in flight is `pending` with a task id on
+    it, and this asks the peer what became of each one.  `finished` is `ran`, and
+    **the moment comes off the task's own `finished_at`** rather than off the
+    clock — the work ended when it ended, not when this poll happened to look.
+
+    `failed` and `cancelled` are both `failed`, because the ledger's question is
+    whether the work happened and neither of those is it; the account of *why* is
+    in the conversation, where the task's answer was delivered.
+
+    **A task the peer no longer holds is `failed` too**, with the reason saying
+    nothing was seen of its ending.  That is the honest answer rather than a
+    `pending` row nobody can resolve: a task that has ended is kept for a while
+    and then forgotten (`slife2.agent_task_server.RETIRED`), and one that is
+    missing while this process is the one that started it did not go anywhere
+    else.  A restart is the common case, and the sweep usually gets there first.
+    """
+    did: list[str] = []
+    for store in ledgers():
+        waiting = store.in_flight()
+        if not waiting:
+            continue
+        try:
+            listed = await _tasks_of(config, store.agent, tasks_client)
+        except Exception as exc:  # noqa: BLE001 - a peer that is not there
+            # Nothing is settled: this says nothing about the runs, only about
+            # this process's view of them, and the next poll asks again.
+            logger.warning(
+                "%s: the runs in flight were not checked: %s", store.agent, exc
+            )
+            continue
+        for run in waiting:
+            found = listed.get(run.agent_task_id)
+            if found is None:
+                store.settle(
+                    run.name,
+                    run.due_at,
+                    FAILED,
+                    error=(
+                        "the background task doing this run is no longer held by "
+                        "the agent-task plugin, so its ending was never seen"
+                    ),
+                )
+            elif found["status"] == TASK_RUNNING:
+                continue
+            elif found["status"] == TASK_FINISHED:
+                store.settle(
+                    run.name,
+                    run.due_at,
+                    RAN,
+                    when=str(found.get("finished_at") or ""),
+                )
+            else:
+                store.settle(
+                    run.name,
+                    run.due_at,
+                    FAILED,
+                    error=f"the background task ended as {found['status']}",
+                )
+            did.append(f"{store.agent}: {run.name} due {run.due_at} closed")
+    return did
+
+
+async def _tasks_of(
+    config: Config, agent: str, client: Client | None
+) -> dict[str, dict[str, Any]]:
+    """This agent's background tasks, by id, as the agent-task plugin sees them."""
+    peer, owned = await tasks_server(config, client)
+    try:
+        answer = await peer.call_tool(
+            AGENT_TASK_LIST, {}, meta=client_meta(agent), timeout=TASKS_TIMEOUT_SECONDS
+        )
+    finally:
+        if owned:
+            await close_server(peer)
+    rows = tool_payload(answer).get("tasks")
+    if not isinstance(rows, list):
+        raise ConnectionError(
+            f"the agent-task plugin did not return a task list (it said {answer!r})"
+        )
+    return {
+        str(row.get("task_id")): row
+        for row in rows
+        if isinstance(row, dict) and row.get("task_id")
+    }
+
+
 async def poll_once(
     config: Config,
     *,
     window_client: Client | None = None,
     agent_client: Client | None = None,
+    tasks_client: Client | None = None,
     reference: datetime | None = None,
 ) -> list[str]:
     """One pass of the clock over every agent's ledger.
+
+    **Two jobs, and they are the two ends of one run's life**: what has come due
+    is fired, and what is in flight is asked after.  A poll that only did the
+    first would leave every run `pending` for as long as nothing else closed it —
+    which is what a prompt telling a *model* to close it amounts to (DESIGN.md
+    §1.7).
 
     Returns what it did, as lines — for the log, and because "it did nothing" is
     the ordinary answer and a caller should be able to see that rather than infer
@@ -344,10 +567,14 @@ async def poll_once(
                 agent_client=agent_client,
             )
             did.append(f"{store.agent}: {task.name} due {due_at} -> {run.status}")
+    # After the fires rather than before them, so that a run started by this pass
+    # is asked about on the next one: a task that has just been started is
+    # `running`, and asking immediately would only add a call per fire.
+    did.extend(await reconcile(config, tasks_client=tasks_client))
     return did
 
 
-async def sweep_once(_config: Config) -> list[str]:
+async def sweep_once() -> list[str]:
     """Close what a stopped process left open, and say nothing about it.
 
     The ledger half of "tasks fire only while slife2 is running".  A `pending`
@@ -378,6 +605,7 @@ async def poll_forever(
     *,
     window_client: Client | None = None,
     agent_client: Client | None = None,
+    tasks_client: Client | None = None,
 ) -> None:
     """The loop: sweep once, then ask the clock every `POLL_SECONDS`.
 
@@ -388,12 +616,15 @@ async def poll_forever(
     fire — the same rule the agent server and the task server follow.
     """
     try:
-        for line in await sweep_once(config()):
+        for line in await sweep_once():
             logger.info("%s", line)
         while True:
             await asyncio.sleep(POLL_SECONDS)
             for line in await poll_once(
-                config(), window_client=window_client, agent_client=agent_client
+                config(),
+                window_client=window_client,
+                agent_client=agent_client,
+                tasks_client=tasks_client,
             ):
                 logger.info("%s", line)
     except asyncio.CancelledError:
@@ -414,17 +645,18 @@ def build_server(
     *,
     window_client: Client | None = None,
     agent_client: Client | None = None,
+    tasks_client: Client | None = None,
     source: Callable[[], Config] | None = None,
     polling: bool = True,
 ) -> FastMCP:
     """Build the schedule server.
 
-    **Two seams, and both are the hand-over's**: what a fire says to an agent is
-    the only thing here that leaves the process, so a test exercising one wires a
-    recorder window and an agent server over the in-memory transport and the rest
-    is real — the real store on a temporary data directory, the real cron, the
-    real ledger rules.  `source` is the config to read when the clock runs, so a
-    test can hand in one no file backs.
+    **Three seams, and all three are peers**: what a fire says to an agent, and
+    the agent-task plugin a run is handed to and asked about.  A test wires a
+    recorder window, a recorder agent server and the real `agent-task` over the
+    in-memory transport, and the rest is real — the real store on a temporary data
+    directory, the real cron, the real ledger rules.  `source` is the config to
+    read when the clock runs, so a test can hand in one no file backs.
 
     `polling=False` is for a test that wants the clock's *decisions* rather than
     its timing: the loop is not started, and `poll_once`/`sweep_once` are called
@@ -484,7 +716,10 @@ def build_server(
         if polling:
             clock = asyncio.create_task(
                 poll_forever(
-                    live, window_client=window_client, agent_client=agent_client
+                    live,
+                    window_client=window_client,
+                    agent_client=agent_client,
+                    tasks_client=tasks_client,
                 )
             )
         try:
@@ -615,17 +850,22 @@ def build_server(
     async def schedule_run_now(
         ctx: Context, name: str, due_at: str = ""
     ) -> dict[str, Any]:
-        """Run a scheduled task now, or backfill a run that was missed.
+        """Start a scheduled run's work now — which is what a trigger asks for.
 
-        With `due_at` it re-opens **that** run — the same run, the one whose due
-        time was in the trigger — and fires it, which is how a missed or failed
-        run is answered. Without it, this is a new run due at this moment,
-        for when somebody wants the work done early.
+        **This is what to call when a task has come due**, with the `due_at` the
+        trigger carried: it starts the work as a background task of yours and
+        returns at once. Do not wait for it and do not follow it up — the answer
+        arrives on its own, and **the run closes itself** when that task ends, so
+        nothing here has to be remembered later.
 
-        The answer is the run's row: `pending` when the agent has been told about
-        it and has not closed it yet, `failed` when no conversation could be
-        reached. **It does not wait for the work** — a run is closed by
-        `schedule_run_settle`, from the turn this starts.
+        With no `due_at` it is a new run due at this moment, for work somebody
+        wants done early. With the `due_at` of a run that was **missed** or that
+        failed to start, it re-opens *that* run — the same run, the same due time
+        — which is how a gap is answered.
+
+        The answer is the run's row, with the background task's id on it. A
+        `pending` row means the work is in flight; `failed` means it could not be
+        started, and the error says why.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
@@ -648,45 +888,21 @@ def build_server(
                 )
         else:
             stamp = now()
-        run = await fire(
-            config,
-            store,
-            task,
-            stamp,
-            window_client=window_client,
-            agent_client=agent_client,
-        )
-        logger.info("scheduled run of %s fired for %s", task.name, agent)
-        return run.row()
-
-    @mcp.tool(name=SCHEDULE_RUN_SETTLE, meta=FOR_THE_MODEL)
-    async def schedule_run_settle(
-        ctx: Context, name: str, due_at: str = "", note: str = ""
-    ) -> dict[str, Any]:
-        """Close a run that has been done, and say what it produced.
-
-        `due_at` is which run — the timestamp the trigger carried. Left out, this
-        closes the newest run that is still open, which is the right answer for
-        the run you were just handed.
-
-        The `note` is one line: what you found, or what you made, or where it
-        went. It is what a later reading of the ledger has instead of the work
-        itself, and a run closed with nothing to say is a run nobody can account
-        for — but the run is closed all the same, and closing it is the part that
-        matters.
-        """
-        agent = agent_of(ctx)
-        store = store_for(agent)
-        task = task_of(agent, name.strip())
-        stamp = due_at.strip() or _newest_open(store, task)
-        settled = store.settle(task.name, stamp, RAN, note=note.strip())
-        if settled is None:
-            raise ToolError(
-                f"{task.name!r} has no run due at {stamp!r}; {SCHEDULE_RUNS} "
-                f"lists what it has."
+        # A run already in flight is left alone rather than started twice: the
+        # row carries the task doing it, and two calls for one due time is a
+        # conversation retrying rather than a second run.
+        found = store.run(task.name, stamp)
+        if found is not None and found.agent_task_id and found.status == PENDING:
+            logger.info(
+                "the run of %s due at %s is already in flight for %s",
+                task.name,
+                stamp,
+                agent,
             )
-        logger.info("scheduled run of %s settled for %s", task.name, agent)
-        return settled.row()
+            return found.row()
+        return (
+            await dispatch(config, store, task, stamp, tasks_client=tasks_client)
+        ).row()
 
     @mcp.tool(name=SCHEDULE_RUN_SKIP, meta=FOR_THE_MODEL)
     async def schedule_run_skip(
@@ -694,7 +910,7 @@ def build_server(
     ) -> dict[str, Any]:
         """Close a run that is not going to happen, and say why.
 
-        The same addressing as `schedule_run_settle` — the run by its due time,
+        The run by its due time,
         or the newest one still open — and the opposite ending. A skipped run is
         an answer rather than a gap: the ledger says the task came due, that
         nobody did it, and what the reason was.

@@ -371,11 +371,11 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-3:] == ["agent", "agent-task", "schedule"]
     assert "agent" in launcher.NEEDS["agent-task"]
-    # The clock reaches a conversation and nothing else: it makes no model call
-    # and asks the hub for no tools (DESIGN.md §1.7), so its peers are the
-    # terminal and the agent server behind it — the same fallback path a task's
-    # answer takes.
-    assert set(launcher.NEEDS["schedule"]) == {"tui", "agent"}
+    # The clock reaches three peers, and asks the hub for nothing: it makes no
+    # model call (DESIGN.md §1.7), so the terminal and the agent server behind it
+    # are where a trigger goes, and `agent-task` is where a run's work is started
+    # and asked after — the third edge is the one that lets a run close itself.
+    assert set(launcher.NEEDS["schedule"]) == {"tui", "agent", "agent-task"}
     # Everything else is a dependency of one of them, whatever kind it is.
     assert set(names[:-3]) == {
         "llm:openai-completions",

@@ -768,13 +768,11 @@ much happens at once (DESIGN.md §9).
 **The one thing here that starts work nobody asked for at the moment it starts.**
 A scheduled task is a name, a description and a cron expression, written down by
 the model; from then on `slife2-schedule` fires it, and when it comes due the
-agent is handed the description as a turn of its own — through the terminal, or
-through the agent server when no window is showing that conversation. **That turn
-is an order, not a notification**: it names the call to make (`agent_task_start`,
-under the scheduled task's own name), says not to wait or poll, and names the one
-ending — `schedule_run_settle` with a one-line note, once the answer arrives. A
-task that has come due is **not the agent's to decline**; `schedule_run_skip`
-exists for the runs that did not happen at all.
+agent is handed the task as a turn of its own — through the terminal, or through
+the agent server when no window is showing that conversation. **That turn has one
+instruction**: call `schedule_run_now` with the due time it carries. A task that
+has come due is **not the agent's to decline**; `schedule_run_skip` exists for the
+runs that did not happen at all.
 
 | tool | what it does |
 |---|---|
@@ -782,9 +780,8 @@ exists for the runs that did not happen at all.
 | `schedule_remove` | Forget it, and everything it ever did |
 | `schedule_list` | What is scheduled, and when each next comes due |
 | `schedule_runs` | What it has actually done — one row per fire |
-| `schedule_run_now` | Run it now, or backfill a run that was missed |
-| `schedule_run_settle` | Close a run that has been done, with a one-line note |
-| `schedule_run_skip` | Close one that is not worth doing any more, and say why |
+| `schedule_run_now` | Start this run's work now; with a `due_at`, backfill that run |
+| `schedule_run_skip` | Close a run that is not going to happen, and say why |
 
 ```
 schedule_set(name="daily", description="Write the day's entry from the turns.",
@@ -792,24 +789,33 @@ schedule_set(name="daily", description="Write the day's entry from the turns.",
 → {"name": "daily", "cron": "0 22 * * *", "next_run": "2026-10-12T22:00:00+08:00", ...}
 ```
 
+**`schedule_run_now` is the plugin starting the work, not the agent doing it.**
+The call hands the run to `agent-task` as a task of the agent's own — the same
+prompt, model and tools, the same context — and returns at once. Because the
+*plugin* is the caller it is handed the task's id, so the clock's own poll can ask
+what became of it: `finished` closes the run `ran` at the task's own `finished_at`,
+a failure or a cancellation closes it `failed`, and nothing has to be remembered
+in a later turn. The answer itself is delivered back to the conversation by
+`agent-task`, wearing `[AsyncTaskResult:…]` like any other background task's.
+
 **The ledger is the feature.** A *run* is one fire, named by the moment it was
-**due** rather than by when it ran, and it moves `pending → ran | failed | missed
-| skipped`. The row is written before anything is handed over, so a fire cannot
+**due** rather than by when it ran, and it moves `pending → ran | failed | missed |
+skipped`. The row is written before the trigger is handed over, so a fire cannot
 repeat on the next poll; a hand-over that is refused marks the run `failed`; one
 that does not come back leaves it `pending`, because a run whose fate is unknown
-is not reported as either. *No note means it failed* — the note `schedule_run_settle`
-takes is what a later reading of `schedule_runs` has instead of the work itself.
+is not reported as either. A run whose work **could not be started** is closed
+`failed` with the reason, rather than left open with nothing behind it.
 
 **Tasks fire only while slife2 is running**, and what was missed is not hidden:
-coming up, the sweep fails anything a stopped process left open and records the
-newest fire each task missed — `schedule_runs(status="missed")` is where you find
-them — so a run can be backfilled with `schedule_run_now(name, due_at)` or closed
-with `schedule_run_skip`. Nothing announces them: **a fire is the only thing the
-clock ever says to a conversation**, and the ledger is where "did it run?" is
-answered (DESIGN.md §1.7, §9). A trigger wears no marker either, because the
-marker vocabulary is for matching a *result* to what produced it and a trigger is
-not a result — the `schedule:<task>` channel and the template's first line carry
-what a reader needs.
+coming up, the sweep fails anything a stopped process left open and the poll
+records the newest fire each task missed — `schedule_runs(status="missed")` is
+where you find them — so a run can be backfilled with `schedule_run_now(name,
+due_at)` or closed with `schedule_run_skip`. Nothing announces them: **a trigger
+is the only thing the clock ever says to a conversation**, and the ledger is where
+"did it run?" is answered (DESIGN.md §1.7, §9). A trigger wears no marker either,
+because the marker vocabulary is for matching a *result* to what produced it and a
+trigger is not a result — the `schedule:<task>` channel and the template's first
+line carry what a reader needs.
 
 A ledger lives at `<data>/agents/<agent>/schedule.db`, and there is **no config
 section** — an address is the whole of what is written down about the plugin. A

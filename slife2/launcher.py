@@ -668,13 +668,16 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # up fails its own first hop, and that failure looks like the feature not
     # working rather than like a daemon that was still starting.
     "agent-task": ("toolhub", "tui", "agent"),
-    # The clock reaches two peers, and needs neither the hub nor a model: a fire
-    # puts a due task in front of the agent through the terminal, or through the
-    # agent server when no window is showing that conversation.  Ordering rather
-    # than correctness, like every edge here — a ledger whose first fire cannot
-    # be handed over is a run marked failed, which looks like the feature not
-    # working rather than like a daemon that was still starting.
-    "schedule": ("tui", "agent"),
+    # The clock reaches three peers, and needs neither the hub nor a model.  A
+    # fire puts a due task in front of the agent through the terminal, or through
+    # the agent server when no window is showing that conversation; the turn it
+    # opens then calls back into *this* plugin, which hands the work to
+    # `agent-task` as a task of the agent's own and asks that peer what became of
+    # it.  So the third edge is where the run can actually be closed.  Ordering
+    # rather than correctness, like every edge here — a fire that cannot be handed
+    # over is a run marked failed, which looks like the feature not working rather
+    # than like a daemon that was still starting.
+    "schedule": ("tui", "agent", "agent-task"),
     "toolhub": (
         "embeddings",
         "context",
@@ -686,14 +689,14 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "cabinet",
         "media",
         "file-tunnel",
-        "schedule",
-        # **`agent-task` is not here, and it cannot be.**  The comment above
-        # says this edge is kept for every plugin the hub asks, and the hub does
-        # ask it — but a task's loop *runs on* the hub's tool list, so an edge
-        # from the hub to `agent-task` closes a cycle the launcher refuses to
-        # start (`ensure_all` raises).  What the edge is for is a plugin that
-        # would otherwise be asked before it is up; one that waits on the hub
-        # itself is up by definition by the time the hub can answer.
+        # **`agent-task` and `schedule` are not here, and they cannot be.**  The
+        # comment above says this edge is kept for every plugin the hub asks, and
+        # the hub does ask both — but a task's loop *runs on* the hub's tool list,
+        # and the clock hands its runs to `agent-task`, so either edge closes a
+        # cycle the launcher refuses to start (`ensure_all` raises).  What the
+        # edge is for is a plugin that would otherwise be asked before it is up;
+        # both of these wait on the hub themselves, so they are up by definition
+        # by the time the hub can answer.
     ),
 }
 

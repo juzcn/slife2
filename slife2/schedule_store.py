@@ -91,13 +91,19 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 );
 
 CREATE TABLE IF NOT EXISTS scheduled_runs (
-    id      INTEGER PRIMARY KEY,
-    task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id),
-    due_at  TEXT NOT NULL,
-    status  TEXT NOT NULL,
-    ran_at  TEXT NOT NULL DEFAULT '',
-    note    TEXT NOT NULL DEFAULT '',
-    error   TEXT NOT NULL DEFAULT '',
+    id            INTEGER PRIMARY KEY,
+    task_id       INTEGER NOT NULL REFERENCES scheduled_tasks(id),
+    due_at        TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    ran_at        TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',
+    error         TEXT NOT NULL DEFAULT '',
+    -- The background task this run's work is being done by, once it has been
+    -- started.  Empty until then, and empty forever for a run that never got
+    -- that far — which is the difference between "in flight" and "nobody acted
+    -- on the trigger", and the reason this is a column rather than a guess made
+    -- from the task's name.
+    agent_task_id TEXT NOT NULL DEFAULT '',
     UNIQUE(task_id, due_at)
 );
 
@@ -156,6 +162,11 @@ class Run:
     ran_at: str
     note: str
     error: str
+    #: The agent task doing this run's work, as agent-task named it, once
+    #: `schedule_run_now` has started one.  This is the whole reason a run can be
+    #: closed without the model having to remember anything: the plugin made the
+    #: call, so it holds the id, so it can ask what became of it.
+    agent_task_id: str = ""
     #: The task's name, carried on the value rather than looked up per row:
     #: `schedule_runs` lists across tasks, and a row that cannot say which task
     #: it belongs to is a row nobody can act on.  Empty only for a `Run` built
@@ -171,6 +182,7 @@ class Run:
             "ran_at": self.ran_at,
             "note": self.note,
             "error": self.error,
+            "agent_task_id": self.agent_task_id,
         }
 
 
@@ -453,12 +465,16 @@ class ScheduleStore:
         *,
         note: str = "",
         error: str = "",
+        when: str = "",
     ) -> Run | None:
         """Move a run to an ending, and say what it produced.
 
         `ran_at` is stamped only for `ran`: a run that was skipped or that never
         happened has no moment it happened at, and writing one would make the
-        ledger claim a completion that did not occur.
+        ledger claim a completion that did not occur.  `when` is that moment,
+        for the caller that knows it better than this process does — the harness
+        closing a run reads it off the background task, which finished before
+        anybody noticed.
         """
         if status not in STATUSES:
             raise ValueError(f"{status!r} is not a run state")
@@ -471,7 +487,7 @@ class ScheduleStore:
                 "error = ? WHERE task_id = ? AND due_at = ?",
                 (
                     status,
-                    now() if status == RAN else "",
+                    (when or now()) if status == RAN else "",
                     note,
                     error,
                     task.id,
@@ -502,6 +518,42 @@ class ScheduleStore:
                 (PENDING, note, found.id),
             )
         return self.run(name, due_at)
+
+    def attach(self, name: str, due_at: str, agent_task_id: str) -> Run | None:
+        """Say which background task is doing this run's work.
+
+        Written the moment the task has started, so that a process which stops
+        afterwards leaves a row that says what it was waiting on.  A run whose
+        work never got started keeps an empty column, which is how the poll tells
+        "in flight" from "nobody acted on the trigger".
+        """
+        task = self.task(name)
+        if task is None:
+            return None
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE scheduled_runs SET agent_task_id = ? "
+                "WHERE task_id = ? AND due_at = ?",
+                (agent_task_id, task.id, due_at),
+            )
+        return self.run(name, due_at)
+
+    def in_flight(self) -> list[Run]:
+        """Runs whose work is being done right now: `pending`, with a task.
+
+        What the poll asks the agent-task plugin about.  A `pending` run with no
+        task is *not* here — it is a trigger nobody acted on, which is a different
+        thing and one this plugin deliberately does not chase (DESIGN.md §9).
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT r.*, t.name AS task_name FROM scheduled_runs r "
+                "JOIN scheduled_tasks t ON t.id = r.task_id "
+                "WHERE r.status = ? AND r.agent_task_id <> '' "
+                "ORDER BY r.due_at",
+                (PENDING,),
+            ).fetchall()
+        return [_run(row, row["task_name"]) for row in rows]
 
     def unresolved(self) -> list[Run]:
         """Every run still awaiting an ending, newest first.
@@ -568,6 +620,7 @@ def _run(row: sqlite3.Row, name: str = "") -> Run:
         ran_at=str(row["ran_at"]),
         note=str(row["note"]),
         error=str(row["error"]),
+        agent_task_id=str(row["agent_task_id"]),
         # `name` is a join column when the caller asked for one.  Run carries it
         # so that a ledger listing can say which task each row belongs to —
         # `schedule_runs` asks across tasks, and a row without a name is a row

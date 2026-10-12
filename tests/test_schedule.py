@@ -29,24 +29,33 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2 import paths
-from slife2.audience import client_meta, for_the_model
+from slife2.agent_task_server import (
+    FAILED as TASK_FAILED,
+)
+from slife2.agent_task_server import (
+    FINISHED as TASK_FINISHED,
+)
+from slife2.agent_task_server import (
+    RUNNING as TASK_RUNNING,
+)
+from slife2.audience import client_meta, for_the_model, request_client
 from slife2.config import default_config
 from slife2.schedule_server import (
     CHANNEL,
     SCHEDULE_LIST,
     SCHEDULE_REMOVE,
     SCHEDULE_RUN_NOW,
-    SCHEDULE_RUN_SETTLE,
     SCHEDULE_RUN_SKIP,
     SCHEDULE_RUNS,
     SCHEDULE_SET,
     build_server,
     due,
     poll_once,
+    reconcile,
     sweep_once,
 )
 from slife2.schedule_store import (
@@ -69,6 +78,10 @@ EVERY_MINUTE = "* * * * *"
 #: behind the moment asked about, so a task due every minute is always fresh and
 #: only a sparse one can be late by more than the window.
 ONCE_A_YEAR = "0 0 1 1 *"
+#: What the recorder peer says a finished task finished at.  A fixed moment
+#: because it is asserted on: `ran_at` comes off *this*, not off the clock, and a
+#: test that read it from `now()` would pass whichever one the code used.
+FINISHED_AT = "2026-10-12T22:31:07+08:00"
 
 
 # ── the peers, as recorders ──────────────────────────────────────────────────
@@ -123,6 +136,79 @@ class Conversation:
             self.handed.append({"agent": agent, "prompt": prompt, "channel": channel})
 
 
+@dataclass
+class Tasks:
+    """A recorder standing in for `slife2-agent-task`.
+
+    **What is under test is what this plugin hands that peer and what it makes of
+    the answer**, so the recorder is the peer's whole surface: `agent_task_start`,
+    which answers with an id and runs nothing, and `agent_task_list`, whose
+    statuses a test sets by hand.  One `status` field rather than a transcript,
+    because the question asked of this peer is one question — what became of the
+    task I started.
+
+    It records the identity each call arrived under, which is the half of the
+    contract a fake can silently get wrong: a task is an *agent's*, and a shared
+    process that forgot to say whose would be refused by the real one.
+    """
+
+    client: Client | None = None
+    refuse: bool = False
+    status: str = TASK_RUNNING
+    started: list[dict[str, Any]] = field(default_factory=list)
+    asked: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.mcp: FastMCP = FastMCP("tasks")
+
+        def who(ctx: Context) -> str:
+            found = request_client(ctx)
+            return found[0] if found else ""
+
+        @self.mcp.tool
+        async def agent_task_start(
+            ctx: Context, name: str, description: str
+        ) -> dict[str, Any]:
+            if self.refuse:
+                raise ToolError(f"an agent task named {name!r} is already running")
+            self.started.append(
+                {"agent": who(ctx), "name": name, "description": description}
+            )
+            return {
+                "task_id": f"agent-task:{name}",
+                "name": name,
+                "status": TASK_RUNNING,
+                "started_at": "",
+                "finished_at": "",
+            }
+
+        @self.mcp.tool
+        async def agent_task_list(ctx: Context) -> dict[str, Any]:
+            self.asked.append(who(ctx))
+            return {
+                "tasks": [
+                    {
+                        "task_id": f"agent-task:{row['name']}",
+                        "name": row["name"],
+                        "status": self.status,
+                        "started_at": "",
+                        "finished_at": (
+                            FINISHED_AT if self.status == TASK_FINISHED else ""
+                        ),
+                    }
+                    for row in self.started
+                ]
+            }
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def tasks() -> AsyncIterator[Tasks]:
+    node = Tasks()
+    async with Client(node.mcp) as client:
+        node.client = client
+        yield node
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def window() -> AsyncIterator[Window]:
     node = Window()
@@ -159,13 +245,16 @@ async def conversation() -> AsyncIterator[Conversation]:
 
 
 def build(
-    window: Window | None = None, conversation: Conversation | None = None
+    window: Window | None = None,
+    conversation: Conversation | None = None,
+    tasks: Tasks | None = None,
 ) -> FastMCP:
     """The plugin, wired to recorders and with its clock not running."""
     return build_server(
         default_config(),
         window_client=window.client if window else None,
         agent_client=conversation.client if conversation else None,
+        tasks_client=tasks.client if tasks else None,
         polling=False,
     )
 
@@ -224,15 +313,15 @@ def later(seconds: float = 0, days: float = 0) -> datetime:
 # ── the surface ──────────────────────────────────────────────────────────────
 
 
-async def test_the_seven_tools_are_the_models_and_nothing_else_is() -> None:
-    """Seven, and each says so: `schedule_run_settle` is the one v1 did not have
-    to expose, because there the cabinet reported its own success (§1.7)."""
+async def test_the_six_tools_are_the_models_and_nothing_else_is() -> None:
+    """Six, which is v1's six.  There is no `schedule_run_settle` because there is
+    nothing for a model to close: a run ends when the background task doing it
+    ends, and the plugin is the one that asks (§1.7)."""
     tools = await build().list_tools()
     assert sorted(t.name for t in tools) == [
         SCHEDULE_LIST,
         SCHEDULE_REMOVE,
         SCHEDULE_RUN_NOW,
-        SCHEDULE_RUN_SETTLE,
         SCHEDULE_RUN_SKIP,
         SCHEDULE_RUNS,
         SCHEDULE_SET,
@@ -333,8 +422,8 @@ async def test_a_task_that_has_come_due_is_handed_to_the_conversation(
     window: Window,
 ) -> None:
     """A fire is a turn of the agent's own, on the task's own channel, wearing
-    the rendered template — and the run it opens is `pending`, because the turn
-    is what closes it."""
+    the rendered template — and the run it opens is `pending` with no task behind
+    it yet, because *starting the work* is what the turn is for."""
     async with Client(build(window)) as client:
         await write(client, cron=EVERY_MINUTE)
 
@@ -353,9 +442,14 @@ async def test_a_task_that_has_come_due_is_handed_to_the_conversation(
 
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING
-    # The timestamp the trigger carried is the run's name, so the model can say
-    # which run it is closing.
+    # **Open, with nothing doing it yet**: the turn has not been answered, so
+    # `schedule_run_now` has not been called.
+    assert run.agent_task_id == ""
+    # The trigger's one instruction is that call, carrying the due time that names
+    # the run — and it says the run closes itself, so there is nothing to
+    # remember in a later turn.
     assert run.due_at in handed["text"]
+    assert SCHEDULE_RUN_NOW in handed["text"]
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
 
 
@@ -516,77 +610,143 @@ async def test_a_ledger_that_does_not_say_whose_it_is_is_skipped(
     assert "does not say whose ledger" in caplog.text
 
 
-# ── closing a run ────────────────────────────────────────────────────────────
+# ── starting a run's work ────────────────────────────────────────────────────
 
 
-async def open_a_run(*, seconds: float = 90) -> str:
-    """Fire one task, and answer with the due time of the run it opened."""
-    window = Window()
-    async with Client(window.mcp) as client:
-        mcp = build(window)
-        async with Client(mcp) as plugin:
-            await write(plugin)
-        await poll_once(
-            default_config(), window_client=client, reference=later(seconds)
-        )
-    run = ledger().newest("daily")
-    assert run is not None
-    return run.due_at
-
-
-async def test_settling_a_run_closes_it_and_keeps_the_note() -> None:
-    """The note is what a later reading of the ledger has instead of the work."""
-    due_at = await open_a_run()
-    async with Client(build()) as client:
-        settled = await ask(
-            client,
-            SCHEDULE_RUN_SETTLE,
-            {"name": "daily", "due_at": due_at, "note": "wrote 400 words"},
-        )
-    assert settled["status"] == RAN
-    assert settled["note"] == "wrote 400 words"
-    assert settled["ran_at"]
-    # And the answer to "did it run" is now in the ledger for anybody who asks.
-    async with Client(build()) as client:
-        runs = await ask(client, SCHEDULE_RUNS, {"name": "daily"})
-    assert [row["status"] for row in runs["runs"]] == [RAN]
-
-
-async def test_skipping_a_run_is_an_answer_rather_than_a_gap() -> None:
-    due_at = await open_a_run(seconds=600)
-    async with Client(build()) as client:
-        skipped = await ask(
-            client,
-            SCHEDULE_RUN_SKIP,
-            {"name": "daily", "due_at": due_at, "note": "the day is over"},
-        )
-    assert skipped["status"] == SKIPPED
-    # A run that never happened has no moment it happened at.
-    assert skipped["ran_at"] == ""
-
-
-async def test_closing_with_no_due_at_closes_the_newest_open_run() -> None:
-    """The run you were just handed: the trigger carried its timestamp, and a
-    model that read it does not have to send it back."""
-    due_at = await open_a_run()
-    async with Client(build()) as client:
-        settled = await ask(client, SCHEDULE_RUN_SETTLE, {"name": "daily"})
-    assert settled["due_at"] == due_at
-    assert settled["status"] == RAN
-
-
-async def test_closing_with_nothing_open_is_refused() -> None:
-    """Rather than inventing a timestamp, which would close a run nobody asked
-    about."""
-    async with Client(build()) as client:
+async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
+    tasks: Tasks,
+) -> None:
+    """**The whole of what a trigger asks for.** The plugin makes the call, so it
+    is handed the id — and that is why a run can close itself later instead of a
+    model having to remember anything (§1.7)."""
+    async with Client(build(tasks=tasks)) as client:
         await write(client)
-        with pytest.raises(ToolError, match="no run waiting to be closed"):
-            await ask(client, SCHEDULE_RUN_SETTLE, {"name": "daily"})
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    assert run["status"] == PENDING
+    assert run["agent_task_id"] == "agent-task:daily"
+    # Handed over as the agent, under the task's own name, with the description
+    # as the whole of what the work is told.
+    assert tasks.started == [
+        {"agent": AGENT, "name": "daily", "description": DESCRIPTION}
+    ]
 
 
-async def test_running_now_backfills_the_run_that_was_missed(window: Window) -> None:
-    """The same run, re-opened: same identity, same due time, and now fired."""
-    async with Client(build(window)) as client:
+async def test_a_run_already_in_flight_is_not_started_twice(tasks: Tasks) -> None:
+    """A second call for the same due time is a conversation retrying, not a
+    second run."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        first = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        again = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": first["due_at"]}
+        )
+
+    assert again["agent_task_id"] == first["agent_task_id"]
+    assert len(tasks.started) == 1
+
+
+async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(
+    tasks: Tasks,
+) -> None:
+    """**A `pending` row with no task behind it is the one state nothing can
+    resolve** — the poll cannot ask about a task that was never started, and the
+    sweep would have to guess."""
+    tasks.refuse = True
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        with pytest.raises(ToolError, match="could not be started"):
+            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == FAILED
+    assert "already running" in run.error
+
+
+async def test_the_work_ending_closes_the_run_at_the_moment_it_ended(
+    tasks: Tasks,
+) -> None:
+    """`ran_at` comes off the task's own `finished_at` rather than off the clock:
+    the work ended when it ended, not when a poll happened to look."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.status = TASK_FINISHED
+
+    did = await reconcile(default_config(), tasks_client=tasks.client)
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == RAN
+    assert run.ran_at == FINISHED_AT
+    assert did == [f"{AGENT}: daily due {run.due_at} closed"]
+    # And the answer to "did it run" is in the ledger for anybody who asks.
+    async with Client(build(tasks=tasks)) as client:
+        listed = await ask(client, SCHEDULE_RUNS, {"name": "daily", "status": RAN})
+    assert len(listed["runs"]) == 1
+
+
+async def test_a_run_still_running_is_left_where_it_is(tasks: Tasks) -> None:
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    assert await reconcile(default_config(), tasks_client=tasks.client) == []
+    run = ledger().newest("daily")
+    assert run is not None and run.status == PENDING
+    # Whose tasks were asked about: a task is an agent's, and the identity is how
+    # the peer knows which ones.
+    assert tasks.asked == [AGENT]
+
+
+async def test_a_background_task_that_failed_closes_the_run(tasks: Tasks) -> None:
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.status = TASK_FAILED
+
+    await reconcile(default_config(), tasks_client=tasks.client)
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == FAILED
+    assert TASK_FAILED in run.error
+
+
+async def test_a_task_the_peer_no_longer_holds_closes_the_run(tasks: Tasks) -> None:
+    """A task its own plugin has forgotten is not a run to leave open: a
+    `pending` row nothing can resolve is the state this design exists to avoid."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.started.clear()  # the peer's registry no longer holds it
+
+    await reconcile(default_config(), tasks_client=tasks.client)
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == FAILED
+    assert "never seen" in run.error
+
+
+async def test_the_poll_asks_after_the_task_has_ended(tasks: Tasks) -> None:
+    """Both ends of a run's life in one pass: the clock's fires, then the asking
+    about what is in flight."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.status = TASK_FINISHED
+
+    did = await poll_once(default_config(), tasks_client=tasks.client)
+
+    assert any(line.endswith("closed") for line in did)
+    run = ledger().newest("daily")
+    assert run is not None and run.status == RAN
+
+
+async def test_run_now_backfills_the_run_that_was_missed(
+    tasks: Tasks, window: Window
+) -> None:
+    """The same run — same identity, same due time — and now it has work behind
+    it."""
+    async with Client(build(tasks=tasks, window=window)) as client:
         await write(client, cron=ONCE_A_YEAR)
     await poll_once(
         default_config(), window_client=window.client, reference=later(days=400)
@@ -594,40 +754,84 @@ async def test_running_now_backfills_the_run_that_was_missed(window: Window) -> 
     missed = ledger().newest("daily")
     assert missed is not None and missed.status == MISSED
 
-    async with Client(build(window)) as client:
-        fired = await ask(
+    async with Client(build(tasks=tasks)) as client:
+        started = await ask(
             client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": missed.due_at}
         )
 
-    assert fired["due_at"] == missed.due_at
-    assert fired["status"] == PENDING
-    assert len(window.handed) == 1
+    assert started["due_at"] == missed.due_at
+    assert started["status"] == PENDING
+    assert started["agent_task_id"] == "agent-task:daily"
 
 
-async def test_running_now_refuses_a_run_that_has_already_ended() -> None:
+async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> None:
     """`ran` and `skipped` are answers, and a tool that quietly turned one back
     into work would make the ledger's history a function of the last thing
     anybody said."""
-    due_at = await open_a_run()
-    async with Client(build()) as client:
-        await ask(client, SCHEDULE_RUN_SETTLE, {"name": "daily", "due_at": due_at})
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.status = TASK_FINISHED
+    await reconcile(default_config(), tasks_client=tasks.client)
+
+    async with Client(build(tasks=tasks)) as client:
         with pytest.raises(ToolError, match="already ran"):
-            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": due_at})
+            await ask(
+                client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": run["due_at"]}
+            )
 
 
-async def test_removing_a_task_takes_its_runs_with_it() -> None:
+async def test_skipping_a_run_is_an_answer_rather_than_a_gap(tasks: Tasks) -> None:
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        skipped = await ask(
+            client,
+            SCHEDULE_RUN_SKIP,
+            {"name": "daily", "due_at": run["due_at"], "note": "the day is over"},
+        )
+
+    assert skipped["status"] == SKIPPED
+    assert skipped["note"] == "the day is over"
+    # A run that never happened has no moment it happened at.
+    assert skipped["ran_at"] == ""
+
+
+async def test_skipping_with_no_due_at_closes_the_newest_open_run(
+    tasks: Tasks,
+) -> None:
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        skipped = await ask(client, SCHEDULE_RUN_SKIP, {"name": "daily"})
+
+    assert skipped["due_at"] == run["due_at"]
+    assert skipped["status"] == SKIPPED
+
+
+async def test_skipping_with_nothing_open_is_refused() -> None:
+    """Rather than inventing a timestamp, which would close a run nobody asked
+    about."""
+    async with Client(build()) as client:
+        await write(client)
+        with pytest.raises(ToolError, match="no run waiting to be closed"):
+            await ask(client, SCHEDULE_RUN_SKIP, {"name": "daily"})
+
+
+async def test_removing_a_task_takes_its_runs_with_it(tasks: Tasks) -> None:
     """The one delete, and it is the model saying "this is not a thing any
     more" — keeping the runs of a task that no longer exists would be keeping
     rows nothing can name."""
-    due_at = await open_a_run()
-    async with Client(build()) as client:
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
         await ask(client, SCHEDULE_REMOVE, {"name": "daily"})
         listed = await ask(client, SCHEDULE_LIST)
         runs = await ask(client, SCHEDULE_RUNS, {})
 
     assert listed["tasks"] == []
     assert runs["runs"] == []
-    assert ledger().run("daily", due_at) is None
+    assert ledger().run("daily", run["due_at"]) is None
 
 
 # ── coming up again ──────────────────────────────────────────────────────────
@@ -647,7 +851,7 @@ async def test_the_sweep_fails_what_a_stopped_process_left_pending(
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    did = await sweep_once(default_config())
+    did = await sweep_once()
 
     run = ledger().run("daily", "2026-10-12T09:00:00+08:00")
     assert run is not None and run.status == FAILED
@@ -671,7 +875,7 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    await sweep_once(default_config())
+    await sweep_once()
 
     assert window.handed == []
     # …and the run is findable, which is the whole of the answer it needs.
@@ -684,7 +888,7 @@ async def test_a_sweep_with_nothing_to_do_is_quiet(window: Window) -> None:
     async with Client(build(window)) as client:
         await write(client)
 
-    did = await sweep_once(default_config())
+    did = await sweep_once()
 
     assert did == []
     assert window.handed == []
