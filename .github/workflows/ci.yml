@@ -42,9 +42,12 @@ jobs:
       # Homebrew marks its Python externally managed (PEP 668), because
       # `brew upgrade` owns that tree; uv honours the marker and refuses with
       # "The interpreter ... is externally managed".  `uv venv --python` is the
-      # way through, and the `.venv` it leaves is what `uv pip install` targets
-      # and what `uv run` discovers — so `UV_PYTHON` matters only for the steps
-      # that build their own environment on the fly (`uv run --with ruff`).
+      # way through.
+      #
+      # `--clear` because `setup-uv` has already left a `.venv` built from its
+      # own managed interpreter — which is the whole problem, since that is the
+      # build with no loadable SQLite.  Replacing it is the point of the step;
+      # nothing is installed into it until the `Install` step below.
       - name: A Python that can load SQLite extensions
         if: runner.os == 'macOS'
         shell: bash
@@ -52,7 +55,7 @@ jobs:
           brew install python@3.13
           brew_python="$(brew --prefix python@3.13)/bin/python3.13"
           echo "UV_PYTHON=$brew_python" >> "$GITHUB_ENV"
-          uv venv --python "$brew_python"
+          uv venv --clear --python "$brew_python"
 
       - name: Build wheel
         run: uv build --out-dir dist
