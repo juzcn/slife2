@@ -247,7 +247,10 @@ def test_same_process_rejects_a_reused_pid() -> None:
 def test_exclusive_lock_is_released_on_exit() -> None:
     with runtime.exclusive("k"):
         pass
-    with runtime.exclusive("k", timeout=1):
+    with runtime.exclusive(
+        "k",
+        timeout=1,  # timeouts: the value this test is built around, not a budget
+    ):  # timeouts: the value this test is built around, not a budget
         pass  # acquiring again proves the first was released
 
 
@@ -264,7 +267,10 @@ def test_exclusive_lock_is_held_by_another_process() -> None:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "held"
         with pytest.raises(TimeoutError):
-            with runtime.exclusive("shared", timeout=0.3):
+            with runtime.exclusive(
+                "shared",
+                timeout=0.3,  # timeouts: the value this test is built around, not a budget
+            ):  # timeouts: the value this test is built around, not a budget
                 pass
     finally:
         holder.kill()
@@ -286,7 +292,10 @@ def test_exclusive_lock_survives_nothing_when_the_holder_is_killed() -> None:
         holder.kill()
         holder.wait()
         # No stale-lock protocol, no pid probing, no timeout: it is just free.
-        with runtime.exclusive("shared", timeout=2):
+        with runtime.exclusive(
+            "shared",
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        ):  # timeouts: the value this test is built around, not a budget
             pass
     finally:
         if holder.poll() is None:
@@ -337,7 +346,7 @@ def test_a_spawned_server_gets_no_console_window(tmp_path) -> None:
         "    str(ctypes.windll.kernel32.GetConsoleWindow()))\n"
     )
     proc = runtime.spawn([sys.executable, "-c", probe], url="http://127.0.0.1:8077/mcp")
-    proc.wait(timeout=30)
+    proc.wait(timeout=30)  # timeouts: the value this test is built around, not a budget
 
     assert result.exists(), "the probe did not run"
     assert result.read_text().strip() == "0", "the daemon opened a console window"
@@ -359,7 +368,9 @@ def test_a_spawned_server_outlives_its_spawner() -> None:
     try:
         assert holder.stdout is not None
         pid = int(holder.stdout.readline().strip())
-        holder.wait(timeout=20)
+        holder.wait(
+            timeout=20  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         assert holder.returncode == 0
 
         time.sleep(0.5)

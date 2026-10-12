@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import slife2.timeouts as _T
 from slife2.config import A2ASettings
 from slife2.paths import runtime_dir
 from slife2.runtime import spawn, tail_log, tcp_listening
@@ -47,8 +48,6 @@ MOSQUITTO = "mosquitto"
 
 #: How long a broker we started has to start answering.  Generous for a binary
 #: that has to read a config and bind a port, short enough to be a deadline.
-READY_SECONDS = 10.0
-_POLL_SECONDS = 0.1
 
 #: The hosts `broker.host` may name and still be *this* machine.  A broker is
 #: started only for one of these; anything else is somebody else's host.
@@ -62,8 +61,6 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::", ""})
 #: start" — neither of which a slow link is entitled to choose.  Getting it wrong
 #: in the tight direction is the worse mistake: a broker that is merely far away
 #: would be reported as absent, and absent-and-remote is fatal.
-LOCAL_PROBE_SECONDS = 0.25
-REMOTE_PROBE_SECONDS = 5.0
 
 #: The config we hand mosquitto, and **it is not optional on mosquitto 2.x**.
 #: From 2.0 the broker listens on loopback only and refuses anonymous clients
@@ -96,7 +93,11 @@ def _probe(host: str, port: int) -> bool:
     — so a caller never has to remember that one question costs different amounts
     at different distances.
     """
-    timeout = LOCAL_PROBE_SECONDS if is_local(host) else REMOTE_PROBE_SECONDS
+    timeout = (
+        _T.timeouts.ready.probe_local
+        if is_local(host)
+        else _T.timeouts.ready.probe_remote
+    )
     return tcp_listening(host, port, timeout=timeout)
 
 
@@ -126,7 +127,7 @@ def ensure(
     listening: Callable[[str, int], bool] | None = None,
     which: Callable[[str], str | None] = shutil.which,
     start: Callable[..., subprocess.Popen] = spawn,
-    ready_seconds: float = READY_SECONDS,
+    ready_seconds: float = _T.timeouts.ready.broker,
 ) -> str:
     """Make sure something is serving `settings.address`, and say what happened.
 
@@ -202,4 +203,4 @@ def ensure(
                 f"{MOSQUITTO} did not serve {settings.address} within "
                 f"{ready_seconds:.0f}s\n{tail_log(url)}".rstrip()
             )
-        time.sleep(_POLL_SECONDS)
+        time.sleep(_T.timeouts.pacing.broker_poll)

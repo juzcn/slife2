@@ -31,6 +31,7 @@ from pathlib import Path
 
 from fastmcp import Client
 
+import slife2.timeouts as _T
 from slife2.config import (
     A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
@@ -209,16 +210,13 @@ BACKEND_PREFIX = "llm:"
 #: the most before it serves (a catalogue index, then ten plugin asks): starved
 #: past 26s before it logged its first line, killed about a second short.  A
 #: deadline has to clear the floor before it means anything.
-READY_TIMEOUT_SECONDS = 90.0
 
 #: How long to wait for one `tools/list`.  Long enough that a slow but real
 #: server is not misread as absent.
-PROBE_TIMEOUT_SECONDS = 2.0
 
 #: How long to wait for another instance to release an agent name.  Short on
 #: purpose: unlike starting a server, there is nothing to wait for — a name is
 #: either free or it is not — so a long wait would only delay a refusal.
-AGENT_CLAIM_TIMEOUT_SECONDS = 0.2
 
 
 class Status(enum.Enum):
@@ -378,7 +376,7 @@ async def _probe_async(spec: ServerSpec, timeout: float) -> bool:
         await client.__aexit__(None, None, None)
 
 
-def probe(spec: ServerSpec, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
+def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
     """Whether the server at `spec.url` is up *and* is the one we expect.
 
     Identity comes from the handshake, which is what makes this better than a
@@ -389,6 +387,10 @@ def probe(spec: ServerSpec, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
     Takes the whole spec rather than a URL and a name so the two cannot be
     paired up wrongly at a call site — there are five of them, and a mismatched
     pair would report a perfectly good server as absent.
+
+    `timeout` is None by default, resolved here rather than in the signature:
+    a def-time default captures the registry's value at import, which is the one
+    thing the gate forbids (`slife2.timeouts`).
 
     Blocks, and so cannot be called from inside a running event loop.  It never
     is in production — the launcher runs before the TUI starts its loop — and
@@ -409,7 +411,9 @@ def probe(spec: ServerSpec, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
         )
 
     try:
-        return asyncio.run(_probe_async(spec, timeout))
+        return asyncio.run(
+            _probe_async(spec, _T.timeouts.ready.probe if timeout is None else timeout)
+        )
     except Exception:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
         return False
 
@@ -458,9 +462,9 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
     that dies at import — a bad config, a missing SDK, a port something grabbed
     in the meantime — reports that in about fifty milliseconds with its log, where
     a launcher that only watched the clock would sit out the whole of
-    `READY_TIMEOUT_SECONDS` and then blame a timeout.
+    `_T.timeouts.ready.plugin_start` and then blame a timeout.
     """
-    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    deadline = time.monotonic() + _T.timeouts.ready.plugin_start
     delay = 0.05
 
     while True:
@@ -480,9 +484,9 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
             # for is a zombie for the life of the waiter — which here is the
             # whole session, since the launcher runs until the TUI exits.
             with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5.0)
+                proc.wait(timeout=_T.timeouts.ready.reap)
             raise StartFailed(
-                f"{spec.name} did not answer within {READY_TIMEOUT_SECONDS:.0f}s",
+                f"{spec.name} did not answer within {_T.timeouts.ready.plugin_start:.0f}s",
                 tail_log(spec.url),
             )
         time.sleep(delay)
@@ -602,7 +606,7 @@ def claim_agent(name: str) -> Generator[None]:
         raise AgentInUse(name, read_claim(name))
 
     try:
-        with exclusive(agent_key(name), timeout=AGENT_CLAIM_TIMEOUT_SECONDS):
+        with exclusive(agent_key(name), timeout=_T.timeouts.ready.agent_claim):
             _HELD_NAMES.add(name)
             try:
                 # Everything after the `add` is inside the `try`, including the

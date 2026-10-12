@@ -65,6 +65,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx2
 
+import slife2.timeouts as _T
+
 logger = logging.getLogger(__name__)
 
 #: The provider used when the section is absent, unreadable, or names a
@@ -89,22 +91,15 @@ _TAIL_LINES = 20
 
 # ── Timings, v1's values ─────────────────────────────────────────────────────
 #: How long a start may be in flight before a newer attempt supersedes it.
-TUNNEL_START_SECONDS = 45.0
 #: How long to wait for a spawned CLI to print a publishable URL.
-TUNNEL_READ_URL_SECONDS = 30.0
 #: How long a published tunnel may stay unreachable before it is restarted.
 #: Deliberately far longer than the read timeout above: a CLI child that loses
 #: its edge re-registers on its own and KEEPS its hostname, while a respawn
 #: mints a new one and kills every link already handed out.
-TUNNEL_HEAL_SECONDS = 180.0
 #: Delay between retries, multiplied by the attempt number (linear backoff).
-TUNNEL_RETRY_DELAY_SECONDS = 2.0
 #: Cancellation cadence of the health loop.
-TUNNEL_HEALTH_SECONDS = 30.0
 #: How long a CLI child gets to die politely before it is killed.
-TUNNEL_KILL_SECONDS = 5.0
 #: Timeout for the one HTTP probe this module makes (a child's own metrics API).
-PROBE_ENDPOINT_SECONDS = 5.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -494,13 +489,13 @@ class _TunnelProviderBase:
         with self._start_lock:
             if self._starting:
                 elapsed = time.monotonic() - (self._starting_at or time.monotonic())
-                if elapsed < TUNNEL_START_SECONDS:
+                if elapsed < _T.timeouts.ready.tunnel_start:
                     logger.debug("tunnel_start_already_in_progress")
                     raise RuntimeError("Tunnel start already in progress")
                 logger.warning(
                     "tunnel_start_stale_superseded elapsed=%.0fs timeout=%.0fs",
                     elapsed,
-                    TUNNEL_START_SECONDS,
+                    _T.timeouts.ready.tunnel_start,
                 )
             self._start_gen += 1
             gen = self._start_gen
@@ -513,7 +508,7 @@ class _TunnelProviderBase:
             self._failed = True
             url = self._do_start(port)
             # Only the CURRENT owner may publish the URL.  A superseded
-            # attempt (its start crossed TUNNEL_START_SECONDS and a newer one
+            # attempt (its start crossed _T.timeouts.ready.tunnel_start and a newer one
             # took over) must NOT overwrite the newer tunnel's URL — the
             # tracked URL would point at a duplicate/stale attempt while the
             # monitor tears down "the current" one, leaking a tunnel and
@@ -562,7 +557,7 @@ class _TunnelProviderBase:
                 last_error = e
                 self._after_failed_attempt()
                 if n < _MAX_RETRIES:
-                    delay = TUNNEL_RETRY_DELAY_SECONDS * n
+                    delay = _T.timeouts.pacing.tunnel_retry_delay * n
                     logger.warning(
                         "tunnel_retry provider=%s attempt=%d/%d delay=%.1fs err=%s",
                         self.label,
@@ -622,7 +617,7 @@ class _TunnelProviderBase:
         transport can die at any time — so this loop never terminates; it runs
         until the monitor is cancelled (``stop_monitor`` / shutdown).
         """
-        await asyncio.sleep(TUNNEL_RETRY_DELAY_SECONDS)  # let the start land
+        await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)  # let the start land
 
         # When the current unreachable stretch began, so a transport that
         # heals itself is not respawned out from under its own recovery.
@@ -640,7 +635,7 @@ class _TunnelProviderBase:
                             time.monotonic() - down_since,
                         )
                         down_since = None
-                    await asyncio.sleep(TUNNEL_HEALTH_SECONDS)
+                    await asyncio.sleep(_T.timeouts.pacing.tunnel_health)
                     continue
 
                 # Unreachable, but not necessarily lost — and the difference
@@ -659,8 +654,8 @@ class _TunnelProviderBase:
                         self._public_url,
                     )
                 elapsed = time.monotonic() - down_since
-                if elapsed < TUNNEL_HEAL_SECONDS:
-                    await asyncio.sleep(TUNNEL_HEALTH_SECONDS)
+                if elapsed < _T.timeouts.ready.tunnel_heal:
+                    await asyncio.sleep(_T.timeouts.pacing.tunnel_health)
                     continue
                 logger.warning(
                     "tunnel_lost provider=%s url=%s elapsed=%.0fs — restarting",
@@ -679,7 +674,7 @@ class _TunnelProviderBase:
             # read as a failed restart — two warnings in the log for an
             # attempt that was never broken.
             if self.is_starting:
-                await asyncio.sleep(TUNNEL_RETRY_DELAY_SECONDS)
+                await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)
                 continue
 
             # No tunnel — (re)start.
@@ -694,11 +689,11 @@ class _TunnelProviderBase:
                     e,
                     self._monitor_retries,
                 )
-                await asyncio.sleep(TUNNEL_RETRY_DELAY_SECONDS)
+                await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)
                 continue
             if self._public_url is not None:
                 self._monitor_retries = 0
-            await asyncio.sleep(TUNNEL_HEALTH_SECONDS)
+            await asyncio.sleep(_T.timeouts.pacing.tunnel_health)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -986,7 +981,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
             return None
         try:
             with httpx2.Client(
-                timeout=httpx2.Timeout(PROBE_ENDPOINT_SECONDS),
+                timeout=httpx2.Timeout(_T.timeouts.ready.probe_endpoint),
             ) as http:
                 payload = http.get(f"{base}/ready").json()
             return int(payload.get("readyConnections") or 0) > 0
@@ -1042,7 +1037,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
         )
         self._reader.start()
 
-        deadline = time.monotonic() + TUNNEL_READ_URL_SECONDS
+        deadline = time.monotonic() + _T.timeouts.ready.tunnel_read_url
         while not self._url_event.wait(0.25):
             if proc.poll() is not None:
                 raise RuntimeError(
@@ -1072,7 +1067,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
         be never, or minutes later.  Saying so is the difference between a
         dead link and a clear "the tunnel is not reachable from here".
         """
-        budget = TUNNEL_READ_URL_SECONDS
+        budget = _T.timeouts.ready.tunnel_read_url
         if self._pending_url is not None and not self._transport_alive():
             return (
                 f"the {self.label} tunnel printed its URL "
@@ -1153,12 +1148,12 @@ class _CliTunnelProvider(_TunnelProviderBase):
             if proc.poll() is None:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=TUNNEL_KILL_SECONDS)
+                    proc.wait(timeout=_T.timeouts.grace.kill)
                 except subprocess.TimeoutExpired:
                     logger.warning("tunnel_kill_escalated provider=%s", self.label)
                     proc.kill()
                     try:
-                        proc.wait(timeout=TUNNEL_KILL_SECONDS)
+                        proc.wait(timeout=_T.timeouts.grace.kill)
                     except subprocess.TimeoutExpired:
                         pass
             if proc.stdout is not None:

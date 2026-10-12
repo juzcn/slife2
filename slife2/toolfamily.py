@@ -42,6 +42,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
+import slife2.timeouts as _T
 from slife2 import configfile
 from slife2.audience import forwarded_client, request_meta
 from slife2.config import Config, ConfigError, ToolServerSettings
@@ -53,9 +54,6 @@ from slife2.mcp_server import (
     SKILLS_SOURCE,
     house_server,
 )
-from slife2.mcp_server import (
-    LIST_SETTLE_SECONDS as _LIST_SETTLE_SECONDS,
-)
 from slife2.paths import data_dir
 
 logger = logging.getLogger(__name__)
@@ -66,7 +64,6 @@ logger = logging.getLogger(__name__)
 #: list of a session is missing every external tool; waiting without a bound
 #: means a cold `npx` holds a turn open for a minute.  So: wait, but briefly, and
 #: only for attempts that have already begun.
-LIST_SETTLE_SECONDS = _LIST_SETTLE_SECONDS
 
 #: How many of one server's tools a `*_list_tools` prints.  v1's number and v1's
 #: reason: a published server can carry four figures of tools (github: 1239),
@@ -283,7 +280,7 @@ class Family:
             if (attempt := one.connection.attempt) is not None
         ]
         if pending:
-            await asyncio.wait(pending, timeout=LIST_SETTLE_SECONDS)
+            await asyncio.wait(pending, timeout=_T.timeouts.ready.list_settle)
 
     async def declare(self) -> dict[str, Any]:
         """The `list_sources` payload: everything this family holds.
@@ -366,7 +363,7 @@ async def settled(one: Held) -> Held:
     one.connection.connecting()
     attempt = one.connection.attempt
     if attempt is not None:
-        await asyncio.wait([attempt], timeout=LIST_SETTLE_SECONDS)
+        await asyncio.wait([attempt], timeout=_T.timeouts.ready.list_settle)
     return one
 
 

@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
+import slife2.timeouts as _T
 from slife2 import ilink, markers, wechat
 from slife2.audience import client_meta, for_the_model
 from slife2.config import Config, load
@@ -152,9 +153,9 @@ class Rig:
 
 def rig(monkeypatch: pytest.MonkeyPatch, *, bridge: Bridge | None = None) -> Rig:
     """A plugin over a fresh bridge, with every loop hurried along."""
-    monkeypatch.setattr(wechat, "POLL_SECONDS", QUICK)
-    monkeypatch.setattr(wechat, "QR_POLL_SECONDS", QUICK)
-    monkeypatch.setattr(wechat, "TYPING_REFRESH", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing, "wechat_poll", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing, "qr_poll", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing, "typing_refresh", QUICK)
     made = Bridge() if bridge is None else bridge
     delivery = Delivery()
     return Rig(
@@ -191,7 +192,11 @@ def message(text: str, *, peer: str = "peer-1", token: str = "ctx-1") -> dict[st
     }
 
 
-async def until(predicate: Any, *, timeout: float = 3.0) -> None:
+async def until(
+    predicate: Any,
+    *,
+    timeout: float = 3.0,  # timeouts: the value this test is built around, not a budget
+) -> None:  # timeouts: the value this test is built around, not a budget
     """Wait for a background loop to get somewhere, or say it did not."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -516,7 +521,9 @@ async def test_an_aged_login_is_never_offered_to_the_server(
     login is a sentence about scanning again rather than a rejected request that
     reads like a network fault.
     """
-    signed_in("jack", saved_at=time.time() - (wechat.SESSION_MAX_AGE + 60))
+    signed_in(
+        "jack", saved_at=time.time() - (_T.timeouts.pacing.wechat_session_max_age + 60)
+    )
     made = rig(monkeypatch)
     await made.plugin.start()
     try:

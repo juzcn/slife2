@@ -368,7 +368,13 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
     server — which keeps it, and records it, because losing it is the failure
     the whole loop design exists to prevent.  See DESIGN.md §3.
     """
-    backend = FakeBackend(text_turn("slow", chunks=["s", "l", "o", "w"], delay=0.05))
+    backend = FakeBackend(
+        text_turn(
+            "slow",
+            chunks=["s", "l", "o", "w"],
+            delay=0.05,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     messages: list[Message] = []
 
     task = asyncio.create_task(AgentLoop(backend, registry()).run_turn(messages, "hi"))

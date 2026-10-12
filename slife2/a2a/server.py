@@ -57,6 +57,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.a2a.broker import ensure as ensure_broker
 from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
@@ -139,7 +140,6 @@ ORPHAN_PEER = "orphans"
 #: needs arrive underneath it.  Tens of seconds is what the launcher's own waves
 #: cost, so the count is generous against that and still a bound: a notice nobody
 #: can receive is not a reason to keep saying it.
-ORPHAN_RETRY_SECONDS = 10.0
 ORPHAN_RETRIES = 30
 
 #: What a call that does not say which agent it is for is told.  A shared process
@@ -413,7 +413,7 @@ async def _drain(
                 # costs is this writer's own idleness, which is the queue's
                 # normal mode: one path, one delivery at a time, and a reader
                 # that never waits on it (`Session.post`).
-                await asyncio.sleep(ORPHAN_RETRY_SECONDS)
+                await asyncio.sleep(_T.timeouts.pacing.orphan_retry)
                 session.post(text, peer, what, retries=retries - 1)
     except asyncio.CancelledError:
         raise

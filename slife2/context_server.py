@@ -68,6 +68,7 @@ from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 
+import slife2.timeouts as _T
 from slife2 import context as decisions
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import API_SERVER_NAMES, Config
@@ -109,7 +110,6 @@ INSTRUCTIONS = (
 #: discriminator is `context.timeout`, which is a knob because how long a model
 #: deserves to think about a decision is a property of the deployment rather than
 #: of this code.
-MODEL_TIMEOUT_SECONDS = 600.0
 
 #: The discriminator call, as a seam: the conversation and the input in, whatever
 #: the model said out.  A test injects one; production uses the model server
@@ -150,7 +150,7 @@ async def _ask_model(
                 url,
                 name=API_SERVER_NAMES[provider.api],
                 fallback_tool="stream_chat",
-                timeout=MODEL_TIMEOUT_SECONDS,
+                timeout=_T.timeouts.work.model_call,
             )
     asked = [
         *messages,
@@ -166,7 +166,7 @@ async def _ask_model(
             "tools": [],
             "messages": asked,
         },
-        timeout=MODEL_TIMEOUT_SECONDS,
+        timeout=_T.timeouts.work.model_call,
     )
     return StreamChatResult.from_wire(result.data).text
 

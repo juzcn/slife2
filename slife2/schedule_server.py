@@ -82,6 +82,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2 import schedule as expressions
 from slife2.agent_task_server import (
     AGENT_TASK_LIST,
@@ -149,7 +150,6 @@ SCHEDULE_RUN_SKIP = "schedule_run_skip"
 #: The two tools themselves and the states they answer with are **imported**
 #: rather than re-spelled — `slife2.agent_task_server` is the module that writes
 #: them, and a second copy here is the copy that drifts.
-TASKS_TIMEOUT_SECONDS = 30.0
 
 #: The channel a trigger arrives on, and the first half of what it is keyed by:
 #: `schedule:daily_diary`.  The window draws a bubble from the channel alone
@@ -160,14 +160,12 @@ CHANNEL = "schedule"
 #: How often the clock is asked.  Cron's unit is a minute, so this fires within
 #: half a minute of the due time and no expression can tell the difference —
 #: v1's number, and the reason it chose it.
-POLL_SECONDS = 30.0
 
 #: How late a fire may be and still count as *now* rather than as *missed*.  A
 #: fire whose due time is within this of the moment the clock looked is one that
 #: came due while slife2 was running; older than this, slife2 was not running,
 #: and the right answer is to say so rather than to run yesterday's work at
 #: today's prices.  v1's number.
-MISS_GRACE_SECONDS = 120.0
 
 #: What a task name may be.  Safe as a filename is not the requirement — nothing
 #: is named after it — but safe as *a word a model says back* is, and the two
@@ -235,7 +233,7 @@ def due(task: Task, reference: datetime | None = None) -> tuple[str, str] | None
     # clock readings — which is the only way it can be asked about a task whose
     # zone is not this machine's.
     late = (reference.astimezone() - found.astimezone()).total_seconds()
-    return ("fire" if late <= MISS_GRACE_SECONDS else "missed", at(found))
+    return ("fire" if late <= _T.timeouts.pacing.miss_grace else "missed", at(found))
 
 
 def channel_for(name: str) -> str:
@@ -360,7 +358,7 @@ async def tasks_server(
             config.server("agent-task").url,
             name=AGENT_TASK_SERVER_NAME,
             fallback_tool=AGENT_TASK_LIST,
-            timeout=TASKS_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.tasks,
         ),
         True,
     )
@@ -406,7 +404,7 @@ async def dispatch(
             # this process serves every agent: without it the peer would have to
             # guess whose loop to start, and would refuse (its `UNADDRESSED`).
             meta=client_meta(store.agent),
-            timeout=TASKS_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.tasks,
         )
     except Exception as exc:  # noqa: BLE001 - refusals and a missing peer alike
         store.settle(task.name, due_at, FAILED, error=str(exc))
@@ -498,7 +496,10 @@ async def _tasks_of(
     peer, owned = await tasks_server(config, client)
     try:
         answer = await peer.call_tool(
-            AGENT_TASK_LIST, {}, meta=client_meta(agent), timeout=TASKS_TIMEOUT_SECONDS
+            AGENT_TASK_LIST,
+            {},
+            meta=client_meta(agent),
+            timeout=_T.timeouts.transport.tasks,
         )
     finally:
         if owned:
@@ -607,7 +608,7 @@ async def poll_forever(
     agent_client: Client | None = None,
     tasks_client: Client | None = None,
 ) -> None:
-    """The loop: sweep once, then ask the clock every `POLL_SECONDS`.
+    """The loop: sweep once, then ask the clock every `_T.timeouts.pacing.schedule_poll`.
 
     **One loop for every agent**, which is the second half of why this is a
     plugin rather than something each conversation does: two windows on one agent
@@ -619,7 +620,7 @@ async def poll_forever(
         for line in await sweep_once():
             logger.info("%s", line)
         while True:
-            await asyncio.sleep(POLL_SECONDS)
+            await asyncio.sleep(_T.timeouts.pacing.schedule_poll)
             for line in await poll_once(
                 config(),
                 window_client=window_client,

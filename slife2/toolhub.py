@@ -184,6 +184,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
+import slife2.timeouts as _T
 from slife2.audience import for_the_model, forwarded_client, request_meta
 from slife2.config import Config, ToolServerSettings
 from slife2.db import Embedder, ToolStore
@@ -203,9 +204,6 @@ from slife2.mcp_server import (
 )
 from slife2.mcp_server import (
     CLI_SOURCE as _CLI_SOURCE,
-)
-from slife2.mcp_server import (
-    LIST_SETTLE_SECONDS as _LIST_SETTLE_SECONDS,
 )
 from slife2.mcp_server import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
@@ -388,7 +386,6 @@ INSTRUCTIONS = (
 #: `npx` that has to download itself holds a turn open for a minute.  So: wait,
 #: but briefly and only for attempts that have already begun.  This is a cost
 #: paid once per daemon, not once per turn.
-LIST_SETTLE_SECONDS = _LIST_SETTLE_SECONDS
 
 #: How many names one `func_tool_load` may carry.  Each name is its own
 #: catalogue write and its own embedding call — the loop is a `for` over a hop
@@ -2165,7 +2162,7 @@ def build_server(
 
         **The sets are built aside and swapped in, not emptied first.**  The
         awaits below are round trips to plugins, one of which waits up to
-        `slife2.toolfamily.LIST_SETTLE_SECONDS` for the servers it holds — and
+        `slife2.timeouts.timeouts.ready.list_settle` for the servers it holds — and
         `live_sources` is read the whole time by whatever else this process is
         serving, since one hub answers every conversation.  A reader that caught
         the function between an emptying and a filling would see no declared
@@ -2238,7 +2235,7 @@ def build_server(
 
     async def settle() -> None:
         """Let attempts already in flight finish, briefly.  See
-        `LIST_SETTLE_SECONDS`.
+        `ready.list_settle`.
 
         **Wait, never cancel.**  The obvious spelling of this is
         `asyncio.gather(*pending)` under `asyncio.timeout`, and it is wrong in a
@@ -2255,7 +2252,7 @@ def build_server(
         pending = [attempt for upstream in upstreams if (attempt := upstream.attempt)]
         if not pending:
             return
-        await asyncio.wait(pending, timeout=LIST_SETTLE_SECONDS)
+        await asyncio.wait(pending, timeout=_T.timeouts.ready.list_settle)
 
     async def start() -> None:
         """What the hub does before it serves anything.

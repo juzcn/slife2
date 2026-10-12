@@ -109,6 +109,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+import slife2.timeouts as _T
 from slife2.paths import data_dir
 
 #: The one place this module warns rather than refuses.  Everything else here
@@ -606,7 +607,15 @@ class ContextSettings:
     #: context it already has.  Generous for a remote model, tight for the
     #: reason `slife2.context_server` gives: the answer is optional by design, so
     #: a slow one is only making the *turn* late.
-    timeout: float = 20.0
+    #:
+    #: **The default is the registry's value, read when a config is built** —
+    #: `slife2.timeouts.work.recall_discriminator` — so this is an *override* and
+    #: not a second seat for the number.  Read through a factory rather than as a
+    #: def-time default, which would capture it at import and ignore a patch
+    #: (`slife2.timeouts` states the rule).
+    timeout: float = field(
+        default_factory=lambda: _T.timeouts.work.recall_discriminator
+    )
 
 
 @dataclass(frozen=True)

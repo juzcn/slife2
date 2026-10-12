@@ -57,7 +57,11 @@ def answering(text: str):
     return respond
 
 
-async def until(predicate: Any, *, timeout: float = 5.0) -> None:
+async def until(
+    predicate: Any,
+    *,
+    timeout: float = 5.0,  # timeouts: the value this test is built around, not a budget
+) -> None:  # timeouts: the value this test is built around, not a budget
     """Wait for a background loop to get somewhere, or say it did not."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -390,5 +394,8 @@ async def served(mcp: Any) -> AsyncGenerator[str]:
         yield f"http://127.0.0.1:{port}/mcp"
     finally:
         uv.should_exit = True
-        await asyncio.wait_for(serve_task, timeout=5)
+        await asyncio.wait_for(
+            serve_task,
+            timeout=5,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         sock.close()

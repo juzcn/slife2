@@ -30,12 +30,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import slife2.timeouts as _T
 from slife2.clock import now
 from slife2.paths import runtime_dir
 
 #: How long to wait for another launcher to finish starting a server.
-LOCK_TIMEOUT_SECONDS = 30.0
-LOCK_POLL_SECONDS = 0.1
 
 #: How large a daemon's log may grow before the next start truncates it.  Logs
 #: here are diagnostics nobody is expected to read in full, so the ceiling is a
@@ -469,7 +468,7 @@ def _start_token_ps(pid: int) -> str | None:
             ["ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=_T.timeouts.ready.probe,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -521,13 +520,18 @@ def same_process(record: ServerRecord) -> bool:
     return current is not None and current == record.start_token
 
 
-def tcp_listening(host: str, port: int, *, timeout: float = 0.25) -> bool:
+def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool:
     """Whether anything accepts a connection here.
 
     A cheap gate in front of the MCP probe, so the common "nothing is there"
     case costs a quarter second instead of a full probe timeout.  It answers
     "is something there", never "is it ours" — the probe does that.
+
+    `timeout` is None by default and resolved here, not in the signature: a
+    def-time default would capture the registry's value at import
+    (`slife2.timeouts` states the rule).
     """
+    timeout = _T.timeouts.ready.probe_local if timeout is None else timeout
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -536,7 +540,7 @@ def tcp_listening(host: str, port: int, *, timeout: float = 0.25) -> bool:
 
 
 @contextlib.contextmanager
-def exclusive(key: str, *, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[None]:
+def exclusive(key: str, *, timeout: float = _T.timeouts.grace.lock) -> Generator[None]:
     """Hold a named lock, released by the OS if the holder dies.
 
     The primitive behind both the per-server start lock and the per-agent name
@@ -546,7 +550,11 @@ def exclusive(key: str, *, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[N
 
     Raises:
         TimeoutError: If someone else holds it for longer than `timeout`.
+
+    `timeout` is None by default and resolved here rather than in the signature
+    (`slife2.timeouts` states why a def-time default is forbidden).
     """
+    timeout = _T.timeouts.grace.lock if timeout is None else timeout
     if sys.platform == "win32":
         with _windows_mutex(key, timeout):
             yield
@@ -557,7 +565,7 @@ def exclusive(key: str, *, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[N
 
 
 @contextlib.contextmanager
-def start_lock(url: str, *, timeout: float = LOCK_TIMEOUT_SECONDS) -> Generator[None]:
+def start_lock(url: str, *, timeout: float = _T.timeouts.grace.lock) -> Generator[None]:
     """Hold the exclusive right to start the server at `url`.
 
     Probe, spawn and wait-for-ready all happen inside this, so two launchers
@@ -627,7 +635,7 @@ def _posix_flock(key: str, timeout: float):
                     raise TimeoutError(
                         f"timed out waiting for {key!r} to be released"
                     ) from None
-                time.sleep(LOCK_POLL_SECONDS)
+                time.sleep(_T.timeouts.pacing.lock_poll)
         yield
     finally:
         os.close(fd)  # also releases the flock
@@ -704,8 +712,11 @@ def _truncate_if_huge(path: Path) -> None:
             path.unlink()
 
 
-def terminate(pid: int, *, grace: float = 5.0) -> bool:
+def terminate(pid: int, *, grace: float | None = None) -> bool:
     """Stop a process and its children, returning whether it is gone.
+
+    `grace` is None by default and resolved here rather than in the signature
+    (`slife2.timeouts` states why a def-time default is forbidden).
 
     Deliberately blunt.  These processes have no console to receive a graceful
     signal and hold no state worth flushing — they are stateless by design — so
@@ -714,12 +725,13 @@ def terminate(pid: int, *, grace: float = 5.0) -> bool:
     if not pid_alive(pid):
         return True
 
+    grace = _T.timeouts.grace.kill if grace is None else grace
     if sys.platform == "win32":
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
-                timeout=grace + 5,
+                timeout=grace + _T.timeouts.ready.reap,
             )
     else:
         import signal
@@ -742,7 +754,7 @@ def terminate(pid: int, *, grace: float = 5.0) -> bool:
     while time.monotonic() < deadline:
         if not pid_alive(pid):
             return True
-        time.sleep(0.1)
+        time.sleep(_T.timeouts.pacing.lock_poll)
 
     if sys.platform != "win32":
         import signal
@@ -759,6 +771,6 @@ def terminate(pid: int, *, grace: float = 5.0) -> bool:
         else:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-        time.sleep(0.2)
+        time.sleep(_T.timeouts.pacing.lock_poll)
 
     return not pid_alive(pid)

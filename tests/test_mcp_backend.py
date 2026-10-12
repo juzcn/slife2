@@ -163,7 +163,10 @@ async def test_cancelling_the_drain_cancels_the_call() -> None:
         assert [c.text for c in received] == ["first"]
         # The generator's finally cancelled the call; nothing should now hang.
         with pytest.raises((asyncio.CancelledError, Exception)):
-            await asyncio.wait_for(stream.result, timeout=1.0)
+            await asyncio.wait_for(
+                stream.result,
+                timeout=1.0,  # timeouts: the value this test is built around, not a budget
+            )  # timeouts: the value this test is built around, not a budget
 
 
 async def test_the_agent_loop_runs_over_mcp() -> None:

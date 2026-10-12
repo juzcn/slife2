@@ -43,6 +43,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import slife2.timeouts as _T
 from slife2.audience import client_meta
 from slife2.mcp_server import tool_payload
 from slife2.messages import ToolSpec
@@ -59,6 +60,19 @@ if TYPE_CHECKING:  # the agent never imports a server, and this is a client one
 #: tools, under the names `UpstreamTool.name` carries.
 LIST_TOOLS = "list_tools"
 CALL_TOOL = "call_tool"
+
+#: How long the agent waits on the hub for the things it asks it *itself* — the
+#: tool list, and the trim at a turn boundary.  v1's `ready.list_tools`, and
+#: `slife2.mcp_server.LIST_SETTLE_SECONDS` (5 s) sits well inside it, which is
+#: what makes this the right size: the hub briefly waits for tool servers that
+#: are still connecting, and a patience shorter than that wait would read a
+#: server that is starting as one that is down.
+#:
+#: **It is not a bound on a tool call**, and that is why it is written on the
+#: two calls rather than on the connection: a connection-level timeout applies to
+#: every request that travels over it, which is how a listing's patience came to
+#: be the deadline for whatever tool the model happened to call.  A tool call is
+#: bounded by the loop (`slife2.loop`), and by nobody else.
 
 #: The harness's own trim, and the one hub tool the *agent* calls on the hub's
 #: API rather than through `call_tool`.  Its leading underscore is the system's
@@ -143,7 +157,9 @@ async def remote_tools(
             short tool list — turns a version mismatch into a model that has
             quietly lost its abilities.  `slife2 down` is the answer.
     """
-    payload = tool_payload(await client.call_tool(LIST_TOOLS, {}))
+    payload = tool_payload(
+        await client.call_tool(LIST_TOOLS, {}, timeout=_T.timeouts.work.hub)
+    )
     listed = payload.get("tools")
     if not isinstance(listed, list):
         raise ConnectionError(
@@ -183,7 +199,9 @@ async def unload_tools(client: Client) -> dict[str, Any]:
         "text": "",
     }
     try:
-        payload = tool_payload(await client.call_tool(FUNC_TOOL_UNLOAD, {}))
+        payload = tool_payload(
+            await client.call_tool(FUNC_TOOL_UNLOAD, {}, timeout=_T.timeouts.work.hub)
+        )
     except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
         logger.warning("the tool list was not trimmed: %s", exc)
         return empty

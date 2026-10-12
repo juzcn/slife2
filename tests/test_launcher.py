@@ -244,7 +244,10 @@ def test_the_servers_are_worked_on_at_once() -> None:
         replace(SPEC, name=f"server{n}", url=f"http://127.0.0.1:810{n}/mcp")
         for n in range(3)
     ]
-    gate = threading.Barrier(len(batch), timeout=10)
+    gate = threading.Barrier(
+        len(batch),
+        timeout=10,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
 
     def work(spec: ServerSpec) -> launcher.Outcome:
         gate.wait()
@@ -494,7 +497,10 @@ async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
     the only sign.
     """
     with pytest.raises(RuntimeError, match="cannot run inside an event loop"):
-        launcher.probe(SPEC, timeout=0.2)
+        launcher.probe(
+            SPEC,
+            timeout=0.2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
 
 
 def test_a_spawned_server_is_told_where_the_data_directory_is(
@@ -700,7 +706,11 @@ def test_the_spawn_command_uses_this_interpreter(
 # --- the agent name is exclusive ---------------------------------------------
 
 
-def wait_until_free(name: str, *, timeout: float = 8.0) -> None:
+def wait_until_free(
+    name: str,
+    *,
+    timeout: float = 8.0,  # timeouts: the value this test is built around, not a budget
+) -> None:  # timeouts: the value this test is built around, not a budget
     """Block until nobody holds `name`.
 
     A process killed by a test releases its mutex at teardown, which is not
@@ -830,7 +840,9 @@ def test_a_killed_client_stops_counting() -> None:
         # a moment after `wait()` returns.  Production has the same window, and
         # it fails in the safe direction: a lingerer means the servers stay up
         # until the next exit or a `slife2 down`.
-        deadline = time.monotonic() + 5
+        deadline = (  # timeouts: the value this test is built around, not a budget
+            time.monotonic() + 5
+        )  # timeouts: the value this test is built around, not a budget
         while launcher.others_running() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert launcher.others_running() == []

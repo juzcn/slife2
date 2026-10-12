@@ -40,13 +40,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import slife2.timeouts as _T
 from slife2.clock import now
 
 #: How long SQLite waits for a lock before giving up.  The same number
 #: `slife2.db` uses, and for the same reason: one writer, but a read may be in
 #: flight while a run is being recorded — the poll and a model's tool call are
 #: two callers of one file.
-BUSY_TIMEOUT_MS = 5000
 
 #: Every state a run can be in, in the order they can be reached.
 #:
@@ -253,10 +253,12 @@ class ScheduleStore:
         return str(row["value"]) if row else ""
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_MS / 1000)
+        connection = sqlite3.connect(self.path, timeout=_T.timeouts.storage.sqlite_busy)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        connection.execute(
+            f"PRAGMA busy_timeout={int(_T.timeouts.storage.sqlite_busy * 1000)}"
+        )
         return connection
 
     def _ensure_schema(self) -> None:

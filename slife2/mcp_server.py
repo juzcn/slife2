@@ -75,6 +75,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
+import slife2.timeouts as _T
 from slife2 import __version__
 from slife2.config import Config, ServerSettings, find_config_path, load
 from slife2.paths import add_data_dir_argument, apply_data_dir
@@ -129,7 +130,13 @@ CLI_SOURCE = "cli"
 #: already begun.  Bounded on purpose: asking what a server offers must not be
 #: the thing that holds a turn open, and an answer that is late is the same
 #: answer as one that is absent — "not answering yet".
-LIST_SETTLE_SECONDS = 5.0
+
+#: How long one of *our own* hops may take to connect.  Not patience: both ends
+#: are this machine, and a daemon this system started answers a loopback port at
+#: once — so what this bounds is the case where the port listens and never
+#: replies, which would otherwise hold a turn open with nothing to show for it.
+#: Distinct from `slife2.gateway.CONNECT_TIMEOUT_SECONDS`, which is somebody
+#: else's server and may be an `npx` fetching itself first.
 
 
 def describe(client: ClientId) -> str:
@@ -254,18 +261,29 @@ class _Ours(ClientTransport):
         **session_kwargs: Any,
     ) -> AsyncGenerator[ClientSession]:
         options = transport_options or TransportOptions()
-        # The request timeout arrives as a *session* argument rather than as a
+        # The request deadline arrives as a *session* argument rather than as a
         # transport one — `Client(url, timeout=…)` turns it into
         # `read_timeout_seconds` and carries it in `session_kwargs` — so it is
-        # read from there and turned into the http client's own timeout, exactly
-        # as FastMCP's transport does it.  None means the SDK's defaults: 30s to
-        # connect, 300s to read, the second of which exists because a server may
-        # hold a response stream open.
+        # read from there and turned into the http client's own clocks, exactly
+        # as FastMCP's transport does it.
+        #
+        # **Read and write are None, and that is the whole of this hop's own
+        # opinion.**  v1's registry spelled it `read: None # DELEGATED — owned by
+        # the loop's tool budget`, and the reason survives the port: a bound here
+        # applies to *every* message that crosses this socket, so a number meant
+        # for one layer becomes the deadline for whatever the far end is doing —
+        # and a tool that takes twenty minutes (a render) is a tool doing its job,
+        # not a link to give up on.  A request that stated a deadline keeps it
+        # (`read_timeout_seconds`); one that did not has none.
+        #
+        # Connect is not a duration anybody waits *through*: it is the bound that
+        # keeps a port that hangs instead of refusing from holding a turn open.
         read_timeout_seconds = session_kwargs.get("read_timeout_seconds")
-        timeout = (
-            httpx2.Timeout(30.0, read=read_timeout_seconds)
-            if read_timeout_seconds is not None
-            else None
+        timeout = httpx2.Timeout(
+            connect=_T.timeouts.ready.connect_ours,
+            read=read_timeout_seconds,
+            write=None,
+            pool=None,
         )
         async with create_mcp_http_client(timeout=timeout) as http_client:
             async with streamable_http_client(

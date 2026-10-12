@@ -33,7 +33,7 @@ stream the *client* has to open, and measured against the installed FastMCP
 FastMCP **server** advertises `tools.listChanged: false` and answers the listen
 request with `Method not found` — so our own plugins never send one either — and
 the SDK's own `mcp.client.subscriptions.listen` has nothing to talk to.  So
-`RELIST_AFTER_SECONDS` is what keeps a listing true: an ask that finds one older
+`_T.timeouts.pacing.relist_after` is what keeps a listing true: an ask that finds one older
 than that re-reads it.  **The age costs a round trip and never a tool** — a
 stale listing is still `usable` and still in the model's list while it is being
 replaced, and it is replaced inside the same ask that noticed, because
@@ -45,12 +45,21 @@ the age is the floor under it.
 **Two failures that look alike and are not.**  A *transport* failure and a peer's
 *refusal* are opposites here.  A refusal — an unknown tool, bad arguments, a
 permission it will not grant — is a value the caller reads and acts on, and
-rebuilding the link would only be told the same thing again.  A link that died
-mid-call is retried, **once**: a tool that never ran is worth a second attempt,
-and a server that is down must not turn every call into two timeouts.  FastMCP
-makes the split visible for free — `call_tool(..., raise_on_error=False)` returns
+rebuilding the link would only be told the same thing again.  A link that was
+*already down when the call was made* is retried, **once**: nothing was asked of
+the far end, so a second attempt is not a second execution.  FastMCP makes the
+split visible for free — `call_tool(..., raise_on_error=False)` returns
 `is_error` where the raising form throws — which is one of the reasons this port
 is a few hundred lines where v1's gateway was three thousand.
+
+**And the retry is the one thing this module decides about failure.**  It holds
+no clock of its own: how long a tool may take is the *caller's* to say — the
+loop's `_timeout`, or the tool's own declared deadline — and a caller that gives
+up cancels the call rather than being answered by a timer down here (v1's
+argument, and the reason `CALL_TIMEOUT_SECONDS` no longer exists: a bound here
+would cut off calls whose callers had said they were willing to wait, and the
+retry that follows a timer is a second render, a second file write, a second
+message sent).
 
 **A credential is held by the process that needs it.**  `env` and `headers` are
 the two places a tool server is handed one, they are resolved by the config's own
@@ -70,7 +79,9 @@ from typing import Any
 
 from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
+from mcp import MCPError
 
+import slife2.timeouts as _T
 from slife2.config import ToolServerSettings
 from slife2.toolclient import SEPARATOR
 
@@ -80,11 +91,27 @@ logger = logging.getLogger(__name__)
 #: Generous, because a stdio server may be an `npx` invocation that has to fetch
 #: itself the first time, and a deadline that fires during that leaves a tool
 #: server permanently absent when it was only slow.
-CONNECT_TIMEOUT_SECONDS = 60.0
 
-#: How long a tool may run.  Long: a tool is a real action somewhere else, and
-#: the alternative to waiting is a call the model cannot tell was cut off.
-CALL_TIMEOUT_SECONDS = 300.0
+#: The SDK's JSON-RPC `CONNECTION_CLOSED` code, spelled rather than imported:
+#: `mcp_types` has the constant and `mcp` does not re-export it, and this build
+#: does not depend on `mcp_types` by name.  What it means is the whole of the
+#: retry rule below — the dispatcher raises it for a send onto a transport that
+#: is already torn down, which is precisely "nothing reached the far end".
+#: `REQUEST_TIMEOUT` is deliberately outside this class: a call that timed out
+#: went out, and may still be running.
+LINK_DOWN_CODE = -32000
+
+
+def _link_was_down(exc: BaseException) -> bool:
+    """Whether a failed call never reached the peer.
+
+    True for the dispatcher's `CONNECTION_CLOSED` and for nothing else — see
+    :data:`LINK_DOWN_CODE`.  Everything else means the request went out: a peer
+    that refused, a tool whose body threw, a transport that died while the
+    answer was on its way.  None of those is a reason to run the call again.
+    """
+    return isinstance(exc, MCPError) and getattr(exc, "code", None) == LINK_DOWN_CODE
+
 
 #: How long a tool list is trusted without being read again.
 #:
@@ -97,7 +124,6 @@ CALL_TIMEOUT_SECONDS = 300.0
 #: changes about as often as it is restarted.  Five minutes is that trade,
 #: deliberately far above the loopback round trip it costs and far below the age
 #: at which "the tool is not there" would read as a bug rather than as staleness.
-RELIST_AFTER_SECONDS = 300.0
 
 #: How a client is built from a transport.  A seam rather than a direct call,
 #: because the rebuild-once rule below is about a link that dies *during a call*,
@@ -189,8 +215,8 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
     return Client(
         transport,
         message_handler=handler,
-        init_timeout=CONNECT_TIMEOUT_SECONDS,
-        timeout=CONNECT_TIMEOUT_SECONDS,
+        init_timeout=_T.timeouts.ready.connect_tools,
+        timeout=_T.timeouts.ready.connect_tools,
     )
 
 
@@ -340,7 +366,7 @@ class Connection:
         and an ask is what this method means: a caller arriving here has decided
         to read the tool list, which is the moment a stale one is worth
         re-reading and no earlier.  `_stale` is what bounds how often — see
-        `RELIST_AFTER_SECONDS`.
+        `_T.timeouts.pacing.relist_after`.
         """
         if self._attempt is not None and not self._attempt.done():
             return
@@ -358,7 +384,8 @@ class Connection:
         "listed, and a while ago", and both callers above read it that way.
         """
         return (
-            self._ready and time.monotonic() - self._listed_at >= RELIST_AFTER_SECONDS
+            self._ready
+            and time.monotonic() - self._listed_at >= _T.timeouts.pacing.relist_after
         )
 
     @property
@@ -477,7 +504,7 @@ class Connection:
         gates on liveness stops counting it until the next ask re-lists it.
 
         **A peer that says so is still worth listening to**, and this is the fast
-        path over `RELIST_AFTER_SECONDS`: where the age bounds how wrong a
+        path over `_T.timeouts.pacing.relist_after`: where the age bounds how wrong a
         listing may be, this makes it zero — which is all a legacy server, whose
         notifications still arrive, gets out of having sent one.
         """
@@ -522,14 +549,22 @@ class Connection:
         **One rebuild, and only for a transport failure.**  A peer that answered
         and refused — an unknown tool, bad arguments, a permission it will not
         grant — has said something the model should read, and rebuilding the link
-        would only repeat it.  A link that died mid-call is the one case where
-        trying again is not superstition, and it is tried exactly once: a server
-        that is down must not turn every call into two timeouts.
+        would only repeat it.  A link that was gone *before* the call went out is
+        the one case where trying again is not superstition, and it is tried
+        exactly once: a server that is down must not turn every call into two
+        attempts.
 
-        **A timeout is not one of those cases**, and `_call_once` answers for it
-        rather than returning `None`: the call was *made*, so the far end may
-        still be running it, and a retry is a second render, a second file
-        write, a second message sent.
+        **Nothing else is retried**, and that is a claim about what may already
+        have happened rather than about failure: a call that reached the far end
+        may be running there, and a retry of it is a second render, a second file
+        write, a second message sent.  So `_call_once` returns `None` — "the
+        link was gone and nothing was asked" — for that one case only, and
+        everything else comes back as a value the model reads.
+
+        **No clock lives here**, which is the other half of the same rule: the
+        caller that gave up cancels this call (`slife2.loop`'s `_timeout`, or the
+        tool's own declared deadline), and a cancellation is not a failure that
+        this method is entitled to answer for.
 
         `meta` is the caller's identity, carried across unchanged.  This module
         does not read it and could not: one process serves every conversation in
@@ -558,7 +593,15 @@ class Connection:
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> tuple[str, bool] | None:
-        """One attempt.  `None` means the transport failed, not the tool."""
+        """One attempt.  `None` means the link was down, not that the tool failed.
+
+        **`None` is a claim about the far end**, and it is the only thing that
+        makes the caller's rebuild-and-retry safe: it says the call never left
+        this process, so running it again is not running it twice.  That is what
+        `LINK_DOWN_CODE` is, and it is why the branch below is narrow rather
+        than an `except Exception` — v1 measured what the wide version costs,
+        and it is the one failure the whole three-way split exists to prevent.
+        """
         client = self._client
         if client is None:
             return None
@@ -566,7 +609,6 @@ class Connection:
             result = await client.call_tool(
                 tool,
                 arguments,
-                timeout=CALL_TIMEOUT_SECONDS,
                 # The SDK would otherwise raise for a tool that reported an
                 # error, and this is the half of the contract that says a
                 # refusal is a value: the difference between "the tool said no"
@@ -579,24 +621,24 @@ class Connection:
                 # that did not come from the model.
                 meta=meta,
             )
-        except TimeoutError:
-            # **Not None, because a retry would run it twice.**  `None` means
-            # "the link is gone and nothing was asked of the far end", which is
-            # what makes the caller's rebuild safe; a timeout means the opposite
-            # — the request went out and the answer did not come back — so this
-            # is answered like any other failed call, and the sentence says
-            # which of the two happened.  `CALL_TIMEOUT_SECONDS` is well past
-            # every tool here, so this is a stuck peer rather than a slow one.
-            self._error = f"timed out after {CALL_TIMEOUT_SECONDS:g}s"
-            logger.warning("%s: calling %s timed out", self.settings.name, tool)
-            return (
-                f"{self.settings.name}: {tool} did not answer within "
-                f"{CALL_TIMEOUT_SECONDS:g}s. It may still be running: the call "
-                f"was made and was not retried.",
-                False,
+        except Exception as exc:  # noqa: BLE001 - the split below is the decision, not the catch
+            if not _link_was_down(exc):
+                # The call went out, or the peer answered and something in it
+                # threw.  Either way this is the far end's answer and the model's
+                # to read — *not* a reason to rebuild, and above all not a reason
+                # to run it again.  The connection is left alone: it is the next
+                # call, refused by a dispatcher whose link really is gone, that
+                # takes the rebuild.
+                logger.warning(
+                    "%s: calling %s failed: %s", self.settings.name, tool, exc
+                )
+                return (
+                    f"{self.settings.name}: {tool} failed: {type(exc).__name__}: {exc}",
+                    False,
+                )
+            logger.warning(
+                "%s: calling %s found the link down: %s", self.settings.name, tool, exc
             )
-        except Exception as exc:  # noqa: BLE001 - a call that threw is a transport failure, and returns None
-            logger.warning("%s: calling %s failed: %s", self.settings.name, tool, exc)
             self._error = f"{type(exc).__name__}: {exc}".strip()
             return None
         return flatten(result.content), not result.is_error
@@ -610,8 +652,6 @@ class Connection:
 
 
 __all__ = [
-    "CALL_TIMEOUT_SECONDS",
-    "CONNECT_TIMEOUT_SECONDS",
     "ClientFactory",
     "Connection",
     "Watching",

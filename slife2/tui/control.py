@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.config import TUI_SERVER_NAME, Config
 from slife2.mcp_server import house_server, serve_plugin
 
@@ -83,7 +84,6 @@ SUBMIT = "submit"
 #: How long one push may take before it is a broken window rather than a slow
 #: one.  Generous for a loopback write, short enough to be a deadline: this
 #: bounds the *write*, not the turn the window will run afterwards.
-WRITE_TIMEOUT_SECONDS = 10.0
 
 #: What `submit` says when there is nothing to hand a message to.  A constant
 #: because a *caller* has to be able to recognise it: see `refused`.
@@ -315,7 +315,7 @@ async def _push(ctx: Context, session: WindowSession) -> None:
             try:
                 await asyncio.wait_for(
                     ctx.report_progress(handover.ticket, None, encode(handover)),
-                    WRITE_TIMEOUT_SECONDS,
+                    _T.timeouts.transport.window,
                 )
             except Exception as exc:  # noqa: BLE001 - the caller is told, not this loop
                 session.settle(waiter, f"the window did not take the message: {exc}")

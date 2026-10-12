@@ -16,10 +16,13 @@ from typing import Any
 
 import pytest
 from fastmcp import FastMCP
+from mcp import MCPError
 
+import slife2.timeouts as _T
 from slife2 import gateway
 from slife2.config import ToolServerSettings
 from slife2.gateway import (
+    LINK_DOWN_CODE,
     Connection,
     mcp_config,
     proxied_name,
@@ -137,7 +140,7 @@ async def test_a_listing_that_has_aged_is_read_again(
     being replaced, so a source never blinks out of the model's list because its
     answer got old.
     """
-    monkeypatch.setattr(gateway, "RELIST_AFTER_SECONDS", 0.0)
+    monkeypatch.setattr(_T.timeouts.pacing, "relist_after", 0.0)
     seen = Recorder()
     link = connection(seen)
     assert await link.ready() is True
@@ -183,7 +186,7 @@ async def test_a_call_does_not_reread_an_aged_listing(
     call must not wait behind a re-list, which is what would happen if `ready`
     refreshed — it is the question calls ask.
     """
-    monkeypatch.setattr(gateway, "RELIST_AFTER_SECONDS", 0.0)
+    monkeypatch.setattr(_T.timeouts.pacing, "relist_after", 0.0)
     seen = Recorder()
     link = connection(seen)
     assert await link.ready() is True
@@ -297,7 +300,13 @@ class DeadClient:
     async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
         self.calls += 1
         if self.dies:
-            raise ConnectionError("the link is gone")
+            # **The shape a torn-down link really has**, and the whole of the
+            # retry rule: the dispatcher refuses a send onto a transport that is
+            # already gone with this code, which is what says "nothing reached
+            # the far end" (`slife2.gateway.LINK_DOWN_CODE`).  A generic
+            # exception is a *different* case and must not retry — see the test
+            # below.
+            raise MCPError(code=LINK_DOWN_CODE, message="Connection closed")
         if self.times_out:
             raise TimeoutError("the call did not answer")
         return types.SimpleNamespace(
@@ -357,15 +366,19 @@ async def test_a_server_that_is_down_costs_two_timeouts_not_more() -> None:
 
 @pytest.mark.asyncio
 async def test_a_timeout_is_neither_rebuilt_nor_retried() -> None:
-    """**A call that timed out was still made.**
+    """**A call that timed out was still made**, so it is never tried again.
 
-    The rebuild rule is about a link that died with nothing asked of the far
-    end — that is what makes trying again safe.  A timeout is the other case:
-    the request went out and the answer did not come back, so the far end may
-    still be running it, and calling again is a second `file_save`, a second
-    video render, a second message sent.  It is answered instead, and the answer
-    says which of the two happened, because "no answer" and "no attempt" are
-    things a caller acts on differently.
+    The rebuild rule is about a link that was down *before* the call went out —
+    that is what makes trying again safe.  A timeout is the other case: the
+    request went out and the answer did not come back, so the far end may still
+    be running it, and calling again is a second `file_save`, a second video
+    render, a second message sent.
+
+    **The sentence is no longer this module's to write**, and that is the change
+    the assertion records: there is no clock here any more (`slife2.gateway`'s
+    docstring argues why), so a timeout that arrives at this layer is the far
+    end's own — the caller's `_timeout` is what produces the "did not answer
+    within" sentence, at the layer that owns it.
     """
     make, made = clients(times_out=True)
     link = connection(client_factory=make)
@@ -373,8 +386,42 @@ async def test_a_timeout_is_neither_rebuilt_nor_retried() -> None:
     text, ok = await link.call("echo", {})
 
     assert ok is False
-    assert "did not answer within" in text
-    assert len(made) == 1, "a timeout is not a reason to rebuild"
+    assert "TimeoutError" in text, "the far end's failure, as a value"
+    assert len(made) == 1, "not rebuilt: the call may have run"
+    assert made[0].calls == 1, "and certainly not called again"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_is_not_the_link_is_not_retried() -> None:
+    """**The narrow branch is the whole point of the rule.**
+
+    A generic exception — something the far end threw, a wrapper this process
+    does not recognise — may have been produced *after* the call ran, so trying
+    again is a second execution of something that already happened.  It is
+    answered instead, and the connection is left alone: the call that finds the
+    dispatcher refusing a send is the one that earns the rebuild.
+    """
+
+    class Throws(DeadClient):
+        """A client that connects and lists, and then fails in its call."""
+
+        #: Counted on the class so the test can read it after the factory has
+        #: built and dropped the instance.
+        calls = 0
+
+        async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
+            Throws.calls += 1
+            raise RuntimeError("the far end threw somewhere in the middle")
+
+    link = connection(
+        client_factory=lambda _transport, _handler: Throws(dies=False, refuses=False)
+    )
+
+    text, ok = await link.call("echo", {})
+
+    assert ok is False
+    assert "the far end threw" in text
+    assert Throws.calls == 1, "not called again: it may already have run"
     await link.close()
 
 
@@ -461,7 +508,6 @@ def test_the_gateway_holds_no_catalogue_and_no_database() -> None:
     reach into the db plugin — would be the first sign that the connection and
     the catalogue had started to overlap half way.
     """
-    import slife2.gateway as gateway
 
     source = Path(gateway.__file__).read_text(encoding="utf-8")
     assert "sqlite3" not in source

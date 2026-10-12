@@ -574,7 +574,10 @@ async def test_sync_ends_with_a_document_that_has_nothing_to_embed(
     await store.sync(embedder)
     await store.write(NOTE, "empty", body="", embedder=embedder)
 
-    status = await asyncio.wait_for(store.sync(embedder), timeout=5.0)
+    status = await asyncio.wait_for(
+        store.sync(embedder),
+        timeout=5.0,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
 
     assert status["ready"] is True, status["problems"]
 

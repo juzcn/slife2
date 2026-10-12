@@ -438,7 +438,10 @@ async def test_a_video_submits_asynchronously_and_polls(monkeypatch, tmp_path) -
     )
 
     answer = await adapter.generate_video(
-        model="vid", prompt="bounce", outputs_dir=tmp_path, deadline_s=60
+        model="vid",
+        prompt="bounce",
+        outputs_dir=tmp_path,
+        deadline_s=60,  # timeouts: the value this test is built around, not a budget
     )
 
     assert answer == str(tmp_path / "v.mp4")

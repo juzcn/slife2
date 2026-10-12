@@ -22,14 +22,22 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
+from mcp import MCPError
 
+import slife2.timeouts as _T
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
-from slife2.gateway import flatten, make_client, mcp_config, proxied_name, sanitise
+from slife2.gateway import (
+    LINK_DOWN_CODE,
+    flatten,
+    make_client,
+    mcp_config,
+    proxied_name,
+    sanitise,
+)
 from slife2.mcp_server import LIST_SOURCES
 from slife2.toolfamily import Held
 from slife2.toolhub import (
-    LIST_SETTLE_SECONDS,
     MAX_LOAD_NAMES,
     PLUGIN,
     _verdict,
@@ -714,7 +722,7 @@ async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
     elapsed = time.monotonic() - started
 
     assert found["ok"] is True
-    assert elapsed < LIST_SETTLE_SECONDS, (
+    assert elapsed < _T.timeouts.ready.list_settle, (
         "the search waited for a plugin that is not coming up"
     )
 
@@ -1788,7 +1796,10 @@ class FakeClient:
     async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
         self.calls += 1
         if self.dies:
-            raise ConnectionError("the link is gone")
+            # The dispatcher's own refusal for a send onto a torn-down
+            # transport: "nothing reached the far end", which is the only case
+            # that earns a retry (`slife2.gateway.LINK_DOWN_CODE`).
+            raise MCPError(code=LINK_DOWN_CODE, message="Connection closed")
         return types.SimpleNamespace(
             content=[types.SimpleNamespace(text="answered")], is_error=self.refuses
         )
@@ -1880,7 +1891,7 @@ async def test_a_slow_connect_is_not_cancelled_by_the_waiting(
     plugins, and a plugin answers `list_sources` whether or not its entries have
     come up yet.
     """
-    monkeypatch.setattr("slife2.toolfamily.LIST_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 0.05)
 
     class Slow(FakeClient):
         async def __aenter__(self) -> FakeClient:

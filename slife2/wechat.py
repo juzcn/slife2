@@ -78,6 +78,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from ruamel.yaml import YAML
 
+import slife2.timeouts as _T
 from slife2 import ilink
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import TUI_SERVER_NAME, Config
@@ -111,14 +112,11 @@ INSTRUCTIONS = (
 
 #: How long to wait between polls.  The call itself blocks until the bridge has
 #: something to say, so this is the pause *after* an answer, not the latency.
-POLL_SECONDS = 3.0
 #: The ceiling a failing link backs off to, and the factor it grows by.  A link
 #: that is down must not be re-polled every three seconds forever.
 BACKOFF_FACTOR = 1.5
-BACKOFF_MAX = 30.0
 #: How long a message that has already been seen is read as the bridge
 #: re-serving it rather than as somebody typing the same thing twice.
-DEDUP_SECONDS = 30.0
 #: How many messages one person's burst may have in flight before this process
 #: stops handing them over.  A bound rather than a queue: `send_message` blocks
 #: until its turn is done, so these are turns, and twenty of them is somebody
@@ -128,11 +126,9 @@ MAX_INFLIGHT = 16
 #: makes answers as soon as the words are written down the stream that window is
 #: holding (`slife2.tui.control`), so this bounds a window that is not answering
 #: at all rather than a slow terminal.
-WINDOW_TIMEOUT_SECONDS = 10.0
 #: A login's lifetime, in seconds — 23 hours, from v1, which measured it against
 #: the bridge's own ~24h expiry and left an hour of margin.  Past this a saved
 #: token is not offered to the far end at all.
-SESSION_MAX_AGE = 82_800.0
 
 #: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
 #: the directory is the agent, and a filename repeating it is a name to keep in
@@ -140,14 +136,10 @@ SESSION_MAX_AGE = 82_800.0
 SESSION_NAME = "wechat.yaml"
 #: The QR handshake: how often its status is asked, how long the whole thing may
 #: take, and how many times an expired code is replaced before giving up.
-QR_POLL_SECONDS = 2.0
-QR_DEADLINE = 600.0
 QR_MAX_ATTEMPTS = 3
 #: The typing indicator expires at the far end after ~10-20s, so it is refreshed
-#: well inside that; `TYPING_MAX_LIFETIME` bounds the keep-alive so a turn that
+#: well inside that; `_T.timeouts.pacing.typing_max_lifetime` bounds the keep-alive so a turn that
 #: never ends cannot leave one refreshing forever.
-TYPING_REFRESH = 8.0
-TYPING_MAX_LIFETIME = 300.0
 
 
 #: What the marker opens with.  A constant because the marker is *read* as well
@@ -272,7 +264,7 @@ class Session:
         #: Message keys seen inside the dedup window — the bridge re-serves
         #: recent messages, so this is what tells a re-delivery from somebody
         #: typing the same thing twice.
-        self.seen = Window(DEDUP_SECONDS, MAX_INFLIGHT * 3)
+        self.seen = Window(_T.timeouts.pacing.wechat_dedup, MAX_INFLIGHT * 3)
         #: When the login in hand was saved.  Kept here because the client's own
         #: `get_session_dict` stamps `saved_at` at read time — right for the next
         #: start's age check, wrong for "how much of this login is left", and
@@ -514,7 +506,9 @@ class Wechat:
         rather than re-deriving from the file.
         """
         client = session.client
-        if not await client.try_restore_session(saved, max_age=SESSION_MAX_AGE):
+        if not await client.try_restore_session(
+            saved, max_age=_T.timeouts.pacing.wechat_session_max_age
+        ):
             session.restore_note = (
                 "the saved login is older than one lasts, so it was not offered "
                 "to the server"
@@ -584,8 +578,12 @@ class Wechat:
         raising, so what is left here is the cadence and the queue.
         """
         client = session.client
-        backoff = POLL_SECONDS
-        logger.info("wechat %s: polling every %.1fs", session.agent, POLL_SECONDS)
+        backoff = _T.timeouts.pacing.wechat_poll
+        logger.info(
+            "wechat %s: polling every %.1fs",
+            session.agent,
+            _T.timeouts.pacing.wechat_poll,
+        )
         while client.is_logged_in and not client.auth_failed:
             try:
                 messages = await client.poll_updates()
@@ -600,9 +598,9 @@ class Wechat:
                 client.last_error = str(exc)
                 logger.debug("wechat %s: poll failed: %s", session.agent, exc)
             backoff = (
-                min(backoff * BACKOFF_FACTOR, BACKOFF_MAX)
+                min(backoff * BACKOFF_FACTOR, _T.timeouts.pacing.wechat_backoff_max)
                 if client.last_error
-                else POLL_SECONDS
+                else _T.timeouts.pacing.wechat_poll
             )
             await asyncio.sleep(backoff)
         logger.info("wechat %s: polling stopped", session.agent)
@@ -637,7 +635,7 @@ class Wechat:
         # the second "ok".
         #
         # The cost is stated rather than hidden: a repeat of a text seen inside
-        # the last `DEDUP_SECONDS` that arrives *alongside its own replay* is
+        # the last `_T.timeouts.pacing.wechat_dedup` that arrives *alongside its own replay* is
         # indistinguishable from the replay, and is dropped with it.
         if session.seen.has(key, now=now) and key not in batch:
             return
@@ -754,13 +752,13 @@ class Wechat:
         does not catch it, which is exactly right — a courtesy that failed is
         not a reason to keep going, and a cancellation is not a failure.
         """
-        deadline = time.monotonic() + TYPING_MAX_LIFETIME
+        deadline = time.monotonic() + _T.timeouts.pacing.typing_max_lifetime
         while time.monotonic() < deadline:
             try:
                 await session.client.send_typing(peer, token, status=1)
             except Exception as exc:  # noqa: BLE001 — a courtesy, not a contract
                 logger.debug("wechat %s: typing not shown: %s", session.agent, exc)
-            await asyncio.sleep(TYPING_REFRESH)
+            await asyncio.sleep(_T.timeouts.pacing.typing_refresh)
 
     # ── Handing over, for real ───────────────────────────────────────────
 
@@ -813,7 +811,7 @@ class Wechat:
             self._config.server("tui").url,
             name=TUI_SERVER_NAME,
             fallback_tool="submit",
-            timeout=WINDOW_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.window,
         )
         try:
             # **The call returning is the acknowledgement** — the words are on
@@ -823,7 +821,7 @@ class Wechat:
             await window.call_tool(
                 "submit",
                 {"agent": agent, "text": prompt, "channel": CONFIG_KEY},
-                timeout=WINDOW_TIMEOUT_SECONDS,
+                timeout=_T.timeouts.transport.window,
             )
         finally:
             with contextlib.suppress(Exception):
@@ -888,9 +886,9 @@ class Wechat:
         self, session: Session, qrcode: str, base_url: str, *, attempts: int
     ) -> None:
         """Follow one QR until it is confirmed, replaced, or out of time."""
-        deadline = time.monotonic() + QR_DEADLINE
+        deadline = time.monotonic() + _T.timeouts.ready.qr_deadline
         while time.monotonic() < deadline:
-            await asyncio.sleep(QR_POLL_SECONDS)
+            await asyncio.sleep(_T.timeouts.pacing.qr_poll)
             status = await session.client.poll_login_status(qrcode, base_url)
 
             if redirect := status.get("redirect_base"):
@@ -1046,7 +1044,11 @@ class Wechat:
                 "`wechat_login` to put a QR code in front of whoever will scan it."
             )
 
-        left = max(0.0, SESSION_MAX_AGE - (time.time() - session.saved_at))
+        left = max(
+            0.0,
+            _T.timeouts.pacing.wechat_session_max_age
+            - (time.time() - session.saved_at),
+        )
         head = (
             f"WeChat is connected — about {left / 3600:.1f} hours left on this "
             f"login — and "

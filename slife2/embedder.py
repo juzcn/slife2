@@ -22,6 +22,7 @@ from typing import Any
 
 from fastmcp import Client
 
+import slife2.timeouts as _T
 from slife2.config import EMBEDDINGS_SERVER_NAME
 from slife2.db import Embedder
 from slife2.mcp_server import close_server, open_server, tool_payload
@@ -36,7 +37,6 @@ EMBEDDINGS_KEY = "embeddings"
 #: EMBED_TIMEOUT_SECONDS`): the inner deadline is the one that can name the
 #: endpoint that did not answer, and an outer one that fired first would replace
 #: that message with a timeout of its own.
-EMBEDDINGS_TIMEOUT_SECONDS = 60.0
 
 
 class RemoteEmbedder:
@@ -129,7 +129,7 @@ class EmbedderConnection:
                     self._config.server(EMBEDDINGS_KEY).url,
                     name=EMBEDDINGS_SERVER_NAME,
                     fallback_tool="embed",
-                    timeout=EMBEDDINGS_TIMEOUT_SECONDS,
+                    timeout=_T.timeouts.transport.embed,
                 )
                 self._client = client
                 described = tool_payload(await client.call_tool("describe", {}))
@@ -151,7 +151,6 @@ class EmbedderConnection:
 
 __all__ = [
     "EMBEDDINGS_KEY",
-    "EMBEDDINGS_TIMEOUT_SECONDS",
     "Embedder",
     "EmbedderConnection",
     "RemoteEmbedder",

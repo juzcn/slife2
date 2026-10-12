@@ -699,7 +699,10 @@ async def test_a_streaming_turn_does_not_drag_a_reader_back_to_the_tail() -> Non
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        await asyncio.wait_for(arrived.wait(), timeout=2)
+        await asyncio.wait_for(
+            arrived.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         transcript = app.query_one(ChatView)
         assert await settled(pilot, lambda: transcript.max_scroll_y > 0)
 
@@ -1620,7 +1623,10 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         assert app._turn is not None and not app._turn.done()
 
         await pilot.press("ctrl+c")
@@ -1895,7 +1901,10 @@ async def test_a_selection_keeps_ctrl_c_off_a_running_turn() -> None:
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         prompt = app.query_one(HistoryInput)
         prompt.text = "still typing"
         prompt.select_all()
@@ -1935,7 +1944,10 @@ async def test_a_second_prompt_waits_and_both_are_answered() -> None:
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "alpha")
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         await submit(pilot, "beta")
         await pilot.pause()
 
@@ -1975,7 +1987,10 @@ async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
 
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "alpha")
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         await submit(pilot, "beta")
         await pilot.pause()
 

@@ -34,6 +34,7 @@ import pytest_asyncio
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.a2a import broker
 from slife2.a2a import server as a2a_server
 from slife2.a2a.inbound_store import InboundStore
@@ -569,7 +570,9 @@ async def drain_until_idle(
             conversation.client if conversation else None,
         )
     )
-    deadline = asyncio.get_running_loop().time() + 5.0
+    deadline = (  # timeouts: the value this test is built around, not a budget
+        asyncio.get_running_loop().time() + 5.0
+    )  # timeouts: the value this test is built around, not a budget
     while not session.queue.empty():
         if asyncio.get_running_loop().time() > deadline:
             raise AssertionError("the writer never drained its queue")
@@ -733,7 +736,9 @@ async def writer_until(
             conversation.client if conversation else None,
         )
     )
-    deadline = asyncio.get_running_loop().time() + 10.0
+    deadline = (  # timeouts: the value this test is built around, not a budget
+        asyncio.get_running_loop().time() + 10.0
+    )  # timeouts: the value this test is built around, not a budget
     while not done():
         if asyncio.get_running_loop().time() > deadline:
             raise AssertionError("the writer never did what the test waited for")
@@ -799,7 +804,7 @@ async def test_a_notice_that_reached_nothing_is_offered_again(
     conversation (refused, so provably nothing was written) and a turn that
     fails because the hub is not up yet.
     """
-    monkeypatch.setattr(a2a_server, "ORPHAN_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(_T.timeouts.pacing, "orphan_retry", 0.01)
     monkeypatch.setattr(a2a_server, "ORPHAN_RETRIES", 2)
     caplog.set_level(logging.WARNING, logger="slife2.a2a.server")
 

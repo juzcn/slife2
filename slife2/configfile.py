@@ -49,6 +49,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
 
+import slife2.timeouts as _T
 from slife2.config import Config, ConfigError, find_config_path, load
 from slife2.runtime import config_key, exclusive
 
@@ -58,7 +59,6 @@ logger = logging.getLogger(__name__)
 #: write is a lock, a read, a rewrite and a validating parse — milliseconds —
 #: so anything near this bound means a writer that died holding the lock, and
 #: `exclusive` releases that in the kernel rather than after a timeout.
-WRITE_TIMEOUT_SECONDS = 30.0
 
 
 def _yaml() -> YAML:
@@ -233,7 +233,7 @@ def _edit(
     predicate here, and it must raise `ConfigError` to refuse, which rolls the
     file back exactly as the loader's own refusal does.
     """
-    with exclusive(config_key(path), timeout=WRITE_TIMEOUT_SECONDS):
+    with exclusive(config_key(path), timeout=_T.timeouts.storage.filelock):
         existed = path.exists()
         before = path.read_text(encoding="utf-8") if existed else ""
         document = _document(before, path)

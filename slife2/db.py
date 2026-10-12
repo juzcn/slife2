@@ -89,6 +89,7 @@ from typing import Any, Protocol
 
 import sqlite_vec
 
+import slife2.timeouts as _T
 from slife2 import attachments, textindex
 from slife2.clock import now
 from slife2.context import normalise_ids
@@ -104,7 +105,6 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 #: How long SQLite waits for a lock before giving up.  The database server is the
 #: only writer, but a read may be in flight while a turn is being written.
-_BUSY_TIMEOUT_MS = 5000
 
 #: Database files already reported as belonging to the previous schema.  See
 #: `TurnStore._report_legacy_file`, which is why this is not simply computed.
@@ -948,10 +948,12 @@ def connect_to(path: Path) -> sqlite3.Connection:
     unconditionally: a second connection path used only where a vector is
     touched would be a second thing to keep in step, and would buy nothing.
     """
-    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_MS / 1000)
+    connection = sqlite3.connect(path, timeout=_T.timeouts.storage.sqlite_busy)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    connection.execute(
+        f"PRAGMA busy_timeout={int(_T.timeouts.storage.sqlite_busy * 1000)}"
+    )
     _load_vector_index(connection)
     return connection
 

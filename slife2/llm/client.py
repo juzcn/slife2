@@ -20,6 +20,7 @@ from typing import Any
 
 from fastmcp import Client
 
+import slife2.timeouts as _T
 from slife2.llm.base import Chunk, Stream
 from slife2.llm.wire import decode_chunk
 from slife2.mcp_server import open_server
@@ -33,12 +34,29 @@ logger = logging.getLogger(__name__)
 #: indistinguishable.
 _DONE = object()
 
-#: How long one `stream_chat` call may take before it is abandoned.
+#: How long a streamed answer may *say nothing* before it is declared stalled.
 #:
-#: Generous on purpose: the default is short enough that a slow model ends the
-#: call mid-stream, which looks like a bug in the loop rather than a timeout.
-#: This bounds a hung provider, not a thinking one.
-DEFAULT_TIMEOUT_SECONDS = 600.0
+#: **Inactivity, not a total, and the difference is the whole of this number.**
+#: A slow-but-live generation must never be cut — a model that thinks for ten
+#: minutes and streams the answer afterwards is working, not hung — while a
+#: provider that accepted the request and went silent must not park the loop
+#: forever: Bailian served a turn exactly like that (200 OK, zero bytes for
+#: about seven minutes, then the connection dropped).  So this is v1's
+#: `work.stall`, the deadline is reset by every chunk, and no total replaces it.
+
+
+class StreamStallError(TimeoutError):
+    """A model call produced no chunk for `_T.timeouts.work.stall`.
+
+    A `TimeoutError` on purpose: it is the class a caller already catches for
+    "this took too long", and a stall is the one way a model call takes too
+    long — none of the others end the call.  The message names the silence,
+    because a reader of a log needs to know it was the *provider* that stopped
+    talking rather than anything this process did.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"LLM stream stalled — no data for {seconds:g}s")
 
 
 class MCPBackend:
@@ -56,7 +74,7 @@ class MCPBackend:
         *,
         provider: str = "",
         name: str = "mcp",
-        timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+        timeout: float | None = None,
         key: tuple[str, str] = ("", ""),
     ) -> None:
         self.name = name
@@ -134,10 +152,22 @@ class MCPBackend:
     async def _drain(
         self, queue: asyncio.Queue[Any], task: asyncio.Task[StreamChatResult]
     ) -> AsyncIterator[Chunk]:
-        """Yield chunks until the call signals it is done."""
+        """Yield chunks until the call signals it is done, watching for silence.
+
+        The deadline sits on the *wait for one chunk* and is restarted by every
+        chunk that arrives, which is what makes it a stall detector rather than
+        a clock: a model that streams for an hour is fine, and one that stops
+        talking for `_T.timeouts.work.stall` is not `_T.timeouts.work.stall` from being done, it
+        is indistinguishable from a provider that has given up (see
+        `StreamStallError`).
+        """
         try:
             while True:
-                item = await queue.get()
+                try:
+                    async with asyncio.timeout(_T.timeouts.work.stall):
+                        item = await queue.get()
+                except TimeoutError:
+                    raise StreamStallError(_T.timeouts.work.stall) from None
                 if item is _DONE:
                     return
                 yield item
@@ -174,7 +204,7 @@ async def open_backend(
     provider: str = "",
     name: str = "mcp",
     server_name: str = "",
-    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = None,
 ) -> tuple[Client, MCPBackend]:
     """Connect to an LLM server and return `(client, backend)`.
 
@@ -189,6 +219,11 @@ async def open_backend(
     Connecting, probing and the policy on failure are all
     `slife2.mcp_server.open_server`'s; what is left here is the LLM half, which
     is wrapping the client in the backend that speaks this wire format.
+
+    `timeout` is None by default, which means **no clock on one model call** —
+    the bound is the stall watchdog in the drain (`_T.timeouts.work.stall`), and a total
+    would be the thing that cuts a slow-but-live answer.  A caller that wants one
+    anyway says so here; nothing in this build does.
     """
     client = await open_server(
         url, name=server_name, fallback_tool="stream_chat", timeout=timeout

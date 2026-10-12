@@ -240,7 +240,10 @@ def build_server(
         ratio: str = "",
         duration: int = 0,
         folder: str = "",
-        timeout: float = 0,
+        # The model's own argument rather than a budget of ours: it is the
+        # schema's default, the tool reads it, and there is nothing here to
+        # route through the registry.
+        timeout: float = 0,  # timeouts: the model's number, not ours
     ) -> str:
         """Render a video from a description, and say where it was written.
 

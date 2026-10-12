@@ -46,6 +46,8 @@ from urllib.parse import quote
 
 import httpx2
 
+import slife2.timeouts as _T
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -61,7 +63,6 @@ BOT_AGENT = "slife2-wechat/1.0.0 (python)"
 #: How long one call may take.  Generous, because the poll is a *long* poll —
 #: the far end holds the request open until it has something to say — and v1's
 #: number is kept: it is the far end's cadence, not ours to shorten.
-REQUEST_TIMEOUT = 120.0
 
 
 @dataclass(frozen=True)
@@ -537,7 +538,7 @@ class IlinkClient:
             url,
             headers=headers(self._bot_token),
             body=body,
-            timeout=REQUEST_TIMEOUT,
+            timeout=_T.timeouts.transport.wechat_request,
         )
         try:
             decoded = json.loads(answer.text)

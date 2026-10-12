@@ -533,7 +533,15 @@ async def test_asking_never_carries_the_answer(
 
 
 async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> None:
-    built = build(text_turn("one", delay=1.0), hub=hub, context=store, max_running=1)
+    built = build(
+        text_turn(
+            "one",
+            delay=1.0,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        hub=hub,
+        context=store,
+        max_running=1,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     await start(built, "first")
     async with Client(built.mcp) as client:
         with pytest.raises(ToolError, match="already running"):
@@ -544,7 +552,14 @@ async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> No
 async def test_two_tasks_may_not_share_one_name(hub: Client, store: Store) -> None:
     """The name *is* the id, so a second one under it is a refusal rather than a
     second task nothing could address."""
-    built = build(text_turn("one", delay=1.0), hub=hub, context=store)
+    built = build(
+        text_turn(
+            "one",
+            delay=1.0,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        hub=hub,
+        context=store,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     await start(built, "research")
     async with Client(built.mcp) as client:
         with pytest.raises(ToolError, match="already running"):
@@ -563,7 +578,13 @@ async def test_cancelling_a_running_task_takes_its_answer_with_it(
     """A task that was called off has nothing to report, so nothing is handed
     over — §3's rule for a cancelled turn, one level down."""
     built = build(
-        text_turn("never sent", delay=5.0), hub=hub, context=store, window=window
+        text_turn(
+            "never sent",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        hub=hub,
+        context=store,
+        window=window,  # timeouts: the value this test is built around, not a budget
     )
     await start(built)
     async with Client(built.mcp) as client:

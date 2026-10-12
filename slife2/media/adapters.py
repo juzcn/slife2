@@ -41,6 +41,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import httpx2
 
+import slife2.timeouts as _T
 from slife2.paths import agent_dir
 
 logger = logging.getLogger(__name__)
@@ -53,16 +54,11 @@ logger = logging.getLogger(__name__)
 
 #: One request, from connect to last byte.  Generous on purpose: a synchronous
 #: render is a long POST.
-REQUEST_TIMEOUT = 180.0
-CONNECT_TIMEOUT = 30.0
 #: Downloading the artifact the provider hands back.
-DOWNLOAD_TIMEOUT = 300.0
 #: How long an asynchronous job (a video) may take before the wait gives up.
 #: **The job keeps running on the provider's side** — the message says so — so
 #: this bounds the *wait*, not the render.
-DEADLINE_SECONDS = 1200.0
 #: How often an asynchronous job is asked about.
-POLL_SECONDS = 15.0
 
 #: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
@@ -143,7 +139,8 @@ class _HttpClientMixin:
                 if self._client is None:
                     self._client = httpx2.AsyncClient(
                         timeout=httpx2.Timeout(
-                            REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT
+                            _T.timeouts.transport.media_request,
+                            connect=_T.timeouts.transport.media_connect,
                         ),
                         headers={"Authorization": f"Bearer {self._config.api_key}"},
                     )
@@ -251,7 +248,10 @@ class ArtifactSaver:
             ext = Path(url.split("?")[0]).suffix.lstrip(".") or "bin"
         try:
             async with httpx2.AsyncClient(
-                timeout=httpx2.Timeout(DOWNLOAD_TIMEOUT, connect=CONNECT_TIMEOUT),
+                timeout=httpx2.Timeout(
+                    _T.timeouts.transport.media_download,
+                    connect=_T.timeouts.transport.media_connect,
+                ),
                 follow_redirects=True,
             ) as client:
                 response = await client.get(url)
@@ -457,7 +457,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                     f"the job {status.lower()}: "
                     f"{output.get('message') or output.get('code') or 'no detail'}"
                 )
-            await asyncio.sleep(POLL_SECONDS)
+            await asyncio.sleep(_T.timeouts.pacing.media_poll)
 
     async def _data_uri(self, path: Path, types: dict[str, str], what: str) -> str:
         """A local file as a `data:` URI, with its media type.
@@ -557,7 +557,8 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             data[field] = reference
         task_id = await self._submit(model, data, params)
         output = await self._poll(
-            task_id, DEADLINE_SECONDS if deadline_s is None else deadline_s
+            task_id,
+            _T.timeouts.transport.media_deadline if deadline_s is None else deadline_s,
         )
         url = output.get("video_url")
         if not url:

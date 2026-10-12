@@ -25,10 +25,9 @@ from collections.abc import Sequence
 
 import pytest
 
+import slife2.timeouts as _T
 from slife2.file_tunnel import providers
 from slife2.file_tunnel.providers import (
-    TUNNEL_HEAL_SECONDS,
-    TUNNEL_READ_URL_SECONDS,
     CloudflareQuickTunnel,
     LocalhostRunTunnel,
     NgrokTunnel,
@@ -170,7 +169,7 @@ def one_attempt(monkeypatch, read_timeout: float | None = None) -> None:
     """
     monkeypatch.setattr(providers, "_MAX_RETRIES", 1)
     if read_timeout is not None:
-        monkeypatch.setattr(providers, "TUNNEL_READ_URL_SECONDS", read_timeout)
+        monkeypatch.setattr(_T.timeouts.ready, "tunnel_read_url", read_timeout)
 
 
 def lhr_line(host: str) -> str:
@@ -252,7 +251,7 @@ def test_the_heal_window_outlasts_the_read_timeout() -> None:
     """Load-bearing: a shorter one would restart a child while it is still
     establishing itself, and every restart mints a new hostname — killing every
     link already handed out."""
-    assert TUNNEL_HEAL_SECONDS >= TUNNEL_READ_URL_SECONDS
+    assert _T.timeouts.ready.tunnel_heal >= _T.timeouts.ready.tunnel_read_url
 
 
 # --- the state machine --------------------------------------------------------
@@ -540,7 +539,10 @@ def test_a_child_that_dies_early_reports_its_output(monkeypatch) -> None:
 
 
 def test_silence_times_out_instead_of_hanging(monkeypatch) -> None:
-    one_attempt(monkeypatch, read_timeout=0.3)
+    one_attempt(
+        monkeypatch,
+        read_timeout=0.3,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     install_popen(monkeypatch, SilentStdout())
     with pytest.raises(RuntimeError, match="timed out"):
         CloudflareQuickTunnel().start(8038)
@@ -550,7 +552,10 @@ def test_a_url_without_a_connector_is_never_published(monkeypatch) -> None:
     """cloudflared prints the hostname BEFORE the edge can route to it, and in
     between every fetch answers HTTP 530 — so the URL is not its own proof of
     readiness, and publishing it here is handing out a dead link."""
-    one_attempt(monkeypatch, read_timeout=0.3)
+    one_attempt(
+        monkeypatch,
+        read_timeout=0.3,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     banner = CF_BANNER.splitlines(keepends=True)
     install_popen(monkeypatch, lambda: BannerThenSilent(banner))
     with pytest.raises(RuntimeError, match="registered no connection to the edge"):
@@ -669,7 +674,10 @@ def test_the_metrics_port_is_picked_up_from_the_child(monkeypatch) -> None:
     """The child names it once, early — before it registers — and it is what
     lets the liveness question be asked of the transport itself rather than
     read off its prose."""
-    one_attempt(monkeypatch, read_timeout=0.3)
+    one_attempt(
+        monkeypatch,
+        read_timeout=0.3,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     install_popen(monkeypatch, LinesStdout([CF_METRICS]))
     tunnel = CloudflareQuickTunnel()
     with pytest.raises(RuntimeError):

@@ -30,6 +30,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+import slife2.timeouts as _T
 from slife2.config import (
     Config,
     EmbeddingProviderSettings,
@@ -56,13 +57,11 @@ CONFIG_KEY = "embeddings"
 #: failure — but a deadline all the same, because the db awaits this call on its
 #: save path and an endpoint that never answers must not become a turn that
 #: never finishes.
-EMBED_TIMEOUT_SECONDS = 30.0
 
 #: Retries are off.  The SDK's default is a long exponential backoff, which
 #: turns an endpoint that is simply down into a call that hangs for minutes —
 #: measured on v1, where the fix was this line.  The db's startup sync is what
 #: retries, by running again, and it can say which provider it could not reach.
-EMBED_MAX_RETRIES = 0
 
 #: Widths and input limits of models whose answers are known, so the common case
 #: costs no probe request.  Both numbers are per model, not per provider: the
@@ -123,8 +122,8 @@ class EmbeddingClient:
         self._client = AsyncOpenAI(
             base_url=self.provider.base_url,
             api_key=key,
-            timeout=EMBED_TIMEOUT_SECONDS,
-            max_retries=EMBED_MAX_RETRIES,
+            timeout=_T.timeouts.transport.embed_api,
+            max_retries=_T.timeouts.stream.retries,
         )
         return self._client
 

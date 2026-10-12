@@ -38,6 +38,7 @@ import logging
 
 from fastmcp import Client
 
+import slife2.timeouts as _T
 from slife2.config import AGENT_SERVER_NAME, TUI_SERVER_NAME, Config
 from slife2.mcp_server import open_server
 from slife2.tui import control
@@ -50,8 +51,6 @@ logger = logging.getLogger(__name__)
 #: fallback runs a whole turn before it answers.  **Two numbers for two different
 #: promises**, and using the window's for the fallback would cut off every
 #: hand-over that had to go the long way round.
-WINDOW_TIMEOUT_SECONDS = 10.0
-AGENT_TIMEOUT_SECONDS = 600.0
 
 
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
@@ -65,7 +64,7 @@ async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool
         await window.call_tool(
             "submit",
             {"agent": agent, "text": text, "channel": channel},
-            timeout=WINDOW_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.window,
         )
     except Exception as exc:  # noqa: BLE001 - three answers, and this is both
         if control.refused(exc):
@@ -94,7 +93,7 @@ async def to_window(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
             fallback_tool="submit",
-            timeout=WINDOW_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.window,
         )
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.info("no window for %s could be reached: %s", agent, exc)
@@ -131,13 +130,13 @@ async def to_agent(
         config.server("agent").url,
         name=AGENT_SERVER_NAME,
         fallback_tool="send_message",
-        timeout=AGENT_TIMEOUT_SECONDS,
+        timeout=_T.timeouts.transport.agent,
     )
     try:
         await server.call_tool(
             "send_message",
             {"agent": agent, "prompt": text, "channel": channel},
-            timeout=AGENT_TIMEOUT_SECONDS,
+            timeout=_T.timeouts.transport.agent,
         )
     finally:
         with contextlib.suppress(Exception):
