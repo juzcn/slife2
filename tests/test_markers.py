@@ -38,7 +38,7 @@ def test_both_markers_come_off_and_nothing_else_does() -> None:
 def test_a_prefix_without_a_closing_bracket_is_left_whole() -> None:
     """A torn row, or a hand-edited file: a display that eats the rest of a
     message is worse than one that shows a marker it could not read."""
-    torn = f"{MARKER_PREFIX}{{\"task_id\": \"x\""
+    torn = f'{MARKER_PREFIX}{{"task_id": "x"'
     assert markers.strip(torn, *MARKERS) == torn
 
 

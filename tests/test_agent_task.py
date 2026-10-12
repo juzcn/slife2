@@ -114,9 +114,7 @@ class Window:
                 raise ConnectionError("the stream dropped mid-call")
             if self.refuse:
                 raise ToolError(f"no window is showing {agent}'s conversation")
-            self.handed.append(
-                {"agent": agent, "text": text, "channel": channel}
-            )
+            self.handed.append({"agent": agent, "text": text, "channel": channel})
 
 
 @dataclass
@@ -345,9 +343,7 @@ async def test_a_call_that_does_not_say_whose_task_it_is_is_refused(
     async with Client(build(hub=hub, context=store).mcp) as client:
         # No `slife2/client` in `_meta`: not a call on anybody's behalf.
         with pytest.raises(ToolError, match="did not say which conversation"):
-            await client.call_tool(
-                AGENT_TASK_START, {"name": "x", "description": "y"}
-            )
+            await client.call_tool(AGENT_TASK_START, {"name": "x", "description": "y"})
 
 
 async def test_a_task_needs_a_description_that_stands_alone(
@@ -537,9 +533,7 @@ async def test_asking_never_carries_the_answer(
 
 
 async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> None:
-    built = build(
-        text_turn("one", delay=1.0), hub=hub, context=store, max_running=1
-    )
+    built = build(text_turn("one", delay=1.0), hub=hub, context=store, max_running=1)
     await start(built, "first")
     async with Client(built.mcp) as client:
         with pytest.raises(ToolError, match="already running"):
@@ -554,7 +548,9 @@ async def test_two_tasks_may_not_share_one_name(hub: Client, store: Store) -> No
     await start(built, "research")
     async with Client(built.mcp) as client:
         with pytest.raises(ToolError, match="already running"):
-            await ask(client, AGENT_TASK_START, {"name": "research", "description": "again"})
+            await ask(
+                client, AGENT_TASK_START, {"name": "research", "description": "again"}
+            )
     await settle(built, "research")
 
 
@@ -595,9 +591,7 @@ async def test_a_late_cancel_cannot_take_a_result_away(
     assert len(window.handed) == 1
 
 
-async def test_a_name_nobody_knows_answers_unknown(
-    hub: Client, store: Store
-) -> None:
+async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) -> None:
     built = build(hub=hub, context=store)
     async with Client(built.mcp) as client:
         stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "nothing"})
@@ -763,9 +757,7 @@ async def test_a_name_that_has_been_started_again_is_a_different_task(
     import slife2.agent_task_server as module
 
     monkeypatch.setattr(module, "RETIRED", 1)
-    built = build(
-        text_turn("first"), text_turn("second"), hub=hub, context=store
-    )
+    built = build(text_turn("first"), text_turn("second"), hub=hub, context=store)
     await start(built, "research")
     await settle(built, "research")
     await start(built, "research")

@@ -108,6 +108,7 @@ def refused(error: Exception) -> bool:
     """
     return isinstance(error, ToolError) and NO_WINDOW in str(error)
 
+
 INSTRUCTIONS = (
     "The terminal showing an agent's conversation. `attach` is how a window "
     "announces itself and is handed messages; `submit` hands it one, from a "

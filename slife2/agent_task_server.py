@@ -594,9 +594,7 @@ def build_server(
                 content=render(current.agent.system_prompt, agent_name=task.agent),
             )
         ]
-        opening = render(
-            OPENING_TEMPLATE, name=task.name, description=task.description
-        )
+        opening = render(OPENING_TEMPLATE, name=task.name, description=task.description)
 
         messages, turn_ids, covered = await restore(task, head)
         messages, covered = await rebuild(
@@ -699,7 +697,9 @@ def build_server(
         """
         try:
             result = await run_loop(task)
-            task.text = result.text.strip() or "(the task stopped without saying anything)"
+            task.text = (
+                result.text.strip() or "(the task stopped without saying anything)"
+            )
             task.status = FINISHED
             task.finished_at = now()
         except asyncio.CancelledError:
@@ -1033,7 +1033,9 @@ def build_server(
         mine = [task for task in tasks.values() if task.agent == agent]
         # Running first, then the most recently started — the order the question
         # "what is still going" wants, and a total order rather than a ranking.
-        mine.sort(key=lambda task: (task.status != RUNNING, task.started_at), reverse=False)
+        mine.sort(
+            key=lambda task: (task.status != RUNNING, task.started_at), reverse=False
+        )
         rows = []
         for task in sorted(mine, key=lambda t: t.started_at, reverse=True):
             row = task.report()
