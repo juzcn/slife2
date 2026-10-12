@@ -725,6 +725,18 @@ def build_server(
             await deliver(task)
         finally:
             task.handle = None
+            # **The answer is let go of here, and this line is the design rather
+            # than tidiness.**  A finished task's message list, its loop and its
+            # tool registry are locals of `run_loop` and die with it; what
+            # outlives a task is this object, and the only part of it worth
+            # megabytes is the answer.  Nothing reads it again — the hand-over
+            # was the only reader, and there is deliberately no tool that fetches
+            # an answer back (§1.3) — so keeping it would be holding a second
+            # copy of something that is either already in the conversation or,
+            # in the one case above, gone.  Keeping the *handle* would be the
+            # same mistake in the other direction: a finished `asyncio.Task`
+            # holds its result, so dropping the reference is what releases it.
+            task.text = ""
 
     def retire(task: AgentTask) -> None:
         """Let go of an ended task, oldest first, past the cap.
