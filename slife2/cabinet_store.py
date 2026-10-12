@@ -166,13 +166,14 @@ SPECS: dict[str, Spec] = {
 
 
 def cabinet_dir(agent: str) -> Path:
-    """One agent's cabinet: `<data>/<agent>.files/`.
+    """One agent's cabinet: `<data>/agents/<agent>/cabinet/`.
 
     **Per agent**, because a plugin here keys its state by the client id every
     call carries (`slife2.mcp_server`) and the cabinet is the most private state
-    there is: a diary is one person's.  This is v1's own layout — it named the
-    directory after the agent too — which is what makes a v1 cabinet adoptable by
-    copying the directory in.
+    there is: a diary is one person's.  Where a v1 cabinet ends up, too: v1 also
+    named its own directory after the agent (`<data>/<agent>.files/`), which is
+    what makes one adoptable by copying its contents in — the level that moved
+    is the one this module's docstring names.
 
     The name is sanitised by `safe_agent_name` for the reason that function
     gives: an agent name comes from a command line, and `jack` becoming a

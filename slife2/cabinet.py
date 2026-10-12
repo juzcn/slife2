@@ -21,8 +21,9 @@ differs per kind is what a *document* is, and that is `SPECS` in the store: its
 key, its time axis, whether a second write appends, and where its markdown goes.
 
 **A document is written twice, and one of the two is for a person.**  The row is
-what a search reads; the markdown under `<data>/<agent>.files/` is what somebody
-opens in an editor.  The store owns both writes, because they are one operation.
+what a search reads; the markdown under `<data>/agents/<agent>/cabinet/` is what
+somebody opens in an editor.  The store owns both writes, because they are one
+operation.
 
 **The bytes of a saved file live on disk and never in the index.**  `file_save`
 copies them into the cabinet (never moving, never deleting what it copied from);
