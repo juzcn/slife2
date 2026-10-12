@@ -58,8 +58,11 @@ class FakeTransport:
         # that kept the reference would let a later mutation show up in a
         # recorded call.
         self.sent.append((name, copy.deepcopy(arguments)))
-        if name == "reset":
-            return SimpleNamespace(data={"reset": True})
+        if name == "model_switch":
+            # A string rather than a mapping, which is what the tool returns
+            # and what FastMCP hands back wrapped in `data` — the shape the
+            # client reads first.
+            return SimpleNamespace(data=f"`default:` is now `{arguments['ref']}`.")
         return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
 
 
@@ -146,24 +149,54 @@ async def test_a_subagent_name_is_carried_as_part_of_the_id(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_resetting_names_the_same_id(monkeypatch) -> None:
-    """Forgetting a conversation is a command about a key, not a handle.
+async def test_switching_names_the_model_and_adopts_it(monkeypatch) -> None:
+    """The tool the model calls, and the reference every later turn carries.
 
-    Nothing about this client changes: the next message under the same id simply
-    begins a conversation the way the first one did.
+    **Adopting it is what makes a switch outlive the conversation it was made
+    in.**  The model goes out with every message and the server reads it when a
+    conversation *starts*, so a client that kept the model it was built with
+    would bring the old one back the moment that conversation was started again
+    — after the server let an idle one go, or in the next window.
     """
     transport = FakeTransport()
     install(monkeypatch, transport)
-    client = MCPAgentClient("http://test/mcp", agent="jack")
+    client = MCPAgentClient("http://test/mcp", agent="jack", model="local/big")
     await client.connect()
+
+    answer = await client.switch_model("local/small")
+
+    assert sent(transport, "model_switch") == [{"ref": "local/small"}]
+    assert "local/small" in answer, "the server's own sentence, not a paraphrase"
     await client.run_turn("hi", lambda event: None)
+    assert sent(transport, "send_message")[-1]["model"] == "local/small"
 
-    await client.reset()
-    await client.run_turn("after reset", lambda event: None)
 
-    assert sent(transport, "reset") == [{"agent": "jack", "subagent": ""}]
-    assert client.client_id == ("jack", "")
-    assert len(sent(transport, "send_message")) == 2
+@pytest.mark.asyncio
+async def test_a_refused_switch_is_not_adopted(monkeypatch) -> None:
+    """A refusal is an answer rather than an error — and it is not a switch.
+
+    `model_switch` says no in a sentence the model reads like any other answer,
+    so nothing raises and the caller has to read it.  Carrying the reference
+    anyway would pin the *next* conversation to a model this client has just
+    been told does not exist.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack", model="local/big")
+    await client.connect()
+
+    async def refuse(name, arguments, **kwargs):
+        if name == "model_switch":
+            return SimpleNamespace(data="[refused] `local/nope` is not a model.")
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", refuse)
+
+    answer = await client.switch_model("local/nope")
+
+    assert answer.startswith("[refused]")
+    await client.run_turn("hi", lambda event: None)
+    assert sent(transport, "send_message")[-1]["model"] == "local/big"
 
 
 @pytest.mark.asyncio

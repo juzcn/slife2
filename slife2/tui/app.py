@@ -47,7 +47,7 @@ from textual.binding import Binding
 from textual.message import Message as TextualMessage
 from textual.worker import Worker
 
-from slife2.config import DEFAULT_AGENT
+from slife2.config import DEFAULT_AGENT, Config
 from slife2.events import (
     ContextChosen,
     TextDelta,
@@ -62,11 +62,19 @@ from slife2.tui.client import (
     MCPAgentClient,
     MCPWindowClient,
     WindowClient,
+    refused,
 )
 from slife2.tui.control import Handover
 from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
-from slife2.tui.widgets import WINDOW_CHANNEL, ChatView, HistoryInput, StatusBar
+from slife2.tui.widgets import (
+    WINDOW_CHANNEL,
+    ChatView,
+    HistoryInput,
+    ModelChoice,
+    ModelPicker,
+    StatusBar,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +115,36 @@ def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
+def configured_models(config: Config) -> list[ModelChoice]:
+    """Every model the config defines, as the picker's rows.
+
+    Read here, at the moment the window opens, rather than by the window
+    itself: `main` is the party that already knows where the config is, and a
+    widget that went looking for the file would be a second answer to "which
+    models are there" — from a list the server has not seen.  v1 held its
+    models the same way.
+
+    **The reference is built the way `Config.resolve` builds it**, so what a
+    row names and what `model_switch` accepts are one string rather than two
+    that agree today.  The order is the file's, provider by provider and model
+    by model: a picker that sorted would open on a row the config does not lead
+    with, and the config is the operator's own ordering.
+    """
+    return [
+        ModelChoice(
+            ref=f"{provider}/{settings.model}",
+            # The config's `name:` when it has one, and empty when it does not,
+            # so a row shows a name only where somebody wrote one.
+            label=settings.name,
+            context_window=settings.context_window,
+            thinking=settings.reasoning,
+            vision=settings.accepts_images,
+        )
+        for provider, entry in config.providers.items()
+        for settings in entry.models.values()
+    ]
+
+
 class SlifeApp(App[None]):
     """The conversation window."""
 
@@ -126,8 +164,13 @@ class SlifeApp(App[None]):
         # be able to close the window — it is the interrupt to reach for while
         # something is selected, and that has to be safe to press.
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+n", "new_conversation", "New conversation"),
-        Binding("ctrl+q", "quit", "Quit"),
+        # The switch, and the key is v1's — `s` for switch.  Not ctrl+m, which
+        # Textual aliases to enter, and not ctrl+g, which VS Code keeps for its
+        # own goto-line.  What it opens is the picker; what applies the choice
+        # is the *tool* the model calls (`model_switch`), so a person and a
+        # model switching a model are one behaviour with one implementation
+        # rather than two that can drift apart.
+        Binding("ctrl+s", "switch_model", "Switch model", show=False),
         # Home/End go to the transcript rather than to the draft, and
         # `priority` is what makes that true: the priority pass runs *before*
         # the focused widget, and the focused widget is the prompt, whose
@@ -151,6 +194,7 @@ class SlifeApp(App[None]):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
+        models: Sequence[ModelChoice] = (),
         control_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
         window_factory: Callable[[], WindowClient] | None = None,
@@ -178,6 +222,16 @@ class SlifeApp(App[None]):
         #: a model cannot read.
         self._thinking = thinking
         self._vision = vision
+        #: The models the picker offers: the config's, as it was when this
+        #: window opened.  Held rather than re-read at the key, because the
+        #: window is not a reader of that file — and because a list that grew
+        #: under a picker the person is looking at would move the row under the
+        #: cursor in the middle of choosing it.
+        self._models = list(models)
+        #: Whether a picker is on screen.  A second ctrl+s would stack a second
+        #: one and leave the first's future unresolved, so the second press is
+        #: the one that does nothing — v1's guard, and v1's reason for it.
+        self._switching = False
         #: Where this window *attaches* so a message arriving on another channel
         #: can be handed to it (`slife2.tui.control`) — the plugin's address, and
         #: the window is its client.  Empty means no inbox, which is what a test
@@ -519,7 +573,7 @@ class SlifeApp(App[None]):
 
         # Lazy retry, and the same call `_drain` makes before it mounts
         # anything — asking the client is what keeps one drop from costing a
-        # restart, and ctrl+n does not help: reset goes down the same path.
+        # restart, rather than a window that has to be closed and opened again.
         await self._ensure_connected()
         if not self._connected:
             raise ConnectionError(
@@ -640,51 +694,87 @@ class SlifeApp(App[None]):
         """
         self._transcript.jump_to_tail()
 
-    async def action_new_conversation(self) -> None:
-        """Start over: a new loop, an empty queue, an empty window.
+    def action_switch_model(self) -> None:
+        """Open the model picker: the list, a cursor, and a future for the choice.
 
-        The queue is dropped rather than carried over — those messages were
-        meant for the conversation being abandoned — and the loop is replaced,
-        which is also what forgets the history: the server ends a name's old
-        loop when it opens a new one for that name.
+        **Sync, and that is not a style choice.**  A binding action runs inside
+        the key handler, so awaiting the choice here would block the message
+        pump — and the message pump is what would deliver the very `Enter` that
+        resolves the picker.  The choice is awaited by a worker instead, which
+        is v1's arrangement and v1's reason for it.
 
-        The turn is cancelled without `_cancel_turn`, so `_interrupting` stays
-        clear and the drain adds no `[cancelled]` note — this window is about to
-        be emptied, and a note about the turn nobody is watching is not worth
-        saying.
-
-        The ticket moves on for the reason `_drain` moves it: the turn just
-        cancelled is still delivering events for a moment, and a window that
-        kept the old number would mount them into the conversation that replaced
-        it — a tool panel in an emptied transcript, and a status bar reading the
-        abandoned turn's numbers.
+        What the picker decides with is `model_switch`, the tool the model
+        itself calls, so there is one implementation of "switch the model" and
+        one answer as to whether it worked.
         """
-        if self._turn is not None and not self._turn.done():
-            self._turn.cancel()
-        self._queue.clear()
-        self._ticket += 1
-        if self._client is not None:
-            # Connected first, because forgetting a conversation is something
-            # only the server can do: with the connection down `reset` returns
-            # having done nothing, and the next message would carry on the
-            # history this keystroke was meant to end.
+        if self._switching:
+            return
+        if not self._models:
+            # Said rather than shown as an empty picker: a list with no rows is
+            # a key that looks broken, and the tool that would fix it is the
+            # thing to name.
+            self._transcript.add_error("no models are configured; `model_set` adds one")
+            return
+        future: asyncio.Future[ModelChoice | None] = asyncio.Future()
+        picker = self._transcript.add_picker(
+            ModelPicker(self._models, self._model, future)
+        )
+        picker.focus()
+        self._switching = True
+        self.run_worker(self._finish_switch(future), group="model", exit_on_error=False)
+
+    async def _finish_switch(self, future: asyncio.Future[ModelChoice | None]) -> None:
+        """Apply the picker's decision, off the key handler.
+
+        A worker rather than a plain task so the window unmounting cancels it:
+        the thing it is waiting on is a key, and nothing is going to press one
+        in a window that is closing.
+        """
+        choice = await future
+        self._switching = False
+        # The prompt takes the focus back, whether or not anything was chosen:
+        # the picker had it while it asked, and what the person did before
+        # ctrl+s was type.
+        self.query_one(HistoryInput).focus()
+        if choice is None:
+            return  # cancelled — the picker's own line is the whole answer
+
+        assert self._client is not None
+        try:
+            await self._ensure_connected()
             if not self._connected:
-                await self._connect()
-            try:
-                await self._client.reset()
-            except Exception as exc:  # noqa: BLE001 - a key binding that raises takes the app down
-                # Guarded because this is a key binding: Textual's message pump
-                # turns a raise here into a fatal error and takes the whole app
-                # down — which is the outcome a window built to survive a dead
-                # server must not have, half-applied at that.  The window is
-                # being emptied either way, so the failure is said and the
-                # emptying goes ahead.
-                logger.warning("the conversation was not reset: %s", exc)
-                self._connected = False
-                self._connection_text = f"disconnected: {exc}"
-        self._transcript.clear_all()
-        self._context_tokens = 0
-        self._steps = 0
+                raise ConnectionError(self._connection_text)
+            answer = await self._client.switch_model(choice.ref)
+        except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
+            self._transcript.add_error(f"the model was not switched: {exc}")
+            return
+        # A refusal rather than a note (`client.refused`), and the difference is
+        # the bar: a note would leave it describing a switch that never
+        # happened.
+        if refused(answer):
+            self._transcript.add_error(answer)
+            return
+        self._transcript.add_note(answer)
+        self._apply_model(choice)
+
+    def _apply_model(self, choice: ModelChoice) -> None:
+        """Move the bar onto the model the switch just put the conversation on.
+
+        All of it moves together, and that is the point: what the bar says
+        about a model is a fact about the *model* — its window, whether it
+        reasons, whether it reads pictures — so a bar that kept the old
+        window's percentage or the old model's capability marks would be
+        describing a model that is not the one answering.
+
+        The reference rather than the config's name, which is what the bar
+        shows for a window that has not switched anything: one spelling of
+        "which model is this" is worth more than the prettier of the two.
+        """
+        self._model = choice.ref
+        self._model_label = choice.ref
+        self._context_window = choice.context_window
+        self._thinking = choice.thinking
+        self._vision = choice.vision
         self._refresh_status()
 
     # --- status --------------------------------------------------------------

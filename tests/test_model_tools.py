@@ -15,12 +15,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from fastmcp import Client
 
-from slife2.config import load, load_cached
+from slife2.config import DEFAULT_AGENT, load, load_cached
 from slife2.configfile import read_scalar, read_section
+from slife2.context_server import build_server as build_context
 from slife2.launcher import Outcome, Status
 from slife2.server.server import build_server
+from slife2.toolhub import build_server as build_hub
+from tests.fakes import (
+    FakeBackend,
+    StubEmbedder,
+    keep_the_context,
+    plugin_transports,
+    text_turn,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -301,6 +311,66 @@ providers:
 
     assert answer.startswith("[refused]") and "last model" in answer
     assert written(isolated_runtime) == before
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def answering_server(isolated_runtime):
+    """`server_for`'s server, plus the two peers a turn needs to run.
+
+    The real context and hub servers over the in-memory transport, exactly as
+    `test_server.py` builds them for its own turns, and a model that is a script
+    rather than an endpoint.  A switch is about conversations that are *running*,
+    so the test needs a conversation that can: asserting on the file after a
+    switch is not the same claim, and it is the one the whole tool exists for.
+    """
+    live = load()
+    async with (
+        Client(
+            build_context(live, embedder=StubEmbedder(), ask=keep_the_context)
+        ) as context,
+        Client(
+            build_hub(
+                live,
+                transports=plugin_transports(live),
+                embedder=StubEmbedder(),
+            )
+        ) as hub,
+    ):
+        yield build_server(
+            live,
+            context_client=context,
+            hub_client=hub,
+            backend=FakeBackend(text_turn("one"), text_turn("two")),
+            source=load_cached,
+        )
+
+
+@pytest.mark.asyncio
+async def test_switching_moves_the_conversations_already_running(
+    isolated_runtime,
+) -> None:
+    """**The half that makes `model_switch` the way out of a model that is down.**
+
+    Writing `default:` alone changes what the *next* conversation starts on — so
+    a window switching away from a model that has stopped answering would go on
+    being answered, or not answered, by the one it was trying to leave.  The
+    conversation keeps its key and its history; what moves is the model it
+    reaches, from its next turn.
+    """
+    write_config(isolated_runtime)
+    async with answering_server(isolated_runtime) as server:
+        async with Client(server) as client:
+            first = await client.call_tool(
+                "send_message", {"agent": DEFAULT_AGENT, "prompt": "one"}
+            )
+            switched = await ask(client, "model_switch", ref="local/small")
+            second = await client.call_tool(
+                "send_message", {"agent": DEFAULT_AGENT, "prompt": "two"}
+            )
+
+    assert first.data["model"] == "local/big", "it starts on the default"
+    assert "moved with it" in switched, "and the answer says what happened"
+    assert second.data["model"] == "local/small", "the same conversation moved"
 
 
 @pytest.mark.asyncio

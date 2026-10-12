@@ -36,6 +36,39 @@ from slife2.tui.widgets import WINDOW_CHANNEL
 #: call is never sitting on the server waiting its turn while this clock runs.
 TURN_TIMEOUT_SECONDS = 900.0
 
+#: How every tool in this system says no: a sentence beginning with this, which
+#: a model reads as an answer and a person reads as a refusal.  Spelled once
+#: here because two callers now ask the same question of one answer — the app,
+#: which shows it as a failure, and this client, which must not adopt a model
+#: the server just refused.
+REFUSAL = "[refused]"
+
+
+def refused(answer: str) -> bool:
+    """Whether a tool's answer is a refusal rather than a result."""
+    return answer.startswith(REFUSAL)
+
+
+def answer_of(result: Any) -> str:
+    """The words a tool answered with, however the transport carried them.
+
+    `model_switch` returns a plain string, which FastMCP wraps and hands back as
+    `data` — so that is the first shape read, and the content-block half is the
+    fallback for a server that answered the older way.  A reply that is neither
+    is answered as empty rather than guessed at: the refusal this client acts on
+    is a prefix, and inventing text would be inventing the prefix with it.
+    """
+    data = getattr(result, "data", None)
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("text"), str):
+        return data["text"]
+    for block in getattr(result, "content", None) or ():
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            return text
+    return ""
+
 
 class AgentClient(Protocol):
     """The TUI's view of the agent."""
@@ -55,8 +88,21 @@ class AgentClient(Protocol):
 
     async def close(self) -> None: ...
 
-    async def reset(self) -> None:
-        """Forget the conversation so the next turn starts fresh."""
+    async def switch_model(self, ref: str) -> str:
+        """Make `provider/model` what this machine runs on, and say what happened.
+
+        **The answer is the agent server's own sentence**, because it is the
+        only place that says what a switch does to a conversation already
+        running — and a client that paraphrased it would be a second story about
+        the same fact.  A refusal arrives as an answer too (`refused`), not as
+        an exception: the server answered, the connection is fine, and the
+        sentence is written for a person to read.
+
+        **It needs the agent server and not the model**, which is the whole
+        reason the key exists: switching away from a model that is down is the
+        one thing to do about it, and it has to work precisely then.  Nothing
+        here calls the model.
+        """
         ...
 
     async def transcript(self) -> list[dict[str, Any]]:
@@ -129,9 +175,12 @@ class MCPAgentClient:
         #: always the former, which is why it does not expose this as a flag.
         self._subagent = subagent
         #: Which model to ask for, as `provider/model`.  The server reads it when
-        #: the conversation starts and keeps it, so sending it every turn is
-        #: idempotent rather than wrong — a conversation's model is a property of
-        #: the conversation, and changing it is what `reset` is for.
+        #: a conversation *starts*, so sending it every turn is idempotent rather
+        #: than wrong.  What changes a model is `model_switch`, and it is why
+        #: `switch_model` moves this too: the next conversation to start — after
+        #: an idle conversation is let go, or a window reopened — must start on
+        #: the model that was just chosen, and not on the one this client was
+        #: built with.
         self._model = model
         self._timeout = timeout
         self._client: Client | None = None
@@ -182,21 +231,30 @@ class MCPAgentClient:
         if client is not None:
             await close_server(client)
 
-    async def reset(self) -> None:
-        """Start a new conversation under the same id.
-
-        One call, and no state of ours changes: the server forgets the history,
-        and the next message under this id begins a new one.  Nothing follows the
-        old conversation into the new one, because nothing about it was ever
-        held here.
-        """
+    async def switch_model(self, ref: str) -> str:
         if self._client is None:
-            return
-        await self._client.call_tool(
-            "reset",
-            {"agent": self._agent, "subagent": self._subagent},
-            timeout=self._timeout,
-        )
+            raise ConnectionError("not connected")
+        try:
+            result = await self._client.call_tool(
+                "model_switch", {"ref": ref}, timeout=self._timeout
+            )
+        except ToolError:
+            # The server answered and refused the *call* — the connection is
+            # fine, so it stays.
+            raise
+        except Exception:
+            # The transport itself is gone; dropping the client is what lets the
+            # app's lazy retry reconnect instead of believing it is connected to
+            # a server nothing is talking to.  See `run_turn`.
+            await self.close()
+            raise
+        answer = answer_of(result)
+        # Adopted only when the server said it happened.  A refused switch wrote
+        # nothing, so carrying the reference here would pin the next conversation
+        # to a model this client was just told does not exist.
+        if not refused(answer):
+            self._model = ref
+        return answer
 
     async def transcript(self) -> list[dict[str, Any]]:
         """Read the conversation back, for the window that has just opened.

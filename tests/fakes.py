@@ -152,7 +152,14 @@ class FakeAgentClient:
         #: The images sent with each prompt, so a test can assert the attachment
         #: reached the client rather than only that the file was read.
         self.images: list[list[str]] = []
-        self.resets = 0
+        #: What `switch_model` was asked for, in order, so a test can prove the
+        #: picker's choice reached the server rather than only that the picker
+        #: closed.
+        self.switches: list[str] = []
+        #: What `switch_model` answers with.  A refusal is an *answer* on the
+        #: wire, so a test sets this to a `[refused] …` sentence to exercise the
+        #: one path that must not move anything.
+        self.switch_answer = "`default:` is now `local/small`; it was `local/big`."
         #: What `transcript` answers with — the previous conversation, as the
         #: window opened after a restart sees it.  Empty is the real answer for
         #: a name that has never run, and so is the default.
@@ -175,8 +182,17 @@ class FakeAgentClient:
     async def close(self) -> None:
         self.connected = False
 
-    async def reset(self) -> None:
-        self.resets += 1
+    async def switch_model(self, ref: str) -> str:
+        """Answer the way the server does: the answer carries a refusal too.
+
+        It needs a connection for the same reason `run_turn` does — the real one
+        reaches for a client it may no longer have, and that is the failure the
+        app's lazy retry is built on.
+        """
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.switches.append(ref)
+        return self.switch_answer
 
     async def run_turn(
         self,

@@ -36,6 +36,9 @@ that has only reasoning to show.  slife v1 signs the message, not the widget.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TypeVar
 
@@ -410,6 +413,17 @@ class ChatView(VerticalScroll):
         self._close_block()
         self._add(Static(plain(text, PALETTE["dim"])), "system-message")
 
+    def add_picker(self, picker: ModelPicker) -> ModelPicker:
+        """Mount the model picker inline, at the tail.
+
+        **Nothing is closed for it**, unlike every message above: a picker
+        opened while an answer is streaming belongs *between* two pieces of that
+        answer, and `_close_block` would end the block the rest of the answer
+        still has to arrive in — under a second signature, because a block is
+        opened by the first thing that has something to put in it.
+        """
+        return self._add(picker, "model-picker")
+
     def add_error(self, text: str) -> None:
         self._turn_open = False
         self._close_block()
@@ -546,14 +560,6 @@ class ChatView(VerticalScroll):
         )
         self.follow_tail()
 
-    def clear_all(self) -> None:
-        """Empty the transcript.  Pairs with starting a new conversation."""
-        self._turn_open = False
-        self._close_block()
-        self._tools.clear()
-        for widget in list(self.query(Static)) + list(self.query(ToolCallWidget)):
-            widget.remove()
-
     # --- for tests -----------------------------------------------------------
 
     def plain_text(self) -> str:
@@ -564,9 +570,12 @@ class ChatView(VerticalScroll):
         """
         lines = []
         for widget in self.query(
-            ".user-message, .assistant-message, .system-message, .tool-call"
+            ".user-message, .assistant-message, .system-message, .tool-call, "
+            ".model-picker"
         ):
             if isinstance(widget, ToolCallWidget):
+                lines.append(widget.plain_text())
+            elif isinstance(widget, ModelPicker):
                 lines.append(widget.plain_text())
             elif isinstance(widget, Static):
                 content = widget.content
@@ -1024,6 +1033,189 @@ class HistoryInput(TextArea):
         self.move_cursor(self.document.end)
 
 
+@dataclass(frozen=True)
+class ModelChoice:
+    """One model the picker offers: what to ask for, and what it is.
+
+    A value built from the config by whoever opens the picker, rather than a
+    `ModelSettings` handed over or a config read from in here.  A widget that
+    can reach the config file is a widget that can disagree with the server
+    about what the models are; this carries only what the row draws and what
+    the switch names — `ref` — and the two are the same string by construction.
+    """
+
+    #: `provider/model` — the reference `model_switch` takes, and the row's text.
+    ref: str
+    #: The config's `name:` where it wrote one, and empty where it did not: a
+    #: row shows a name only for a model somebody took the trouble to name.
+    label: str = ""
+    context_window: int = 0
+    thinking: bool = False
+    vision: bool = False
+
+
+class ModelPicker(Static):
+    """The models this config defines, inline in the transcript.
+
+    slife v1's picker, ported as it was: `↑`/`↓` move a cursor, `Enter` picks,
+    `Esc` cancels, the row re-renders itself to a status line once decided, and
+    the caller mounts it, focuses it and awaits the future it was handed.  The
+    cursor opens on the model the conversation is already on, so a bare `Enter`
+    is a no-op rather than a surprise.
+
+    **The bindings are `priority`, and that is what makes the keys the picker's.**
+    The priority pass runs before the focused widget, and the widget that would
+    otherwise take them is the prompt — a `TextArea` whose `↑`/`↓` reach back
+    through the draft's history, which is the wrong list to move while a model
+    is being chosen.
+
+    **Losing focus without a decision cancels.**  A picker is dismissed by a
+    click on the transcript as easily as by `Esc`, and one left undecided is
+    worse than a wasted keystroke: the future would never resolve, so the app's
+    `Ctrl+S` would stay latched and every later press would do nothing.  A
+    decided picker ignores the blur, which is what makes the refocus after a
+    pick harmless.
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("up", "cursor_up", "Up", priority=True, show=False),
+        Binding("down", "cursor_down", "Down", priority=True, show=False),
+        Binding("enter", "pick", "Pick", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        choices: Sequence[ModelChoice],
+        active: str,
+        future: asyncio.Future[ModelChoice | None],
+    ) -> None:
+        super().__init__("")
+        self._choices = list(choices)
+        self._active = active
+        self._future = future
+        self._decided = False
+        self._cursor = next(
+            (i for i, one in enumerate(self._choices) if one.ref == active), 0
+        )
+        self.update(self._body())
+
+    # --- the keys ------------------------------------------------------------
+
+    def action_cursor_up(self) -> None:
+        """Move the cursor up, clamped at the top."""
+        if not self._decided and self._cursor > 0:
+            self._cursor -= 1
+            self.update(self._body())
+
+    def action_cursor_down(self) -> None:
+        """Move the cursor down, clamped at the bottom."""
+        if not self._decided and self._cursor < len(self._choices) - 1:
+            self._cursor += 1
+            self.update(self._body())
+
+    def action_pick(self) -> None:
+        """Choose the model under the cursor."""
+        if not self._decided and 0 <= self._cursor < len(self._choices):
+            self._decide(self._choices[self._cursor])
+
+    def action_cancel(self) -> None:
+        """Choose nothing."""
+        self._decide(None)
+
+    def on_blur(self) -> None:
+        """Focus went elsewhere: nothing was chosen.  See the class docstring."""
+        self._decide(None)
+
+    def _decide(self, choice: ModelChoice | None) -> None:
+        """Resolve the future once, and re-render as the decision.
+
+        Once, because the blur that follows every decided picker would
+        otherwise set the same future a second time, and a resolved future
+        raises rather than shrugs.
+        """
+        if self._decided:
+            return
+        self._decided = True
+        self._chosen = choice
+        self._future.set_result(choice)
+        self.update(self._body())
+
+    # --- the row -------------------------------------------------------------
+
+    def _body(self) -> Text:
+        """The row, as it stands: the list, or the line the decision left.
+
+        **Not `_render`**, which is the name this wants and cannot have: Textual
+        has one, it is the hook `get_content_height` calls to measure a widget,
+        and overriding it makes this class return a `Text` where the framework
+        wants a visual — a layout crash at the first resize, nowhere near the
+        line that caused it.
+        """
+        if self._decided:
+            return self._decided_line()
+        line = Text()
+        line.append("Switch model", f"bold {PALETTE['text']}")
+        for index, choice in enumerate(self._choices):
+            current = choice.ref == self._active
+            line.append("\n")
+            line.append(
+                f"{GLYPHS['cursor']} " if index == self._cursor else "  ",
+                PALETTE["amber"],
+            )
+            line.append(f"{index + 1}. ", PALETTE["dim"])
+            line.append(
+                f"{GLYPHS['current']} " if current else "  ",
+                PALETTE["amber"] if current else PALETTE["dim"],
+            )
+            # The reference, because that is what the switch names; the label
+            # follows it, because that is what the config calls the thing.
+            line.append(choice.ref, f"bold {PALETTE['text']}")
+            if choice.label and choice.label != choice.ref:
+                line.append(f"  {choice.label}", PALETTE["muted"])
+            meta = _model_meta(choice)
+            if meta:
+                line.append(f"  {meta}", PALETTE["dim"])
+        line.append("\n")
+        line.append(f"{GLYPHS['up']}/{GLYPHS['down']} ", PALETTE["dim"])
+        line.append("select", f"bold {PALETTE['green']}")
+        line.append("  Enter ", PALETTE["dim"])
+        line.append("pick", f"bold {PALETTE['green']}")
+        line.append("  Esc ", PALETTE["dim"])
+        line.append("cancel", f"bold {PALETTE['red']}")
+        return line
+
+    def _decided_line(self) -> Text:
+        line = Text()
+        if self._chosen is None:
+            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
+            line.append("Cancelled", f"bold {PALETTE['red']}")
+            return line
+        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
+        line.append("Switched to ", f"bold {PALETTE['green']}")
+        line.append(self._chosen.ref, f"bold {PALETTE['text']}")
+        return line
+
+    def plain_text(self) -> str:
+        """What this row shows, for the transcript's own `plain_text`."""
+        content = self.content
+        return content.plain if isinstance(content, Text) else str(content)
+
+
+def _model_meta(choice: ModelChoice) -> str:
+    """One model's facts, as the row's trailing note: what it costs and does."""
+    parts = []
+    if choice.context_window:
+        parts.append(f"ctx {choice.context_window:,}")
+    if choice.thinking:
+        parts.append("thinking")
+    if choice.vision:
+        parts.append("vision")
+    return "  ".join(parts)
+
+
 class StatusBar(Static):
     """One dim row: who you are, what is happening, and what the keys do."""
 
@@ -1097,9 +1289,20 @@ class StatusBar(Static):
             parts.append(
                 f"[{PALETTE['dim']}]{steps} step{'s' if steps != 1 else ''}[/]"
             )
-        # Both keys, because they are not interchangeable: the copy actions get
-        # first refusal on ctrl+c, and escape is the one that stops the turn and
-        # cannot do anything else — nothing else claims it, and it never quits.
-        hints = "Esc/Ctrl+C cancel  Ctrl+N new  Ctrl+Q quit"
+        # Both spellings of the cancel, because they are not interchangeable:
+        # the copy actions get first refusal on ctrl+c, and escape is the one
+        # that stops the turn and cannot do anything else — nothing else claims
+        # it, and it never quits.
+        #
+        # **What is named here is what reaches the app in every terminal, and
+        # that is the whole test.**  ctrl+c is the one control key nothing
+        # intercepts, and it is what a person reaches for to leave; ctrl+s is
+        # v1's for the switch, "s" for switch, and it is not ctrl+g because VS
+        # Code keeps that one.  Ctrl+Q would quit too — Textual binds it — and
+        # it is deliberately not named: a terminal with flow control eats it as
+        # XON, so the bar would be promising a key that arrives nowhere.  A bar
+        # read by somebody whose key does nothing is worse than a bar that says
+        # less.
+        hints = "Esc/Ctrl+C cancel  Ctrl+S model  Ctrl+C quit"
         parts.append(f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {hints}[/]")
         self.update("  ".join(parts))

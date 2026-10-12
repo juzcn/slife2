@@ -329,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     # Imported here rather than at module scope so `slife2.config` and the
     # servers stay importable without pulling in fastmcp or Textual.
     from slife2.launcher import AgentInUse, claim_agent, others_running
-    from slife2.tui.app import SlifeApp
+    from slife2.tui.app import SlifeApp, configured_models
 
     code = 0
     claimed = False
@@ -354,6 +354,13 @@ def main(argv: list[str] | None = None) -> int:
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
+                    # Every model the config defines, for the picker `Ctrl+S`
+                    # opens.  Built here rather than by the window, because this
+                    # read of the file is the one that already happened: the
+                    # picker offers `providers:` as this start saw it, and a
+                    # model the *model* has added since is offered from the next
+                    # start — which is what keeps the window out of the file.
+                    models=configured_models(config),
                     # Where this window attaches, so another channel can hand it
                     # a message (`slife2.tui.control`).  One address for every
                     # agent: what picks out this window is the agent name it

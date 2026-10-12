@@ -280,6 +280,11 @@ class Outcome:
     #: the caller is told, since a call whose pictures were fewer than it asked
     #: for is a call that cannot tell.
     refused: list[str] = field(default_factory=list)
+    #: The model this turn *ran on*, taken when it started.  Held because the
+    #: loop's own reference can move while a turn is in flight — `model_switch`
+    #: moves every conversation it is holding — and what that turn's record must
+    #: name is the model that answered it, which is the one it began on.
+    model: str = ""
     started_at: str = ""
     completed_at: str = ""
 
@@ -379,9 +384,13 @@ def build_server(
     choice.
     """
     #: Cached per model *name*, because the connection behind one is expensive
-    #: and a conversation's model never changes.  `MCPBackend` rather than the
-    #: protocol, because only this one can carry a key — an injected backend is
-    #: a test's, and has no model server to name a conversation to.
+    #: and a conversation's reference changes rarely and only between its turns.
+    #: A `model_switch` therefore needs no cache handling at all: the reference
+    #: it writes is the key, so the backend it wants is either open already or
+    #: opened by `loop_for` the next time that conversation runs a turn.
+    #: `MCPBackend` rather than the protocol, because only this one can carry a
+    #: key — an injected backend is a test's, and has no model server to name a
+    #: conversation to.
     model_backends: dict[str, MCPBackend] = {}
     clients: dict[str, Client] = {}
     #: The context client once we have one — injected, or opened on first use.
@@ -405,8 +414,11 @@ def build_server(
 
         **Only what a conversation *starts* from is read here**, which is
         deliberate: a conversation's model, its prompt and the backend it talks
-        to are properties of the conversation, so a later edit does not reach
-        one already running — it is what `reset` is for.
+        to are properties of the conversation, so an edit of the file does not
+        reach one already running.  `model_switch` is the one edit that does,
+        and it does not come through here — it moves the loops it is holding,
+        because a reference is not a prompt and a conversation can be pointed at
+        another model without being rebuilt.
         """
         return source() if source is not None else config
 
@@ -736,16 +748,18 @@ def build_server(
 
         task.add_done_callback(done)
 
-    def recorded_model(loop: Loop) -> str:
+    def recorded_model(loop: Loop, outcome: Outcome) -> str:
         """What to write in the `what_model` column.
 
-        The loop's own model, except when a backend was injected — in which case
-        the thing that ran genuinely is not anything the config names, and
-        writing the config's model would be recording a model that never
-        answered.  This is the one place that distinction has to be made, so it
-        is one function rather than a condition repeated at each call site.
+        The model the turn *started* on, except when a backend was injected — in
+        which case the thing that ran genuinely is not anything the config
+        names.  Both are the same mistake written twice, recording a model that
+        never answered, which is why this is one function rather than a
+        condition at each call site — and it is the loop's *record* of the turn
+        rather than the loop's reference now, because `model_switch` moves the
+        reference under a turn that is already running.
         """
-        return backend.name if backend is not None else loop.model
+        return backend.name if backend is not None else outcome.model or loop.model
 
     async def record(loop: Loop, item: Pending, outcome: Outcome) -> int | None:
         """Write this turn to the log if this loop has any, and answer with its id.
@@ -769,7 +783,7 @@ def build_server(
             loop.subagent,
             [message.to_wire() for message in outcome.messages],
             outcome.result,
-            model=recorded_model(loop),
+            model=recorded_model(loop, outcome),
             channel=item.channel,
             created_at=outcome.started_at or outcome.completed_at,
             completed_at=outcome.completed_at,
@@ -1075,6 +1089,11 @@ def build_server(
 
         snapshot = len(loop.messages)
         outcome.started_at = now()
+        # **The model is taken here, and that is a turn boundary.**  `loop_for`
+        # below resolves the backend once for this turn, so this is what will
+        # answer it; a `model_switch` arriving mid-turn moves the conversation
+        # for the next one and must not rewrite what this one's record says.
+        outcome.model = loop.model
         # **The caller's own sources are resolved here**, before the turn: the
         # message is built with its parts rather than having them injected later,
         # because there is no tool call to inject them — this is the route for a
@@ -1634,8 +1653,8 @@ def build_server(
         if holders:
             return (
                 f"[refused] `{ref}` is the model a conversation is running on "
-                f"({', '.join(holders)}); a conversation's model is fixed when "
-                f"it starts. Switch the default, or reset that conversation."
+                f"({', '.join(holders)}). `model_switch` to another one first — "
+                f"it moves the conversations running on this one with it."
             )
 
         def change(current: dict[str, Any]) -> dict[str, Any] | None:
@@ -1663,11 +1682,13 @@ def build_server(
 
     @mcp.tool(name="model_switch", meta=FOR_THE_MODEL)
     async def model_switch(ref: str) -> str:
-        """Make `provider/model` the default model, for the next conversation.
+        """Make `provider/model` the model this system runs on, at once.
 
-        Writes the top-level `default:` in the config file. A conversation
-        already running keeps the model it started on — `reset` starts it over
-        on this one. The model must be one `model_list` shows.
+        Writes the top-level `default:` in the config file, and moves every
+        conversation this server is holding onto it: each keeps its history and
+        runs on the new model from its next turn. That is what makes it the way
+        out of a model that has stopped answering. The model must be one
+        `model_list` shows.
 
         Args:
             ref: The model, as `provider/model`.
@@ -1696,6 +1717,19 @@ def build_server(
                 f"[refused] `{ref}` is not a model — `model_list` shows what there is."
             )
 
+        # What the conversations below are moved *onto*, and it is not the same
+        # question as the judge inside the writer.  `default:` is a scalar the
+        # model's own settings do not depend on, so resolving the reference a
+        # moment before the write reads the same entry the write leaves behind —
+        # which is what lets the move be made from an answer `resolve` gave
+        # rather than from the file's raw dicts, whose rules about `input:` and
+        # about a bare provider name are `Config.resolve`'s and are not worth a
+        # second spelling here.
+        try:
+            name, endpoint, settings = current().resolve(ref)
+        except ConfigError as exc:
+            return f"[refused] {exc}"
+
         def resolves(config: Config) -> None:
             """The writer's judge: `load` accepts any string, `resolve` does not."""
             config.resolve(ref)
@@ -1704,11 +1738,41 @@ def build_server(
             configfile.set_scalar("default", ref, check=resolves)
         except ConfigError as exc:
             return f"[refused] {exc}"
-        return (
-            f"`default:` is now `{ref}` ({display}); it was `{old}`. It takes "
-            f"effect at the next conversation — one already running keeps the "
-            f"model it started on (`reset` starts it over on the new one)."
-        )
+
+        # **The conversations move with it, and this is the half that makes the
+        # tool worth having.**  Writing `default:` alone changes what the *next*
+        # conversation starts on — so switching away from a model that has
+        # stopped answering, which is the whole reason to do this, would leave
+        # the window being answered (or not) by the model it was trying to
+        # leave.  v1's `switch_model` reloaded the loop for exactly that reason,
+        # and it is done here rather than by the caller because this process is
+        # the one holding the loops: the edit and the read that honours it are
+        # one process, which is the argument that puts these four tools on the
+        # agent server at all.
+        #
+        # From the next turn, never mid-turn.  `loop_for` resolves the backend
+        # once, when a turn starts, so a turn already in flight finishes on the
+        # model it began on — and the record of what answered it was taken at
+        # that same boundary (`Outcome.model`).  Everything the conversation
+        # reaches its model with moves, images included: `accepts_images` is
+        # what `attach_image` refuses against.
+        reference = f"{name}/{settings.model}"
+        for loop in loops.values():
+            loop.model = reference
+            loop.provider = name
+            loop.api = endpoint.api
+            loop.model_id = settings.model
+            loop.accepts_images = settings.accepts_images
+
+        running = len(loops)
+        if running:
+            moved = (
+                f" {running} conversation{'' if running == 1 else 's'} already "
+                f"running moved with it, from the next turn."
+            )
+        else:
+            moved = " Nothing was running, so nothing had to move."
+        return f"`default:` is now `{reference}` ({display}); it was `{old}`.{moved}"
 
     @mcp.tool
     async def send_message(
@@ -1760,10 +1824,13 @@ def build_server(
                 would file them under a conversation they were never part of.
             model: Which model this conversation runs on, as `provider/model`.
                 Left out, the config's `default` is used.  Read when the
-                conversation starts and kept — a later message naming a different
-                model is ignored, because the model, the system prompt and the
-                recorded name are all properties of the conversation.  Change it
-                by resetting the conversation.
+                conversation starts — a later message naming a different model is
+                ignored, because the model, the system prompt and the recorded
+                name are all properties of the conversation, and a caller that
+                could rename the model per message could rename who answered.
+                Change it by resetting the conversation, or for everything at
+                once with `model_switch`, which is the one edit that reaches a
+                conversation already running.
             images: Images to send with it — a local path, an `http(s)` URL or a
                 `data:` URI, the same three `attach_image` takes.  Refused unless
                 the model's config lists `image` under `input`; silently

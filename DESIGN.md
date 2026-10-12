@@ -2699,6 +2699,22 @@ key or an endpoint moved. The one case a re-read cannot cover is a provider adde
 for a protocol *nothing is serving*: no process can follow the file, so the tool
 starts one through `slife2.launcher`, the same call a cold start makes.
 
+**`model_switch` is the one edit that is not left to the next conversation, and
+it is where the rule above pays for itself.** A model that has stopped answering
+is the ordinary reason to leave it, so a tool that only changed what the *next*
+conversation starts on would leave the person who reached for it being answered
+by the model they were leaving — v1's `switch_model` reloaded the loop, and the
+window's `Ctrl+S` is the same key. It is done there rather than by the caller
+because the agent server is the one holding the loops, which is the argument that
+puts the four `model_*` tools on that server at all: the edit and the read that
+honours it are one process, and the conversation moves without the reference
+being a thing anybody else has to be told about. What it does not move is a turn
+in flight — `loop_for` resolves the backend once when a turn starts, so that turn
+finishes on the model it began on, and `Outcome.model` is taken at the same
+boundary so the turn's record names the model that actually answered it. So "a
+conversation's model is fixed when it starts" survives with one exception, and
+the exception is the edit that exists to change it.
+
 **And one thing was un-ported after a first pass left it out.** v1's
 `_func_tool_unload` is back, as the tool that carries the budget. The first
 version of this port had the gate itself drop the excess — no tool, no call, one

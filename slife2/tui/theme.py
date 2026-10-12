@@ -59,9 +59,16 @@ GLYPHS: dict[str, str] = {
     "done": "●",  # filled circle
     "error": "●",
     "failed": "✗",
+    "check": "✓",  # the other half of `failed`
     "up": "↑",
+    "down": "↓",
     "separator": "│",
     "ellipsis": "…",
     "thinking": "⟐",
     "vision": "◉",
+    # The model picker's two, named apart from `collapsed` for the reason every
+    # one of these is named apart: a cursor and a folded panel look alike and
+    # mean nothing alike, so one name for both is a name that says neither.
+    "cursor": "▸",
+    "current": "★",
 }

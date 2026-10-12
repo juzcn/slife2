@@ -76,6 +76,29 @@ ChatView {
     width: 100%;
 }
 
+/* ── The model picker ───────────────────────────────────────────────────── */
+
+/* The one widget in the transcript that is asking something, and the only one
+   with a drawn edge — which is how it reads as a question rather than as part
+   of the conversation.  It sits in the stream rather than floating over it, and
+   that is v1's arrangement: an answer that was streaming stays above it, and
+   what the switch says appears under it, in the order things happened. */
+.model-picker {
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: solid $slife-border;
+    background: $slife-panel;
+    height: auto;
+    width: 1fr;
+}
+
+/* Lit while it has the keys, which is while it is undecided: the picker hands
+   the focus back as it resolves, so the edge dimming is the same fact as the
+   keys belonging to the prompt again. */
+.model-picker:focus {
+    border: solid $slife-amber;
+}
+
 /* ── The prompt ─────────────────────────────────────────────────────────── */
 
 /* Three rows to start, twelve at most, growing upward with the draft.  The

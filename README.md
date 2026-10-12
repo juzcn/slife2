@@ -135,8 +135,11 @@ uv run slife2-llm-embeddings   # vectors for both indexes,  :8004
 
 In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Esc** cancels a
 running turn, **Ctrl+C** cancels one too and quits when there is none (copying
-instead when something is selected), **Ctrl+N** starts a new conversation,
-**Ctrl+Q** quits.
+instead when something is selected), and **Ctrl+S** opens the model picker —
+`↑`/`↓` move, `Enter` picks, `Esc` leaves it. Those are the keys the status bar
+names, and it names only those: **Ctrl+Q** quits too, as it does in any Textual
+app, and it is left unsaid because a terminal with flow control takes it as XON
+before the window ever sees it.
 
 **PageUp/PageDown** page the transcript and **Home/End** jump to its ends, and
 the wheel scrolls it wherever the pointer happens to be — the transcript is what
@@ -153,6 +156,16 @@ second spelling, and it is only that: it cancels the turn in flight and will not
 close the window however often it is pressed. With nothing selected, **Ctrl+C**
 cancels the turn; with nothing running either, it quits.
 
+**Ctrl+S switches the model.** The picker lists every model under `providers:`
+with the one in use marked, and choosing one calls the same `model_switch` the
+model itself calls, so a person switching a model and a model switching one are
+one behaviour. The conversation keeps its history and moves onto the new model
+from its next turn — a turn already in flight finishes on the model it started
+on — and the status bar takes the new model's window and capability marks with
+it. **Nothing in that path needs the model that is failing**: it is a config edit
+and a line to the agent server, which is the point of the key, since a model that
+has stopped answering is not something to argue with.
+
 Send a second message while one is still being answered and it **queues**: the
 turn already running finishes, yours runs next, and the status bar says how many
 are waiting. Esc stops the turn in flight and leaves the queue alone — the
@@ -167,8 +180,7 @@ with the moment it was sent rather than with the moment the window opened. What
 is put back is the conversation's *context*, restored by the agent server the
 moment it builds the loop; the window asks for the turns that context was made of
 and draws them, reasoning and all — a step that thought before it answered comes
-back with its thinking folded away exactly where a live one had it. **Ctrl+N** is
-what starts a genuinely new conversation.
+back with its thinking folded away exactly where a live one had it.
 
 **The window also says what the context is doing.** A restored conversation shows
 its size in the status bar — the count the last call left the conversation at, not

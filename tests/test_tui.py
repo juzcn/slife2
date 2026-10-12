@@ -31,6 +31,8 @@ from slife2.tui.widgets import (
     AssistantMessage,
     ChatView,
     HistoryInput,
+    ModelChoice,
+    ModelPicker,
     StatusBar,
     ToolCallWidget,
 )
@@ -1383,8 +1385,7 @@ async def test_a_dropped_connection_is_retried_by_the_next_prompt() -> None:
     A turn that fails at the transport drops the connection inside the client,
     so the window has to ask the client rather than trust a flag of its own:
     with a latch it stays "connected" to a server nothing is talking to and
-    every later turn fails the same way — and ctrl+n does not help, because
-    reset goes down the same path.
+    every later turn fails the same way.
     """
     calls = {"n": 0}
 
@@ -1404,33 +1405,39 @@ async def test_a_dropped_connection_is_retried_by_the_next_prompt() -> None:
         assert "second" in shown(app), "the window never reconnected"
 
 
-async def test_ctrl_n_survives_a_reset_that_fails() -> None:
+async def test_ctrl_s_survives_a_server_that_has_died() -> None:
     """A key binding that raises takes the whole app down with it.
 
     Textual's message pump turns an exception out of an action into a fatal
-    error, so Ctrl+N against a server that has just died would close the
+    error, so Ctrl+S against a server that is not answering would close the
     window — the one outcome a window built to survive a dead server must not
-    have, and half-applied at that (the queue cleared, the transcript not).
+    have.  It is also the key somebody presses *because* something is broken,
+    which is the worst moment to lose the window they are working in.
     """
     client = FakeAgentClient(answering("ok"))
 
-    async def refuse() -> None:
+    async def dead(ref: str) -> str:
         raise ConnectionError("the server died")
 
-    client.reset = refuse  # type: ignore[method-assign]
+    client.switch_model = dead  # type: ignore[method-assign]
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         model_label="deepseek/deepseek-flash",
         agent="jack",
+        model="deepseek/deepseek-flash",
+        models=[ModelChoice(ref="deepseek/deepseek-flash")],
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
-        await pilot.press("ctrl+n")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("enter")
         await pilot.pause()
 
-        assert app.is_running, "the window closed on a failed reset"
-        assert "disconnected" in status(app), "and it says why"
+        assert app.is_running, "the window closed on a failed switch"
+        assert "was not switched" in shown(app), "and it says so"
+        assert isinstance(app.focused, HistoryInput), "and the prompt is back"
 
 
 async def test_a_failing_turn_is_reported() -> None:
@@ -1638,8 +1645,8 @@ async def test_escape_cancels_and_stops_there() -> None:
 
     Slife's rule.  Escape is pressed by reflex — to back out of a half-typed
     thought, to dismiss what is not there — and a terminal where that reflex
-    closes the window is one nobody dares press it in.  Ctrl+C and Ctrl+Q are
-    the ways out; with no turn running this leaves the app up.
+    closes the window is one nobody dares press it in.  Ctrl+C is the way out;
+    with no turn running this leaves the app up.
     """
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:
@@ -1648,6 +1655,199 @@ async def test_escape_cancels_and_stops_there() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert app.is_running
+
+
+# --- the model switch ---------------------------------------------------------
+
+#: Two models, so "switch" has somewhere to switch to, and with different
+#: capabilities, so a bar that kept the old model's facts is visible.
+MODELS = [
+    ModelChoice(ref="local/big", label="Big", context_window=100_000, thinking=True),
+    ModelChoice(ref="local/small", context_window=8_000, vision=True),
+]
+
+
+def model_app(respond, **kwargs) -> SlifeApp:
+    """A window whose Ctrl+S has something to offer."""
+    return SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: FakeAgentClient(respond),
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+        **kwargs,
+    )
+
+
+async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
+    """The cursor starts on the model already answering, so Enter is a no-op.
+
+    That is the difference between a list and a menu with a default: the row
+    under the cursor is the one in front of you, and pressing Enter on it is
+    how somebody who opened the picker to *look* gets out again without
+    changing anything.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        listing = shown(app)
+        assert "local/big" in listing and "local/small" in listing
+        assert "ctx 100,000" in listing, "what the model is, beside its name"
+        assert "Big" in listing and "thinking" in listing
+
+        # The cursor is on that row, so a bare Enter chooses the model already
+        # in use — which is a switch the server has nothing to do about.
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert client.switches == ["local/big"]
+        assert "local/big" in status(app)
+
+
+async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
+    """**The whole point of the key**: pick a model, and it is the one in use.
+
+    What the bar says about a model is a fact about the *model* — its window,
+    whether it reads pictures — so a bar that kept the old window's percentage
+    and the old model's capability marks would be describing something that is
+    not answering any more.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert client.switches == ["local/small"]
+        assert "Switched to local/small" in shown(app)
+        # The server's own sentence, kept as it was written: it is the only
+        # thing that says what a switch does to a conversation already running.
+        assert client.switch_answer in shown(app)
+        bar = status(app)
+        assert "local/small" in bar and GLYPHS["vision"] in bar
+        assert "local/big" not in bar and GLYPHS["thinking"] not in bar
+        assert isinstance(app.focused, HistoryInput)
+
+
+async def test_escape_offers_nothing_and_changes_nothing() -> None:
+    """A picker is a question, and a question can be left unanswered.
+
+    Nothing is switched, the conversation keeps its model, and the prompt has
+    the keys back — the picker is not a mode that has to be exited from.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert client.switches == []
+        assert "Cancelled" in shown(app)
+        assert "local/big" in status(app)
+        assert isinstance(app.focused, HistoryInput)
+        assert app.is_running
+
+
+async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
+    """The re-entry guard, which v1 had for the same reason.
+
+    A second picker would leave the first one's future unresolved, and the
+    window would then be waiting on a decision nobody can make — every later
+    Ctrl+S doing nothing, which reads as a broken key.
+    """
+    app = model_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert len(app.query(ModelPicker)) == 1
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app._switching, "and a later Ctrl+S opens one again"
+
+
+async def test_a_refused_switch_moves_nothing_and_says_why() -> None:
+    """A refusal is an answer, and the one thing it must not do is move the bar.
+
+    The server writes nothing when it refuses, so a window that showed the new
+    model anyway would be the one place in the system claiming a switch that
+    did not happen.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.switch_answer = "[refused] `local/nope` is not a model"
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert "is not a model" in shown(app)
+        assert "local/big" in status(app), "the bar still names the model in use"
+
+
+async def test_ctrl_s_says_so_when_there_is_nothing_to_switch_to() -> None:
+    """An empty picker is a key that looks broken; the fix is a tool with a name."""
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: FakeAgentClient(answering("ok")),
+        agent="jack",
+        model_label="deepseek/deepseek-flash",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert "no models are configured" in shown(app)
+        assert len(app.query(ModelPicker)) == 0
 
 
 async def test_ctrl_c_copies_the_selection_in_the_prompt() -> None:
