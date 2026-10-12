@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from fakes import FakeAgentClient
+from fakes import FakeAgentClient, FakeWindowClient
 
 from slife2.events import (
     ContextChosen,
@@ -1842,7 +1842,7 @@ async def test_the_context_indicator_is_there_before_the_first_turn() -> None:
 async def test_a_message_handed_over_by_another_channel_runs_as_if_typed() -> None:
     """The pass-through, and the whole of it: words in this window's queue.
 
-    `deliver` is what `slife2.tui.control` calls.  What it does is what the person
+    `deliver` is what the window's inbox calls.  What it does is what the person
     typing does — nothing more — so the line, the turn and the record are the ones
     this window already draws, and the channel rides along for the two things that
     depend on it: the bubble and where the turn came from.
@@ -1861,3 +1861,58 @@ async def test_a_message_handed_over_by_another_channel_runs_as_if_typed() -> No
     assert "peer_wechat_id" not in text
     assert "jack> 你好" in text
     assert channels == ["wechat"]
+
+
+async def test_the_window_attaches_to_its_inbox_and_a_push_reaches_the_queue() -> None:
+    """The half above `deliver`: the window holds a session open, and is pushed to.
+
+    A window no longer *serves* anything — it attaches to `slife2-tui` on mount
+    and keeps that call open for its life, which is what makes a message able to
+    find one window out of several.  The plugin is faked here because the real
+    one is a socket and a second process; `tests/test_tui_control.py` runs that
+    end to end over a port.
+
+    The assertion is the same one as above, deliberately: what arrives on the
+    push is the *person's own typing* by the time it is done, or the seam is in
+    the wrong place.
+    """
+    client = FakeAgentClient(answering("你好"))
+    window = FakeWindowClient()
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        control_url="http://test/inbox",
+        window_factory=lambda: window,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        assert await settled(pilot, window.attaching.is_set), "never attached"
+        window.push("hello")
+        await settle(pilot, app)
+        text = shown(app)
+        channels = client.channels
+
+    assert "Wechat> hello" in text
+    assert channels == ["wechat"]
+
+
+async def test_a_window_with_no_inbox_attaches_to_nothing() -> None:
+    """`control_url` empty is a window that serves no purpose for other channels.
+
+    That is what a unit test wants and what a window started without a config
+    address gets, and it has to mean *nothing happens* rather than a worker
+    retrying against an empty string forever.
+    """
+    client = FakeAgentClient(answering("ok"))
+    window = FakeWindowClient()
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        window_factory=lambda: window,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+
+    assert not window.attaching.is_set()
+    assert not window.connected

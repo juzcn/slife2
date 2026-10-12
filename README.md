@@ -3,9 +3,10 @@
 **Terminal-based AI agent — slife v2, a clean-slate rebuild.**
 
 **A plugin is an MCP server over Streamable HTTP plus a small contract** — an
-implementation of the protocol, not one of its own. The TUI is a client; the
-agent loop is a server and a client; each model backend is its own server, and so
-is the hub the tools come from. The word separates the servers slife2 starts from
+implementation of the protocol, not one of its own. The TUI is a client and
+nothing else; the agent loop is a server and a client; each model backend is its
+own server, and so is the hub the tools come from — and so is the terminal's own
+inbox, which is a plugin like the rest. The word separates the servers slife2 starts from
 the ones somebody else wrote under `tools:`, and the difference is load-bearing:
 **a plugin is required** — a missing one fails the turn — where an entry under
 `tools:` is optional and its absence just means fewer tools.
@@ -63,8 +64,9 @@ leaves them up instead.
 `--agent NAME` (default `slife2`) names the instance. It titles the window, it
 signs the assistant's messages, and it renders the system prompt — and it is
 **exclusive**, so two live instances may not share a name. Where it *does*
-partition is the context store: each agent's turns go in their own database. The
-servers themselves stay shared.
+partition is inside servers that stay shared: each agent's turns go in their own
+database, and each agent is its own session on `slife2-tui` — which is how a
+message from a phone reaches *your* terminal and not the one next to it.
 
 The **context** is chosen rather than accumulated: one model call before every
 turn decides what to keep of the conversation in hand and what to recall from the
@@ -103,6 +105,7 @@ uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-cabinet          # notes, diary, files,        :8035
 uv run slife2-media            # images, video, speech,      :8036
+uv run slife2-tui              # the terminal's inbox,       :8005
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
 uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
@@ -614,10 +617,13 @@ which runs it exactly as if it had been typed there: the same queue, the same
 turn, the same transcript. So the message sent from a phone appears on screen,
 its answer streams there, and both are in the record afterwards.
 
-For that, the window listens: the `tui:` section in `slife2.yaml` is its
-address, read by the window and by the plugin that delivers to it. It is a
-section of its own rather than a `servers:` entry because that table is the
-servers slife2 runs, and a window is your process (DESIGN.md §4).
+For that, the message goes to **`slife2-tui`**, the terminal's own inbox: a
+plugin like every other one — an address under `servers:`, started and shared by
+`slife2`, listed by `slife2 status` — which keeps **a session per agent**. The
+window attaches to it when it opens and holds that call for as long as it is
+showing a conversation, which is what lets a call say *which* terminal it means;
+two windows at once are two sessions, and neither is more special than the other
+(DESIGN.md §4).
 
 The turn is recorded with `channel=wechat` and a
 `[Wechat:{"peer_wechat_id": …}]` prefix naming who it is from. The name is
@@ -800,9 +806,11 @@ slife2/
 │  └─ recall.j2       # the recall instruction, rendered per turn
 └─ tui/
    ├─ app.py          # the Textual App
-   ├─ client.py       # AgentClient protocol + the MCP implementation
-   ├─ control.py      # the window as an MCP server: one tool, `submit`, so a
-   │                  #   channel can hand it a message to run as if typed
+   ├─ client.py       # AgentClient + WindowClient protocols, and the MCP
+   │                  #   implementations of both directions
+   ├─ control.py      # slife2-tui: the terminal's inbox, a plugin with a session
+   │                  #   per agent (`attach` for the window, `submit` for a
+   │                  #   channel) — the window is a client of it
    ├─ restore.py      # a previous conversation, drawn back into the transcript
    ├─ widgets.py      # ChatView, HistoryInput, StatusBar
    ├─ theme.py        # the palette and glyphs, defined once

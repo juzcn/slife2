@@ -370,6 +370,33 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
             load(write(tmp_path, text))
 
 
+def test_the_terminal_is_a_server_now(tmp_path) -> None:
+    """`tui` is one of ours, addressed like every other one.
+
+    It used to be a section of its own — an address slife2 never started — so
+    this asserts the shape that replaced it: the name is in `LOCAL_SERVERS`
+    (which is also what makes `servers.tui` legal to write at all), the default
+    address is the port it always had, and a config can move it.
+    """
+    assert "tui" in slife2.config.LOCAL_SERVERS
+    assert slife2.config.default_config().server("tui").port == 8005
+
+    moved = load(write(tmp_path, "servers:\n  tui:\n    port: 9005\n"))
+    assert moved.server("tui").url == "http://127.0.0.1:9005/mcp"
+
+
+def test_a_leftover_tui_section_is_refused(tmp_path) -> None:
+    """The old spelling parsed and was *silently* ignored, which is the reason
+    this is an error rather than a migration.
+
+    Every key in `tui:` is optional, so a config written before the move would
+    load cleanly with its port discarded — a window that quietly listened
+    somewhere else than the file said.
+    """
+    with pytest.raises(ConfigError, match="servers.tui"):
+        load(write(tmp_path, "tui:\n  port: 9005\n"))
+
+
 def test_an_empty_providers_section_is_refused(tmp_path) -> None:
     """**Absent is the built-in provider; empty is a mistake.**
 

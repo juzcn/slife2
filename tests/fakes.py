@@ -1,9 +1,10 @@
 """Test doubles.
 
-Four seams get faked, and each one exists because something real and slow sits
+Five seams get faked, and each one exists because something real and slow sits
 behind it: the model (an HTTP call to a provider), the embedding model (another
-one), the agent server (a socket), and the observer (nothing — but a recorder is
-how a test reads what happened).
+one), the agent server (a socket), the window's own inbox (another socket, and
+one the window *holds open* rather than calls), and the observer (nothing — but a
+recorder is how a test reads what happened).
 
 Plus one that is not a seam but a *shape*: the set of plugins a toolhub will
 ask for tools.  It is here because three test modules need it and none of them
@@ -25,6 +26,7 @@ from slife2.config import Config
 from slife2.events import TurnEvent
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import Message, StreamChatResult, ToolSpec
+from slife2.tui.control import Handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -205,6 +207,49 @@ class FakeAgentClient:
         except Exception:
             self.connected = False
             raise
+
+
+class FakeWindowClient:
+    """A :class:`~slife2.tui.client.WindowClient` that pushes on demand.
+
+    The *other* direction from `FakeAgentClient`: this one is how a test plays
+    the plugin, handing the window a message over the call it holds open.  What
+    it records is what the window asked for, because "which agent am I" is the
+    only thing a window says to its inbox.
+    """
+
+    def __init__(self, *, connect_error: Exception | None = None) -> None:
+        self._connect_error = connect_error
+        self.connected = False
+        #: The handler `attach` was handed, so a test can push a message — or
+        #: several — down the session the way the plugin does.
+        self.on_handover: Callable[[Handover], None] | None = None
+        #: Set once `attach` has been entered, which is what a test waits on
+        #: before pushing: the real call blocks, so "has it started" is a fact
+        #: the fake has to say by hand.
+        self.attaching = asyncio.Event()
+
+    async def connect(self) -> None:
+        if self._connect_error is not None:
+            raise self._connect_error
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+
+    async def attach(self, on_handover: Callable[[Handover], None]) -> None:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.on_handover = on_handover
+        self.attaching.set()
+        # Held rather than returned, like the real one: a fake that came back
+        # would let a test pass while the app's worker spun on a dead session.
+        await asyncio.Event().wait()
+
+    def push(self, text: str, channel: str = "wechat") -> None:
+        """Hand the window one message, as the plugin's push does."""
+        assert self.on_handover is not None, "nothing has attached"
+        self.on_handover(Handover(ticket=1, text=text, channel=channel))
 
 
 @dataclass

@@ -652,16 +652,47 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
     made = rig(monkeypatch)
     await made.plugin._ask_agent("jack", "hello")
 
-    # Where it went, and what it says: the address is the window's own
-    # (the `tui:` section), and the name is what a caller proves before handing
+    # Where it went, and what it says: the address is the `tui` plugin's — one
+    # for every agent — and the name is what a caller proves before handing
     # anything over.
     assert seen.pop("url") == made.plugin._config.server("tui").url
     assert seen.pop("advertised") == wechat.TUI_SERVER_NAME
     assert seen == {
         "name": "submit",
+        # **Which agent**, and it is the whole reason the address can be shared:
+        # the plugin keeps a session per agent and this picks the window.
+        "agent": "jack",
         "text": "hello",
         "channel": "wechat",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_is_not_there_fails_the_hand_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retried once, then raised — and a failure here means *not delivered*.
+
+    The plugin refuses a `submit` for an agent no window is showing, by name, and
+    a refusal took nothing: that is what makes this process free to retry, and
+    what stops the retry from being a second turn (`slife2.tui.control`).  So the
+    honest thing to assert is the shape of the failure — two attempts, then the
+    error — rather than that something was quietly dropped.
+    """
+    attempts = 0
+
+    async def open_window(url: str, **kwargs: Any):
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionError(f"nothing is listening on {url}")
+
+    monkeypatch.setattr(wechat, "open_server", open_window)
+    made = rig(monkeypatch)
+
+    with pytest.raises(ConnectionError, match="nothing is listening"):
+        await made.plugin._ask_agent("jack", "hello")
+
+    assert attempts == 2
 
 
 # --- logging out, and two logins at once --------------------------------------
@@ -844,11 +875,13 @@ async def test_a_message_off_the_wire_is_handed_to_the_window(
         (
             "submit",
             {
+                # Whose conversation it belongs to, so that one shared plugin
+                # can find the one window showing it.
+                "agent": "jack",
                 # The marker is the plugin's, and it is what the model answers
                 # with: it goes through the window untouched.
                 "text": (
-                    '[Wechat:{"peer_wechat_id": "peer-1", '
-                    '"context_token": "ctx-1"}] hi'
+                    '[Wechat:{"peer_wechat_id": "peer-1", "context_token": "ctx-1"}] hi'
                 ),
                 "channel": "wechat",
             },

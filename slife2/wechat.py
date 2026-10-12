@@ -125,8 +125,9 @@ DEDUP_SECONDS = 30.0
 #: flooding a conversation rather than talking to it.
 MAX_INFLIGHT = 16
 #: How long to wait for the window when handing a message over.  The call it
-#: makes answers as soon as the message is queued (`slife2.tui.control`), so this
-#: bounds a window that is not answering at all rather than a slow terminal.
+#: makes answers as soon as the words are written down the stream that window is
+#: holding (`slife2.tui.control`), so this bounds a window that is not answering
+#: at all rather than a slow terminal.
 WINDOW_TIMEOUT_SECONDS = 10.0
 #: A login's lifetime, in seconds — 23 hours, from v1, which measured it against
 #: the bridge's own ~24h expiry and left an hour of margin.  Past this a saved
@@ -429,7 +430,6 @@ class Wechat:
         self._deliver = deliver or self._ask_agent
         self._agents = directory or agents_dir()
         self._sessions: dict[str, Session] = {}
-
 
     def session(self, agent: str) -> Session:
         """One agent's session, started the first time it is asked for.
@@ -797,10 +797,14 @@ class Wechat:
         one turn at a time, in arrival order — is the one inbox everything this
         system takes goes into.
 
-        **The call returns when the window has taken the message, not when the
-        turn ends** (`slife2.tui.control`), and that is what makes the retry
-        below safe: a connection that died *after* the words were queued cannot
-        make them run twice.
+        **The agent is named, and that is what makes this work with more than one
+        window open.**  It used to be implicit in the address, which is one per
+        machine, so a second terminal could not be reached at all; now the plugin
+        keeps a session per agent and this says which one (`slife2.tui.control`).
+
+        **The call returns when the words are on their way to that window, not
+        when the turn ends**, and that is what makes the retry below safe: a
+        connection that died *after* they were written cannot make them run twice.
 
         The connection is per delivery rather than held: this process polls for
         hours and speaks only when somebody writes, so a handshake on the message
@@ -826,19 +830,21 @@ class Wechat:
         memory.
         """
         window = await open_server(
-            self._config.tui.url,
+            # The plugin's address, and the same one every agent shares — what
+            # picks out *this* agent is the argument below, not the endpoint.
+            self._config.server("tui").url,
             name=TUI_SERVER_NAME,
             fallback_tool="submit",
             timeout=WINDOW_TIMEOUT_SECONDS,
         )
         try:
-            # **The call returning is the acknowledgement** — the window has
-            # queued the words by then (`slife2.tui.control`), which is why a
-            # transport failure after this point must not be retried into a
-            # second turn.
+            # **The call returning is the acknowledgement** — the words are on
+            # their way down the stream that agent's window is holding by then
+            # (`slife2.tui.control`), which is why a transport failure after this
+            # point must not be retried into a second turn.
             await window.call_tool(
                 "submit",
-                {"text": prompt, "channel": CONFIG_KEY},
+                {"agent": agent, "text": prompt, "channel": CONFIG_KEY},
                 timeout=WINDOW_TIMEOUT_SECONDS,
             )
         finally:

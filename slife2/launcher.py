@@ -45,6 +45,7 @@ from slife2.config import (
     RESTAPI_TOOLS_SERVER_NAME,
     SKILLS_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
+    TUI_SERVER_NAME,
     WECHAT_SERVER_NAME,
     Config,
 )
@@ -123,6 +124,12 @@ CABINET_SERVER = ("slife2.cabinet", CABINET_SERVER_NAME, "note_list")
 #: The media plugin.  It identifies itself by `generate_image`, which is the
 #: first of the four capabilities and the one a config is most likely to have.
 MEDIA_SERVER = ("slife2.media.server", MEDIA_SERVER_NAME, "generate_image")
+#: The terminal's inbox: one process, a session per agent.  It identifies itself
+#: by `attach` — the call a window holds open for as long as it is showing a
+#: conversation, which is served before any window exists and so is the state
+#: this plugin starts in.  The probe only looks for the name in `tools/list`
+#: (`slife2.mcp_server.identifies`), so naming a tool that blocks is safe.
+TUI_SERVER = ("slife2.tui.control", TUI_SERVER_NAME, "attach")
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -135,6 +142,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "wechat": WECHAT_SERVER,
     "cabinet": CABINET_SERVER,
     "media": MEDIA_SERVER,
+    "tui": TUI_SERVER,
     "agent": AGENT_SERVER,
 }
 

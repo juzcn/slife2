@@ -145,6 +145,17 @@ servers:
     host: 127.0.0.1
     port: 8036
     path: /mcp
+  # The terminal's own inbox.  One process, shared like every other server here,
+  # holding a session per agent: a message arriving on another channel is handed
+  # to it by name, and it puts the words down the stream the window showing that
+  # conversation holds open — so they become the one thing a window already
+  # handles, something the person typed.  `slife2-wechat` is the caller today
+  # (DESIGN.md §1.2).  It reads no section of its own: an address is the whole of
+  # what is written down about it.
+  tui:
+    host: 127.0.0.1
+    port: 8005
+    path: /mcp
   # Other people's servers, held by the process that owns the section they are
   # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
   # the model anything — each holds its entries' connections and *declares* them
@@ -454,16 +465,6 @@ context:
   recall_limit: 40
   min_similarity: 0.45
   timeout: 20.0
-
-# ── The window ──────────────────────────────────────────────────────────────
-# Where your terminal listens.  **Not a server: slife2 never starts this one.**
-# It is here so that a message arriving over WeChat can be handed to the window
-# and run as if you had typed it — the same queue, the same turn, the same
-# transcript (DESIGN.md §1.2, §4).
-tui:
-  host: 127.0.0.1
-  port: 8005
-  path: /mcp
 
 # ── WeChat ──────────────────────────────────────────────────────────────────
 # **There is no `wechat:` section, and that is the design.**  WeChat is always

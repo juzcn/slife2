@@ -223,6 +223,21 @@ def tui_url(config: Config, override: str | None = None) -> str:
     return override or config.agent.server.url
 
 
+def control_url(config: Config) -> str:
+    """Where the window attaches to be handed messages from other channels.
+
+    **And the naming is a trap worth walking into slowly**: `tui_url` above is the
+    *agent* server this window connects to, and this is the `tui` plugin the
+    window connects to as well — two addresses, two directions, and the word
+    `tui` in both because in both cases it is the terminal that is at one end.
+
+    It is a `servers:` entry rather than a section of its own
+    (`slife2.tui.control`), so it is started, probed and stopped with everything
+    else, which is what `_ensure` and `_down` get for free.
+    """
+    return config.server("tui").url
+
+
 def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     """Which model the window starts on, and what that model is.
 
@@ -339,10 +354,11 @@ def main(argv: list[str] | None = None) -> int:
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
-                    # Where another channel hands this window a message
-                    # (`slife2.tui.control`): the `tui:` section, which is an
-                    # address and not a server slife2 runs.
-                    control_url=config.tui.url,
+                    # Where this window attaches, so another channel can hand it
+                    # a message (`slife2.tui.control`).  One address for every
+                    # agent: what picks out this window is the agent name it
+                    # attaches under, not a port of its own.
+                    control_url=control_url(config),
                 )
                 app.run()
     except AgentInUse as exc:

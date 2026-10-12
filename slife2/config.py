@@ -176,12 +176,13 @@ DEFAULT_AGENT = "slife2"
 #: asserts each still matches its module's own `SERVER_NAME`.
 AGENT_SERVER_NAME = "slife2-agent"
 
-#: The name the *terminal* advertises when it is serving its control surface —
-#: the window's own MCP server, which exists so that a message arriving on
-#: another channel can be handed to it as something the person typed
-#: (`slife2.tui.control`).  It is not one of the servers slife2 starts: the
-#: window is the person's process, and its address is the `tui:`
-#: section that nothing spawns.
+#: The terminal's own inbox, and one of the servers slife2 starts: a message
+#: arriving on another channel is handed to it, and it puts the words down the
+#: stream the window showing that conversation holds open — so they become the
+#: one thing a window already handles, something the person typed
+#: (`slife2.tui.control`).  It is one process and a session per agent, and the
+#: window is a *client* of it rather than the process hosting it, which is what
+#: makes two windows on one machine both reachable.
 TUI_SERVER_NAME = "slife2-tui"
 CONTEXT_SERVER_NAME = "slife2-context"
 MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
@@ -235,6 +236,15 @@ MEDIA_SERVER_NAME = "slife2-media"
 #: token in every importer.  The only thing written down about it is an address,
 #: here; a login is scanned rather than configured, and lives in a
 #: `wechat_<agent>.yaml` beside the data.
+#:
+#: `tui` is the last one with no section of its own, and it is here for a
+#: narrower reason than the rule above: the *window* is the person's process and
+#: is still nobody's daemon, but the thing a message is handed to is a server,
+#: and a server is started and shared by the launcher like every other one.  So
+#: the exception this project used to carry — "every plugin is an MCP server but
+#: the TUI" — is gone, and what replaced it is a session per agent inside the
+#: plugin: the window attaches, and a channel names the agent it is addressing.
+#: It declares no rows and offers the model no tools, so it is asked for nothing.
 LOCAL_SERVERS = (
     "embeddings",
     "context",
@@ -245,6 +255,7 @@ LOCAL_SERVERS = (
     "wechat",
     "cabinet",
     "media",
+    "tui",
     "toolhub",
     "agent",
 )
@@ -920,12 +931,6 @@ class Config:
     #: which is the plugin that owns the section and the only one that holds a
     #: rendering provider's key.
     media: MediaSettings = field(default_factory=MediaSettings)
-    #: Where the *terminal* listens, from `tui:`.  **A section and not a
-    #: `servers:` entry**, because that table is the servers this system runs and
-    #: a window is the person's process (`slife2.tui.control`).  Two readers, one
-    #: address: the window binds it, and a channel hands it messages by dialling
-    #: it (`slife2.wechat`).
-    tui: ServerSettings = field(default_factory=lambda: ServerSettings(port=8005))
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -1075,6 +1080,14 @@ def default_config() -> Config:
             # speaks to somebody else's endpoint — and a *family* of endpoints
             # rather than one, which is why it has a module of its own.
             "media": ServerSettings(port=8036),
+            # The terminal's own inbox: where a channel hands a message so that
+            # the window showing that conversation runs it as something the
+            # person typed.  One process and a session per agent — the window
+            # attaches to it and holds that call open, and nothing binds a port
+            # per terminal.  It has no section: an address is the whole of what
+            # is written down about it, which is also why it reads no config of
+            # its own.
+            "tui": ServerSettings(port=8005),
             # The model's tools, and the only process that decides what they
             # are.  It holds no credential and no connection to anybody's
             # server: every plugin above is asked for a tool list and for the
@@ -1234,6 +1247,17 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
         )
 
+    # `tui:` used to be a section of its own, and a config written before that
+    # changed would still parse — every other key in it is optional, so the
+    # section would simply be ignored and a port somebody chose would quietly
+    # revert to 8005.  Refused rather than migrated, because the fix is one
+    # indentation and the failure is silent either way.
+    if raw.get("tui") is not None:
+        raise ConfigError(
+            "tui: is a `servers:` entry now, not a section of its own; "
+            "move it under `servers:` as `servers.tui`"
+        )
+
     # **An absent section is the built-in provider; an *empty* one is a
     # mistake.**  `providers: {}` used to fall through the same `if not raw`
     # test as no section at all, so a config that named no provider quietly ran
@@ -1292,7 +1316,6 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
-        tui=_server(raw.get("tui"), base.tui, "tui"),
         default=str(raw.get("default") or _first_reference(providers)),
     )
 

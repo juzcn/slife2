@@ -22,8 +22,11 @@ not separate the servers slife2 starts from the twenty somebody else wrote, and
 that line is load-bearing everywhere below: a missing plugin fails the turn,
 where a missing entry under `tools:` is a model with fewer tools.
 
-Every plugin is an MCP server but the TUI — all of them brought up on demand
-by `slife2` and shared by every instance (see §4):
+**Every server here is a plugin**, brought up on demand by `slife2` and shared
+by every instance (see §4) — and the terminal is not a server at all: it is a
+client of two of them, the agent it asks for turns and the plugin that hands it
+messages (§1.2).  There used to be an exception to that sentence, and removing it
+is what `slife2-tui` is:
 
 ```
 slife2                    TUI, MCP client              (no provider key, no SDK)
@@ -38,7 +41,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
   │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
   │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
-  │                                 │                  └── MCP ──▶ slife2-agent   (what arrives, as a turn)
+  │                                 │                  └── MCP ──▶ slife2-tui    (into that agent's window)
   │                                 ├── :8035/mcp ──▶ slife2-cabinet       (notes, diary, files, reports)
   │                                 ├── :8036/mcp ──▶ slife2-media         (images, video, speech, transcripts)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
@@ -49,8 +52,16 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                                    └── MCP ──▶ the OpenAPI proxy an entry expands into
   ├── HTTP 127.0.0.1:8001/mcp ──▶ slife2-llm-openai             (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8002/mcp ──▶ slife2-llm-anthropic          (anthropic SDK, holds keys)
-  └── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
+  ├── HTTP 127.0.0.1:8003/mcp ──▶ slife2-llm-openai-responses   (openai SDK, holds keys)
+  └── HTTP 127.0.0.1:8005/mcp ──▶ slife2-tui                    (a session per agent)
 ```
+
+The last edge is the one that goes the other way, and it is worth reading
+twice.  `slife2-tui` is the terminal's own inbox: the window holds an `attach`
+call open to it for as long as it is showing a conversation, and a channel
+hands that agent's window a message with `submit`.  So the window is a *client*
+of this one too — nothing serves the terminal, and the thing that knows where
+each terminal is is an ordinary plugin, started and shared like the rest.
 
 Two things reach the embeddings server — the context store, for a turn's
 vectors, and the hub, for a tool row's — because what needs a vector is an index
@@ -190,17 +201,31 @@ replaced it is not a smaller seam but the removal of the question — the window
 where a message becomes a turn, and the window is already the thing that shows
 turns.
 
+**What the window is handed over *on* is a call it holds open, and that is the
+second thing `slife2-tui` is.**  The window attaches to the plugin when it
+mounts; the plugin keeps a session per agent; the push down that open call is
+what arrives, and the window's handler puts the words in its queue — so what
+crosses is a message, not a notification the window has to go and collect.  It
+is deliberately *not* an inbox the window polls, for the reason the paragraph
+above gives, and not a port per terminal either: one plugin, one address, and
+the agent name is what picks the window.  Two windows used to be impossible,
+because the address was one per machine and a call could not say which terminal
+it meant.
+
 Two things follow, and both are the shape rather than an implementation detail:
 
-* **A message is handed over and let go.**  The window's `submit` returns as
-  soon as the words are in its queue, *not* when the turn ends, and that is what
-  makes handing over safe to retry: a caller whose call came back knows the
-  message is somebody else's problem, so a connection that drops afterwards
-  cannot run the same words twice.  What the terminal does with them is the ordinary thing it
+* **A message is handed over and let go.**  `submit` returns once the words are
+  written down the stream that window is holding, *not* when the turn ends, and
+  that is what makes handing over safe to retry: a caller whose call came back
+  knows the message is somebody else's problem, so a connection that drops
+  afterwards cannot run the same words twice.  What the terminal does with them is the ordinary thing it
   does with anything — one turn at a time, in arrival order (§3) — and the plugin
   does not wait for any of it.  The bound on how many may be in flight is the
   plugin's, because a person flooding a conversation is a fact the plugin sees
-  first.
+  first.  The one thing that is *not* done is the window acknowledging the
+  message once it has it: that reads as the stronger promise and is the weaker
+  one, since an acknowledgement landing after a `submit` gave up leaves a message
+  that still runs (§2).
 * **The reply is still the model's to send.**  Nothing here auto-dispatches an
   answer, which is v1's rule unchanged: a turn that says nothing sends nothing.
   What the plugin does do on its own is the typing indicator — up when a message
@@ -377,6 +402,19 @@ transport without the caller noticing, because the caller builds its state from
 the returned value. It is also why `slife2.tui.widgets.ChatView` *discards*
 deltas that arrive after a turn's result: they are late fragments of something
 already replaced.
+
+**There is a third use, and it inverts that rule rather than joining it.**  The
+message a channel hands a window travels down the *window's* open call as one
+progress notification (`slife2.tui.control`), and there the notification is not
+display at all — it is the payload, and a dropped one is a turn nobody ever ran.
+So the caller's assurance cannot come from the end of the stream: it comes from
+the write. `submit` returns when the plugin has put the words down that stream,
+a `submit` that could not is withdrawn rather than delivered late, and the
+window does *not* acknowledge — an acknowledgement is a second call whose late
+arrival resurrects a message the caller already gave up on, which is the one
+failure the write-as-acknowledgement is there to prevent. The rate is one
+notification per message rather than one per token, which is what makes a
+lossy channel acceptable here and not there.
 
 Why progress and not `Context.log()`, which would carry structured `extra` and
 skip the JSON encoding:
@@ -623,20 +661,32 @@ live instances may not share a name). It creates no port, no process, and no
 config section. Isolation, if it ever appears, belongs inside an MCP server —
 which is why the label reaches one.
 
-**The window itself does listen, and it is the one thing here that is not a
-daemon.**  A terminal serving this agent's conversation has an MCP server of its
-own (`slife2.tui.control`), so that a channel like WeChat can hand it a message
-to run as something the person typed (§1.2).  Its address is a `tui:` *section*
-and not an entry under `servers:`, and the rule of that table is why: it is the
-servers this system runs, and a window is the person's process.
+**The window does not listen at all, and that is a repair rather than a
+taste.**  An earlier shape gave the terminal an MCP server of its own, on a
+`tui:` section of its own that nothing started — so that a channel like WeChat
+could hand it a message to run as something the person typed (§1.2).  It worked
+for one window and could not work for two: the address was one for the machine,
+so a second terminal bound nothing and was unreachable, and a call had no way to
+say *which* window it meant.  That is the topology the paragraph above forbids,
+arriving in practice.
 
-What this is *not* is topology in the sense the paragraph above forbids: the
-address is one for the machine and not one per agent, nothing about a
-conversation depends on it, and the daemons, the servers and every agent name are
-exactly as they were.  The honest cost is that the terminal is now reachable by
-anything on loopback that knows the address — which is the same standing as every
-other server here (§3: possession is not authorization, because there is nothing
-on loopback but this machine's own processes).
+What replaced it is the ordinary answer this section gives for everything else.
+`slife2-tui` is a plugin: an address under `servers:`, started and shared by the
+launcher, probed by its own name, recorded and stopped with the rest — and the
+session inside it is keyed by the agent, exactly as a WeChat login is (§1.2).
+The window is a *client* of it and holds one `attach` call open for as long as it
+is showing a conversation, which is what "a session per agent" means concretely
+and why a window that dies leaves nothing behind: the stream goes, the handler
+behind it is cancelled, and the session with it.  `--agent NAME` still creates no
+port and no process — it is now, as it always was meant to be, an identity that
+reaches a server rather than a piece of topology.
+
+The honest cost is the one the old paragraphs claimed and did not have to pay:
+the terminal is reachable by anything on loopback that knows the plugin's
+address.  Which is the same standing as every other server here (§3: possession
+is not authorization, because there is nothing on loopback but this machine's own
+processes) — and it is now true of a *shared* address rather than of a port one
+window happened to hold.
 
 ## 5. The context store
 

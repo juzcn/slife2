@@ -29,9 +29,10 @@ Four things here are worth knowing before changing them:
 **And another process can hand this window a message**, which is how a channel
 like WeChat reaches the screen: the message goes into the same queue the person's
 own typing goes into and is run as the same kind of turn, so there is one path and
-one display for both.  `slife2.tui.control` is the address it arrives on; the
-channel rides along so the line wears the right bubble and the turn is recorded
-with where it came from.
+one display for both.  It arrives on a call this window *holds open* to
+`slife2-tui` — the plugin that owns a session per agent — and the channel rides
+along, so the line wears the right bubble and the turn is recorded with where it
+came from.
 """
 
 from __future__ import annotations
@@ -56,12 +57,24 @@ from slife2.events import (
     TurnEvent,
     TurnFinished,
 )
-from slife2.tui.client import AgentClient, MCPAgentClient
+from slife2.tui.client import (
+    AgentClient,
+    MCPAgentClient,
+    MCPWindowClient,
+    WindowClient,
+)
+from slife2.tui.control import Handover
 from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import WINDOW_CHANNEL, ChatView, HistoryInput, StatusBar
 
 logger = logging.getLogger(__name__)
+
+#: How long to wait before offering to attach again, when the plugin that hands
+#: this window its messages is not answering.  A pause rather than a spin: the
+#: usual reason is that it has not started yet or is being restarted, and both
+#: are over in a second or two.
+RECONNECT_SECONDS = 2.0
 
 
 class TurnEventMessage(TextualMessage):
@@ -140,6 +153,7 @@ class SlifeApp(App[None]):
         vision: bool = False,
         control_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
+        window_factory: Callable[[], WindowClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
@@ -164,17 +178,23 @@ class SlifeApp(App[None]):
         #: a model cannot read.
         self._thinking = thinking
         self._vision = vision
-        #: Where this window can be reached, so that a message arriving on
-        #: another channel can be handed to it (`slife2.tui.control`).  Empty
-        #: means no control surface, which is what a test wants and what a window
-        #: started without a config address gets.
+        #: Where this window *attaches* so a message arriving on another channel
+        #: can be handed to it (`slife2.tui.control`) — the plugin's address, and
+        #: the window is its client.  Empty means no inbox, which is what a test
+        #: wants and what a window started without a config address gets.
         self._control_url = control_url
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
             lambda: MCPAgentClient(url, agent=agent, model=model)
         )
+        #: The other half, and injectable for the same reason: the connection
+        #: this window *receives* on, held open for as long as it is up.
+        self._window_factory = window_factory or (
+            lambda: MCPWindowClient(control_url, agent=agent)
+        )
         self._client: AgentClient | None = None
+        self._window: WindowClient | None = None
         self._connected = False
         self._connection_text = "connecting"
         #: Whether the previous conversation is drawn, or being drawn.  Once
@@ -240,8 +260,9 @@ class SlifeApp(App[None]):
         self.query_one(HistoryInput).focus()
         self._refresh_status()
         if self._control_url:
+            self._window = self._window_factory()
             self._control = self.run_worker(
-                self._serve_control(), group="control", exit_on_error=False
+                self._attach_inbox(), group="control", exit_on_error=False
             )
         # Connecting can take a moment; a worker keeps the first paint prompt.
         self.run_worker(self._connect(), group="connect", exit_on_error=False)
@@ -249,22 +270,57 @@ class SlifeApp(App[None]):
     async def on_unmount(self) -> None:
         if self._control is not None:
             control, self._control = self._control, None
+            # Cancelling the worker drops the attach call, and the plugin sees
+            # that as the window going away — there is no `detach` to send.
             control.cancel()
+        if self._window is not None:
+            await self._window.close()
         if self._client is not None:
             await self._client.close()
 
-    async def _serve_control(self) -> None:
-        """Offer this window's queue to whoever is delivering to it.
+    async def _attach_inbox(self) -> None:
+        """Hold this window's session open, so messages can be handed to it.
 
-        A worker of its own, because the server lives as long as the window does
-        and there is nothing to await in between: `serving` holds the port until
-        it is cancelled on the way out.
+        A worker of its own, because the call does not return while the window is
+        up: `attach` *is* the session (`slife2.tui.control`), and what arrives on
+        it goes through `deliver` — the same method the person's own typing goes
+        through, which is the whole of the pass-through.
+
+        Retried rather than fatal, for `_connect`'s reason: a plugin that is not
+        answering must not make the window unusable.  What is lost while it is
+        down is a message somebody else tried to hand over, and that caller is
+        told so by its own failed call.
         """
-        from slife2.tui import control
+        assert self._window is not None
+        complained = False
+        while True:
+            try:
+                await self._window.connect()
+                await self._window.attach(self._take)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a missing inbox is operational
+                # Said once rather than once per attempt.  This retries until it
+                # works, and a terminal left open beside a stopped plugin would
+                # otherwise write the same line every two seconds for as long as
+                # somebody is looking at it.
+                (logger.debug if complained else logger.warning)(
+                    "TUI inbox unavailable: %s", exc
+                )
+                complained = True
+                await self._window.close()
+                await asyncio.sleep(RECONNECT_SECONDS)
+            else:
+                return
 
-        mcp = control.build_server(deliver=self.deliver)
-        async with control.serving(mcp, self._control_url):
-            await asyncio.Event().wait()
+    def _take(self, handover: Handover) -> None:
+        """Take one handed-over message, from the plugin's push.
+
+        A method of its own rather than `deliver` passed straight through,
+        because the two say different things: this is the wire's shape arriving
+        (`slife2.tui.control`), and `deliver` is the window's one way in.
+        """
+        self.deliver(handover.text, handover.channel)
 
     def deliver(self, text: str, channel: str) -> None:
         """Take a message from another channel, to run as if it were typed.

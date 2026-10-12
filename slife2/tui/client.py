@@ -1,8 +1,14 @@
-"""How the TUI talks to the agent server.
+"""How the TUI talks to the servers it needs: the agent, and its own inbox.
 
-:class:`AgentClient` is a Protocol, so the TUI never imports FastMCP and tests
-can inject a scripted client.  That seam is the whole reason the widgets can be
-built and verified without a server running.
+Two clients, because a window holds two conversations with the outside: it *asks*
+the agent server for turns (:class:`AgentClient`), and it *is asked* by the plugin
+that hands it messages from other channels (:class:`WindowClient`).  The second is
+the newer half and it points the other way — `slife2-tui` pushes, this window
+receives — which is why it is a call held open rather than anything polled.
+
+Both are Protocols, so the TUI never imports FastMCP at the point of use and
+tests can inject scripted clients.  That seam is the whole reason the widgets can
+be built and verified without a server running.
 """
 
 from __future__ import annotations
@@ -14,9 +20,11 @@ from typing import Any, Protocol
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT
+from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT, TUI_SERVER_NAME
 from slife2.events import TurnEvent, decode
 from slife2.mcp_server import close_server, open_server
+from slife2.tui.control import ATTACH, Handover
+from slife2.tui.control import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 #: How long a whole turn may take.  A turn is several model calls plus tool
@@ -278,3 +286,95 @@ class MCPAgentClient:
             raise
 
         return str((result.data or {}).get("text") or "")
+
+
+class WindowClient(Protocol):
+    """The window's view of its own inbox, from the receiving end."""
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def attach(self, on_handover: Callable[[Handover], None]) -> None:
+        """Announce this window and be handed messages until it goes away.
+
+        **Does not return while the window is up**, and that is the mechanism
+        rather than an oversight: the session *is* this call, so a message handed
+        over by a channel arrives as a progress notification on it and is passed
+        straight to `on_handover` — which is the app's `deliver`, the same method
+        the person's own typing goes through.
+
+        Returns, or raises, only when the window is done: a cancelled call is the
+        detach (`slife2.tui.control`).
+        """
+        ...
+
+
+class MCPWindowClient:
+    """A :class:`WindowClient` backed by an MCP connection.
+
+    Holds an identity and nothing else — which window this is — because
+    everything a message does afterwards belongs to the app: this class never
+    sees the queue, the turn or the transcript.
+    """
+
+    def __init__(self, url: str, *, agent: str = DEFAULT_AGENT):
+        self._url = url
+        #: Whose conversation this window is showing, which is the whole of what
+        #: it tells the plugin: one session per agent, and this is the key.
+        self._agent = agent
+        self._client: Client | None = None
+
+    async def connect(self) -> None:
+        """Open the connection, or raise with a message worth showing.
+
+        The named-peer check is the point: a `tui:` address pointed at anything
+        else fails here, by name, rather than as a window that silently receives
+        nothing (`slife2.mcp_server.identifies`).
+        """
+        if self._client is not None:
+            return
+        self._client = await open_server(
+            self._url, name=TUI_SERVER_NAME, fallback_tool=ATTACH
+        )
+
+    async def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await close_server(client)
+
+    async def attach(self, on_handover: Callable[[Handover], None]) -> None:
+        if self._client is None:
+            raise ConnectionError("not connected")
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            handover = decode_handover(message or "")
+            if handover is not None:
+                on_handover(handover)
+
+        try:
+            await self._client.call_tool(
+                ATTACH,
+                {"agent": self._agent},
+                # Passing a progress handler is what makes the SDK attach a
+                # progress token, and the plugin's push is a *silent no-op*
+                # without one — a window that omitted this would be handed
+                # nothing while every `submit` still succeeded.  See
+                # `slife2.events` for the same seam on a turn's stream.
+                progress_handler=on_progress,
+                # A session lasts as long as the window, so this call is bounded
+                # by nothing: the default timeout would detach a window that had
+                # merely been open for a while.
+                timeout=None,
+            )
+        except ToolError:
+            # The plugin answered and refused — an agent it cannot place, a
+            # version mismatch.  The connection is fine, so keep it.
+            raise
+        except Exception:
+            # The transport is gone.  Dropping the client is what lets the app's
+            # retry reconnect, for `run_turn`'s reason.
+            await self.close()
+            raise

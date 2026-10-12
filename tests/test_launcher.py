@@ -67,6 +67,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "wechat",
         "cabinet",
         "media",
+        "tui",
         "toolhub",
         "agent",
     ]
@@ -84,6 +85,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.wechat",
         "slife2.cabinet",
         "slife2.media.server",
+        "slife2.tui.control",
         "slife2.toolhub",
         "slife2.server.server",
     }
@@ -276,6 +278,7 @@ def test_one_server_per_wire_protocol() -> None:
         "wechat",
         "cabinet",
         "media",
+        "tui",
         "toolhub",
         "agent",
     ]
@@ -328,6 +331,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "wechat",
         "cabinet",
         "media",
+        "tui",
         "toolhub",
         "agent",
     ]
@@ -361,6 +365,7 @@ def test_every_peer_the_agent_reaches_starts_before_it() -> None:
         "wechat",
         "cabinet",
         "media",
+        "tui",
         "toolhub",
     }
 

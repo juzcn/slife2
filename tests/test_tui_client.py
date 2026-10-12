@@ -22,7 +22,8 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from slife2 import mcp_server as mcp_server_module
-from slife2.tui.client import MCPAgentClient
+from slife2.tui.client import MCPAgentClient, MCPWindowClient
+from slife2.tui.control import ATTACH, Handover, encode
 
 pytestmark = pytest.mark.unit
 
@@ -62,7 +63,7 @@ class FakeTransport:
         return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
 
 
-def install(monkeypatch, transport: FakeTransport) -> None:
+def install(monkeypatch, transport: FakeTransport | FakeWindowTransport) -> None:
     """Point the client at a stubbed transport instead of a URL.
 
     Patched in `slife2.mcp_server` rather than here: the client no longer builds
@@ -233,3 +234,114 @@ async def test_a_named_server_is_accepted_without_listing_tools(monkeypatch) -> 
     await client.connect()
     await client.run_turn("hi", lambda event: None)
     assert sent(transport, "send_message")[0]["prompt"] == "hi"
+
+
+# --- and the other direction: the window's own inbox --------------------------
+
+
+class FakeWindowTransport:
+    """The MCP client `MCPWindowClient` would have built, with the wire stubbed.
+
+    It keeps the *options* as well as the payload, because the two facts that
+    matter down here are not in the arguments at all: that a progress handler was
+    supplied, and that the call is not on a clock.
+    """
+
+    def __init__(
+        self, tools: tuple[str, ...] = (ATTACH,), *, name: str | None = None
+    ) -> None:
+        self.tools = tools
+        self.server_info = SimpleNamespace(name=name) if name else None
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.options: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> FakeWindowTransport:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def list_tools(self) -> list[SimpleNamespace]:
+        return [SimpleNamespace(name=name) for name in self.tools]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], **kwargs: Any
+    ) -> SimpleNamespace:
+        self.sent.append((name, copy.deepcopy(arguments)))
+        self.options.append(kwargs)
+        return SimpleNamespace(data=None)
+
+    async def push(self, handover: Handover) -> None:
+        """What the plugin does to a window: one progress notification."""
+        handler = self.options[-1]["progress_handler"]
+        await handler(handover.ticket, None, encode(handover))
+
+
+@pytest.mark.asyncio
+async def test_attaching_names_the_agent_and_asks_for_the_stream(monkeypatch) -> None:
+    """Three things go out, and each is load-bearing.
+
+    The **agent**, because that is what picks the session — the address is one
+    for every window now.  The **progress handler**, because the plugin's push is
+    a silent no-op without one: a window that omitted it would be handed nothing
+    while every `submit` still succeeded.  And **no timeout**, because the call
+    lasts as long as the window does, so the default would detach a terminal that
+    had merely been open a while.
+    """
+    transport = FakeWindowTransport()
+    install(monkeypatch, transport)
+    client = MCPWindowClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    await client.attach(lambda handover: None)
+
+    assert transport.sent == [(ATTACH, {"agent": "jack"})]
+    (options,) = transport.options
+    assert options["progress_handler"] is not None
+    assert options["timeout"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_message_arrives_as_a_handover(monkeypatch) -> None:
+    """The words and their channel, decoded once and handed straight on."""
+    transport = FakeWindowTransport()
+    install(monkeypatch, transport)
+    client = MCPWindowClient("http://test/mcp", agent="jack")
+    seen: list[Handover] = []
+
+    await client.connect()
+    await client.attach(seen.append)
+    await transport.push(Handover(ticket=4, text="hi", channel="wechat"))
+
+    assert seen == [Handover(ticket=4, text="hi", channel="wechat")]
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_is_not_a_handover_is_dropped(monkeypatch) -> None:
+    """The stream is somebody else's too, in principle.
+
+    A notification this build has no word for is a line not shown rather than a
+    window that dies on it — `slife2.events.decode`'s rule, for its reason.
+    """
+    transport = FakeWindowTransport()
+    install(monkeypatch, transport)
+    client = MCPWindowClient("http://test/mcp", agent="jack")
+    seen: list[Handover] = []
+
+    await client.connect()
+    await client.attach(seen.append)
+    handler = transport.options[-1]["progress_handler"]
+    await handler(1, None, '{"t":"text","d":"someone elses"}')
+    await handler(2, None, None)
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_an_inbox_that_is_not_ours_is_refused(monkeypatch) -> None:
+    """A `tui` address pointed at anything else fails here, by name."""
+    install(monkeypatch, FakeWindowTransport(tools=("stream_chat",)))
+    client = MCPWindowClient("http://test/mcp", agent="jack")
+
+    with pytest.raises(ConnectionError, match="not slife2-tui"):
+        await client.connect()
