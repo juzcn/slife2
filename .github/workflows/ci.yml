@@ -24,6 +24,26 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # macOS only, and it is a *requirement* rather than a preference.  The
+      # vector index is a SQLite extension (`sqlite-vec`), and uv's managed
+      # CPython is built without `--enable-loadable-sqlite-extensions` —
+      # python-build-standalone links SQLite statically — while Apple's system
+      # SQLite does not support them either.  A Python that cannot load one has
+      # no index, so `slife2.db` refuses to open, so every plugin dies: not one
+      # failing test but the whole product.  Windows and Linux builds have the
+      # feature, which is why this is invisible anywhere but here.
+      #
+      # `UV_PYTHON` is what the later steps read, so `uv pip install` and every
+      # `uv run` below resolve the same interpreter.  `brew --prefix <formula>`
+      # rather than `$(brew --prefix)/bin/python3.13`: the keg's own path does
+      # not depend on which Homebrew Python happens to own the unversioned
+      # `python3` symlink.
+      - name: A Python that can load SQLite extensions
+        if: runner.os == 'macOS'
+        run: |
+          brew install python@3.13
+          echo "UV_PYTHON=$(brew --prefix python@3.13)/bin/python3.13" >> "$GITHUB_ENV"
+
       - name: Build wheel
         run: uv build --out-dir dist
 
@@ -35,6 +55,28 @@ jobs:
       - name: Install
         shell: bash
         run: uv pip install dist/slife2-*.whl pytest pytest-asyncio
+
+      # The precondition the macOS step above exists for, asserted rather than
+      # assumed.  Without it, a runner whose interpreter cannot load extensions
+      # reports five "Client failed to connect" errors out of `test_agent_task`
+      # and stops — which names neither SQLite nor the interpreter, and cost
+      # five days the first time.  ASCII only, because it is printed: a console
+      # whose codepage is not UTF-8 turns an em-dash into the failure this
+      # assertion is trying to report.
+      - name: The interpreter can load SQLite extensions
+        shell: bash
+        run: |
+          uv run python -c "
+          import sqlite3
+          connection = sqlite3.connect(':memory:')
+          assert hasattr(connection, 'enable_load_extension'), (
+              'this interpreter has no enable_load_extension: it was built '
+              'without --enable-loadable-sqlite-extensions, so there is no '
+              'vector index and slife2 cannot open its database'
+          )
+          connection.enable_load_extension(True)
+          print('sqlite extension loading: OK')
+          "
 
       # Before the tests, because it is seconds and it fails with a file and a
       # line rather than a traceback.  The rules live in pyproject.toml and were

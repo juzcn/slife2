@@ -43,6 +43,23 @@ uv run slife2
 That is the whole thing. `slife2` brings up the MCP servers its config needs,
 attaches to any that are already running, and starts the TUI.
 
+**On macOS the Python has to be one that can load SQLite extensions**, and
+neither of the two you are most likely to be using is. The vector index is a
+SQLite extension (`sqlite-vec`), and an interpreter built without
+`--enable-loadable-sqlite-extensions` has no way to load one: that is uv's own
+managed CPython, which links SQLite statically, and Apple's `/usr/bin/python3`,
+whose system SQLite is compiled without it for sandboxing reasons. Nothing here
+can work around it — with no index the database will not open, so no plugin
+starts and the first command fails with `this Python's sqlite3 cannot load
+extensions`. The builds on Windows and Linux have the feature. Homebrew's Python
+does too:
+
+```bash
+brew install python@3.13
+uv venv --python "$(brew --prefix python@3.13)/bin/python3.13"
+uv sync
+```
+
 ```
 slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
        [--keep-servers]                  ensure the servers, then run the TUI
