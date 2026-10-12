@@ -1424,6 +1424,25 @@ children to a kill-on-close job so they die with their parent. Here the
 requirement is exactly inverted, and it is a requirement about *survival*, so it
 is worth knowing which way it points.
 
+**Which server waits for which is a table rather than prose, and everything the
+table says nothing about comes up at once.** `slife2.launcher.NEEDS` is that
+table, and the shape it buys is the one the *graph* has rather than the one the
+config file lists: five waves, whose depth is the real chain — the embedder, then
+the stores that open it, then the hub, then the task server, then the clock —
+with each plugin riding whichever wave its own dependencies allow. Two of its
+entries are rules rather than pairs of names. The hub waits for **every** plugin,
+because it asks each one for its tools — including the ones with nothing to offer
+the model — and refuses to serve a list while any of them is not answering; the
+only plugins it may not wait for are the three that wait for it (itself, the task
+server, and the clock). And the agent server has no entry at all, though its
+first turn reaches both the hub and the store: the edge the other way would close
+a cycle, and what makes leaving it out safe is that the agent server does nothing
+until a caller arrives — and a caller arrives either from a window, which exists
+only once the last wave is done, or from a plugin that is already waiting on the
+hub. The one exception is named where it lives: `a2a` hands over its orphan
+notice at its *own* start-up, before any of that is true, and it is the reason
+that notice's delivery is retried rather than attempted once (§1.8).
+
 On top of that sits one piece of bookkeeping: each client registers itself, and
 the **last one out** stops the servers. Without it, the daemon rule would mean an
 ordinary exit leaves the servers running until the next reboot. The count is

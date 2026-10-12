@@ -159,6 +159,49 @@ def test_a_server_is_asked_for_only_once_what_it_needs_is_up(
     assert "agent" in first_wave and "skills-server" in first_wave
 
 
+def _reaches(name: str, target: str) -> bool:
+    """Whether *name* waits on *target*, directly or through the table."""
+    seen: set[str] = set()
+    pending = [name]
+    while pending:
+        for dependency in launcher.NEEDS.get(pending.pop(), ()):
+            if dependency == target:
+                return True
+            if dependency not in seen:
+                seen.add(dependency)
+                pending.append(dependency)
+    return False
+
+
+def test_the_hub_waits_for_every_plugin_it_can() -> None:
+    """The hub's entry is a rule, and the rule is the whole set minus the cycle.
+
+    The hub asks *every* plugin for its tools — including the ones with nothing
+    to offer the model, because what a server has is not knowable without asking
+    — and `list_tools` refuses while any of them is not answering
+    (`slife2.toolhub`), so a plugin that comes up after the hub is a first turn
+    that cannot run.  What it may not wait for is the plugins that wait for
+    *it*, and this is the assertion that keeps that the only exception: it fails
+    for a plugin nobody has decided about, which is exactly what `a2a` was — the
+    hub asks it for four tools, and the hand-written tuple said otherwise.
+    """
+    waited_for = set(launcher.NEEDS["toolhub"])
+    assert waited_for <= set(LOCAL_SERVERS)
+    assert "toolhub" not in waited_for
+
+    for name in LOCAL_SERVERS:
+        if name in waited_for or name == "toolhub":
+            continue
+        assert _reaches(name, "toolhub"), (
+            f"{name} is not waited for and does not reach the hub"
+        )
+    # And the exclusion is not an excuse: each one really does wait on the hub.
+    for name in launcher._AFTER_THE_HUB:
+        assert name not in waited_for
+        if name != "toolhub":
+            assert _reaches(name, "toolhub")
+
+
 def test_a_server_whose_dependency_failed_is_reported_and_not_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -359,22 +402,24 @@ def test_the_agent_server_takes_no_provider() -> None:
 
 
 def test_every_peer_each_server_reaches_starts_before_it() -> None:
-    """The two servers that *reach* their peers come last, their peers first.
+    """The plugins that *reach* a peer are ordered by which peer they reach.
 
     Starting them together races, and the failure is confusing rather than
-    obvious: the server comes up healthy and every turn — or every task — fails.
-    The agent server's peers are its model, the context store (which needs
-    `embeddings` in turn, which is why that one starts first), and the toolhub
-    with the plugins behind it — all of which it now *needs*, since the model's
-    tool list comes from the hub.  The agent-task plugin reaches three of those
-    and one more: the agent server itself, because a task whose window is not
-    showing hands its answer to `send_message` (DESIGN.md §1.3).  So the agent
-    is no longer the last thing started — it is the second to last, and the
-    order between the two is the one edge that is new here.
+    obvious: the plugin comes up healthy and every message — or every task — it
+    hands over fails.  Which peer each one reaches is the table's business and
+    the reasons are written down beside it, one entry at a time, so this is the
+    place they are held to the code: an entry that outlives the call it
+    described fails here, which is what `wechat`'s did — it was the agent server
+    for a release after the delivery became the window's (DESIGN.md §1.2).
     """
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-4:] == ["agent", "agent-task", "schedule", "a2a"]
-    assert "agent" in launcher.NEEDS["agent-task"]
+    # WeChat delivers to the window and to nothing else: the terminal is the peer
+    # that has to be there, and the agent server is not one it speaks to at all.
+    assert set(launcher.NEEDS["wechat"]) == {"tui"}
+    # A task reaches four: the hub its loop runs with, the two ways into a
+    # conversation, and the store the task's own conversation is restored from.
+    assert set(launcher.NEEDS["agent-task"]) == {"toolhub", "tui", "agent", "context"}
     # The clock reaches three peers, and asks the hub for nothing: it makes no
     # model call (DESIGN.md §1.7), so the terminal and the agent server behind it
     # are where a trigger goes, and `agent-task` is where a run's work is started

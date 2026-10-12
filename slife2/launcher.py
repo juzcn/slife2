@@ -638,6 +638,13 @@ def others_running() -> list[ClientRecord]:
     ]
 
 
+#: The plugins the hub cannot be made to wait for, because each of them waits on
+#: the hub: itself, `agent-task` (a task's loop *runs on* the hub's tool list) and
+#: `schedule` (its runs are handed to `agent-task`).  Named once, so that the
+#: entry below can be the rule rather than a list of names.
+_AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
+
+
 #: What a server needs up before it can come up itself.
 #:
 #: **These are edges, and everything not named here is a preference.**  The rest
@@ -651,34 +658,52 @@ def others_running() -> list[ClientRecord]:
 #: that is not listening — so a context started in the same breath as an
 #: embeddings is a context that fails to start, not one that starts slowly.
 #:
-#: `toolhub` needs every plugin it asks for tools — including `context`, whose
-#: `turn_list` and `turn_read` are the model's.  That edge is soft, and it is
-#: kept anyway: `settle`'s bounded wait means a late plugin costs the hub
-#: catalogue *rows* rather than a crash, which is exactly the failure that would
-#: go unnoticed — a first turn answered with tools missing.
+#: **The hub's entry is every plugin it asks, minus the three that reach it**,
+#: and it is a comprehension rather than thirteen names because the list did
+#: drift: `a2a` landed, the hub asks it for its four tools, and the tuple nobody
+#: had a reason to revisit said otherwise.  What the edge is for is not
+#: politeness — `list_tools` *refuses* while any plugin is not answering
+#: (`slife2.toolhub`: a missing hub is a plugin gone and fails the turn), so a
+#: plugin that comes up after the hub is a first turn that cannot run.  The hub
+#: asks the plugins with nothing to offer the model too, which is why this is the
+#: whole set and not the ones with tools.
 #:
-#: `tests/test_launcher.py` holds this table together: every name is one of ours
-#: and nothing here points at itself in a circle.
+#: **`agent` is a peer the agent server reaches and this table cannot say.**  Its
+#: tool list and its turn log both come from a peer, and the hub is one of them —
+#: but the hub asks *it*, so that edge closes a cycle and `ensure_all` would
+#: refuse to start.  What makes leaving it out safe is the other half of the same
+#: fact: the agent server is inert until a caller arrives, and a caller arrives
+#: either from a window, which exists only once every wave is done, or from a
+#: plugin that is itself waiting on the hub.  Its peers are up by construction
+#: rather than by an edge, which is the weaker guarantee and the honest one.
+#:
+#: `tests/test_launcher.py` holds this table together: every name is one of ours,
+#: nothing here points at itself in a circle, and the hub waits for every plugin
+#: it can.
 NEEDS: dict[str, tuple[str, ...]] = {
     "context": ("embeddings",),
-    # WeChat's poll loop hands a message to a conversation by calling the agent
-    # server's `send_message`, so the peer it speaks to has to be there — and a
-    # login resumed before it is would be a session watching a bridge for
-    # messages it cannot deliver.  Its own call is what notices, so this is
-    # ordering rather than correctness, which is what every edge here is.
-    "wechat": ("agent",),
+    # **The window, and not the agent server** (DESIGN.md §1.2).  WeChat's poll
+    # loop hands a message to the conversation the window is showing, which is
+    # the one inbox everything this system takes goes into — and the agent server
+    # was the peer named here until that changed, an edge that outlived the code
+    # by a release.  Ordering rather than correctness, which is what every edge
+    # here is: a login resumed before its peer is up would be a session watching
+    # a bridge for messages it cannot deliver, and its own call is what notices.
+    "wechat": ("tui",),
     # The cabinet embeds through the embeddings server, like the context store:
     # a write places its vector in the same call, so a cabinet that cannot embed
     # stores nothing.
     "cabinet": ("embeddings",),
-    # The background tasks reach three peers rather than being reached by them:
+    # The background tasks reach four peers rather than being reached by them:
     # the hub for the tools its loop runs with, a model server for the loop
-    # itself, and the terminal — or, when no window is showing the conversation,
-    # the agent server — to hand the answer over.  Ordering rather than
-    # correctness, like every edge here: a task started before one of these is
-    # up fails its own first hop, and that failure looks like the feature not
-    # working rather than like a daemon that was still starting.
-    "agent-task": ("toolhub", "tui", "agent"),
+    # itself, the terminal — or, when no window is showing the conversation, the
+    # agent server — to hand the answer over, and the context store a task's
+    # conversation is restored from, which is the one a task cannot run without
+    # at all.  Ordering rather than correctness, like every edge here: a task
+    # started before one of these is up fails its own first hop, and that failure
+    # looks like the feature not working rather than like a daemon that was still
+    # starting.
+    "agent-task": ("toolhub", "tui", "agent", "context"),
     # The clock reaches three peers, and needs neither the hub nor a model.  A
     # fire puts a due task in front of the agent through the terminal, or through
     # the agent server when no window is showing that conversation; the turn it
@@ -697,26 +722,12 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # handed over is logged and dropped, which looks like the mesh not working
     # rather than like a daemon that was still starting.
     "a2a": ("tui", "agent"),
-    "toolhub": (
-        "embeddings",
-        "context",
-        "skills-server",
-        "cli-server",
-        "mcp-tools",
-        "restapi-tools",
-        "wechat",
-        "cabinet",
-        "media",
-        "file-tunnel",
-        # **`agent-task` and `schedule` are not here, and they cannot be.**  The
-        # comment above says this edge is kept for every plugin the hub asks, and
-        # the hub does ask both — but a task's loop *runs on* the hub's tool list,
-        # and the clock hands its runs to `agent-task`, so either edge closes a
-        # cycle the launcher refuses to start (`ensure_all` raises).  What the
-        # edge is for is a plugin that would otherwise be asked before it is up;
-        # both of these wait on the hub themselves, so they are up by definition
-        # by the time the hub can answer.
-    ),
+    # The rule and not a list: see `_AFTER_THE_HUB` for the three that cannot be
+    # in here.  The model backends are asked too and are deliberately absent —
+    # nothing waits on a backend and a backend waits on nothing, so it is in the
+    # first wave whatever this table says, which is the preference `config.py`
+    # states about them and not a dependency.
+    "toolhub": tuple(name for name in LOCAL_SERVERS if name not in _AFTER_THE_HUB),
 }
 
 
