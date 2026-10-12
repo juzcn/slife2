@@ -70,6 +70,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "tui",
         "toolhub",
         "agent",
+        "agent-task",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
     assert modules == {
@@ -88,6 +89,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.tui.control",
         "slife2.toolhub",
         "slife2.server.server",
+        "slife2.agent_task_server",
     }
 
 
@@ -281,6 +283,7 @@ def test_one_server_per_wire_protocol() -> None:
         "tui",
         "toolhub",
         "agent",
+        "agent-task",
     ]
 
 
@@ -334,6 +337,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "tui",
         "toolhub",
         "agent",
+        "agent-task",
     ]
 
 
@@ -342,19 +346,25 @@ def test_the_agent_server_takes_no_provider() -> None:
     assert "--provider" not in launcher._argv(spec)
 
 
-def test_every_peer_the_agent_reaches_starts_before_it() -> None:
-    """The agent server connects to its peers in its lifespan.
+def test_every_peer_each_server_reaches_starts_before_it() -> None:
+    """The two servers that *reach* their peers come last, their peers first.
 
     Starting them together races, and the failure is confusing rather than
-    obvious: the agent server comes up healthy and every turn fails.  The peers
-    are its model, the context store (which needs `embeddings` in turn, which
-    is why that one starts first), and the toolhub with the plugins behind it —
-    all of which it now *needs*, since the model's tool list comes from the hub.
+    obvious: the server comes up healthy and every turn — or every task — fails.
+    The agent server's peers are its model, the context store (which needs
+    `embeddings` in turn, which is why that one starts first), and the toolhub
+    with the plugins behind it — all of which it now *needs*, since the model's
+    tool list comes from the hub.  The agent-task plugin reaches three of those
+    and one more: the agent server itself, because a task whose window is not
+    showing hands its answer to `send_message` (DESIGN.md §1.3).  So the agent
+    is no longer the last thing started — it is the second to last, and the
+    order between the two is the one edge that is new here.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
-    assert names[-1] == "agent"
-    # Everything else is a dependency of it, whatever kind it is.
-    assert set(names[:-1]) == {
+    assert names[-2:] == ["agent", "agent-task"]
+    assert "agent" in launcher.NEEDS["agent-task"]
+    # Everything else is a dependency of one of them, whatever kind it is.
+    assert set(names[:-2]) == {
         "llm:openai-completions",
         "embeddings",
         "context",

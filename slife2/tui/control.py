@@ -85,6 +85,29 @@ SUBMIT = "submit"
 #: bounds the *write*, not the turn the window will run afterwards.
 WRITE_TIMEOUT_SECONDS = 10.0
 
+#: What `submit` says when there is nothing to hand a message to.  A constant
+#: because a *caller* has to be able to recognise it: see `refused`.
+NO_WINDOW = "no window is showing"
+
+
+def refused(error: Exception) -> bool:
+    """Whether a `submit` failed because no window is showing that agent.
+
+    **The one failure a caller may safely repeat**, and the reason this is a
+    function rather than a `ToolError` check at the call site.  Everything a tool
+    handler raises arrives at the far end as a `ToolError` (`serve` pins
+    `mask_error_details=False`, which is what keeps the text) — so the *type*
+    cannot tell a refusal from a stream that dropped, and a caller that read it
+    as one would hand over words that had already been written.
+
+    What makes this one decidable is that `submit` looks the session up **before
+    it posts anything**: nothing was written, so trying somewhere else cannot
+    duplicate anything.  The module that writes the message is the one that
+    answers what it looks like — the same arrangement `MARKER_PREFIX` makes for a
+    marker, and `tests/test_agent_task.py` holds the pair together.
+    """
+    return isinstance(error, ToolError) and NO_WINDOW in str(error)
+
 INSTRUCTIONS = (
     "The terminal showing an agent's conversation. `attach` is how a window "
     "announces itself and is handed messages; `submit` hands it one, from a "
@@ -377,7 +400,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         session = windows.showing(agent)
         if session is None:
             raise ToolError(
-                f"no window is showing {agent}'s conversation; "
+                f"{NO_WINDOW} {agent}'s conversation; "
                 f"start `slife2 --agent {agent}` and hand it over again"
             )
 

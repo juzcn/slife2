@@ -72,6 +72,7 @@ classifiers = [
 [project.scripts]
 slife2 = "slife2:main"
 slife2-agent = "slife2.server.server:main"
+slife2-agent-task = "slife2.agent_task_server:main"
 slife2-context = "slife2.context_server:main"
 slife2-skills = "slife2.skills_server:main"
 slife2-cli = "slife2.cli_server:main"

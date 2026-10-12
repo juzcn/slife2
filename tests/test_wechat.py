@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
-from slife2 import ilink, wechat
+from slife2 import ilink, markers, wechat
 from slife2.audience import client_meta, for_the_model
 from slife2.config import Config, load
 from slife2.paths import agent_dir
@@ -334,9 +334,9 @@ def test_the_marker_a_person_is_shown_is_not_the_one_the_model_reads() -> None:
     """
     written = wechat.marker("peer-1", "ctx-1")
     assert written.startswith(wechat.MARKER_PREFIX)
-    assert wechat.strip_marker(f"{written} 你好") == "你好"
+    assert markers.strip(f"{written} 你好", wechat.MARKER_PREFIX) == "你好"
     # Without a token, which is the shape a first reply's marker has.
-    assert wechat.strip_marker(f"{wechat.marker('peer-1')} hi") == "hi"
+    assert markers.strip(f"{wechat.marker('peer-1')} hi", wechat.MARKER_PREFIX) == "hi"
 
 
 def test_unwrapping_takes_a_leader_and_leaves_everything_else() -> None:
@@ -349,11 +349,11 @@ def test_unwrapping_takes_a_leader_and_leaves_everything_else() -> None:
     point about punctuation.
     """
     inside = 'we discussed [Wechat:{"peer_wechat_id": "p"}] and moved on'
-    assert wechat.strip_marker(inside) == inside
+    assert markers.strip(inside, wechat.MARKER_PREFIX) == inside
     torn = '[Wechat:{"peer_wechat_id": "p"'
-    assert wechat.strip_marker(torn) == torn
-    assert wechat.strip_marker("plain words") == "plain words"
-    assert wechat.strip_marker("") == ""
+    assert markers.strip(torn, wechat.MARKER_PREFIX) == torn
+    assert markers.strip("plain words", wechat.MARKER_PREFIX) == "plain words"
+    assert markers.strip("", wechat.MARKER_PREFIX) == ""
 
 
 @pytest.mark.asyncio

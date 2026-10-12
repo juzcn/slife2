@@ -195,6 +195,13 @@ WECHAT_SERVER_NAME = "slife2-wechat"
 CABINET_SERVER_NAME = "slife2-cabinet"
 MEDIA_SERVER_NAME = "slife2-media"
 
+#: The background tasks: one loop of the calling agent's own per task, run on a
+#: description and answered by a message (`slife2.agent_task_server`,
+#: DESIGN.md §1.3).  A second agent server in the only sense that matters here —
+#: what it holds is loops — and the reason it is a plugin is the reason the
+#: agent server is: no file is the answer to a running loop.
+AGENT_TASK_SERVER_NAME = "slife2-agent-task"
+
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
 #: the order `slife2.config.Config.plugins` reads them out in.
@@ -258,6 +265,7 @@ LOCAL_SERVERS = (
     "tui",
     "toolhub",
     "agent",
+    "agent-task",
 )
 
 
@@ -513,6 +521,31 @@ class AgentSettings:
     #: rather than a string because the prompt has a hole in it where the agent
     #: name goes, and the hole has to be *somewhere* the caller can see.
     system_prompt: str = ""
+
+
+@dataclass(frozen=True)
+class AgentTaskSettings:
+    """The `agent-task:` section, and the one number an agent task costs.
+
+    **`agent:`, read by two plugins.**  Everything else a task's turn is made of
+    — the system prompt and `max_steps` — is the agent's own and comes out of
+    that section, because a task *is* the agent working: a prompt or a step count
+    that meant something different for a task would be two agents wearing one
+    name.  So the rule that the section a key lives in is the plugin that reads
+    it has exactly one exception, and this is where it is stated.
+
+    What is left is the number only this plugin has an opinion about.
+    """
+
+    #: How many tasks one agent may have running at once.
+    #:
+    #: A cap rather than a preference, and the only bound this feature has: a
+    #: task may start a task — the tool set is the one catalogue and nothing
+    #: filters it — so without a cap a model can grow loops without limit.  What
+    #: it does not bound is how much work happens over *time*; DESIGN.md §9
+    #: holds that one open, and `agent_task_list` with `agent_task_cancel` is
+    #: what makes it visible and stoppable in the meantime.
+    max_running: int = 4
 
 
 @dataclass(frozen=True)
@@ -916,6 +949,11 @@ class Config:
     #: ambient environment is the whole of what that skill is given.
     skills: dict[str, SkillSettings] = field(default_factory=dict)
     agent: AgentSettings = field(default_factory=AgentSettings)
+    #: How many background tasks one agent may run at once, from `agent-task:`.
+    #: Read by `slife2-agent-task`, which owns that section — and the *only*
+    #: thing it owns, since a task's prompt and step count are the agent's and
+    #: come out of `agent:` above (see `AgentTaskSettings`).
+    agent_task: AgentTaskSettings = field(default_factory=AgentTaskSettings)
     #: How a conversation's context is decided, from `context:`.  Read by
     #: `slife2-context`, which is the plugin that owns the turn log.
     context: ContextSettings = field(default_factory=ContextSettings)
@@ -1094,6 +1132,15 @@ def default_config() -> Config:
             # sources it holds, and the two `*-tools` plugins above are the ones
             # that reach the entries under `tools:` and `rest-api:`.
             "toolhub": ServerSettings(port=8020),
+            # Background tasks: a loop of the calling agent's own, one per task,
+            # answered by a message in the conversation that asked for it.  A
+            # plugin because what it holds is loops — the same reason the agent
+            # server is one — and it reaches three peers rather than being
+            # reached by them: the hub for a tool list, a model server for the
+            # loop, and either the terminal or the agent server to hand the
+            # answer over.  It reads one section of its own, `agent-task:`, and
+            # only for its cap; a task's prompt and step count are the agent's.
+            "agent-task": ServerSettings(port=8037),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
@@ -1312,12 +1359,36 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         cli=_cli_tools(raw),
         skills=_skills(raw),
         agent=agent,
+        agent_task=_agent_task(raw.get("agent-task"), base.agent_task),
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
         default=str(raw.get("default") or _first_reference(providers)),
     )
+
+
+def _agent_task(raw: Any, base: AgentTaskSettings) -> AgentTaskSettings:
+    """The `agent-task:` section, defaulted — one number, and it has to be real.
+
+    Zero is refused rather than accepted as "no tasks": a cap of zero is a tool
+    the model can see, can call, and can never be answered by, which is a
+    configuration nobody wants and a failure that would arrive as a refusal
+    rather than as the config mistake it is.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "agent-task")
+    max_running = _int_or(
+        section.get("max_running"), base.max_running, "agent-task.max_running"
+    )
+    if max_running < 1:
+        raise ConfigError(
+            f"agent-task.max_running: {max_running} would refuse every task the "
+            f"model starts — set at least 1, or leave the section out for "
+            f"{base.max_running}"
+        )
+    return AgentTaskSettings(max_running=max_running)
 
 
 def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
@@ -1968,6 +2039,7 @@ def _as_float(value: Any, where: str) -> float:
 
 __all__ = [
     "AGENT_SERVER_NAME",
+    "AGENT_TASK_SERVER_NAME",
     "API_BACKENDS",
     "API_SERVER_NAMES",
     "CABINET_SERVER_NAME",
@@ -1985,6 +2057,7 @@ __all__ = [
     "TOOLHUB_SERVER_NAME",
     "WECHAT_SERVER_NAME",
     "AgentSettings",
+    "AgentTaskSettings",
     "CliToolSettings",
     "Config",
     "ConfigError",

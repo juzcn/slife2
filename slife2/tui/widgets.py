@@ -48,14 +48,24 @@ from textual.message import Message as TextualMessage
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
+# Imported, never re-spelled.  The module that writes a marker is the one that
+# knows what it looks like, and a prefix typed a second time here is a copy that
+# drifts — into printing the raw marker at somebody, which is the failure these
+# imports exist to prevent.  Taking one off is `slife2.markers.strip`, which is
+# the *shape* rather than any one name, so a third channel is a line here and
+# nothing at all in that module.
+from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
+from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
+from slife2.markers import strip as strip_marker
 from slife2.tui.theme import GLYPHS, PALETTE
-
-# Imported, never re-spelled.  The module that writes the marker is the one that
-# knows what it looks like, and `[Wechat:` typed a second time here is a copy
-# that drifts — into printing the raw marker at somebody, which is the failure
-# this half of the pair exists to prevent.
 from slife2.wechat import CONFIG_KEY as WECHAT_CHANNEL
-from slife2.wechat import strip_marker
+from slife2.wechat import MARKER_PREFIX as WECHAT_MARKER
+
+#: Every marker this window knows how to take back off, handed to `strip_marker`
+#: together.  A marker that is not in here is one this window does not know
+#: about, and an unknown marker is left alone rather than guessed at — which is
+#: what makes adding a channel a line in this list.
+MARKERS: tuple[str, ...] = (WECHAT_MARKER, ASYNC_TASK_MARKER)
 
 #: So `_add` can hand back the widget type it was given.
 WidgetT = TypeVar("WidgetT", bound=Static)
@@ -98,9 +108,16 @@ def channel_prefix(channel: str) -> str:
         return "You> "
     if channel == WECHAT_CHANNEL:
         return "Wechat> "
-    # A worker's key, which is a name rather than a channel's name — shown as it
-    # is rather than guessed at, since a guess here would be this window
-    # inventing a speaker.
+    if channel.startswith(f"{ASYNC_TASK_CHANNEL}:"):
+        # An agent task's answer, wearing the name of the task that produced it.
+        # The name is in the channel because a hand-over carries the channel and
+        # the words and nothing else (`slife2.agent_task_server`), and the bubble
+        # is deliberately *not* the key spelled again: `agent-task:research` is
+        # an address, and what a person is being told is who answered.
+        return f"AsyncTaskResult({channel.split(':', 1)[1]})> "
+    # Every other channel is a name that already exists in the conversation, and
+    # it is shown as it is rather than guessed at, since a guess here would be
+    # this window inventing a speaker (DESIGN.md §1.3).
     return f"{channel}> "
 
 
@@ -356,7 +373,7 @@ class ChatView(VerticalScroll):
         self._turn_open = False
         self._close_block()
         if channel != WINDOW_CHANNEL:
-            text = strip_marker(text)
+            text = strip_marker(text, *MARKERS)
         line = Text.assemble(
             (f"[{_timestamp(moment)}] ", f"dim {PALETTE['dim']}"),
             (channel_prefix(channel), f"bold {PALETTE['amber-bold']}"),

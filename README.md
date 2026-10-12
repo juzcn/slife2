@@ -803,7 +803,8 @@ slife2/
 │                     #   `model_*` tools, which own `providers:` and `default:`
 ├─ templates/
 │  ├─ system.j2       # the system prompt the distribution ships
-│  └─ recall.j2       # the recall instruction, rendered per turn
+│  ├─ recall.j2       # the recall instruction, rendered per turn
+│  └─ agent_task.j2   # what a task is told as it starts (DESIGN.md §1.3)
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient + WindowClient protocols, and the MCP

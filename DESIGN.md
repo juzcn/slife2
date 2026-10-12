@@ -270,7 +270,328 @@ whole of what this process resumes.  What is left in the config is an address
 under `servers:` and nothing else — `slife2-toolhub` is the only other plugin
 that reads no section of its own.
 
-### 1.3 The cabinet, and what four kinds of document cost
+### 1.3 The agent task, and what a second loop costs
+
+**`slife2-agent-task` is a second agent server, and it is a plugin for the reason
+`slife2-agent` is one: what it holds is loops.**  It owns no section of entries
+and nobody's connection, so §1.1's first row does not reach it — and the two
+facts that do are these.  A plugin's own tools are the only ones the model may
+call (§8.1's gate, `toolhub.Upstream._offered`), so a tool the model is meant to
+reach has to have a server to be served from.  And what a task *is* — a loop in
+flight, holding a message list nobody else addresses — is the same kind of state
+`slife2-agent` keeps, for the same reason: no file is the answer to it, and no
+other process can reach it.
+
+**It does one thing, and the whole surface is four tools.**
+`agent_task_start(name, description)` begins one loop of the *calling agent's
+own* and answers at once with its id; `agent_task_status(name)`,
+`agent_task_list()` and `agent_task_cancel(name)` are the rest.  The model
+reaches them the way it reaches any plugin's tools, and the identity rides on the
+call (`audience.client_of`), so a task runs as the agent that asked — the same
+system prompt, the same model, the same tool set — and its answer comes back to
+that agent's conversation.  **A task never receives anything**: no second message
+into it, no queue, no cut-in, no turn after the first.
+
+**It is not a subagent, and that is a fact about the code rather than a word.**
+§9's Subagents entry describes the other thing: `send_message` already takes a
+`subagent` and already runs a separate conversation under it, with its own
+history, inbox and lock.  Reading a task off that mechanism costs four things:
+
+* **The context would be the wrong one, and it is the whole point of the
+  feature.**  A task has to run on *this conversation's* context — the description
+  is what the caller chose to write down, and everything else the agent already
+  knows is in the log the discriminator reads from.  A `subagent` key is a
+  different file (`db.database_path`, `db.py:221`), so a task read off that
+  mechanism would rebuild against a log nothing has ever written to: the
+  discriminator would be paid the most expensive call a turn makes (§5.1,
+  `rebuild_into` at `server.py:832`) to decide that an empty list stays empty, and
+  the task would know only what its description said.
+* **A task becomes an addressable conversation.**  A `(agent, subagent)` key is
+  nameable by anybody, so any caller could `send_message` into a running task —
+  and the running turn would fold the message in, because the agent server always
+  passes `auto_invoke`.  A task is not a conversation, and nothing should be able
+  to name one.
+* **Not recording would come from a rule about something else.**  A worker does
+  not record because `records` is `not self.subagent` — a flag about subagents.  A
+  task does not record because the *answer* is what the conversation gains (below),
+  and that is a decision about tasks: inheriting it from a flag about a different
+  thing is how the two come apart the first time either one changes.
+* **The agent server would grow a second kind of thing it owns.**  §3's whole
+  architecture is *a conversation is an object, named by `(agent, subagent)`.*  A
+  task has no inbox, no transcript and no turn of its own in the log; it enters
+  that table only as an exception — an entry that is addressable, that any caller
+  may `send_message` into, and that nothing ever reads back.
+
+**So the task's turn path is the plugin's own, and it touches nothing the agent
+server owns.**  It does not call `send_message`, does not build a `Loop`, and
+does not run `run_turn_into` with anything switched off.  It assembles a loop:
+
+```
+system prompt   render(config.agent.system_prompt, agent_name=agent)
+opening         render("agent_task.j2", name=…, description=…)
+restore         the agent's own context, under the agent's own key
+rebuild         once — keep ∪ recall, this conversation's turns included
+tools           remote_tools(hub, client_id)          the hub's list, unfiltered
+loop            AgentLoop(backend, tools, max_steps=…, refresh=…)
+answer          loop.run_turn(messages, opening)      `opening` beside the list
+trim            _func_tool_unload, at the turn boundary the agent server uses
+```
+
+**A task runs on the agent's own context, and gets it the way the agent does.**
+Its key is `(agent, "")` — the agent's own conversation — so `restore` puts back
+what this conversation had, and `rebuild` asks the same discriminator the agent
+server asks, once, before the turn.  That is what "it runs on the current agent's
+context" means when it is written down, and it is the difference between
+delegating and asking a stranger: the description is what the caller chose to
+write down, and everything else the agent already knows is in the log the
+discriminator reads from.
+
+**And the context is a snapshot with an edge, which is the one thing about it the
+model cannot see.**  What `restore` reads is the *stored* list, and a turn is
+written when it ends — so the turn that is calling `agent_task_start` is not in
+what the task starts from.  That is not a detail of this plugin: it is the same
+fact as "nothing is recorded", seen from the other side, and it is the reason
+`agent_task_start`'s description says to restate the last exchange and let the
+task read everything older for itself.  A description that said the task had
+"none of this conversation's history" was the opposite of true, and a model that
+believed it wrote descriptions that re-explained what the task could already see; the
+truth is more useful than the caveat was.
+
+**Once is exactly right, and zero would be wrong.**  A task runs a single turn,
+so the one rebuild the agent server makes before a turn is the one a task makes
+— and a turn that ran on whatever happened to be in the list would be the one
+turn in this system whose context nobody decided (§5.1).  The call is made
+outside the agent's lock, which is safe for the reason §5.1 gives on the other
+side of it: **a decision that asks for what is in hand rebuilds nothing and
+writes nothing**, and that is the common answer.  The turn's writer is the agent
+server; this one speaks only when it has something to say.
+
+**And nothing is recorded.**  A task's result reaches the conversation as a
+message, and *that* message is what the agent server records — so writing the
+task's own round trip as well would put the same answer in the transcript twice,
+under a description that is a rendered template rather than anything the person said.
+A task reads the agent's context and adds nothing to it, and what the
+conversation gains is the answer, which is the thing it asked for.  `Loop.records`
+is the agent server's switch for the opposite case; there is no switch here
+because there is nothing to switch.
+
+**The trim is not optional, and it is not for this turn.**  The tools a model has
+loaded go out with every request, so a turn that loaded several past
+`tool_load.threshold` has left the list longer than the config allows — and the
+loaded set lives in the *catalogue*, which is one list for the whole system.  So
+a task that did not trim would leave every other conversation's request longer.
+It runs where the agent server runs it, at the turn boundary and never mid-turn
+(dropping the excess there would take away a tool the model had just loaded and
+was about to use), and what went is written into the turn as the harness pair
+`_func_tool_unload` called with no names — the same shape and the same rule, so
+that a reader of the record reads that the list shrank rather than reaching for a
+tool it still believes it has.
+
+**The opening message is rendered, and that is the third prompt-with-holes.**
+`slife2/templates/agent_task.j2` joins `system.j2` and `recall.j2` under the
+mechanism `slife2.prompt` already describes for both, for the same reason: it is
+a prompt with holes in it, so it is a template rather than an f-string.  It is
+asked for by bare name and is therefore **shipped rather than configured** —
+which is what `recall.j2` does, and the opposite of what `agent:`'s
+`system_prompt` does.  The difference is whose words they are: the agent's prompt
+is the operator's, because it is *who the agent is*, and a task gets it because a
+task is that agent; this one is machinery, the way this system tells a loop that
+nobody is listening.  An operator with an opinion about what a task is told has
+the agent's own prompt to say it in, and it already reaches tasks.
+
+Three things the file has to carry, and only the first is obvious:
+
+* **Nobody can answer a question.**  A turn that ends by asking which report was
+  wanted is a task that spent a whole loop producing nothing.
+* **It is the agent, on the agent's own context.**  Said out loud, because the
+  alternative reading is a stranger being briefed: a task that behaved like one
+  would ask for what the conversation already holds, and would not use what it
+  already knows.
+* **Its last message is the result, and it goes back on its own.**  So it is the
+  answer rather than a plan, an offer to begin, or a note about what it is about
+  to do — nobody is going to ask for it, and nothing else will be sent.
+
+Everything else a task needs is in the agent's own prompt, and what is in this
+file and *not* there is exactly the difference between being an agent and being a
+task.  That is why it is a file, and why it is short.
+
+**The step machine is a library, and this is the sentence §1.1 was written for.**
+`slife2.loop` is a pure function over a message list: it owns no conversation,
+knows no provider, and does not know whether anyone is watching (§7).  It is not
+"the main agent's loop" — it is *the* loop, and the agent server is one of its
+callers.  And it is called here with nothing that has to be turned *off*:
+`run_turn`'s `observer` defaults to `NULL_OBSERVER` and its `auto` to `None`,
+which are exactly a task's two answers — nobody is watching, and there is no
+inbox to cut in from.  **A library that needs a row of switches set to off before
+it fits has to be reused; one whose defaults are already the caller's needs only
+to be called**, and the distance between those two is the whole of "clean" here.
+
+**The boundary that keeps it that way**: a behaviour the task's turn needs and
+`AgentLoop` does not have is added to `AgentLoop` behind a parameter that
+defaults off, or the task does not get it.  It is never added to a copy.  Phase A
+strictly before Phase B, every tool failure becoming a message, and `max_steps`
+ending a turn normally are three decisions §7 names as load-bearing, and a second
+implementation of them is a second answer waiting to drift.
+
+**A task carries the agent's identity, and no identity of its own.**  Its tool
+calls and its model calls go out as `(agent, "")` — the agent itself, from
+`audience.client_meta`.  Nothing is invented to hold a task's name, and that is a
+decision rather than a shortcut: a key of its own would be a second slot in a
+namespace that means "a conversation", and the name a task has lives where the
+thing that owns it lives.  Two consequences follow, and both are wanted:
+
+* **`turn_read` and `turn_list` answer from the agent's own log.**  That is what
+  "it runs on the agent's context" means where it is observable: a task is the
+  agent working, so the agent's memory is what it reads.
+* **A task may start a task, because the tool set is not filtered.**  The
+  catalogue is one list for the whole system (§8) — what a caller gets is what is
+  loaded — and "this caller's list, minus one name" would be the first
+  per-caller tool set in this design.  So the registry is **flat**: one name per
+  task, no parents, no depth, and `agent-task: max_running` is the bound instead.
+  What that does not bound is how much work happens over *time*; §9 says so.
+
+**The four tools answer in one vocabulary**, which is why stopping a task needs
+no second set of outcomes:
+
+```
+agent_task_start(name, description)  -> {"task_id", "status": "running"}
+agent_task_status(name)              -> {"task_id", "status", "started_at", …}
+agent_task_list()                    -> {"tasks": [{task_id, status, started_at, …}]}
+agent_task_cancel(name)              -> {"task_id", "status"}   after the call
+```
+
+`status` is one of `running`, `finished`, `failed`, `cancelled` and `unknown`.
+`agent_task_cancel` answers with that same field — `cancelled` when this call
+stopped it, `finished` or `failed` when it was already over — and that is the
+difference between *I stopped it* and *I arrived late*, which is worth one shared
+vocabulary rather than two.  `finished` and `failed` are apart because a model
+asking about a task needs both halves: that it is over, and how it went.  The
+failure's own words arrive by message like any other answer, so the field is a
+state and never a result.
+
+**And there is no tool that reads an answer back**, which is a decision and not a
+gap left open.  The answer always comes *to* the conversation: that is what the
+push is for, and a second way to fetch one thing is the way that ends up used
+twice — the same argument that keeps the result out of `agent_task_status`.  What
+remains uncovered is a hand-over that landed nowhere at all, and that is the case
+above: it is logged with the answer's length, and it means the terminal and the
+agent server were both gone.
+
+**The result is a message, and asking is a different question.**
+`agent_task_status` does not return the answer's text and does not suppress the
+message that carries it: if it did either, the same result would enter the
+conversation twice and a model could act on it twice.  So the answer travels one
+way, and the poll answers *is it still running, and did it go well*.  A name that
+never ran and a name the registry has forgotten both answer `unknown`, which is
+honest — the registry keeps the tasks it has run, capped, and forgets from the
+tail.
+
+**Cancelling pushes nothing, and the state is the lock.**  A cancelled task's
+result never arrives: there is nothing to report about work that was called off,
+which is §3's rule for a cancelled turn one level down (`Pending.result` stays
+`None`).  Its finaliser awaits nothing — §3 measured that a plain `await` in a
+cancelled scope is cancelled again at its next checkpoint — so the registry entry
+is popped synchronously and the delivery is simply not reached.  The two
+happenings that decide an outcome cannot interleave: one process, one event loop,
+and no `await` between reading the status and writing it.  A cancel arriving
+after the loop returned therefore answers `finished` and the delivery completes —
+**a late cancel cannot take a result away.**
+
+**And a task needs no cancellation repair.**  A cancelled turn in the agent
+server is truncated back to the user's message, because an assistant message with
+half its tool calls answered is a 400 from every provider and *that* conversation
+has to survive.  A task's message list is the runner's local and dies with it, so
+there is no next request to poison.  That is the fifth thing the task's path does
+not have, and this one is not saved by omission — it is not needed.  What is not
+repaired either is a tool that was running when the cancel landed: cancelling
+mid-call is not a rollback, in a task exactly as in a turn.
+
+**The delivery is §1.2's path, because that is what the path is for.**
+`slife2-tui`'s `submit(agent, text, channel)` is how something outside a
+conversation becomes a turn in it — WeChat is its first client
+(`wechat._to_window`) — and a finished task is its second.  The words go into the
+same queue a person's own typing goes into, so a parent that is mid-turn takes
+them at a step boundary as the `_check_new_input` pair it already knows how to
+fold in, and a parent that is idle runs them as its next turn, on screen.  That
+is the whole of "pushed back into the agent's inbox": the inbox already decides
+what an arriving message is, and nothing here has to.
+
+**The channel is `agent-task:<name>`, and the answer wears a marker.**  A channel
+is the key a plugin runs under — `wechat`, `tui`, and this one (§1.2) — and a
+task's answer also carries the task's `name`, because the window builds the
+bubble from the channel and nothing else: `AsyncTaskResult(research)> ` is a fact the
+channel has to carry rather than one the window could guess.  The *recorded*
+channel carries it too, which is what the `[TURN:{…}]` footnote hands the model
+(§5.1) — so a result says which task it came from outside the marker as well as
+inside it.
+
+**The marker is `[AsyncTaskResult:{…}]`, and a screen takes it off like WeChat's.**  It
+carries five fields — `task_id`, `name`, `status`, `started_at`, `finished_at` —
+and its reader is the model: the id is what its *next* call needs, since asking
+about a task or stopping one names it, and this is where the name is learned.
+Those keys are the ones every tool's reply and every row of `agent_task_list`
+uses, so a model never translates between two spellings of one fact — the rule
+`slife2-wechat` states for its own marker, applied to a marker whose keys are
+named after the fields the tools answer with.  A screen has the channel already,
+so it removes the marker before drawing, exactly as it does WeChat's:
+`slife2.markers.strip` takes the prefixes a caller knows about and removes
+whichever it finds, which is one function for two markers and a third channel
+away from being a line in `slife2.tui.widgets.MARKERS`.  The *names* stay with
+their writers, because the module that writes a marker is the one that knows what
+it looks like, and a copy drifts into printing the raw marker at somebody.
+
+**And the delivery has a fallback, which fires on exactly one failure.**  `submit`
+refuses when no window is showing that agent, and it looks the session up before
+it posts anything (`slife2.tui.control`) — so **that refusal is the one that
+proves nothing was written**, and it is the only thing the fallback is for.
+Anything else means the call did not come back, and the words may be down the
+stream already: repeating them is how one answer arrives *twice*, which is what
+treating "it raised" as "it did not happen" produced when it was tried.  So the
+hand-over answers in three values rather than a boolean — written, refused,
+unknown — and the unknown one is logged and not repeated.  That is §1.2's rule
+from the caller's side, and it is worth stating where it bites: a caller that
+gave up cannot know, so it does not repeat.
+
+What the fallback does is `send_message` on the agent server with `subagent`
+empty — §3's "a caller which is not displaying the conversation can still
+continue one", which is what that sentence is for.  The turn runs, is recorded,
+and is drawn when a window opens and restores: the result is late rather than
+gone.  Start a task, close the window, walk away, and the answer is waiting in
+the transcript.
+
+**Nothing here auto-dispatches an answer**, which is §1.2's rule unchanged.  A
+task's result is something the agent acts on; whether that becomes a message to
+somebody is that turn's business, not this plugin's.
+
+**`agent-task:` owns one number, and `agent:` gains a second reader.**  The
+section holds `max_running`, because a task is the one loop source that can grow
+without bound and §9 has owed a cap on loops since before this section existed.
+Everything else a task's turn is made of — `system_prompt`, `max_steps` — comes
+out of `agent:`, which gives that section two readers and §8's rule (*the section
+a key lives in is the plugin that reads it*) an exception.  It is the right one:
+those keys are not the agent *server's*, they are **the agent's**, and a task is
+the agent working.  A prompt or a step count that meant something different for a
+task would be two agents wearing one name.
+
+**The name says what the thing is, and this system already had the other word.**
+`media/adapters.py` speaks of a `task_id` and polls a provider's `task_status`
+(`adapters.py:433`): that is somebody else's asynchronous job, waited for inside
+a turn.  An **agent task** is the opposite — a loop of ours that nobody waits
+for — and `agent_task_*` names it as what it is: a task an agent runs, which
+calls a model.  The word in the name is the word the model needs in order to know
+it is asking for work rather than filing one.
+
+**What it costs, said plainly.**  A second place where a turn is assembled, which
+the boundary rule above is the answer to rather than a denial of.  A task's model
+calls are indistinguishable from the agent's at the far end of the hop, because
+the identity they carry is the agent's — the price of not inventing a key, paid
+in the one log that is not this system's, while the task plugin's own log is
+where a task is visible.  And nothing bounds how much agent-task work happens
+over time; §9 holds that one open, because the two ways to close it are a rate
+and a depth, and `agent_task_list` with `agent_task_cancel` is what makes it
+visible and stoppable in the meantime.
+
+### 1.4 The cabinet, and what four kinds of document cost
 
 **`slife2-cabinet` is the first plugin here that owns a store of its own and
 nothing else** — not a family (it declares no catalogue rows), not a connection
@@ -338,7 +659,7 @@ its title instead of by a task and is otherwise the log it always was); and
 **`USER.md`** (v1 served the profile *and* rendered it into the system prompt,
 and wiring a file into a prompt is a change to the prompt).
 
-### 1.4 A second provider table, and what a *kind* is on
+### 1.5 A second provider table, and what a *kind* is on
 
 **`slife2-media` is the embeddings server's shape applied to four capabilities
 that are not embeddings** — an image, a video, speech and a transcript — and the
@@ -1979,6 +2300,20 @@ cannot say all three is a wish rather than a decision.
   conversation can hold and nothing bounds it. The store already has the pattern
   for the *record* — an oversized result becomes an announced head-and-tail
   digest — and the same rule belongs on the way into the model.
+- **A task's progress, and a person's hand on one.** §1.3's four tools are the
+  model's: a conversation can start an agent task, ask about it, list it and stop
+  it, and nothing draws one. A window has no line for a task that is running and
+  no key that stops one, so a person's only lever is to ask the model — which is
+  the shape §1.2 rejects everywhere else. Drawing one is the same three changes
+  §9's cut-in entry names — an event, `tui/restore.py`'s `_is_harness` filter,
+  and a line that does not close the open turn — plus a read of the task
+  registry, which no window has.
+- **A bound on total agent-task work.** `agent-task: max_running` bounds how many
+  run at once, and nothing bounds how many run over time: a task may start a
+  task, and each one is a full loop. `agent_task_list` and `agent_task_cancel`
+  make a runaway visible and stoppable, which is a mitigation and not a bound. A
+  rate, or a depth, is the number still missing — and neither is worth building
+  before somebody has watched one.
 - **Subagents.** `Loop.records` exists, so a worker's round trips are the ones
   not written to the log, and `send_message` takes a `subagent`: a worker's
   conversation is a separate key with its own history, inbox and lock, in the

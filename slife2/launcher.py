@@ -33,6 +33,7 @@ from fastmcp import Client
 
 from slife2.config import (
     AGENT_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
     API_BACKENDS,
     API_SERVER_NAMES,
     CABINET_SERVER_NAME,
@@ -130,6 +131,16 @@ MEDIA_SERVER = ("slife2.media.server", MEDIA_SERVER_NAME, "generate_image")
 #: this plugin starts in.  The probe only looks for the name in `tools/list`
 #: (`slife2.mcp_server.identifies`), so naming a tool that blocks is safe.
 TUI_SERVER = ("slife2.tui.control", TUI_SERVER_NAME, "attach")
+#: The background tasks: one loop of the calling agent's own per task, answered
+#: by a message.  A second agent server in the only sense that matters — what it
+#: holds is loops — and it identifies itself by `agent_task_list`, the one tool
+#: it serves that takes no argument and needs nothing running, which is the
+#: state it starts in.
+AGENT_TASK_SERVER = (
+    "slife2.agent_task_server",
+    AGENT_TASK_SERVER_NAME,
+    "agent_task_list",
+)
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -144,6 +155,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "media": MEDIA_SERVER,
     "tui": TUI_SERVER,
     "agent": AGENT_SERVER,
+    "agent-task": AGENT_TASK_SERVER,
 }
 
 #: The tool every model server answers to, and how they are named.  One tool
@@ -628,6 +640,14 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # a write places its vector in the same call, so a cabinet that cannot embed
     # stores nothing.
     "cabinet": ("embeddings",),
+    # The background tasks reach three peers rather than being reached by them:
+    # the hub for the tools its loop runs with, a model server for the loop
+    # itself, and the terminal — or, when no window is showing the conversation,
+    # the agent server — to hand the answer over.  Ordering rather than
+    # correctness, like every edge here: a task started before one of these is
+    # up fails its own first hop, and that failure looks like the feature not
+    # working rather than like a daemon that was still starting.
+    "agent-task": ("toolhub", "tui", "agent"),
     "toolhub": (
         "embeddings",
         "context",

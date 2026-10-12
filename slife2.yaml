@@ -176,6 +176,17 @@ servers:
     host: 127.0.0.1
     port: 8020
     path: /mcp
+  # The background tasks: a loop of the calling agent's own, one per task,
+  # answered later by a message in the conversation that asked for it.  A plugin
+  # because what it holds is loops — the same reason the agent server is one —
+  # and unlike every other address here it *reaches* its peers rather than being
+  # reached by them: the hub for a tool list, a model server for the loop, and
+  # the terminal (or, when no window is showing, the agent server) to hand the
+  # answer over.  Its own section is `agent-task:` below, and it holds one key.
+  agent-task:
+    host: 127.0.0.1
+    port: 8037
+    path: /mcp
 
 # ── External tool servers ───────────────────────────────────────────────────
 # Other people's MCP servers, held by `slife2-mcp-tools` — which is why they
@@ -601,6 +612,30 @@ agent:
   #   system_prompt: "prompts/jack.j2"
   #
   # Inside it, `{{ agent_name }}` is the name the instance was started with.
+
+# ── Background tasks ────────────────────────────────────────────────────────
+# How many agent tasks one agent may have running at once.  An **agent task** is
+# a loop of the agent's own — the same system prompt, the same model and the
+# same tools, and none of the asking conversation's history — started by the
+# model with a name and a description, and answered later by a message on the
+# `agent-task` channel.  The model has four tools over them —
+# `agent_task_start`, `agent_task_status`, `agent_task_list` and
+# `agent_task_cancel` — and not one of them waits for the work (DESIGN.md §1.3).
+#
+# **`max_running` is the only key a task owns, and that is the design.**  A
+# task's prompt and its step count come out of `agent:` above, because a task is
+# the agent working: `agent:` is the one section in this file with two readers,
+# and a prompt or a step count that meant something different for a task would
+# be two agents wearing one name.
+agent-task:
+  # Tasks running at once, per agent.  A cap rather than a preference, and the
+  # only bound this feature has: the tool set is the one catalogue and nothing
+  # filters it, so a task may start a task — without this a model can grow loops
+  # without limit.  What it does *not* bound is how much work happens over time;
+  # `agent_task_list` and `agent_task_cancel` are what make a runaway visible
+  # and stoppable in the meantime, and DESIGN.md §9 holds the number that is
+  # still missing.
+  max_running: 4
 
 # ── Embeddings (semantic memory search) ─────────────────────────────────────
 # Where the db's vectors come from.  **A section of its own, holding only
