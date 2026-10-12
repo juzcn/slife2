@@ -11,10 +11,10 @@ folder, so for a while this family needed no server at all and the hub read the
 directory itself.  Two things made that the wrong home.  The first is that the
 hub is the tool *set's* owner — which tools may be called, what a name resolves
 to, what the budget trims — and reading somebody else's config section and
-somebody else's folder is not that job.  The second is what is next: DESIGN.md
-§9 has the rest of the reading family landing here (`skill_list`, the half a
-model uses to find the name it then reads), and a model-facing tool needs a
-server to be served from.
+somebody else's folder is not that job.  The second is what is served here: the
+reading family is a pair — `skill_list`, the half a model uses to find the name
+it then reads, and `skill_use`, the half that reads it — and a model-facing tool
+needs a server to be served from.
 
 **This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer, so the hub stays the only writer of the tool table,

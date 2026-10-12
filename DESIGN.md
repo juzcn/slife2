@@ -1734,11 +1734,20 @@ sentence. A restored panel therefore reads as done. That is an absence in the
 record rather than a mistake in `slife2/tui/restore.py`, and it is worth closing
 in the record rather than guessed at from the text.
 
-Two things are deliberately not carried over from v1, and both are named in §9
-rather than half-built here: **the trim** — which with the rebuild on is a
-*guard* behind the selection rather than the mechanism the context is normally
-held to — and **the real-BPE token count**, for the reason `slife2.tokens`
-argues: it would be exact about a vocabulary none of these endpoints use.
+**The real token count is not carried over, and that is a decision rather than a
+gap.** v1 counts with `tiktoken`'s `o200k_base` and provisions the vocabulary at
+install time. `slife2.tokens` is a script-aware character measure instead,
+because this system's endpoints are DeepSeek, Qwen, Ollama and whatever gateway
+the operator points at, and `o200k_base` is not one of their vocabularies either
+— the dependency would buy exactness about a tokenizer nobody here uses. What it
+costs is tolerance, and the budget is a fraction of a window, so an estimate 10%
+wrong spends 10% of a window sized for it. Measured usage is untouched:
+`context_tokens` is the provider's own count, and it is the number §5.1's
+selection is not spending.
+
+**The trim is the one thing still owed here**, and it is named in §9 rather than
+half-built: with the rebuild on, it is a *guard* behind the selection rather
+than the mechanism the context is normally held to.
 
 **A missing server is a broken system, not a degraded one.** `slife2` starts
 every plugin together and refuses to start at all if one of them will not come
@@ -1968,7 +1977,10 @@ verified by running against the installed library rather than by reading:
   answers the listen request with `Method not found` — so our own plugins never
   send one either. The consequence for §8 is that the peer's notification could
   no longer be the only thing a tool list stays true by, and
-  `Connection` re-reads an aged listing instead.
+  `Connection` re-reads an aged listing instead. The same absence is why **an
+  answer rides the request that asked for it**: with no push channel there is
+  nowhere to tell a caller later, which is why a queued caller waits on its own
+  call (§3) and why that wait is the thing the inbox is capped for.
 
 - **`stream_options` and usage.** OpenAI sends token counts on a trailing chunk
   with an empty `choices` list. DeepSeek attaches them to the final chunk that
@@ -2532,6 +2544,12 @@ keeps wanting. The stamp is written before the answer is returned, which is what
 keeps it ahead of the trim: a detached write could land after the turn boundary
 and cost the model the tool it had just been using.
 
+**The number itself has not been re-measured.** 100 is v1's — arrived at by
+watching a real tool set — and it is carried here unchanged. Nobody has yet
+watched a real twenty-server config against it, so what this section owes is not
+a mechanism but an observation: on-demand loading landed, and the measurement
+that would move the threshold has not been taken.
+
 ### 8.6 Names, and the links the hub holds
 
 **A name is a row's identity, and two sources cannot offer one.** That is the
@@ -2710,7 +2728,13 @@ cannot say all three is a wish rather than a decision.
   and must not until it exists: a refusal that ends "ask for the list" is a
   promise this build cannot keep, and in the log of a real turn a model followed
   it by calling `skill_use` with an invented name.
-- **Markdown rendering.** The transcript shows model output as plain text.
+- **Markdown rendering.** The transcript shows model output as plain text, and
+  that is a stance rather than an unfinished edge: nothing a model produces is
+  parsed as markup (`slife2/tui/widgets.py`), so a `[bold]` a model wrote is
+  seven characters on the screen rather than a formatting instruction. Rendering
+  markdown would keep that property — it is a rendering pass, not a markup one —
+  but it is a taste decision about the transcript rather than a gap in the
+  system, and nobody has asked for it.
 - **Drawing a message that cut in.** §3 has the behaviour — a message that
   arrives mid-turn is handed to that turn as a tool pair and is in the record
   from then on — and nothing draws it. Closing it is three changes: an event, an
@@ -2726,14 +2750,6 @@ cannot say all three is a wish rather than a decision.
   take their ids out of the live list. It catches the one thing no selection can
   see in advance: a turn whose tool results balloon *while it runs*. The list and
   the write that maintains it both exist, so this is the consumer.
-- **The real token count.** v1 counts with `tiktoken`'s `o200k_base` and
-  provisions the vocabulary at install time. `slife2.tokens` is a script-aware
-  character measure instead, because this system's endpoints are DeepSeek, Qwen,
-  Ollama and whatever gateway the operator points at, and `o200k_base` is not one
-  of their vocabularies either — the dependency would buy exactness about a
-  tokenizer nobody here uses. What it costs is tolerance, and the budget is a
-  fraction of a window, so an estimate 10% wrong spends 10% of a window sized for
-  it. Measured usage is untouched: `context_tokens` is the provider's own count.
 - **`turn_search`, offered to the model.** `TurnStore.search` fuses two legs and
   the *rebuild* reads it through `recall`; a model cannot, on purpose. The order
   is v1's — the legs landed and were measured, then the harness used them, and
@@ -2751,6 +2767,17 @@ cannot say all three is a wish rather than a decision.
   model**, run as an argv rather than through a shell, so that arguments a model
   invents cannot become commands it invented. `slife2-cli` is the process it
   lands in. It is also what opens the approval question below.
+- **The tool that runs a skill's scripts.** A skill is a `SKILL.md`, and what it
+  often tells the model to do is run the script sitting beside it. Nothing here
+  performs that step (`slife2/skills.py`), so the last line of a playbook is an
+  instruction no tool of ours carries out. It is the same shape as the `cli:`
+  entry above — a model-facing tool, an argv rather than a shell — and the one
+  thing that makes it skills-specific is `env:` injection: `skills:` in the
+  config resolves a declared key through shell-then-credstore, and handing what
+  it resolved to that process is the whole reason the section exists. What the
+  current answer costs is a check with nothing behind it: `skill_use` reports
+  whether the key and the program are at hand, and the step it is clearing the
+  way for is one nobody takes.
 - **A word to the model about the loaded set.** `tool_search` and
   `func_tool_load` explain themselves in their own descriptions and nothing else
   does. v1 carried a per-turn prompt saying how many tools were loaded; nobody
@@ -2773,15 +2800,19 @@ cannot say all three is a wish rather than a decision.
   model being asked is the model asking. §8.7 still says where the answer goes —
   the hub, the one place that knows the whole set — and what it has to cover is a
   named list of tool names rather than a category.
-- **A measurement of the tool budget.** On-demand loading landed (§8.4, §8.5).
-  What is left is not a gap but a number: nobody has watched a real twenty-server
-  config against `tool_load.threshold`, and 100 is still v1's.
 - **Device-code OAuth for tool servers.** v1's gateway ran the whole RFC 8628
   flow, kept tokens in the OS keyring through `credstore`, and held the token
   beside the configured headers so a re-auth did not churn them. Not ported:
-  `${VAR}` headers cover a token somebody already has, and FastMCP's own `auth:`
-  key reaches the SDK's browser flow for the rest — except headless, where the
-  browser flow has no browser.
+  `${VAR}` headers cover a token somebody already has, and that is the whole of
+  what this build reaches. **There is no fallback behind it.** An earlier
+  version of this entry said FastMCP's own `auth:` key reached the SDK's browser
+  flow for the rest, and it does not: `_tool_server` reads the keys it knows
+  into `ToolServerSettings`, so `auth:` is dropped at load rather than handed on
+  (`slife2/gateway.py`, which also names what closing this costs — a field on
+  the settings and a line in the loader). So a tool server that needs a login
+  works here only if that login can be had out of band and handed over as a
+  header, and headless is the case that hurts, because the browser flow has no
+  browser.
 - **Digesting an oversized tool result.** A tool can return more text than the
   conversation can hold and nothing bounds it. The store already has the pattern
   for the *record* — an oversized result becomes an announced head-and-tail
@@ -2829,11 +2860,6 @@ cannot say all three is a wish rather than a decision.
   `(agent, subagent)`. A spawn tool has to decide that first, and then how it
   collects results, whether a worker is multi-turn, how deep nesting goes, and
   whether cancelling a parent cancels its children.
-- **Server-initiated push.** Not available at this revision through FastMCP:
-  `subscriptions/listen` is the only push channel, it carries four
-  change-notification types, and FastMCP 4.0.11 registers no handler for it. So
-  an answer rides the request that asked for it, which is why a queued caller
-  waits on its own call rather than being told later.
 - **A client id on the turn record.** Nothing reads it yet, and adding a column
   to `turn` means deleting every existing `turns.db` (§5 has no migration layer).
   Getting it wrong is worse than the gap: the new INSERT would raise
