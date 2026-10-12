@@ -105,6 +105,7 @@ uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-cabinet          # notes, diary, files,        :8035
 uv run slife2-media            # images, video, speech,      :8036
+uv run slife2-file-tunnel      # a public URL for a file,    :8038
 uv run slife2-tui              # the terminal's inbox,       :8005
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
@@ -551,6 +552,53 @@ take minutes and the wait is bounded: past `timeout` the call is refused with th
 provider's job id rather than its result, because the render carries on there and
 asking again would pay for it twice.
 
+### The file tunnel
+
+**A public HTTPS URL for a local file**, so something that cannot read your disk
+can fetch one anyway — a vision model asked about a picture, a chat API that
+takes a URL and nothing else.
+
+```
+expose_local_image(path)      → https://<tunnel>/share/<token>
+unexpose_local_image(token)   → that URL stops working
+```
+
+The file is not moved or copied: it is served from where it is, for as long as
+the tunnel is up. The link stops working the moment the **file changes** (so a
+path swapped underneath a link can never serve new bytes to whoever holds the
+old one) and when the process exits. A private key, a `.env` or a saved password
+is refused by name — a share URL is public while the tunnel is up, so that would
+be publishing it.
+
+**A tunnel is somebody else's process, and the config says whose.** Three
+providers, exactly one active; the others stay configured and inert:
+
+```yaml
+file-tunnel:
+  active: cloudflare
+  providers:
+    ngrok:        { token: ${NGROK_AUTHTOKEN} }
+    localhost.run: { binary: ${SSH_BINARY:-ssh}, user: nokey, remote_port: 80 }
+    cloudflare:   { binary: ${CLOUDFLARED_BINARY:-cloudflared}, protocol: http2 }
+```
+
+| provider | needs | the URL | what a *browser* sees |
+|---|---|---|---|
+| `ngrok` | an `NGROK_AUTHTOKEN` credential | one stable dev domain per account | on the free tier, an interstitial splash page (ngrok answers any `Mozilla` User-Agent with it, and forbids suppressing it server-side) |
+| `localhost.run` | an `ssh` client — Windows 10+ ships one | a random `*.lhr.life` hostname that rotates every few hours | the file; TLS ends at their edge. Bytes are relayed by a third party |
+| `cloudflare` | the `cloudflared` binary, which nothing installs | a `*.trycloudflare.com` hostname, stable for the process's life | the file |
+
+Programmatic fetches — the multimodal-LLM path this exists for — are unaffected
+by ngrok's splash page, which is why ngrok is the default when nothing is
+configured. The config above ships with **`cloudflare` active**, because it
+needs no account and relays the bytes to nobody; if you have not installed
+`cloudflared`, set `active:` to `localhost.run` and the OpenSSH client Windows
+already ships is the whole requirement. **A tunnel that is not up, or that has
+published a URL nothing can reach, is refused rather than handed out**: a link
+that answers HTTP 530 is worse than an error, because the model that cannot
+fetch it cannot say why. `tunnel_status` is where the detail is — the state, the
+URL, whether it is reachable, and the edge address it is dialing.
+
 ### The cabinet
 
 Your own notes, a diary, saved files and reports, in one place that a search
@@ -795,6 +843,11 @@ slife2/
 ├─ media/             # slife2-media: generation, one process for every vendor
 │  ├─ server.py       #   the four tools and the config's four-step search
 │  └─ adapters.py     #   one contract, and the vendor HTTP behind it
+├─ file_tunnel/       # slife2-file-tunnel: a public URL for a local file, and
+│  ├─ providers.py    #   the only plugin here with a second HTTP route — the
+│  │                  #   ngrok / localhost.run / cloudflared transports, their
+│  │                  #   state machine, and the health monitor that keeps one up
+│  └─ server.py       #   the token registry, `GET /share/<token>`, the tools
 ├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
 │                     #   as sixteen tools, and the byte half of a saved file —
 │                     #   what is copied in, what is read back, what is refused

@@ -40,6 +40,7 @@ from slife2.config import (
     CLI_SERVER_NAME,
     CONTEXT_SERVER_NAME,
     EMBEDDINGS_SERVER_NAME,
+    FILE_TUNNEL_SERVER_NAME,
     LOCAL_SERVERS,
     MCP_TOOLS_SERVER_NAME,
     MEDIA_SERVER_NAME,
@@ -125,6 +126,14 @@ CABINET_SERVER = ("slife2.cabinet", CABINET_SERVER_NAME, "note_list")
 #: The media plugin.  It identifies itself by `generate_image`, which is the
 #: first of the four capabilities and the one a config is most likely to have.
 MEDIA_SERVER = ("slife2.media.server", MEDIA_SERVER_NAME, "generate_image")
+#: The file tunnel: this machine's port published as a public HTTPS URL.  It
+#: identifies itself by `expose_local_image`, which is the tool it exists for
+#: and the one a config is most likely to have been set up to use.
+FILE_TUNNEL_SERVER = (
+    "slife2.file_tunnel.server",
+    FILE_TUNNEL_SERVER_NAME,
+    "expose_local_image",
+)
 #: The terminal's inbox: one process, a session per agent.  It identifies itself
 #: by `attach` — the call a window holds open for as long as it is showing a
 #: conversation, which is served before any window exists and so is the state
@@ -153,6 +162,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "wechat": WECHAT_SERVER,
     "cabinet": CABINET_SERVER,
     "media": MEDIA_SERVER,
+    "file-tunnel": FILE_TUNNEL_SERVER,
     "tui": TUI_SERVER,
     "agent": AGENT_SERVER,
     "agent-task": AGENT_TASK_SERVER,
@@ -658,6 +668,7 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "wechat",
         "cabinet",
         "media",
+        "file-tunnel",
     ),
 }
 

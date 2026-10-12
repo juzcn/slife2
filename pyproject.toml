@@ -15,6 +15,13 @@ dependencies = [
     # transport every server test runs on.  Brings `mcp` transitively; nothing
     # here imports `mcp` directly, so it is not listed.
     "fastmcp>=4.0.1",
+    # The ASGI layer under it, imported *directly* by one plugin and nowhere
+    # else: the file tunnel serves `GET /share/{token}` beside its MCP
+    # endpoint, and a custom route is written as a Starlette handler
+    # (`Request` in, `Response` out).  It arrives with FastMCP either way, and
+    # is declared by the same rule as `httpx2` below — a module this project
+    # imports is a dependency this project states.
+    "starlette>=1.7.0",
     # The TUI.  Brings `rich` transitively; we do not import it.
     "textual>=8.2.8",
     # The WeChat bridge, which is the one thing here that talks to somebody who
@@ -44,6 +51,15 @@ dependencies = [
     # behind MCP.
     "openai>=2.46.0",
     "anthropic>=1.2.0",
+    # The fourth tunnel provider's own SDK — v1's dependency for the same
+    # plugin, and the only one here that is *not* a model backend.  It embeds
+    # the ngrok agent as a native extension, so the `ngrok` provider needs no
+    # external binary where the other two need `ssh` or `cloudflared`.  The
+    # import is inside the one function that starts that tunnel
+    # (`slife2.file_tunnel.providers._import_ngrok`), by the same rule as
+    # `qrcode` below: a build without it runs every other provider and reports
+    # this one as unavailable when it is selected.
+    "ngrok>=1.6.0",
     "jinja2>=3.1.0",
     # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
     # per connection by `slife2.db`, which is why it is a dependency of the
@@ -82,6 +98,7 @@ slife2-toolhub = "slife2.toolhub:main"
 slife2-wechat = "slife2.wechat:main"
 slife2-cabinet = "slife2.cabinet:main"
 slife2-media = "slife2.media.server:main"
+slife2-file-tunnel = "slife2.file_tunnel.server:main"
 slife2-tui = "slife2.tui.control:main"
 slife2-llm-openai = "slife2.llm.openai_server:main"
 slife2-llm-anthropic = "slife2.llm.anthropic_server:main"

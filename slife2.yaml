@@ -145,6 +145,19 @@ servers:
     host: 127.0.0.1
     port: 8036
     path: /mcp
+  # A public HTTPS URL for a local file, so something that cannot read this
+  # machine's disk — a vision model asked about a picture, an API that takes
+  # links and nothing else — can still fetch one.  The tunnel provider is the
+  # `file-tunnel:` section at the bottom of this file.
+  #
+  # The one server here that answers a second HTTP route: `GET /share/<token>`
+  # beside `/mcp`, on this same port, because the far end fetches that path
+  # *through* the tunnel.  Nothing else about it is unusual — which is why it
+  # is a plugin on this list and not a mechanism of its own.
+  file-tunnel:
+    host: 127.0.0.1
+    port: 8038
+    path: /mcp
   # The terminal's own inbox.  One process, shared like every other server here,
   # holding a session per agent: a message arriving on another channel is handed
   # to it by name, and it puts the words down the stream the window showing that
@@ -738,3 +751,76 @@ media:
           voice: longanhuan_v3.6
         - model: qwen-audio-3.0-asr-flash
           kind: asr
+
+# ── A public URL for a local file ───────────────────────────────────────────
+# The ACTIVE tunnel provider exposes this machine's `file-tunnel` port
+# (8038 above) as a public HTTPS URL; `expose_local_image` hands that URL out,
+# and `GET /share/<token>` on the same port serves the bytes.
+#
+# Provider options support `${VAR}` / `${VAR:-default}`, resolved through the
+# shell env → credstore → literal default, like every other value in this file.
+#
+# Providers differ in what they need and in what a *browser* sees:
+#
+#   ngrok          Needs an NGROK_AUTHTOKEN credential (credstore, or the env
+#                  var).  One stable dev domain per account.  On the FREE tier
+#                  ngrok's edge answers any request whose User-Agent contains
+#                  "Mozilla" with an interstitial splash page (ERR_NGROK_6024),
+#                  so a link opened in a browser shows ngrok's warning instead
+#                  of the file.  Programmatic fetches (OpenAI / Anthropic /
+#                  curl — the multimodal-LLM path this tool exists for) pass
+#                  through untouched.  Suppressing it server-side is not
+#                  possible: ngrok forbids injecting the bypass header.
+#
+#   localhost.run  An SSH reverse tunnel — no account, no signup, nothing to
+#                  install (Windows 10+ ships OpenSSH; a missing ssh client is
+#                  reported as a tunnel failure, not a startup failure).  No
+#                  splash page for any client, because TLS is terminated at
+#                  their edge.  Trade-offs: the URL is a random *.lhr.life
+#                  hostname that rotates after a few hours (the provider picks
+#                  the new one up automatically), and file bytes are relayed by
+#                  a third party.
+#
+#   cloudflare     A Cloudflare Quick Tunnel (`cloudflared tunnel --url`) — no
+#                  account, no domain, no splash page, and the URL is stable
+#                  for as long as the process lives.  Two caveats: the
+#                  cloudflared binary is NOT bundled with slife2 and nothing
+#                  installs it (missing → a tunnel failure, never a startup
+#                  failure), and Cloudflare positions Quick Tunnels for
+#                  testing/development while its free-tier terms restrict
+#                  proxying media through the CDN — which is what sharing
+#                  images does.
+#
+# Exactly one provider is active; the others stay configured and inert.  A name
+# this build does not have falls back to ngrok with a warning rather than
+# refusing to start: a tunnel is a subordinate dependency.  `tunnel_status`
+# reports the provider actually in use.
+file-tunnel:
+  active: cloudflare
+  providers:
+    ngrok:
+      # `${NGROK_AUTHTOKEN}` resolves from the shell env, then credstore.  An
+      # option left out still works if the variable is exported.
+      token: ${NGROK_AUTHTOKEN}
+    localhost.run:
+      # Binary name (resolved on PATH, then Windows' bundled OpenSSH) or an
+      # absolute path to an ssh client.  The legacy key "ssh" also works.
+      binary: ${SSH_BINARY:-ssh}
+      host: localhost.run
+      # "nokey" is localhost.run's anonymous free tier — no SSH key required,
+      # so no -i identity is needed (and none is read from credstore).
+      user: nokey
+      # Remote port 80 is what maps to the https://<id>.lhr.life URL.
+      remote_port: 80
+    cloudflare:
+      # Binary name (resolved on PATH, then the usual Windows install
+      # locations) or an absolute path to cloudflared.  Quick Tunnels take no
+      # token and no domain, so this and `protocol` are the whole config.
+      binary: ${CLOUDFLARED_BINARY:-cloudflared}
+      # Transport to the edge (cloudflared's --protocol): "http2", "quic" or
+      # "auto".  Defaults to http2, which rides TCP.  cloudflared's own default
+      # is quic, and QUIC is the one that fails behind a proxy or a TUN
+      # adapter — it registers a connection, then repeatedly loses it to "no
+      # recent network activity", and every window in between answers the
+      # published URL with HTTP 530.
+      protocol: ${CLOUDFLARED_PROTOCOL:-http2}

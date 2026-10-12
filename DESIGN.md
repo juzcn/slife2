@@ -737,6 +737,128 @@ apart because a person does three different things about them: an adapter that
 cannot do this at all (a config choice), a provider that answered badly (worth a
 retry), and a path that is not there (the caller's own typo).
 
+### 1.6 The file tunnel, and the first second route
+
+**`slife2-file-tunnel` is v1's `sharefile`, and it exists for the one thing a
+local path cannot do.**  A vision model asked about `D:\pictures\cat.png`, or a
+chat API that takes a URL and nothing else, cannot read this machine's disk.
+`expose_local_image(path)` answers with a public HTTPS URL that can fetch it.
+Everything else about the plugin follows from that sentence: to have a public
+URL there has to be a **tunnel**, which is somebody else's process or somebody
+else's account; to serve the bytes there has to be an **HTTP route** on the same
+port the tunnel forwards to; and to hand a URL out and later withdraw it there
+has to be a **registry** of what has been exposed.
+
+**A plugin, by §1.1's table, and comfortably so** — the first row is "a
+credential, a provider SDK, somebody else's connection", and this is all three
+at once: an ngrok session, or an `ssh` child, or a `cloudflared` one.  What it
+does *not* hold is anything a library could hold instead, which is the whole
+reason that row does not reach `db`.
+
+**It is the first plugin here that answers a second HTTP route.**  Every other
+one is a single MCP endpoint at `servers.<name>.path`, and §1's claim that "a
+plugin is an MCP server over Streamable HTTP" is exactly true of them.  This one
+also serves `GET /share/{token}` beside `/mcp`, on the same port, because the
+far end fetches *that path* through the tunnel — the URL handed to a model is
+`https://<tunnel>/share/<token>`, and nothing about MCP is involved in the fetch
+that follows.
+
+Three things are worth saying about it, because each is a place the arrangement
+could have been got wrong:
+
+* **It needs nothing new from `slife2/mcp_server.py`.**  FastMCP has had
+  `custom_route` all along and `serve()` still runs the app with
+  `mcp.run(transport="http", …)`, so the route is served by the same call, on
+  the same port, outside the `/mcp` prefix.  Measured against the installed
+  4.0.11 rather than assumed, and pinned by a test that drives the real ASGI
+  app (`http_app()`) with no socket: a URL a third party cannot fetch is the
+  failure this feature cannot survive.
+* **The port is the config's, not a bound socket's.**  v1 called
+  `bind_free_port()` and told the parent which one it got, so the tunnel could
+  be pointed at it.  Here the address is already written down — `serve_plugin`
+  reads it from `servers.file-tunnel` — so the tunnel is pointed at that.  What
+  it costs is `--port` on this one plugin, which would move the MCP server and
+  leave the tunnel forwarding to the configured port; nothing calls it that
+  way, and a tunnel needs an address written down somewhere regardless.
+* **The registry is one map for the whole process, and that is not the usual
+  rule here.**  §1.1's contract keys a server's state by client id, and this one
+  deliberately does not: the thing being addressed is `GET /share/{token}`, a
+  third party fetching it says nothing about who they are, and the token *is*
+  the capability.  What is kept per agent is the *owner* of each exposure, which
+  is the one place the identity is available and can be made to matter —
+  `unexpose_local_image` refuses to withdraw another conversation's link.  v1
+  did not need the distinction because one child process served one agent; here
+  it is the difference between isolation and a shared namespace.
+
+**What it costs is that the tunnel publishes an MCP endpoint.**  The port being
+forwarded is the plugin's, so while a tunnel is up the public internet reaches
+`/mcp` as well as `/share/{token}` — and no server here has an authorization
+story, because every one of them is bound to loopback and served to its own
+operator.  The surface is therefore wider than the feature: a caller who knows
+the hostname can call `expose_local_image` itself and read any file this process
+can read.  What stands between that and a stranger is the hostname's entropy — a
+random `*.trycloudflare.com` or `*.lhr.life` name — and nothing else.  This is
+v1's property unchanged, it is not fixable by making the tool stricter (the
+caller is anonymous either way, and a client id is a field an attacker sets), and
+closing it properly means an authorization story MCP does not carry anywhere in
+this build.  So it is written down rather than papered over: **a tunnel is a
+decision to make this machine reachable**, and that is the whole of what it does.
+
+**Its config is a section, not a file.**  v1 kept the provider table in a
+standalone `sharefile.yaml`, which this project has no room for: there is one
+config file and one writer for it (`slife2/configfile.py`), and every other
+plugin that owns entries owns a section.  So the provider table is `file-tunnel:`
+in `slife2.yaml` — a table like `providers:` or `embeddings:`, with one thing
+that makes it unlike both: **its entries are options rather than a schema.**
+What a provider needs is a binary name, a host, a protocol — vendor words that
+belong to the tunnel and not to this project — so they are kept as the mapping
+they were written as and read by the provider that understands them.  A typed
+field per option would put three vendors' vocabulary in `slife2/config.py` and
+change it every time a tunnel learns a flag.
+
+**And that section is the one place this project warns instead of refusing.**
+Every other malformed section is a `ConfigError` at load, because a mistake in a
+file a person edits is a mistake to be told about.  A `file-tunnel:` naming a
+provider this build does not have is the exception, and it is v1's: **a tunnel
+is a subordinate dependency**, and a name this build cannot construct — a typo,
+a provider dropped since the config was written, a file copied from another
+machine — must not be able to keep the plugin from loading.  It degrades to
+ngrok with a warning, `tunnel_status` reports the provider actually in use, and
+the asymmetry is the point rather than an oversight.  A malformed *shape* is
+still refused, like every other section: the two are different mistakes, and
+only one of them is about a vendor this build lacks.
+
+**v1's state machine is kept whole, because the failures it names are not
+guesses.**  A tunnel takes seconds to come up and can die at any moment, so
+`status()` carries `active` (a URL is live), `starting` (an attempt is in
+flight), `failed` (terminal, with the reason) or `idle` (no attempt made) — the
+four answers a caller needs to decide whether to wait, refuse or retry.  Two of
+the behaviours in there cost real time to learn and are worth keeping visible:
+
+* **A published URL is not a working URL.**  A transport that has lost the edge
+  keeps its URL and answers every request to it with HTTP 530, so `is_reachable`
+  is asked separately from `is_active`, and `expose_local_image` *refuses*
+  rather than handing out a link that will fail for whoever fetches it.  The
+  cost of getting this wrong is paid by a model that cannot fetch the file and
+  cannot say why.
+* **A wrong "dead" costs a hostname.**  The health monitor answers a false
+  negative by tearing the tunnel down and minting a new one, which kills every
+  link already handed to a person or a model.  So a transport that is merely
+  unreachable is given a heal window before it is respawned, an unanswerable
+  liveness probe is not an outage, and ngrok's listener list answers "dead" only
+  when it is non-empty and demonstrably missing our URL.
+
+**The one diagnosis that had nowhere else to live** is the fake-ip proxy: a
+Clash/Mihomo TUN in fake-ip mode resolves the tunnel's edge to an address of its
+own choosing, so the control connection is carried and cut by the proxy while
+the log blames the transport.  `tunnel_status` reports the edge address and
+whether it is a synthetic one, which is the only place that shows.  It is an
+accusation and not a permission — coarsely true, because a false positive adds a
+hint that is still true of the machine and nobody grants anything through it —
+which is why `slife2/file_tunnel/providers.py` holds the ~60 lines v1 kept in a
+shared `slife2.net`: here there is one caller, and §1.1's rule about libraries
+is that the implementation goes where the capability is.
+
 ## 2. Streaming: one pattern, used twice
 
 MCP `tools/call` is a request/response. A TUI needs tokens as they arrive. Both

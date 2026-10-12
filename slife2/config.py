@@ -99,6 +99,7 @@ read, so the TUI process never opens the OS keyring.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -109,6 +110,13 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from slife2.paths import data_dir
+
+#: The one place this module warns rather than refuses.  Everything else here
+#: raises a `ConfigError` at load, because a malformed section is a mistake in
+#: a file a person edits.  A `file-tunnel:` naming a provider this build does
+#: not have is the exception — see `_file_tunnel` — so this exists for that
+#: single line, and the asymmetry is the point rather than an oversight.
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -194,6 +202,7 @@ EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
 WECHAT_SERVER_NAME = "slife2-wechat"
 CABINET_SERVER_NAME = "slife2-cabinet"
 MEDIA_SERVER_NAME = "slife2-media"
+FILE_TUNNEL_SERVER_NAME = "slife2-file-tunnel"
 
 #: The background tasks: one loop of the calling agent's own per task, run on a
 #: description and answered by a message (`slife2.agent_task_server`,
@@ -262,6 +271,7 @@ LOCAL_SERVERS = (
     "wechat",
     "cabinet",
     "media",
+    "file-tunnel",
     "tui",
     "toolhub",
     "agent",
@@ -924,6 +934,52 @@ class MediaSettings:
 
 
 @dataclass(frozen=True)
+class FileTunnelSettings:
+    """How this machine's port becomes a public HTTPS URL, from `file-tunnel:`.
+
+    A provider table like `providers:` or `embeddings:`, with the one thing
+    that makes it unlike both: **its entries are options, not schemas.**  What
+    a provider needs is a binary name, a host, a protocol — vendor words that
+    belong to the tunnel rather than to this project, so they are kept as the
+    mapping they were written as and read by the provider that understands
+    them (`slife2.file_tunnel.providers`), which is the one place that knows
+    ngrok from cloudflared.  A typed field per option would put three vendors'
+    vocabulary in this file and change it every time a tunnel learns a flag.
+
+    **An unknown `active:` falls back rather than raising**, which is the rule
+    `embeddings.active_model` already follows and the reason a tunnel is
+    allowed it: a tunnel is a *subordinate* dependency, and a name this build
+    does not have must not be able to keep the plugin from loading.  What a
+    malformed *shape* does is the opposite — the loader refuses that, like
+    every other section, because a `providers:` that is not a mapping is a
+    mistake somebody has to be told about rather than a vendor this build
+    lacks.
+    """
+
+    #: Which provider is live.  The others stay configured and inert.
+    #:
+    #: Spelled out rather than read off `slife2.file_tunnel.providers`, by the
+    #: same rule `AGENT_SERVER_NAME` states above: reading it means importing
+    #: it, and this module is imported by the TUI and the agent loop, neither
+    #: of which should pull in a tunnel's SDK or `subprocess`.  `DEFAULT_PROVIDER`
+    #: is the other end of this fact and `tests/test_config.py` pins the two
+    #: together.
+    active: str = "ngrok"
+    #: provider name -> its own options, resolved but otherwise untouched.
+    providers: dict[str, dict] = field(default_factory=dict)
+
+    def options_for(self, name: str) -> dict:
+        """*name*'s options — ``{}`` when it has no entry.
+
+        Empty rather than an error, because every provider has to work from
+        its own defaults: that is what makes ``ngrok: {}`` a complete entry,
+        and an `active:` naming a provider nobody configured a working one.
+        """
+        found = self.providers.get(name)
+        return dict(found) if isinstance(found, dict) else {}
+
+
+@dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
 
@@ -969,6 +1025,10 @@ class Config:
     #: which is the plugin that owns the section and the only one that holds a
     #: rendering provider's key.
     media: MediaSettings = field(default_factory=MediaSettings)
+    #: How this machine's port becomes a public HTTPS URL, from `file-tunnel:`.
+    #: Read by `slife2-file-tunnel`, which holds the tunnel — somebody else's
+    #: process, or an SDK holding an account, which is why it is a plugin.
+    file_tunnel: FileTunnelSettings = field(default_factory=FileTunnelSettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -1118,6 +1178,15 @@ def default_config() -> Config:
             # speaks to somebody else's endpoint — and a *family* of endpoints
             # rather than one, which is why it has a module of its own.
             "media": ServerSettings(port=8036),
+            # A public HTTPS URL for a local file, so something that cannot
+            # read this machine's disk — a vision model, a chat API that takes
+            # links — can fetch one anyway.  A plugin for §1.1's reason: what
+            # it holds is somebody else's connection (an ngrok session, an SSH
+            # forward, a cloudflared child), and it is the one plugin here that
+            # serves a second HTTP route beside its MCP endpoint, because the
+            # far end fetches `/share/<token>` through the tunnel.  Its
+            # settings are the `file-tunnel:` section below.
+            "file-tunnel": ServerSettings(port=8038),
             # The terminal's own inbox: where a channel hands a message so that
             # the window showing that conversation runs it as something the
             # person typed.  One process and a session per agent — the window
@@ -1364,6 +1433,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
+        file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
         default=str(raw.get("default") or _first_reference(providers)),
     )
 
@@ -1444,6 +1514,62 @@ def _media(raw: Any, base: MediaSettings) -> MediaSettings:
                 f"(known: {', '.join(MEDIA_KINDS)})"
             )
     return MediaSettings(providers=providers, defaults=defaults)
+
+
+def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
+    """The `file-tunnel:` section.
+
+    One judgement call, and it is the whole of this function: **a malformed
+    shape raises and a name this build does not have falls back.**
+
+    The first is this module's rule everywhere — a `providers:` that is not a
+    mapping, or an entry that is not one, is a mistake in a file a person
+    edits, and every other section refuses it at load rather than at the call
+    that finds it.  The second is the opposite, and it is v1's: a tunnel
+    provider is a *subordinate* dependency, so an `active:` naming something
+    this build cannot construct — a typo, a provider removed since the config
+    was written, a config copied from another machine — degrades to the default
+    with a warning instead of a plugin that will not load.  What makes that
+    safe rather than silent is `tunnel_status`, which reports the provider
+    actually in use.
+
+    Imported inside the function because the providers module reaches
+    `subprocess` and an SDK, and this module is on the import path of the TUI
+    and of the agent loop.
+    """
+    from slife2.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
+
+    if raw is None:
+        return base
+    section = _mapping(raw, "file-tunnel")
+    providers: dict[str, dict] = {}
+    for name, spec in _mapping(
+        section.get("providers"), "file-tunnel.providers"
+    ).items():
+        if not isinstance(spec, dict):
+            raise ConfigError(
+                f"file-tunnel.providers.{name}: expected a mapping of that "
+                f"provider's own options (`{name}: {{}}` is a complete entry)"
+            )
+        # Resolved but otherwise untouched: `${VAR}` here is a token or a
+        # binary path, and the provider that understands the option is the one
+        # that should see its value.  An unresolved reference is left verbatim
+        # by `resolve_secret` and reported by that provider.
+        providers[str(name)] = {
+            str(key): resolve_secret(value) for key, value in spec.items()
+        }
+
+    active = str(section.get("active") or DEFAULT_PROVIDER).strip()
+    if active not in KNOWN_PROVIDERS:
+        logger.warning(
+            "file_tunnel_active_unknown active=%s fallback=%s known=%s",
+            active,
+            DEFAULT_PROVIDER,
+            sorted(KNOWN_PROVIDERS),
+        )
+        active = DEFAULT_PROVIDER
+
+    return FileTunnelSettings(active=active, providers=providers)
 
 
 def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
