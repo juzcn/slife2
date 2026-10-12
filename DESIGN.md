@@ -1114,10 +1114,23 @@ flight when a process dies can never be completed by anyone.  The ledger is the
 line between *orphaned* and *never seen*: written on arrival, removed on
 departure, so what a fresh process finds is exactly what its predecessor died
 holding.  v1 rode that list on every turn's prompt; there is no per-turn prompt
-here, so it is **one message handed over once, at the start that found it**,
-naming the one reply those tasks can still get — a plain message to the peer.
-That this plugin says something nobody asked for is the point rather than a
-lapse: the peer is waiting.
+here, so it is **one message handed over at the start that found it**, naming the
+one reply those tasks can still get — a plain message to the peer.
+
+**And it is queued rather than sent from there, which is a repair.** The start
+that finds an orphan is a start whose peers cannot run a turn yet: a turn's first
+step is the hub, the hub waits for every plugin (§4), so it is up *after* this
+one. A notice handed over on the spot is therefore lost by construction — and one
+that is not lost is worse, because the hand-over falls through to the agent
+server, that call runs a whole turn, and the deadline judging *this* plugin is
+ninety seconds against the turn's six hundred. So it goes onto the session's own
+queue, the one writer every arrival already takes, and it carries a retry:
+`False` — the one answer that proves nothing reached the conversation — puts it
+back, and `None` does not. Nothing a *peer* sent is ever offered twice, because a
+peer re-sends its own task when it gets no answer; a notice has nobody behind it,
+which is exactly why its delivery is this plugin's to repeat. That this plugin
+says something nobody asked for is the point rather than a lapse: the peer is
+waiting.
 
 **Everything else the mesh delivers is a message too**, and v1's shapes are kept
 for each — a task request marked and answerable, an auto-pushed result wearing

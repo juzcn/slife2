@@ -24,6 +24,12 @@ ordering queue per session** with one writer behind it, which is the job the
 queues were doing for the harness: they kept arrival order, and they kept a mesh
 callback from blocking the MQTT reader loop.
 
+That queue carries the plugin's *own* message as well as the mesh's — the orphan
+notice (§1.8), which is the one thing here that nobody asked for and the one
+thing whose delivery this plugin repeats, for the reason it has no peer behind
+it: a peer re-sends its task when it gets no answer, so nothing a peer sent is
+ever offered twice.
+
 Two things v1 had here are deliberately absent.  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported is now
 `a2a_list_agents`' answer, which is where a model would look anyway.  And the
@@ -101,7 +107,11 @@ MARKER_PREFIX = "[A2A:"
 #: it), `task_response` (an auto-delivered result), `cancel_task` (the sender
 #: withdrew it), `message` (a conversation), `broadcast` (an event).
 A2A_TYPES = (
-    "task_request", "task_response", "cancel_task", "message", "broadcast",
+    "task_request",
+    "task_response",
+    "cancel_task",
+    "message",
+    "broadcast",
 )
 
 #: How many inbound messages may be waiting for a hand-over.  v1's bound on its
@@ -115,6 +125,23 @@ MAX_QUEUED = 500
 #: name and is the shipped one.
 ORPHAN_TEMPLATE = "a2a_orphans.j2"
 
+#: What the orphan notice is handed over as — and **it is not a peer.**  The name
+#: is the second half of the channel `channel_for` builds (`a2a:orphans`), which
+#: the window draws on its own (`A2A(orphans)> `) rather than as somebody
+#: speaking, and the writer's log line names it the same way.
+ORPHAN_PEER = "orphans"
+
+#: How long the writer waits before offering an orphan notice again, and how many
+#: times it will.  **The first attempt is expected to fail**, and not because
+#: anything is broken: a notice is handed over at a start whose peers cannot run
+#: a turn yet — the hub waits for every plugin, so it is up *after* this one
+#: (`slife2.launcher.NEEDS`) — and the delay is what lets the peers the turn
+#: needs arrive underneath it.  Tens of seconds is what the launcher's own waves
+#: cost, so the count is generous against that and still a bound: a notice nobody
+#: can receive is not a reason to keep saying it.
+ORPHAN_RETRY_SECONDS = 10.0
+ORPHAN_RETRIES = 30
+
 #: What a call that does not say which agent it is for is told.  A shared process
 #: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
 #: the agent's own name.
@@ -125,7 +152,9 @@ UNADDRESSED = (
 )
 
 
-def marker(agent_name: str, task_id: str | None = None, type: str = "task_request") -> str:
+def marker(
+    agent_name: str, task_id: str | None = None, type: str = "task_request"
+) -> str:
     """Content prefix for ANY inbound A2A message — one envelope, a type field.
 
     ``[A2A:{"from": …, "task_id": …, "type": …}] `` — ``from`` names the
@@ -179,7 +208,7 @@ def a2a_message_type(text: str) -> str | None:
     if end == -1:
         return None
     try:
-        payload = json.loads(text[len(MARKER_PREFIX):end])
+        payload = json.loads(text[len(MARKER_PREFIX) : end])
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(payload, dict):
@@ -217,19 +246,26 @@ class Session:
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(MAX_QUEUED))
     writer: asyncio.Task | None = None
 
-    def post(self, text: str, peer: str, what: str) -> None:
+    def post(self, text: str, peer: str, what: str, retries: int = 0) -> None:
         """Queue one message for the hand-over writer.
 
         Never blocks and never raises: this runs on the mesh's reader, and a
         delivery that has to wait is a delivery that stops the mesh reading.
         Overflow drops the oldest waiting message rather than the newest.
+
+        `retries` is how many further times the writer may offer this one after a
+        hand-over that came back "nothing was written", and it is zero for
+        everything a peer sent: a peer re-sends a task itself when it gets no
+        answer, and a second copy of its message is worse than a late one.  The
+        orphan notice is the one message with no peer behind it, so its delivery
+        is this plugin's to repeat (`_drain`).
         """
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.queue.get_nowait()
             logger.warning("a2a_delivery_overflow dropped=1 peer=%s", peer)
         with contextlib.suppress(asyncio.QueueFull):
-            self.queue.put_nowait((text, peer, what))
+            self.queue.put_nowait((text, peer, what, retries))
 
 
 def _wire(session: Session) -> None:
@@ -242,7 +278,10 @@ def _wire(session: Session) -> None:
     """
 
     def on_inbound_task(
-        source: str, content: str, task_id: str, kind: str = "task",
+        source: str,
+        content: str,
+        task_id: str,
+        kind: str = "task",
     ) -> None:
         # Only TASK_REQUEST messages are tasks (task_id present); a MESSAGE
         # conversation arrives task-less with kind="message" — no completion.
@@ -258,7 +297,10 @@ def _wire(session: Session) -> None:
         )
 
     def on_task_completion(
-        corr_id: str, result: str, cancelled: bool, peer: str,
+        corr_id: str,
+        result: str,
+        cancelled: bool,
+        peer: str,
         kind: str = "task",
     ) -> None:
         if not result and not cancelled:
@@ -330,13 +372,21 @@ async def _drain(
     the one result that proves nothing was written, `True` means it reached a
     conversation, and `None` means this cannot tell — and **`None` is not tried
     anywhere else**, because the words may already be down the stream and a
-    second copy of a peer's message is worse than a late one.  Nothing here
-    retries: a peer re-sends a task itself when it gets no answer, and that is
-    the retry that knows what it is retrying.
+    second copy of a peer's message is worse than a late one.
+
+    **What a caller does with the last two is the caller's, which is why the
+    retry below is here.**  `handover` says so itself: the classification is its
+    job, the policy is the plugin's whose message it is — `agent-task` marks its
+    answer undelivered, `schedule` leaves its run pending.  What this plugin's
+    own message gets is another attempt, because a *peer's* message has a retry
+    that knows what it is retrying (the peer re-sends the task) and an orphan
+    notice has nobody behind it at all.  So the count rides the queue item, it
+    is zero for everything a peer sent, and only `False` — never `None` — earns
+    another try.
     """
     try:
         while True:
-            text, peer, what = await session.queue.get()
+            text, peer, what, retries = await session.queue.get()
             handed = await hand_over(
                 config,
                 session.agent,
@@ -346,13 +396,63 @@ async def _drain(
                 window_client=window_client,
                 agent_client=agent_client,
             )
-            if handed is not True:
-                logger.warning(
-                    "a2a_delivery_not_confirmed agent=%s peer=%s handed=%s",
-                    session.agent, peer, handed,
-                )
+            if handed is True:
+                continue
+            logger.warning(
+                "a2a_delivery_not_confirmed agent=%s peer=%s handed=%s",
+                session.agent,
+                peer,
+                handed,
+            )
+            if handed is False and retries > 0:
+                # The delay is what makes the retry worth having — without it
+                # the attempt is repeated before the peers it needs can possibly
+                # have arrived — and the notice then goes to the *back* of the
+                # queue, so everything that arrived meanwhile is handed over
+                # first, in arrival order, rather than behind it.  What the wait
+                # costs is this writer's own idleness, which is the queue's
+                # normal mode: one path, one delivery at a time, and a reader
+                # that never waits on it (`Session.post`).
+                await asyncio.sleep(ORPHAN_RETRY_SECONDS)
+                session.post(text, peer, what, retries=retries - 1)
     except asyncio.CancelledError:
         raise
+
+
+def announce_orphans(session: Session) -> None:
+    """Queue the notice about the inbound tasks this agent's predecessor died holding.
+
+    **This is the one thing this plugin says that nobody asked for**, and v1 said
+    it differently: the orphan list rode every turn's prompt, so the model could
+    not miss it.  There is no per-turn prompt here, so the same information is
+    handed over once, on the channel the window draws as its own bubble — the
+    peer is waiting, and a task nobody can complete is a debt the agent has to be
+    told about to pay.
+
+    **Queued, and not handed over from where the orphan is found.**  Both halves
+    of that are paid for rather than defensive.  The start that finds an orphan
+    is a start whose peers cannot run a turn yet — a turn's first step is the
+    hub, and the hub waits for every plugin, so it is up *after* this one
+    (DESIGN.md §4) — so a hand-over awaited here is lost by construction; and
+    when it is not lost it is worse, because the turn it runs takes as long as a
+    model takes, and the deadline judging *this* plugin is 90 seconds
+    (`slife2.launcher.READY_TIMEOUT_SECONDS`).  Queued, the notice rides the one
+    writer every arrival already takes (`_drain`), which is this session's own
+    machinery, and the retries it carries are what let it outlast the launcher's
+    start-up instead of dying of it.
+
+    A `task_response` for any of these is refused by the mesh, so the notice
+    names the one reply that still works.
+    """
+    orphans = session.mesh.stale_inbound()
+    if not orphans:
+        return
+    session.post(
+        render(ORPHAN_TEMPLATE, tasks=orphans),
+        ORPHAN_PEER,
+        f"{len(orphans)} orphaned inbound task(s)",
+        retries=ORPHAN_RETRIES,
+    )
 
 
 def build_server(
@@ -425,8 +525,7 @@ def build_server(
                 with contextlib.suppress(Exception):
                     await session.mesh.disconnect()
                 raise ToolError(
-                    f"could not join the mesh as {agent!r} on "
-                    f"{settings.address}: {e}"
+                    f"could not join the mesh as {agent!r} on {settings.address}: {e}"
                 ) from e
             session.connect_error = ""
             logger.info("a2a_mesh_connected agent=%s", agent)
@@ -438,33 +537,6 @@ def build_server(
         if found is None or not found[0]:
             raise ToolError(UNADDRESSED)
         return found[0]
-
-    async def announce_orphans(session: Session, config_now: Config) -> None:
-        """Tell the agent about the inbound tasks its predecessor died holding.
-
-        **This is the one thing this plugin says that nobody asked for**, and
-        v1 said it differently: the orphan list rode every turn's prompt, so the
-        model could not miss it.  There is no per-turn prompt here, so the same
-        information is handed over once, on the channel the window draws as its
-        own bubble — the peer is waiting, and a task nobody can complete is a
-        debt the agent has to be told about to pay.
-
-        A `task_response` for any of these is refused by the mesh, so the notice
-        names the one reply that still works.
-        """
-        orphans = session.mesh.stale_inbound()
-        if not orphans:
-            return
-        text = render(ORPHAN_TEMPLATE, tasks=orphans)
-        await hand_over(
-            config_now,
-            session.agent,
-            text,
-            f"{CHANNEL}:orphans",
-            what=f"{len(orphans)} orphaned inbound task(s)",
-            window_client=window_client,
-            agent_client=agent_client,
-        )
 
     async def resume(config_now: Config) -> None:
         """Join the mesh as every agent this plugin has a ledger for.
@@ -495,7 +567,10 @@ def build_server(
             except ToolError as e:
                 logger.warning("a2a_resume_failed agent=%s err=%s", agent, e)
                 continue
-            await announce_orphans(session, config_now)
+            # Queued rather than awaited: joining the mesh is what this plugin's
+            # readiness is for, and a hand-over into a conversation is not —
+            # see `announce_orphans`, which is also where the retries come from.
+            announce_orphans(session)
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:

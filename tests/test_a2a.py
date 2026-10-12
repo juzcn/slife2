@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.a2a import broker
+from slife2.a2a import server as a2a_server
 from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
     AgentCard,
@@ -55,10 +57,13 @@ from slife2.a2a.server import (
     A2A_TYPES,
     CHANNEL,
     MAX_QUEUED,
+    ORPHAN_PEER,
+    ORPHAN_RETRIES,
     Session,
     _drain,
     _wire,
     a2a_message_type,
+    announce_orphans,
     build_server,
     channel_for,
     marker,
@@ -465,6 +470,9 @@ class Window:
     #: Refuse, the way a terminal not showing that conversation does — the one
     #: failure that *proves* nothing was written.
     refuse: bool = False
+    #: Die the way a stream that broke does — the answer that proves *nothing*,
+    #: and therefore the one no caller may act on by trying again.
+    broken: bool = False
     handed: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -472,6 +480,8 @@ class Window:
 
         @self.mcp.tool
         async def submit(agent: str, text: str, channel: str) -> None:
+            if self.broken:
+                raise RuntimeError("the stream died")
             if self.refuse:
                 raise ToolError(f"no window is showing {agent}'s conversation")
             self.handed.append({"agent": agent, "text": text, "channel": channel})
@@ -482,6 +492,11 @@ class Conversation:
     """A recorder standing in for the agent server's `send_message`."""
 
     client: Client | None = None
+    #: A turn that failed — which on a cold start is every turn, because the hub
+    #: is one wave behind (`slife2.launcher.NEEDS`) and a turn's first step is
+    #: the hub.  The call arrives and the answer is a refusal, so nothing was
+    #: written and the hand-over is `False` rather than `None`.
+    broken: bool = False
     handed: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -489,6 +504,8 @@ class Conversation:
 
         @self.mcp.tool
         async def send_message(agent: str, prompt: str, channel: str) -> None:
+            if self.broken:
+                raise ToolError("the turn failed: the toolhub is not answering")
             self.handed.append({"agent": agent, "prompt": prompt, "channel": channel})
 
 
@@ -528,9 +545,7 @@ def wired(
     """
     from slife2.a2a.mesh import A2AMesh
 
-    session = Session(
-        agent=AGENT, mesh=A2AMesh(default_config().a2a, AGENT)
-    )
+    session = Session(agent=AGENT, mesh=A2AMesh(default_config().a2a, AGENT))
     _wire(session)
     return session
 
@@ -578,7 +593,7 @@ async def test_an_inbound_task_arrives_marked_and_on_the_peers_channel(
     handed = window.handed[-1]
     assert handed["agent"] == AGENT
     assert handed["channel"] == f"a2a:{PEER}"
-    assert handed["text"] == f'{marker(PEER, TASK)}write me a poem'
+    assert handed["text"] == f"{marker(PEER, TASK)}write me a poem"
     # The type is readable back off it, which is what a receiver needs to know
     # whether it owes a completion.
     assert a2a_message_type(handed["text"]) == "task_request"
@@ -682,12 +697,172 @@ async def test_a_refusing_window_falls_back_to_the_agent_server() -> None:
             refusing.client, conversation.client = window_client, agent_client
             session = wired(window=refusing, conversation=conversation)
             session.mesh.on_inbound_task(PEER, "hello", TASK)
-            await drain_until_idle(
-                session, window=refusing, conversation=conversation
-            )
+            await drain_until_idle(session, window=refusing, conversation=conversation)
 
     assert conversation.handed[-1]["agent"] == AGENT
     assert a2a_message_type(conversation.handed[-1]["prompt"]) == "task_request"
+
+
+# ── the orphan notice, which is nobody's but this plugin's ──────────────────
+#
+#  The one message here that no peer will ever re-send, and the one the plugin
+#  says unprompted.  What it must not do is wait for the peers a *turn* needs at
+#  the moment it is found: the hub waits for every plugin, so it is up after
+#  this one, and a hand-over awaited from the lifespan would be either lost or
+#  running a 600-second turn inside a 90-second readiness deadline.
+
+
+async def writer_until(
+    session: Session,
+    done: Callable[[], bool],
+    *,
+    window: Window | None = None,
+    conversation: Conversation | None = None,
+) -> None:
+    """Run the writer until *done*, and cancel it the way the lifespan does.
+
+    `drain_until_idle` is the wrong tool for a retry: a notice that came back
+    "nothing was written" leaves the queue while it waits, so an empty queue is
+    not the end of the story — which is the whole point of the retry.
+    """
+    task = asyncio.create_task(
+        _drain(
+            session,
+            default_config(),
+            window.client if window else None,
+            conversation.client if conversation else None,
+        )
+    )
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while not done():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("the writer never did what the test waited for")
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> None:
+    """The ledger is read at the start; the hand-over is the writer's job.
+
+    Asserted as the *absence* of a submission, because that is the difference
+    that matters: a notice awaited where it is found is this plugin's readiness
+    spent on another plugin's turn.
+    """
+    InboundStore.open(AGENT).add(TASK, PEER)
+    session = wired()
+
+    announce_orphans(session)
+
+    text, peer, what, retries = session.queue.get_nowait()
+    assert session.queue.empty(), "one notice, and nothing else on the queue"
+    assert peer == ORPHAN_PEER
+    assert channel_for(peer) == f"{CHANNEL}:{ORPHAN_PEER}"
+    assert what == "1 orphaned inbound task(s)"
+    assert TASK in text and PEER in text
+    # It carries the retries, and it is the only message that does: everything
+    # a peer sent is posted with none.
+    assert retries == ORPHAN_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_the_orphan_notice_lands_on_the_channels_the_window_draws_alone() -> None:
+    """The queue is what delivers it, and the bubble is v1's `A2A(orphans)> `."""
+    InboundStore.open(AGENT).add(TASK, PEER)
+    window = Window()
+    async with Client(window.mcp) as client:
+        window.client = client
+        session = wired()
+        announce_orphans(session)
+        await drain_until_idle(session, window=window)
+
+    # Once, and once only: the retries it carries are for a hand-over that came
+    # back "nothing was written", and this one landed.
+    assert len(window.handed) == 1
+    handed = window.handed[-1]
+    assert handed["channel"] == f"{CHANNEL}:{ORPHAN_PEER}"
+    assert handed["agent"] == AGENT
+    # The one reply an orphan can still get, and the peer it is owed to.
+    assert "message" in handed["text"] and PEER in handed["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_reached_nothing_is_offered_again(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`False` is the one answer that licenses a second attempt — and this is the
+    one message with no peer behind it to make that attempt itself.
+
+    The two fakes are the cold start exactly: a window that is not showing that
+    conversation (refused, so provably nothing was written) and a turn that
+    fails because the hub is not up yet.
+    """
+    monkeypatch.setattr(a2a_server, "ORPHAN_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(a2a_server, "ORPHAN_RETRIES", 2)
+    caplog.set_level(logging.WARNING, logger="slife2.a2a.server")
+
+    def attempts(peer: str) -> int:
+        return sum(
+            1
+            for record in caplog.records
+            if f"peer={peer} " in record.getMessage()
+            and record.getMessage().startswith("a2a_delivery_not_confirmed")
+        )
+
+    refusing, broken = Window(refuse=True), Conversation(broken=True)
+    async with Client(refusing.mcp) as window_client:
+        async with Client(broken.mcp) as agent_client:
+            refusing.client, broken.client = window_client, agent_client
+            InboundStore.open(AGENT).add(TASK, PEER)
+            session = wired()
+            announce_orphans(session)
+            session.post("a peer's own message", PEER, "a message from jill")
+
+            await writer_until(
+                session,
+                lambda: attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1,
+                window=refusing,
+                conversation=broken,
+            )
+
+    # The first attempt and every retry it was given, and no more than that.
+    assert attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1
+    # The peer's message: offered once.  A peer re-sends its own task when it
+    # gets no answer, and a second copy of its words is worse than a late one.
+    assert attempts(PEER) == 1
+    assert broken.handed == []
+
+
+@pytest.mark.asyncio
+async def test_a_notice_the_writer_cannot_judge_is_not_offered_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The third answer stops it, retries or not.
+
+    A stream that died says nothing either way about whether the words landed,
+    and a notice arriving twice is how a conversation is told twice about a debt
+    it may already have paid.
+    """
+    caplog.set_level(logging.WARNING, logger="slife2.a2a.server")
+    dying = Window(broken=True)
+    async with Client(dying.mcp) as client:
+        dying.client = client
+        InboundStore.open(AGENT).add(TASK, PEER)
+        session = wired()
+        announce_orphans(session)
+
+        await writer_until(
+            session,
+            lambda: any(
+                "handed=None" in record.getMessage() for record in caplog.records
+            ),
+            window=dying,
+        )
+
+    assert "handed=None" in caplog.records[-1].getMessage()
+    assert session.queue.empty(), "a `None` is not put back"
 
 
 @pytest.mark.asyncio
@@ -737,9 +912,7 @@ async def test_a_call_that_does_not_say_whose_mesh_it_is_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_a_machine_with_no_section_is_told_so_rather_than_dialled() -> None:
     async with Client(build()) as client:
-        answer = await client.call_tool(
-            A2A_LIST_AGENTS, {}, meta=client_meta(AGENT)
-        )
+        answer = await client.call_tool(A2A_LIST_AGENTS, {}, meta=client_meta(AGENT))
     assert answer.data["agents"] == []
     assert "no `a2a:` section" in answer.data["error"]
 
@@ -772,9 +945,7 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     this one's name — which is the whole of what v1's `__check` error field was
     for, and it is here rather than in a tool of its own."""
     async with Client(build(on_the_mesh=True)) as client:
-        answer = await client.call_tool(
-            A2A_LIST_AGENTS, {}, meta=client_meta(AGENT)
-        )
+        answer = await client.call_tool(A2A_LIST_AGENTS, {}, meta=client_meta(AGENT))
     data = answer.data
     assert data["agent_name"] == AGENT
     assert data["agent_name"] == AGENT
