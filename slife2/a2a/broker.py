@@ -176,7 +176,9 @@ def ensure(
     url = log_url(settings)
     logger.info(
         "a2a_broker_starting binary=%s address=%s config=%s",
-        binary, settings.address, config,
+        binary,
+        settings.address,
+        config,
     )
     process = start([binary, "-c", str(config)], url=url)
 

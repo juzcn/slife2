@@ -225,13 +225,24 @@ class _OutboundSend:
     """One outbound message being delivered with the requester retry profile."""
 
     __slots__ = (
-        "task_id", "agent", "session", "payload", "attempts", "delivered",
-        "loops", "record",
+        "task_id",
+        "agent",
+        "session",
+        "payload",
+        "attempts",
+        "delivered",
+        "loops",
+        "record",
     )
 
     def __init__(
-        self, task_id: str, agent: str, session: str, payload: str,
-        *, record: bool = True,
+        self,
+        task_id: str,
+        agent: str,
+        session: str,
+        payload: str,
+        *,
+        record: bool = True,
     ) -> None:
         self.task_id = task_id
         self.agent = agent
@@ -286,7 +297,9 @@ class MeshResponder(Responder):
         self._completion: dict[str, _InboundWait] = {}
 
     async def on_request(
-        self, request: A2ARequest, stream,
+        self,
+        request: A2ARequest,
+        stream,
     ) -> str | None:
         task_id = str(request.task_id)
         waiter = _InboundWait()
@@ -320,7 +333,8 @@ class MeshResponder(Responder):
                 # completes it (empty artifact, terminal) without a record.
                 logger.info(
                     "a2a_inbound_response_ignored task=%s from=%s",
-                    task_id, request.sender or "unknown",
+                    task_id,
+                    request.sender or "unknown",
                 )
                 return None
             if message_type == "message":
@@ -329,12 +343,16 @@ class MeshResponder(Responder):
                 # the SDK empty-completes it, and the peer's real reply
                 # arrives as a NEW inbound message of its own.
                 self._mesh.on_inbound_task(
-                    request.sender or "unknown", request.text, "",
+                    request.sender or "unknown",
+                    request.text,
+                    "",
                     kind="message",
                 )
                 return None
             self._mesh.on_inbound_task(
-                request.sender or "unknown", request.text, task_id,
+                request.sender or "unknown",
+                request.text,
+                task_id,
             )
             # Recorded only now — a MESSAGE / stray TASK_RESPONSE reaches the
             # early returns above and must NOT be tracked as an inbound task
@@ -465,11 +483,13 @@ class A2AMesh:
     def __init__(self, config: A2ASettings, agent: str) -> None:
         self._config = config
         self._topics = TopicSpace(
-            org=config.org or "default", unit=config.unit or "default",
+            org=config.org or "default",
+            unit=config.unit or "default",
         )
         self.agent_name = agent
         self._mqtt_cfg = MqttConfig(
-            host=config.broker_host, port=config.broker_port,
+            host=config.broker_host,
+            port=config.broker_port,
         )
         #: This process's A2A instance id, carried in our own card.  The card
         #: schema has no field for "which process", and the agent name cannot
@@ -490,8 +510,11 @@ class A2AMesh:
         #: (which can never be completed) from ids it has simply never seen.
         self._inbound = InboundStore.open(self.agent_name)
         self._responder = MeshResponder(
-            agent_id=self.agent_name, mqtt=self._mqtt_cfg,
-            topics=self._topics, card=self._card, mesh=self,
+            agent_id=self.agent_name,
+            mqtt=self._mqtt_cfg,
+            topics=self._topics,
+            card=self._card,
+            mesh=self,
         )
 
         self._outbound: aiomqtt.Client | None = None
@@ -516,11 +539,9 @@ class A2AMesh:
         self._corr_to_task: dict[str, str] = {}  # correlation → task_id
 
         # Agent-side callbacks — replaced by the plugin before connect().
-        self.on_inbound_task = (
-            lambda source, content, task_id, kind="task": None
-        )
-        self.on_task_completion = (
-            lambda corr_id, result, cancelled, peer, kind="task": None
+        self.on_inbound_task = lambda source, content, task_id, kind="task": None
+        self.on_task_completion = lambda corr_id, result, cancelled, peer, kind="task": (
+            None
         )
         self.on_agent_change = lambda card, event: None
         # A peer's CancelTask, delivered to the agent: the model is told and
@@ -583,13 +604,13 @@ class A2AMesh:
             # the responder subscribed (recovered only by the 15 s delivery
             # retry).
             await asyncio.wait_for(
-                self._responder_ready.wait(), timeout=MQTT_CONNECT_SECONDS,
+                self._responder_ready.wait(),
+                timeout=MQTT_CONNECT_SECONDS,
             )
         except TimeoutError:
             await self.disconnect()
             raise RuntimeError(
-                f"A2A mesh connect timeout — is the broker "
-                f"{self.broker_address} up?"
+                f"A2A mesh connect timeout — is the broker {self.broker_address} up?"
             ) from None
 
     async def _probe_own_name(self) -> str | None:
@@ -615,7 +636,8 @@ class A2AMesh:
         try:
             async with aiomqtt.Client(**kwargs) as client:
                 await client.subscribe(
-                    self._topics.discovery(self.agent_name), qos=1,
+                    self._topics.discovery(self.agent_name),
+                    qos=1,
                 )
                 try:
                     async with asyncio.timeout(NAME_PROBE_SECONDS):
@@ -652,7 +674,8 @@ class A2AMesh:
         if _presence_status(msg.properties) == "offline":
             return None  # retired — nobody is holding the name
         who = (
-            f"another A2A instance ({instance[:8]})" if instance
+            f"another A2A instance ({instance[:8]})"
+            if instance
             else "an agent that carries no instance id"
         )
         return (
@@ -714,7 +737,8 @@ class A2AMesh:
                 if self._closing:
                     break
                 logger.warning(
-                    "a2a_responder_disconnected err=%s retry=%.1fs", e,
+                    "a2a_responder_disconnected err=%s retry=%.1fs",
+                    e,
                     RETRY_DELAY_SECONDS,
                 )
                 try:
@@ -737,20 +761,24 @@ class A2AMesh:
             try:
                 async with aiomqtt.Client(**kwargs) as client:
                     await client.subscribe(
-                        self._topics.discovery_wildcard(), qos=1,
+                        self._topics.discovery_wildcard(),
+                        qos=1,
                     )
                     await client.subscribe(
-                        self._topics.reply(self.agent_name, "+"), qos=1,
+                        self._topics.reply(self.agent_name, "+"),
+                        qos=1,
                     )
                     await client.subscribe(
-                        self._topics.event("+"), qos=1,
+                        self._topics.event("+"),
+                        qos=1,
                     )
                     self._outbound = client
                     self._connected = True
                     self._ready.set()
                     logger.info(
                         "a2a_outbound_connected id=%s broker=%s",
-                        kwargs["identifier"], self.broker_address,
+                        kwargs["identifier"],
+                        self.broker_address,
                     )
                     try:
                         async for msg in client.messages:
@@ -778,7 +806,8 @@ class A2AMesh:
                 if self._closing:
                     break
                 logger.debug(
-                    "a2a_outbound_disconnected err=%s retry=%.1fs", e,
+                    "a2a_outbound_disconnected err=%s retry=%.1fs",
+                    e,
                     RETRY_DELAY_SECONDS,
                 )
             finally:
@@ -880,7 +909,8 @@ class A2AMesh:
             return
         event = "online" if status == "online" else "offline"
         self.on_agent_change(
-            AgentCard(agent_name=AgentName(agent_id), status=status), event,
+            AgentCard(agent_name=AgentName(agent_id), status=status),
+            event,
         )
 
     def _handle_reply(self, msg) -> None:
@@ -921,7 +951,11 @@ class A2AMesh:
             # MESSAGE conversation: no task record was created — push the
             # reply as a message, not a task completion.
             self.on_task_completion(
-                task_id, result, cancelled, send.agent, "message",
+                task_id,
+                result,
+                cancelled,
+                send.agent,
+                "message",
             )
         else:
             # TASK_REQUEST: record the terminal state on the task store.
@@ -935,7 +969,11 @@ class A2AMesh:
             else:
                 get_store().record_error(task_id)
             self.on_task_completion(
-                task_id, result, cancelled, record.agent_name, "task",
+                task_id,
+                result,
+                cancelled,
+                record.agent_name,
+                "task",
             )
         # Terminal reply → the send is finished; stop tracking its delivery and
         # drop EVERY routing entry for this task — the primary correlation and
@@ -949,7 +987,12 @@ class A2AMesh:
     # ── Outbound operations (LLM-facing, via the plugin) ────────────────
 
     async def _publish_props(
-        self, topic: str, payload: str, props, *, qos: int = 1,
+        self,
+        topic: str,
+        payload: str,
+        props,
+        *,
+        qos: int = 1,
     ) -> None:
         """Publish with MQTT v5 ResponseTopic + CorrelationData properties —
         required: the receiving ``validate_a2a_request`` rejects requests
@@ -973,7 +1016,9 @@ class A2AMesh:
             correlation_data=corr,
         )
         await self._publish_props(
-            self._topics.request(send.agent), send.payload, props,
+            self._topics.request(send.agent),
+            send.payload,
+            props,
         )
 
     async def _deliver(self, send: _OutboundSend) -> None:
@@ -994,7 +1039,8 @@ class A2AMesh:
                 if send.attempts >= _MAX_ATTEMPTS:
                     logger.warning(
                         "a2a_delivery_exhausted task=%s attempts=%d",
-                        send.task_id, send.attempts,
+                        send.task_id,
+                        send.attempts,
                     )
                     return
                 await asyncio.sleep(_backoff_delay(send.attempts - 1))
@@ -1006,11 +1052,13 @@ class A2AMesh:
                 except Exception as e:  # noqa: BLE001 - a failed attempt is retried, not raised: the budget below is what decides, and every client error means the same thing here
                     logger.debug(
                         "a2a_delivery_retry_failed task=%s err=%s",
-                        send.task_id, e,
+                        send.task_id,
+                        e,
                     )
                     continue  # still under the attempts budget — try again
                 logger.info(
-                    "a2a_delivery_retry task=%s attempt=%d", send.task_id,
+                    "a2a_delivery_retry task=%s attempt=%d",
+                    send.task_id,
                     send.attempts,
                 )
                 try:
@@ -1040,7 +1088,11 @@ class A2AMesh:
                 send.loops.discard(task)
 
     async def send_message(
-        self, agent: str, message: str, *, message_type: str = "task_request",
+        self,
+        agent: str,
+        message: str,
+        *,
+        message_type: str = "task_request",
     ) -> str:
         """Standard ``SendMessage`` — returns the task_id immediately.
 
@@ -1055,7 +1107,9 @@ class A2AMesh:
         task_id = uuid.uuid4().hex
         session = uuid.uuid4().hex[:12]
         request = A2ARequest(
-            text=message, request_id=task_id, task_id=task_id,
+            text=message,
+            request_id=task_id,
+            task_id=task_id,
             sender=self.agent_name,
             variables={"message_type": message_type},
         )
@@ -1069,7 +1123,11 @@ class A2AMesh:
         if record:
             get_store().record_send(task_id, agent)
         send = _OutboundSend(
-            task_id, agent, session, request.to_json(), record=record,
+            task_id,
+            agent,
+            session,
+            request.to_json(),
+            record=record,
         )
         self._sends[task_id] = send  # FIFOCache evicts the oldest past the cap
         loop = asyncio.create_task(self._deliver(send))
@@ -1090,12 +1148,14 @@ class A2AMesh:
             response_topic=self._topics.reply(self.agent_name, session),
             correlation_data=task_id,
         )
-        payload = json.dumps({
-            "jsonrpc": "2.0",
-            "id": task_id,
-            "method": "CancelTask",
-            "params": {"id": task_id},
-        })
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": task_id,
+                "method": "CancelTask",
+                "params": {"id": task_id},
+            }
+        )
         await self._publish_props(self._topics.request(agent), payload, props)
         return "cancelled"
 
@@ -1107,12 +1167,17 @@ class A2AMesh:
         receiver filter its own echo.
         """
         payload = json.dumps(
-            {"sender": self.agent_name, "text": event}, ensure_ascii=False,
+            {"sender": self.agent_name, "text": event},
+            ensure_ascii=False,
         )
         await self._publish_plain(self._topics.event("broadcast"), payload, qos=0)
 
     async def _publish_plain(
-        self, topic: str, payload: str, *, qos: int = 0,
+        self,
+        topic: str,
+        payload: str,
+        *,
+        qos: int = 0,
     ) -> None:
         """Publish without MQTT v5 request/response properties."""
         client = self._outbound
@@ -1123,17 +1188,26 @@ class A2AMesh:
     def list_agents(self) -> list[AgentCard]:
         """Own card first, then each discovered peer (by name).  Pure cache
         read — never side-effects a connection (health-probe requirement)."""
-        cards = [AgentCard(
-            agent_name=AgentName(self.agent_name), status=self.status,
-        )]
+        cards = [
+            AgentCard(
+                agent_name=AgentName(self.agent_name),
+                status=self.status,
+            )
+        ]
         for peer in sorted(self._peers.values(), key=lambda p: p.name):
-            cards.append(AgentCard(
-                agent_name=AgentName(peer.name), status=peer.status,
-            ))
+            cards.append(
+                AgentCard(
+                    agent_name=AgentName(peer.name),
+                    status=peer.status,
+                )
+            )
         return cards
 
     def complete_task(
-        self, task_id: str, result: str = "", cancelled: bool = False,
+        self,
+        task_id: str,
+        result: str = "",
+        cancelled: bool = False,
     ) -> str:
         """Resolve an inbound task's bridge (backs the ``task_response`` send)."""
         return self._responder.resolve(task_id, result, cancelled)
