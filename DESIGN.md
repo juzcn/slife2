@@ -122,6 +122,31 @@ The cost is one JSON-RPC hop per token on loopback. That is small and it is the
 price of the architecture; `ProgressObserver` is where a coalescing fix goes if
 it ever stops being small.
 
+**There is a second cost of a different kind, and it is about size rather than
+frequency.** The unit the hop carries is one JSON-RPC message, and the MCP
+*client* puts a ceiling on one: `httpx2`'s SSE parser refuses an event over
+1 MiB (the SDK's `DEFAULT_MAX_SSE_EVENT_SIZE`). This system reached it in a real
+session, as `send_message` failing with "Server-sent event exceeded the 1048576
+byte limit" — and the wall is entirely on the client and entirely inside our own
+process, because the MCP server bounds neither a body nor an event and neither
+does uvicorn.
+
+**So it is off for our own hops and on for anybody else's**, which is why
+`slife2.mcp_server` has a transport of its own rather than a setting: what the
+ceiling buys is keeping a *peer* from making this process buffer an unbounded
+message, and a peer is exactly what a daemon we started is not. `slife2.gateway`,
+which dials the entries under `tools:` and `rest-api:`, keeps it. FastMCP 4.0.11
+does not pass the parameter through, which is the only reason reaching the knob
+takes a class rather than an argument.
+
+**`None` rather than a large number**, because a number is the same wall further
+away: the largest message this system can produce is bounded by the model's
+context — `rebuild` sends exactly that list, and so does `transcript` — so there
+is no size at which one of our own conversations is too big, and nothing here
+needs a degraded mode to fall back into. What is given up is the *reporting*: an
+overrun is now the machine's memory instead of a named `SSEError`, and that is
+only an acceptable trade because the peer is a process this system started.
+
 ## 1.1 Plugins and libraries
 
 **A plugin is a capability; a library is its implementation, and the two are not
@@ -476,6 +501,14 @@ twice — the same argument that keeps the result out of `agent_task_status`.  W
 remains uncovered is a hand-over that landed nowhere at all, and that is the case
 above: it is logged with the answer's length, and it means the terminal and the
 agent server were both gone.
+
+**And nothing keeps a second copy.**  A finished task's message list, its loop
+and its tool registry are locals of the run and die with it; the answer is
+dropped once it has been handed over, and the finished coroutine's handle with
+it — a finished `asyncio.Task` holds its own result, so letting go of the
+reference is what releases it.  What outlives a task is a name, a state, two
+timestamps and the description, which is what `agent_task_list` answers from and
+what the registry's cap bounds.
 
 **The result is a message, and asking is a different question.**
 `agent_task_status` does not return the answer's text and does not suppress the

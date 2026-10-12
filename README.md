@@ -647,6 +647,56 @@ poll loop; the plugin is one shared process (DESIGN.md §1.2). There is no
 `agents/<agent>/wechat.yaml` files are the whole of what the plugin resumes. A machine
 that should not talk to WeChat is a machine where nobody scans a code.
 
+### The agent task
+
+A turn ends when the model stops calling tools, so anything long holds that turn
+open: the person watches a prompt nothing can be typed into. **An agent task** is
+that work gone elsewhere — one loop of the agent's own, started with a name and a
+description and answered later, by a message, in the same conversation.
+
+The model has four tools over them, and **not one of them waits**:
+
+| tool | what it does |
+|---|---|
+| `agent_task_start` | Start one, and answer at once with its id |
+| `agent_task_status` | What one is doing — never its result, which arrives by itself |
+| `agent_task_list` | What this agent has, running ones first |
+| `agent_task_cancel` | Stop one, answering with its state *after* the call |
+
+```
+agent_task_start(name="research", description="Find the retry policy, and say what it is")
+→ {"task_id": "agent-task:research", "name": "research", "status": "running", ...}
+```
+
+**It runs as the agent, on the agent's own context.** The same system prompt, the
+same model, the same tools — and `restore` and `rebuild` under the agent's own
+key, so a task starts from what this conversation has been about rather than from
+nothing. What it does *not* have is the turn that started it: `restore` reads the
+*stored* list and a turn is written when it ends, so the description is where the
+last exchange has to be restated. Nothing is recorded on its behalf — the answer
+reaching the conversation as a message is what the record gains — and its own
+reply is handed back on its own, so there is nothing to poll for and no way to
+fetch one.
+
+The answer arrives on the `agent-task:<name>` channel wearing
+`[AsyncTaskResult:{…}]` — the task's id, name, state and times — so the window
+shows `AsyncTaskResult(research)> ` and the model learns the id its next call
+needs. It goes to the terminal showing that conversation; when no window is
+showing it, the agent server is given it instead, and the turn is recorded and
+drawn on the next restore.
+
+```yaml
+agent-task:
+  max_running: 4   # tasks running at once, per agent
+```
+
+**That is the only key a task owns.** Everything else it is made of comes out of
+`agent:` above, because a task *is* the agent working — the one section in this
+file with two readers. `max_running` is the one bound the feature has: the tool
+set is the single catalogue and nothing filters it, so a task may start a task,
+and what that leaves unbounded is how much work happens over time rather than how
+much happens at once (DESIGN.md §9).
+
 ## Where things live
 
 **One data directory holds everything** — the config that says what to run, the
