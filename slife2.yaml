@@ -212,6 +212,17 @@ servers:
     host: 127.0.0.1
     port: 8039
     path: /mcp
+  # The A2A mesh: agent-to-agent traffic over MQTT, on the published
+  # A2A-over-MQTT profile.  The one server here whose identity is *per agent* —
+  # the agent name is the MQTT client id and the request topic's last segment —
+  # so this one process holds a mesh per agent it serves, and a peer on this
+  # machine is reached exactly as one on another machine is.  What arrives is
+  # handed to the conversation (`hand_over`), and its section is `a2a:` below.
+  # DESIGN.md §1.8.
+  a2a:
+    host: 127.0.0.1
+    port: 8040
+    path: /mcp
 
 # ── External tool servers ───────────────────────────────────────────────────
 # Other people's MCP servers, held by `slife2-mcp-tools` — which is why they
@@ -807,6 +818,40 @@ media:
 # this build does not have falls back to ngrok with a warning rather than
 # refusing to start: a tunnel is a subordinate dependency.  `tunnel_status`
 # reports the provider actually in use.
+# ── The A2A mesh ────────────────────────────────────────────────────────────
+# Agent-to-agent traffic over MQTT, and **the one section whose presence is
+# itself a setting**: a machine with no `a2a:` is a machine that is not on the
+# mesh, which is the same argument the `wechat:` section is absent by.  What it
+# holds is a broker address and the first two segments of the topic namespace
+# (`$a2a/v1/…/{org}/{unit}/{agent}`), which is what tells two groups on one
+# broker apart.
+#
+# **The broker is started for you if it is not there**, and that is this port's
+# one departure from v1, which left mosquitto to the user.  A config that says
+# `a2a:` has said it wants the mesh, so a missing broker is a missing dependency
+# rather than a preference: `mosquitto` is started on `broker.port`, and a broker
+# that will not serve is a *startup failure* naming it and its log — not a mesh
+# that silently is not one.  The broker is left running afterwards, because a
+# broker is a machine's, not a run's.
+#
+# Only a **local** broker is started.  `broker.host` naming another machine is
+# reached exactly the same way, and nothing local can stand in for it — so a
+# remote broker that is down is the same hard failure with no attempt made.
+#
+# `provider` is a hard constraint rather than a default: mosquitto is the only
+# broker this build speaks to, and anything else is refused when the config is
+# read, because the alternative is `a2a_*` tools offered to a model for a mesh
+# that was quietly switched off.  The model's four tools are `a2a_send_message`,
+# `a2a_cancel_task`, `a2a_list_agents` and `a2a_broadcast`.
+#
+a2a:
+  provider: mosquitto
+  broker:
+    host: localhost
+    port: 1883
+  org: default
+  unit: default
+
 file-tunnel:
   active: cloudflare
   providers:

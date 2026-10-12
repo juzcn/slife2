@@ -221,6 +221,38 @@ def schedule_db(agent: str) -> Path:
     return agent_dir(agent) / _SCHEDULE_DB
 
 
+#: The A2A ledger's own file name, spelt once for the reason `_SCHEDULE_DB` is.
+_A2A_INBOUND = "a2a.yaml"
+
+
+def a2a_inbound_paths() -> list[Path]:
+    """Every agent's A2A ledger on this machine.
+
+    **The same mechanism `schedule_dbs` is, and here it carries more weight.**
+    A mesh identity is the agent name — the MQTT client id and the request
+    topic's last segment — so a shared process has to know *which names to be
+    reachable under*, and it cannot ask: there is no registry of agents, and
+    "every directory under `agents/`" is every agent this machine has ever run,
+    which would mean a retained card on the broker for conversations nobody is
+    having.  So the file is the record, as it is for a login and for a schedule:
+    an agent is on the mesh because it has used one.
+    """
+    return sorted(agents_dir().glob(f"*/{_A2A_INBOUND}"))
+
+
+def a2a_inbound_path(agent: str) -> Path:
+    """One agent's A2A ledger: `<agent>/a2a.yaml`.
+
+    What it holds is the inbound tasks this agent's mesh is holding a completion
+    bridge for, which is what lets a *restart* tell its orphans from ids it has
+    never seen (`slife2/a2a/inbound_store.py`).  Beside `turns.db` and
+    `wechat.yaml` for §5's reason — an agent's state is a directory — and YAML
+    for v1's, which is the format this file has always had: an entry in it is a
+    peer still owed a reply, so it is a document rather than one long line.
+    """
+    return agent_dir(agent) / _A2A_INBOUND
+
+
 def skills_dir() -> Path:
     """Where the skills live — one directory per skill, each with a `SKILL.md`.
 

@@ -73,6 +73,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "agent",
         "agent-task",
         "schedule",
+        "a2a",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
     assert modules == {
@@ -94,6 +95,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.server.server",
         "slife2.agent_task_server",
         "slife2.schedule_server",
+        "slife2.a2a.server",
     }
 
 
@@ -290,6 +292,7 @@ def test_one_server_per_wire_protocol() -> None:
         "agent",
         "agent-task",
         "schedule",
+        "a2a",
     ]
 
 
@@ -346,6 +349,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "agent",
         "agent-task",
         "schedule",
+        "a2a",
     ]
 
 
@@ -369,15 +373,19 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     order between the two is the one edge that is new here.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
-    assert names[-3:] == ["agent", "agent-task", "schedule"]
+    assert names[-4:] == ["agent", "agent-task", "schedule", "a2a"]
     assert "agent" in launcher.NEEDS["agent-task"]
     # The clock reaches three peers, and asks the hub for nothing: it makes no
     # model call (DESIGN.md §1.7), so the terminal and the agent server behind it
     # are where a trigger goes, and `agent-task` is where a run's work is started
     # and asked after — the third edge is the one that lets a run close itself.
     assert set(launcher.NEEDS["schedule"]) == {"tui", "agent", "agent-task"}
+    # The mesh reaches two, and it is the same pair for the same reason
+    # (DESIGN.md §1.8): what arrives from a peer is a message handed to a
+    # conversation, wherever the conversation can be reached.
+    assert set(launcher.NEEDS["a2a"]) == {"tui", "agent"}
     # Everything else is a dependency of one of them, whatever kind it is.
-    assert set(names[:-3]) == {
+    assert set(names[:-4]) == {
         "llm:openai-completions",
         "embeddings",
         "context",

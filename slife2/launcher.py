@@ -32,6 +32,7 @@ from pathlib import Path
 from fastmcp import Client
 
 from slife2.config import (
+    A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
     AGENT_TASK_SERVER_NAME,
     API_BACKENDS,
@@ -159,6 +160,15 @@ SCHEDULE_SERVER = (
     SCHEDULE_SERVER_NAME,
     "schedule_list",
 )
+#: The A2A mesh.  It identifies itself by `a2a_list_agents`, by the same test
+#: that picked `schedule_list`: the tool takes no argument and works before any
+#: connection exists — the state this plugin starts in on a machine whose broker
+#: is not up yet, which is the state a probe has to be able to name.
+A2A_SERVER = (
+    "slife2.a2a.server",
+    A2A_SERVER_NAME,
+    "a2a_list_agents",
+)
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -176,6 +186,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "agent": AGENT_SERVER,
     "agent-task": AGENT_TASK_SERVER,
     "schedule": SCHEDULE_SERVER,
+    "a2a": A2A_SERVER,
 }
 
 #: The tool every model server answers to, and how they are named.  One tool
@@ -678,6 +689,14 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # over is a run marked failed, which looks like the feature not working rather
     # than like a daemon that was still starting.
     "schedule": ("tui", "agent", "agent-task"),
+    # The mesh reaches two peers and needs neither the hub nor a model: what
+    # arrives from a peer is handed to the conversation — the terminal showing
+    # it, or the agent server when no window is — through the same `hand_over`
+    # every other out-of-band message takes (`slife2.handover`).  Ordering
+    # rather than correctness, like every edge here: a message that cannot be
+    # handed over is logged and dropped, which looks like the mesh not working
+    # rather than like a daemon that was still starting.
+    "a2a": ("tui", "agent"),
     "toolhub": (
         "embeddings",
         "context",

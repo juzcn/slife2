@@ -7,6 +7,19 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "a2a-over-mqtt"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiomqtt" },
+    { name = "paho-mqtt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/ea/f8c62bbf7b7db3de243c7d47f27a0a7d13744959c81d497ac866640f03de/a2a_over_mqtt-0.1.0.tar.gz", hash = "sha256:9e75a8ae1e9930f03641f874d96e0f66845320ea878200143aa522ff6662d534", size = 48850, upload-time = "2026-04-09T06:21:49.144Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/91/09/ddaae71162e3cc22758d2c6a5e037149f60955508f453f3b4511bff88e52/a2a_over_mqtt-0.1.0-py3-none-any.whl", hash = "sha256:b6f1dd95fe3ba9b46375793c27789cbc9e395ffe9a3b1023fc8c63fd5dcf2539", size = 19705, upload-time = "2026-04-09T06:21:47.822Z" },
+]
+
+[[package]]
 name = "aiofile"
 version = "3.12.3"
 source = { registry = "https://pypi.org/simple" }
@@ -16,6 +29,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/14/31/edb06aabd8f8f0b56d659f30800795f40b93cba96be946ce179f6931e3a5/aiofile-3.12.3.tar.gz", hash = "sha256:caa6aa746b5e47e2165f7abd741b6415e49cf4d44fddc0f61844612cc3924d41", size = 21600, upload-time = "2026-08-04T22:59:27.171Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4e/79/6e45e778c4c3cab39e0937b007b720c15f76c50c6453d153282d0fcc3588/aiofile-3.12.3-py3-none-any.whl", hash = "sha256:5c1bcc9e929c50834608e8cc1a4cc1d7503eb60c15a535b779fd39e2f372c017", size = 22122, upload-time = "2026-08-04T22:59:25.838Z" },
+]
+
+[[package]]
+name = "aiomqtt"
+version = "2.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "paho-mqtt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/44/cfc58272783a11729462dc6df5adbfeabd084f840f609054ac772ae98c19/aiomqtt-2.5.1.tar.gz", hash = "sha256:25a0a47d157e8f158d2da1110ea4786c0615518751e94f7b04976c977a8ff20d", size = 86641, upload-time = "2026-03-05T18:28:56.421Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/9e/5089fa596220bf0dc73deeb23db27904e4b3504986caf08571f6f5cb84a8/aiomqtt-2.5.1-py3-none-any.whl", hash = "sha256:fd58c3593160e4d475d90ce911cdfc4239cd64de96b0ba22edf6c86bd7afa278", size = 16051, upload-time = "2026-03-05T18:28:55.14Z" },
 ]
 
 [[package]]
@@ -1160,6 +1185,15 @@ wheels = [
 ]
 
 [[package]]
+name = "paho-mqtt"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/15/0a6214e76d4d32e7f663b109cf71fb22561c2be0f701d67f93950cd40542/paho_mqtt-2.1.0.tar.gz", hash = "sha256:12d6e7511d4137555a3f6ea167ae846af2c7357b10bc6fa4f7c3968fc1723834", size = 148848, upload-time = "2024-04-29T19:52:55.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/cb/00451c3cf31790287768bb12c6bec834f5d292eaf3022afc88e14b8afc94/paho_mqtt-2.1.0-py3-none-any.whl", hash = "sha256:6db9ba9b34ed5bc6b6e3812718c7e06e2fd7444540df2455d2c51bd58808feee", size = 67219, upload-time = "2024-04-29T19:52:48.345Z" },
+]
+
+[[package]]
 name = "pathable"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1729,6 +1763,8 @@ name = "slife2"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "a2a-over-mqtt" },
+    { name = "aiomqtt" },
     { name = "anthropic" },
     { name = "credstore" },
     { name = "croniter" },
@@ -1757,6 +1793,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "a2a-over-mqtt", specifier = ">=0.1.0" },
+    { name = "aiomqtt", specifier = ">=2.5.0" },
     { name = "anthropic", specifier = ">=1.2.0" },
     { name = "credstore", specifier = ">=0.10.5" },
     { name = "croniter", specifier = ">=6.2.4" },

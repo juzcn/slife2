@@ -86,6 +86,7 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     import importlib
 
     from slife2.config import (
+        A2A_SERVER_NAME,
         AGENT_SERVER_NAME,
         API_SERVER_NAMES,
         CLI_SERVER_NAME,
@@ -123,6 +124,7 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     assert importlib.import_module("slife2.schedule_server").SERVER_NAME == (
         SCHEDULE_SERVER_NAME
     )
+    assert importlib.import_module("slife2.a2a.server").SERVER_NAME == A2A_SERVER_NAME
     for api, module in API_BACKENDS.items():
         assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]
 

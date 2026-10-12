@@ -1,0 +1,9 @@
+▸ Inbound A2A tasks that died with the previous process
+
+{% for t in tasks -%}
+   - {{ t.task_id }} from {{ t.peer }} (arrived {{ t.since }})
+{% endfor %}
+These arrived before this process started, so their reply path died with it — a
+`task_response` for any of them is refused. Answer each peer with
+`a2a_send_message(message_type="message")`, which is the only reply they can
+still get, and the task_id can be dropped.

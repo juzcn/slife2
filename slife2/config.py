@@ -219,6 +219,15 @@ AGENT_TASK_SERVER_NAME = "slife2-agent-task"
 #: tasks is a machine where nobody writes one.
 SCHEDULE_SERVER_NAME = "slife2-schedule"
 
+#: The A2A mesh: agent-to-agent traffic over MQTT, on the published
+#: A2A-over-MQTT profile (`slife2.a2a`, DESIGN.md §1.8).  A plugin for §1.1's
+#: first row of the table — what it holds is somebody else's connection, and a
+#: library would put an MQTT session in every importer — and the one plugin here
+#: whose identity is *per agent*: the agent name is the MQTT client id and the
+#: request topic's last segment, so one shared process holds one mesh per agent
+#: it serves rather than one for the machine.
+A2A_SERVER_NAME = "slife2-a2a"
+
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
 #: the order `slife2.config.Config.plugins` reads them out in.
@@ -285,6 +294,7 @@ LOCAL_SERVERS = (
     "agent",
     "agent-task",
     "schedule",
+    "a2a",
 )
 
 
@@ -989,6 +999,56 @@ class FileTunnelSettings:
 
 
 @dataclass(frozen=True)
+class A2ASettings:
+    """The `a2a:` section: where the mesh's broker is, and whether there is one.
+
+    **An absent section is the whole of the off switch**, which is v1's rule and
+    the reason there is no `enabled:` key here — a section that carried one would
+    have two ways of saying the same thing and a way of contradicting itself.
+    v1 went further and made the section's *presence* merely permission to
+    **probe** the broker, deciding enablement at runtime on whether anything
+    answered; that half does not port, because it existed to decide whether to
+    spawn a per-agent plugin process and there is no spawn to gate here.  The
+    plugin always starts (§4: every plugin the config names is started and
+    shared) and what the section decides is whether it opens a mesh at all.
+
+    **Mosquitto is a hard constraint and not a default.**  v1 carried a
+    `transport:` field with an http skeleton behind it and answered a value it
+    did not implement by disabling the feature with a warning at config load —
+    which is the shape this project refuses: a config naming a transport that
+    does not exist is a mistake in a file a person edits, and a warning on the
+    way past it means the model is offered `a2a_*` tools for a mesh that was
+    silently switched off.  So the field is a `provider:` naming the broker
+    implementation, exactly one value is accepted, and anything else is a
+    `ConfigError` at load.  Adding a provider is adding a branch to
+    `_a2a` and a driver to `slife2/a2a/`; it is not a config value.
+    """
+
+    #: The broker implementation.  `mosquitto` is the only one this build has.
+    provider: str = "mosquitto"
+    #: Whether the operator wrote the section.  Not a field in the file — it is
+    #: what "the section was there" means, and it is what the plugin reads to
+    #: decide whether this machine is on the mesh (`a2a_dbs` is the other half,
+    #: and it says which *agents* are).
+    configured: bool = False
+    #: Where the broker is.  The broker is the operator's to run — v1's rule and
+    #: still this build's: slife2 never spawns one, it dials one.
+    broker_host: str = "localhost"
+    broker_port: int = 1883
+    #: The first two segments of the topic namespace,
+    #: `$a2a/v1/{discovery|request|reply|event}/{org}/{unit}/{agent_id}`.  Two
+    #: brokers, or two groups on one broker, are told apart by these, which is
+    #: why they are configuration rather than constants.
+    org: str = "default"
+    unit: str = "default"
+
+    @property
+    def address(self) -> str:
+        """`host:port`, as every log line and refusal names it."""
+        return f"{self.broker_host}:{self.broker_port}"
+
+
+@dataclass(frozen=True)
 class Config:
     """Every section of one config file, already defaulted."""
 
@@ -1038,6 +1098,10 @@ class Config:
     #: Read by `slife2-file-tunnel`, which holds the tunnel — somebody else's
     #: process, or an SDK holding an account, which is why it is a plugin.
     file_tunnel: FileTunnelSettings = field(default_factory=FileTunnelSettings)
+    #: Where the A2A mesh's broker is, from `a2a:`.  Read by `slife2-a2a`, which
+    #: holds the connections — and the one section whose *presence* is a
+    #: setting, since a machine with no section is a machine not on the mesh.
+    a2a: A2ASettings = field(default_factory=A2ASettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
 
@@ -1227,6 +1291,16 @@ def default_config() -> Config:
             # a due task in front of the agent as a turn of its own.  It owns no
             # section: an address is the whole of what is written down about it.
             "schedule": ServerSettings(port=8039),
+            # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT
+            # profile.  A plugin for §1.1's reason — what it holds is somebody
+            # else's connection — and the only one here whose *identity* is per
+            # agent: the agent name is the MQTT client id, so one shared process
+            # holds one mesh per agent it serves.  Its settings are the `a2a:`
+            # section, and **that section's presence is the machine's opt-in**:
+            # a machine that should not be on the mesh is a machine where nobody
+            # writes one, which is the same argument the `wechat` section is
+            # absent by.
+            "a2a": ServerSettings(port=8040),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
@@ -1451,7 +1525,55 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
         file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
+        a2a=_a2a(raw.get("a2a"), base.a2a),
         default=str(raw.get("default") or _first_reference(providers)),
+    )
+
+
+def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
+    """The `a2a:` section, defaulted — and the one place `configured` is set.
+
+    **Absent means off**, so the built-in answer comes back with
+    `configured=False` and the plugin opens no mesh.  The shape is v1's —
+    `broker:` nested with `host` and `port` under it — so a `slife.yaml` copied
+    over keeps working and keeps meaning the same thing.
+
+    **An unknown `provider:` is refused rather than downgraded.**  This is the
+    section's whole difference from the two others that fall back
+    (`file_tunnel.active`, `embeddings.active`): those name a *subordinate*
+    dependency this build may not have, where falling back leaves a working
+    system; this names the transport of the feature, where falling back would
+    leave `a2a_*` tools offered to a model for a mesh that is not running.  v1
+    answered that case with a warning and `enabled = False`, which is the
+    silence-with-tools outcome, so it does not port.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "a2a")
+
+    provider = str(section.get("provider") or base.provider).strip()
+    if provider != base.provider:
+        raise ConfigError(
+            f"a2a.provider: {provider!r} is not a broker this build speaks to "
+            f"(the only one is {base.provider!r}); leave the key out for "
+            f"{base.provider!r}, or leave the section out to stay off the mesh"
+        )
+
+    # `broker:` is a mapping or nothing.  A `broker: localhost:1883` written as a
+    # scalar is the mistake the nesting invites, and it deserves the section's
+    # name rather than a `str` object's `get` failing somewhere further down.
+    broker = section.get("broker")
+    if broker is None:
+        broker = {}
+    broker = _mapping(broker, "a2a.broker")
+
+    return A2ASettings(
+        provider=provider,
+        configured=True,
+        broker_host=str(broker.get("host") or base.broker_host),
+        broker_port=_int_or(broker.get("port"), base.broker_port, "a2a.broker.port"),
+        org=str(section.get("org") or base.org),
+        unit=str(section.get("unit") or base.unit),
     )
 
 

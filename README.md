@@ -124,6 +124,7 @@ uv run slife2-cabinet          # notes, diary, files,        :8035
 uv run slife2-media            # images, video, speech,      :8036
 uv run slife2-file-tunnel      # a public URL for a file,    :8038
 uv run slife2-schedule         # scheduled tasks, the clock, :8039
+uv run slife2-a2a              # the A2A mesh over MQTT,    :8040
 uv run slife2-tui              # the terminal's inbox,       :8005
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
@@ -827,6 +828,73 @@ task's `timezone` is an IANA name, and leaving it out means the machine's clock
 # machine where nobody writes one
 ```
 
+### The A2A mesh
+
+**Agent-to-agent traffic over MQTT**, on the published A2A-over-MQTT profile —
+so anything else that speaks it can talk to you. The wire, the topics, the agent
+cards and the task lifecycle are that SDK's; this is the driver and the plugin
+around it. v1's mesh, ported.
+
+| tool | what it does |
+|---|---|
+| `a2a_send_message` | Send a task, complete one you were sent, or just talk — `message_type` decides which |
+| `a2a_cancel_task` | Withdraw a task you sent |
+| `a2a_list_agents` | The roster: you first, then every peer, by name |
+| `a2a_broadcast` | A fire-and-forget event to every peer |
+
+```
+a2a_send_message(agent="jill", message="Summarise the release notes.")
+→ {"peer": "jill", "task_id": "61ab0c8a…", "message_type": "task_request",
+   "note": "The result will arrive in this conversation."}
+```
+
+**Nothing waits.** A `task_request` returns an id immediately and the result
+arrives later on its own as a message wearing `[A2A:{"from": "jill", "type":
+"task_response", "task_id": "…"}]`. There is nothing to poll. `task_response`
+completes a task *you* were sent, with the `task_id` from its own marker; the
+direction is in `from`, never `agent_name`, because that word is the agent's own
+identity. Incoming messages read as `A2A(jill)> ` in the window, with the marker
+taken back off.
+
+**A peer may be on this machine or on another one**, and nothing tells them
+apart — a local agent is just one whose mesh this process holds, published to the
+broker under its own name. There is a **mesh per agent**, because the agent name
+*is* the mesh identity: the MQTT client id and the last segment of the request
+topic. Two agents on one machine are therefore two peers, and one agent reached
+from two places is what the name-collision check refuses, before joining, rather
+than fighting over.
+
+**An agent joins the mesh by using it.** The ledger at
+`<data>/agents/<agent>/a2a.yaml` is the record, so the first `a2a_*` call
+enrolls that agent permanently and every later start resumes it — that file is
+also how the shared plugin knows whose names to be reachable under.
+
+**The broker is started for you if it is not there**, which is where this
+departs from v1. Point `a2a.broker` at an address; if nothing is listening there
+and it is *this* machine, `mosquitto` is started on it and left running. A
+broker that will not serve — or one named on another machine that is down — fails
+the startup, naming it and showing its log, rather than leaving you four tools
+attached to nothing. `provider: mosquitto` is the only value; anything else is a
+config error, not a silently disabled feature.
+
+```yaml
+a2a:
+  provider: mosquitto
+  broker:
+    host: localhost      # another machine is reached the same way, and is
+    port: 1883           # never started locally — that host's broker is theirs
+  org: default           # the topic namespace: two groups on one broker are
+  unit: default          # told apart by these
+```
+
+**A restart orphans every task that was in flight**, because the completion
+bridge and the peer's reply topic both lived in the process that died. The ledger
+draws the line between those and ids never seen, and the agent is **told once**,
+at the start that found them, so it can answer each peer with a plain message —
+the only reply those tasks can still get. **Omit the `a2a:` section entirely** to
+stay off the mesh: a machine that should not be on it is a machine where nobody
+writes one.
+
 ## Where things live
 
 **One data directory holds everything** — the config that says what to run, the
@@ -847,6 +915,9 @@ runtime state of what is running, and the turns they produced:
                                    (the search index) inside
       media/                       what it generated
       wechat.yaml                  its WeChat login (~24h, written on a scan)
+      a2a.yaml                     its A2A ledger: the inbound tasks whose
+                                   completion bridge this process holds, which
+                                   is also what puts it on the mesh
 ```
 
 **Nothing inside an agent's directory repeats its name** — the directory says
@@ -931,6 +1002,20 @@ slife2/
 │  │                  #   ngrok / localhost.run / cloudflared transports, their
 │  │                  #   state machine, and the health monitor that keeps one up
 │  └─ server.py       #   the token registry, `GET /share/<token>`, the tools
+├─ a2a/               # slife2-a2a: the A2A mesh over MQTT, on the published
+│  ├─ mesh.py         #   profile — one mesh per agent, because the agent name
+│  │                  #   *is* the MQTT client id and the request topic's last
+│  │                  #   segment: the two connections, the task lifecycle,
+│  │                  #   presence, and the check that refuses a taken name
+│  ├─ broker.py       #   the broker: probed, started when it is local and
+│  │                  #   absent, and a startup failure if it still will not
+│  │                  #   serve — or if it is another machine's and is down
+│  ├─ inbound_store.py#   the per-agent ledger at <agent>/a2a.yaml: tasks whose
+│  │                  #   completion bridge this process holds, which is what
+│  │                  #   tells a restart's orphans from ids never seen
+│  ├─ task_store.py   #   what this process sent, and where each send got to
+│  └─ server.py       #   the plugin: the four tools, and the hand-over that
+│                     #   puts what arrives into the conversation (DESIGN §1.8)
 ├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
 │                     #   as sixteen tools, and the byte half of a saved file —
 │                     #   what is copied in, what is read back, what is refused
@@ -990,7 +1075,11 @@ slife2/
 ├─ templates/
 │  ├─ system.j2       # the system prompt the distribution ships
 │  ├─ recall.j2       # the recall instruction, rendered per turn
-│  └─ agent_task.j2   # what a task is told as it starts (DESIGN.md §1.3)
+│  ├─ agent_task.j2   # what a task is told as it starts (DESIGN.md §1.3)
+│  ├─ schedule.j2     # what a task that came due is told (§1.7)
+│  └─ a2a_orphans.j2  # the inbound tasks a restart left nobody able to
+│                     #   complete, and the one reply their peers can still
+│                     #   get (§1.8)
 └─ tui/
    ├─ app.py          # the Textual App
    ├─ client.py       # AgentClient + WindowClient protocols, and the MCP

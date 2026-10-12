@@ -54,6 +54,8 @@ from textual.widgets import Static, TextArea
 # imports exist to prevent.  Taking one off is `slife2.markers.strip`, which is
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
+from slife2.a2a.server import CHANNEL as A2A_CHANNEL
+from slife2.a2a.server import MARKER_PREFIX as A2A_MARKER
 from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
 from slife2.markers import strip as strip_marker
@@ -66,7 +68,7 @@ from slife2.wechat import MARKER_PREFIX as WECHAT_MARKER
 #: together.  A marker that is not in here is one this window does not know
 #: about, and an unknown marker is left alone rather than guessed at — which is
 #: what makes adding a channel a line in this list.
-MARKERS: tuple[str, ...] = (WECHAT_MARKER, ASYNC_TASK_MARKER)
+MARKERS: tuple[str, ...] = (WECHAT_MARKER, ASYNC_TASK_MARKER, A2A_MARKER)
 
 #: So `_add` can hand back the widget type it was given.
 WidgetT = TypeVar("WidgetT", bound=Static)
@@ -125,6 +127,13 @@ def channel_prefix(channel: str) -> str:
         # from, which is why every message this plugin hands over names a task —
         # including the reconciliation, which is sent per task for this reason.
         return f"Scheduled({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{A2A_CHANNEL}:"):
+        # A peer on the mesh.  The name is in the channel because a hand-over
+        # carries the channel and the words and nothing else, and v1's bubble is
+        # what it draws here — the marker beside the message is taken back off
+        # (it is what a *reply* needs, which nothing a person reads can act on),
+        # and the footnote still carries the key it really came in on.
+        return f"A2A({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
     # this window inventing a speaker (DESIGN.md §1.3).

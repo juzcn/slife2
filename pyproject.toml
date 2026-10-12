@@ -90,6 +90,27 @@ dependencies = [
     # dependency with v1's comment, kept because the reason is invisible from an
     # import that does not exist: `zoneinfo` loads it by name, from C.
     "tzdata>=2026.5",
+    # The A2A mesh (`slife2.a2a`, DESIGN.md §1.8), and **the wire is not ours**.
+    # The published A2A-over-MQTT profile *is* the SDK: the topic tree, the
+    # retained agent card with presence carried by an MQTT user property, the
+    # JSON-RPC 2.0 envelopes whose `ResponseTopic`/`CorrelationData` properties
+    # carry the reply routing, the task lifecycle with its per-task dedup, and
+    # the requester's retry ladder.  What this project writes is the driver
+    # around it — v1's arrangement and v1's reason: interop with the rest of the
+    # ecosystem follows from the wire being somebody else's, and a self-built
+    # binding would be a second protocol wearing the name.  Imported only by
+    # `slife2/a2a/mesh.py`.
+    "a2a-over-mqtt>=0.1.0",
+    # The MQTT client under that SDK, imported *directly* by the same module, for
+    # the one thing the SDK does not offer: its own `Requester` is
+    # connection-per-call, which is exactly wrong here — a send returns a task
+    # id and the result is pushed back later, possibly to a different
+    # correlation than the one it was sent under.  So the outbound half is a
+    # persistent `aiomqtt` client of our own, and the pre-join name probe is a
+    # second, short-lived one.  Declared by the same rule as `httpx2` above: a
+    # module this project imports is a dependency this project states.  It
+    # brings `paho-mqtt`, which nothing here imports.
+    "aiomqtt>=2.5.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -110,6 +131,7 @@ slife2 = "slife2:main"
 slife2-agent = "slife2.server.server:main"
 slife2-agent-task = "slife2.agent_task_server:main"
 slife2-schedule = "slife2.schedule_server:main"
+slife2-a2a = "slife2.a2a.server:main"
 slife2-context = "slife2.context_server:main"
 slife2-skills = "slife2.skills_server:main"
 slife2-cli = "slife2.cli_server:main"

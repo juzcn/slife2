@@ -1038,6 +1038,126 @@ section is absent by — and every number the feature has is pacing inside the
 plugin, where a number with no decision behind it belongs.  What that leaves
 open is the one thing §9 names: nothing bounds how many tasks exist.
 
+### 1.8 The A2A mesh, and what a per-process identity costs a shared one
+
+**A2A is agent-to-agent traffic over MQTT, and the wire is not ours.**  The
+publicly specified **A2A-over-MQTT** profile is the `a2a-over-mqtt` SDK: a
+versioned topic tree with four categories, a retained agent card whose presence
+rides an MQTT user property and a last will, JSON-RPC 2.0 envelopes whose
+`ResponseTopic`/`CorrelationData` properties carry the reply routing, and the
+task lifecycle (acknowledgement → working → artifact → terminal) with per-task
+dedup and a requester retry ladder.  What slife2 writes is the harness glue
+around it — the driver, the plugin, the two ledgers — which is v1's split and
+v1's reason: interop with the rest of the ecosystem follows from the wire being
+somebody else's, and a hand-rolled binding would be a second protocol wearing
+the name.
+
+**A plugin, by §1.1's first row.**  What it holds is somebody else's connection
+— a broker session per agent — and a library would put an MQTT client in every
+importer.  It is also the one plugin here whose **identity is per agent**, and
+that is the whole of what the port had to decide.
+
+**v1's identity *was* the process, and it cannot be here.**  The agent name is
+not a label: it is the MQTT client id of both connections *and* the last segment
+of the request topic, so two processes answering to one name trade the session
+back and forth and every task sent to it runs **twice**.  v1 therefore ran one
+plugin process per agent, which made its module globals that agent's by
+construction.  These servers are shared (§4), so the same things live in a
+**session per agent** — §1.2's WeChat rule, one section up — and a mesh is
+created for the calling agent when a tool first says who it is.  The collision
+machinery ports unchanged and for the same reason it existed: before joining,
+a throwaway connection with its own client id reads the retained card on the
+name's own discovery topic, and a card that is neither our own instance's nor a
+*retirement* means the name is taken and the mesh refuses to connect.  A twin
+that appears afterwards takes the mesh down rather than fighting for the id, and
+**no winner is picked** — a departing agent's last act is to publish an *offline*
+card on the name's own topic, which would overwrite the survivor's card and
+leave it advertising as offline to every peer.
+
+**A peer on this machine and a peer on another one are the same peer.**  Nothing
+in the driver distinguishes them and nothing needs to: a local agent is simply
+one whose mesh this process happens to hold, published to the same broker under
+its own name.  What that costs is the enrollment question — a shared process has
+to know *which names to be reachable under* — and the answer is the one §1.7
+already gives for agents in general: **the file is the record.**  An agent is on
+the mesh because it has used one, the ledger at `agents/<agent>/a2a.yaml` is that
+use, and a restart resumes exactly the agents an earlier call enrolled.  Asking
+`agents/` instead would put a retained card on the broker for every conversation
+the machine had ever had, and there is no per-agent switch to hang that on.  The
+cost is one call per agent, once, and it is permanent.
+
+**The plugin delivers its own turns, and the drain tool was the seam.**  v1's
+harness polled `__a2a_drain_incoming` once a second and injected what it found
+into the agent's inbox; there is no harness here.  What replaced it is exactly
+what §1.2 says replaced `__wechat_drain_incoming`: **`slife2.handover`** — the
+window showing that conversation first, the agent server when no window is, and
+three answers about whether it worked.  So the five queues become one ordering
+queue per session with one writer behind it, which is the job the queues were
+doing for the harness: arrival order, and keeping a mesh callback off the MQTT
+reader's stack.  A message that reaches neither place is logged and dropped;
+nothing retries, because a peer re-sends a task itself when it gets no answer,
+and that is the retry that knows what it is retrying.
+
+**The marker is v1's, character for character** — `[A2A:{"from": …}]`, with the
+peer under `from` and deliberately *not* `agent_name`, which every system prompt
+uses for the agent's own identity; v1 measured receivers misreading a sender as
+themselves.  The `type` field is the one envelope's classifier, and the writer
+and the reader (`marker`, `a2a_message_type`) are one pair so the vocabulary
+stays one list.  `A2A(<peer>)> ` is v1's bubble, drawn from the channel alone
+(`a2a:<peer>`) because a hand-over carries the channel and the words and nothing
+else.  A habit survives a port for the reason `[Wechat:{…}]`'s spelling does.
+
+**A restart orphans every inbound task, and the agent is told.**  The completion
+bridge and the peer's reply topic are both process-local — the latter is read off
+the inbound request's own MQTT properties and never leaves it — so a task in
+flight when a process dies can never be completed by anyone.  The ledger is the
+line between *orphaned* and *never seen*: written on arrival, removed on
+departure, so what a fresh process finds is exactly what its predecessor died
+holding.  v1 rode that list on every turn's prompt; there is no per-turn prompt
+here, so it is **one message handed over once, at the start that found it**,
+naming the one reply those tasks can still get — a plain message to the peer.
+That this plugin says something nobody asked for is the point rather than a
+lapse: the peer is waiting.
+
+**Everything else the mesh delivers is a message too**, and v1's shapes are kept
+for each — a task request marked and answerable, an auto-pushed result wearing
+its task id, a withdrawal, a broadcast, and a presence *transition* rendered by
+v1's own `format_presence_line`.  A non-transition renders as `None` and is not
+delivered, and a **cold retained offline card** — a peer already gone before we
+subscribed — is cached for the roster but never announced, so a dead card from a
+past session cannot fire a fake "went offline".  Peer values reach a model's
+context only through `safe_name`, which strips the control characters a peer
+could otherwise use to write instructions into somebody's turn.
+
+**Two things v1 had are gone.**  `__check` has no port: v2 has no
+`system_health` and no `__`-prefixed tools at all, and what it reported — the
+name, the collision, the broker, the roster — is `a2a_list_agents`' answer now,
+which is where a model would look anyway.  And `broker.py`, v1's TCP probe, is
+`slife2.runtime.tcp_listening`.
+
+**And the broker is started, which is the one place this contradicts v1.**
+v1's rule was that slife leaves mosquitto to the user and treats a listening
+broker as the feature's on/off switch; here a config that says `a2a:` has said it
+wants the mesh, so a missing broker is a missing dependency rather than a
+preference.  `slife2/a2a/broker.py` probes the configured address, starts
+`mosquitto` on it if it can, and **fails the start** if it cannot — reported by
+the launcher with the child's own log, because the alternative is four `a2a_*`
+tools offered to a model for a mesh that is not there.  Only a **local** broker is
+started: `broker.host` may name another machine, which is reached exactly the
+same way and which nothing on this machine can stand in for, so an absent remote
+broker is the same hard failure with no attempt made and a message saying which
+of the two it was.  The config it hands mosquitto is not decoration — from
+mosquitto 2.0 a bare `-p` version binds, listens, and then refuses every
+anonymous client, which would arrive as a connect timeout naming nothing.
+
+**`provider:` is a hard constraint and not a default.**  v1 carried a
+`transport:` field, and answered a value it did not implement by disabling the
+feature with a warning at config load — which is precisely the outcome that
+leaves the model tools for a mesh that was silently switched off.  Mosquitto is
+the only broker this build speaks to, any other value is a `ConfigError` when
+the config is read, and adding one is adding a branch and a driver rather than
+writing a different string.
+
 ## 2. Streaming: one pattern, used twice
 
 MCP `tools/call` is a request/response. A TUI needs tokens as they arrive. Both
