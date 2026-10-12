@@ -33,7 +33,7 @@ only if the tool says so; everything else — a tool that forgot, a tool written
 before this module existed, a tool on a server nobody has thought about yet —
 stays where it was.  The other convention, marking the internal tools and
 exposing the rest, fails the other way: one forgotten mark puts `remember` in
-the model's hands and nothing anywhere says so.  An entry under `tools:` needs no
+the model's hands and nothing anywhere says so.  An entry under `mcp:` needs no
 mark at all, because the operator already opted in by writing it.
 
 The word is the protocol's, not this module's.  MCP annotates *content* with an

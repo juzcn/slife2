@@ -18,10 +18,10 @@ configuration has to answer:
             temperature: 0.7
             top_p: 1.0
 
-The other section worth reading here is `tools:` — the *external* MCP servers,
+The other section worth reading here is `mcp:` — the *external* MCP servers,
 which the plugin that owns the section holds a connection to:
 
-    tools:
+    mcp:
       filesystem:
         command: npx                    # stdio: a process we start
         args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
@@ -35,11 +35,11 @@ which the plugin that owns the section holds a connection to:
         headers:
           Authorization: Bearer ${ARXIV_TOKEN}
 
-Note the two words that are one letter apart throughout this file: `servers:` is
-*our* plugins — the ones slife2 starts, shares and stops — while `tools:` is
-other people's, which `slife2-mcp-tools` holds as a client and declares to the
-hub.  They are different things with different failure rules
-(`slife2.toolhub`), and this is the only place both are configured.
+Note the two words kept apart throughout this file: `servers:` is *our* plugins
+— the ones slife2 starts, shares and stops — while `mcp:` is other people's,
+which `slife2-mcp-tools` holds as a client and declares to the hub.  They are
+different things with different failure rules (`slife2.toolhub`), and this is
+the only place both are configured.
 
 And one section for a program that is neither, because it is already here:
 
@@ -51,7 +51,7 @@ And one section for a program that is neither, because it is already here:
 
 An entry names a command on this machine rather than a server to connect to:
 there is no process for slife2 to start, no URL, and nothing to keep alive — so
-it is not a `tools:` entry, and nothing about it is a plugin either, because
+it is not a `mcp:` entry, and nothing about it is a plugin either, because
 slife2 did not write it.  What it shares with both is the thing that matters
 here: **an entry is the operator's opt-in**, and this file is where the operator
 says it.  That is v1's `cli:` section, ported as configuration.
@@ -640,14 +640,14 @@ class ToolServerSettings:
     running system stops matching the file it was started from.
     """
 
-    #: The name it is configured under.  For an entry under `tools:` it prefixes
+    #: The name it is configured under.  For an entry under `mcp:` it prefixes
     #: every tool that entry offers, so it is also the name a person reads in a
     #: tool call; for one of ours (`kind="plugin"`) it prefixes nothing — a
     #: plugin's tools are the model's under their own names, and this is the
     #: name `servers()` reports them by.  See `slife2.toolhub.model_name`.
     name: str
     #: Which kind of entry this is: `"mcp"` or `"rest"` for one somebody wrote
-    #: under `tools:`, and `"plugin"` for one of ours, which has no section of
+    #: under `mcp:`, and `"plugin"` for one of ours, which has no section of
     #: its own — `slife2.toolhub.plugin_settings` builds it from `servers:`.  A
     #: label, not a behaviour: a REST API entry has already been expanded into
     #: the stdio command it describes by the time one of these exists (see
@@ -1064,9 +1064,9 @@ class Config:
     #: name -> where it listens, keyed by `"agent"` and by each `api` in use.
     servers: dict[str, ServerSettings] = field(default_factory=dict)
     providers: dict[str, ProviderSettings] = field(default_factory=dict)
-    #: Other people's MCP servers, from `tools:`.  Held by `slife2-mcp-tools`,
+    #: Other people's MCP servers, from `mcp:`.  Held by `slife2-mcp-tools`,
     #: which declares each entry to the hub as a source of its own.
-    tools: dict[str, ToolServerSettings] = field(default_factory=dict)
+    mcp: dict[str, ToolServerSettings] = field(default_factory=dict)
 
     #: REST APIs, from `rest-api:`, already expanded into the stdio command that
     #: serves each one.  A section of its own and a mapping of its own, read by
@@ -1173,7 +1173,7 @@ class Config:
         One statement of what this system runs, read by the launcher that starts
         them and by the toolhub that asks each one what tools it offers.  The
         hub has two sources — our own plugins, and the external MCP and REST
-        servers under `tools:` — and this is the first of them: derived here
+        servers under `mcp:` — and this is the first of them: derived here
         rather than written down beside the hub, because a list of "which of
         ours" kept in a second place is a list that disagrees with the
         launcher's.
@@ -1190,7 +1190,7 @@ class Config:
         return [api for api in API_BACKENDS if api in used]
 
     # **There is no `cli_tools()` here, and there is no `tools()` beside it**,
-    # for the reason the `tools:` section's accessor went the same way: `enabled`
+    # for the reason the `mcp:` section's accessor went the same way: `enabled`
     # is one rule, and a filtered view of a section is a second spelling of it
     # kept by whoever does not read the section.  The reader is the plugin that
     # owns the section — `slife2-cli`, `slife2-mcp-tools` — and a switched-off
@@ -1239,7 +1239,7 @@ def default_config() -> Config:
             "skills-server": ServerSettings(port=8031),
             "cli-server": ServerSettings(port=8032),
             # And the two whose whole job is somebody else's servers: the
-            # `tools:` section (`slife2.mcp_tools`) and the `rest-api:` one
+            # `mcp:` section (`slife2.mcp_tools`) and the `rest-api:` one
             # (`slife2.restapi_tools`).  They hold the connections the toolhub
             # used to hold, and declare what they hold to it — the hub keeps the
             # tool *set* and no link to anybody.
@@ -1251,9 +1251,9 @@ def default_config() -> Config:
             # 8030, which v1's `builtins` had and nothing has had since.
             "wechat": ServerSettings(port=8030),
             # The private cabinet: notes, a diary, saved files and reports, one
-            # corpus per agent under `<data>/<agent>.files/`.  It reads no config
-            # section of its own — a cabinet is written by the model and by a
-            # person, never configured — so what is here is its address.
+            # corpus per agent under `<data>/agents/<agent>/cabinet/`.  It reads
+            # no config section of its own — a cabinet is written by the model
+            # and by a person, never configured — so what is here is its address.
             "cabinet": ServerSettings(port=8035),
             # Rendering, speech and transcription, behind `media:`.  A plugin
             # for the reason §1.1's table gives — it holds a provider's key and
@@ -1281,7 +1281,7 @@ def default_config() -> Config:
             # are.  It holds no credential and no connection to anybody's
             # server: every plugin above is asked for a tool list and for the
             # sources it holds, and the two `*-tools` plugins above are the ones
-            # that reach the entries under `tools:` and `rest-api:`.
+            # that reach the entries under `mcp:` and `rest-api:`.
             "toolhub": ServerSettings(port=8020),
             # Background tasks: a loop of the calling agent's own, one per task,
             # answered by a message in the conversation that asked for it.  A
@@ -1323,7 +1323,7 @@ def default_config() -> Config:
             "embeddings": ServerSettings(port=8004),
         },
         providers={"deepseek": deepseek},
-        tools={},
+        mcp={},
         agent=AgentSettings(),
         embeddings=EmbeddingsSettings(
             providers={
@@ -1474,6 +1474,17 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             "move it under `servers:` as `servers.tui`"
         )
 
+    # `tools:` is `mcp:` now, and the same argument applies with more force: an
+    # unknown top-level key is simply not read, so a config that still says
+    # `tools:` would load with every one of those servers gone and nothing said.
+    # The section is named for the catalogue category its rows are declared
+    # under, and that category is `mcp`.
+    if raw.get("tools") is not None:
+        raise ConfigError(
+            "tools: is `mcp:` now — the section is named for the catalogue "
+            "category its rows are declared under; rename the key"
+        )
+
     # **An absent section is the built-in provider; an *empty* one is a
     # mistake.**  `providers: {}` used to fall through the same `if not raw`
     # test as no section at all, so a config that named no provider quietly ran
@@ -1511,19 +1522,19 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     # neither can check the other.  Both would become one entry called
     # `{name}__{tool}` in the model's tool list, so which of the two won would be
     # invisible at every point a person could look.
-    tools = _mcp_servers(raw)
+    mcp = _mcp_servers(raw)
     rest_apis = _rest_servers(raw)
     for name in rest_apis:
-        if name in tools:
+        if name in mcp:
             raise ConfigError(
-                f"rest-api.{name}: already configured under `tools:`; the two "
+                f"rest-api.{name}: already configured under `mcp:`; the two "
                 f"would collide as tool names"
             )
 
     return Config(
         servers=servers,
         providers=providers,
-        tools=tools,
+        mcp=mcp,
         rest_apis=rest_apis,
         cli=_cli_tools(raw),
         skills=_skills(raw),
@@ -1926,10 +1937,10 @@ OPENAPI_API_KEY = "API_KEY"
 
 
 def _mcp_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
-    """The `tools:` section, as upstreams: an MCP server written out."""
+    """The `mcp:` section, as upstreams: an MCP server written out."""
     return {
         str(name): _tool_server(spec, str(name))
-        for name, spec in _mapping(raw.get("tools"), "tools").items()
+        for name, spec in _mapping(raw.get("mcp"), "mcp").items()
     }
 
 
@@ -1953,20 +1964,20 @@ def _rest_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
 
 
 def _tool_server(raw: Any, name: str) -> ToolServerSettings:
-    """One `tools:` entry: an MCP server, over stdio or over the network."""
+    """One `mcp:` entry: an MCP server, over stdio or over the network."""
     if not isinstance(raw, dict):
-        raise ConfigError(f"tools.{name}: expected a mapping")
+        raise ConfigError(f"mcp.{name}: expected a mapping")
 
     command = str(raw.get("command") or "")
     url = str(raw.get("url") or "")
     if command and url:
         raise ConfigError(
-            f"tools.{name}: has both `command` and `url`; one entry is one "
+            f"mcp.{name}: has both `command` and `url`; one entry is one "
             f"transport — write two entries if you meant two servers"
         )
     if not command and not url:
         raise ConfigError(
-            f"tools.{name}: needs `command` (a program to start) or `url` (an "
+            f"mcp.{name}: needs `command` (a program to start) or `url` (an "
             f"endpoint to connect to)"
         )
 
@@ -1974,10 +1985,10 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
         name=name,
         description=str(raw.get("description") or ""),
         command=command,
-        args=_string_list(raw.get("args"), f"tools.{name}.args"),
-        env=_secrets(raw.get("env"), f"tools.{name}.env"),
+        args=_string_list(raw.get("args"), f"mcp.{name}.args"),
+        env=_secrets(raw.get("env"), f"mcp.{name}.env"),
         url=url,
-        headers=_secrets(raw.get("headers"), f"tools.{name}.headers"),
+        headers=_secrets(raw.get("headers"), f"mcp.{name}.headers"),
         cwd=str(raw.get("cwd") or ""),
         enabled=bool(raw.get("enabled", True)),
         autoload=raw.get("autoload") is True,
@@ -2063,7 +2074,7 @@ def _cli_tool(raw: Any, name: str) -> CliToolSettings:
     program is not a disabled entry — it is one that can never work, and saying
     so at load names the entry once instead of failing at every call.
 
-    Unlike `tools:`, there is no second transport to choose between and so
+    Unlike `mcp:`, there is no second transport to choose between and so
     nothing to refuse for naming both.  The strictness that survives is the
     strictness that has something to be strict about.
     """

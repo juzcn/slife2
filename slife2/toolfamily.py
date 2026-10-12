@@ -5,7 +5,7 @@ opened one link per configured entry, merged what each offered, and was therefor
 the only process that could reach a server.  The hub is the tool *set's* owner —
 which tools exist, what the model is holding, what the budget takes back — and
 holding twenty connections is not that job; it is the job of the process that
-owns the config section they were written in.  So `tools:` and `rest-api:` each
+owns the config section they were written in.  So `mcp:` and `rest-api:` each
 have a plugin, and this is the half of both that is the same code.
 
 **A family holds, and the hub records.**  What this class does is connect to each
@@ -452,7 +452,7 @@ def refusal(config: Config, name: str) -> str | None:
 
     **The collision it prevents is silent, which is the whole reason it is
     checked here.**  The hub routes by source name and refuses to know two owners
-    for one: a `tools:` entry called `agent` would be declared, dropped by
+    for one: a `mcp:` entry called `agent` would be declared, dropped by
     `refresh_declared` as a name this hub is already connected under, and
     reported to the model as added — with no tools, and nothing anywhere saying
     why.  The same from the other side for `skills` and `cli`, which are the

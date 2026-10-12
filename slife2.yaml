@@ -5,13 +5,151 @@
 # built-in OpenAI-compatible provider, which is what a fresh checkout starts
 # with — so deleting this file changes behaviour, on purpose.
 #
-# It is safe to check in: it holds no secrets.  Every ${VAR} resolves through
-# shell env -> credstore -> literal default, so keys live in the credential
-# store (`credstore set DEEPSEEK_API_KEY`), never here.  An unresolved reference
-# is left verbatim rather than raising, so a missing key fails at the API call —
-# where the message can name it — rather than at startup.
+# It is safe to check in: it holds no secrets.  Every credential written in it
+# is a *reference*, and one chain resolves all of them — a provider's key, a
+# tool server's `env` or `headers`, a skill's script environment, a tunnel
+# token:
 #
-# ── Providers ───────────────────────────────────────────────────────────────
+#     shell env  ->  credstore  ->  literal default
+#
+# `${VAR}` and `${VAR:-default}` read the shell first and the OS keyring second
+# — the variable's name *is* the credential-store key, so `credstore set
+# DEEPSEEK_API_KEY` is what `${DEEPSEEK_API_KEY}` resolves to — while
+# `keyring:<service>/<key>` skips the shell and a plain string is just itself.
+# Resolution never raises: an unresolved reference is left verbatim, so a
+# missing key fails at the API call — where the message can name it — rather
+# than at startup.
+
+# ── The servers ───────────────────────────────────────────────────────────────
+# The processes this machine runs.  Every address has the same shape —
+# `{host: 127.0.0.1, port: N, path: /mcp}` — so each entry below writes the one
+# value that differs, its port; add `host` or `path` back to bind another
+# interface or serve another route.
+#
+# One address per *wire protocol*, not per provider: a process speaks one
+# format, so every OpenAI-compatible provider is served by the same process and
+# `stream_chat(provider=..., model=...)` says whose credentials to use.  A
+# protocol no provider uses is not started — it would be a process holding
+# nobody's key.
+#
+# **A server that reads no section of its own is a server whose off switch is
+# the absence of the thing that would have written one.**  There is no
+# `wechat:`, `cabinet:`, `tui:` or `schedule:` key anywhere in this file, and
+# that is the design rather than a gap; each of those entries says what its own
+# absence means.
+
+# The model backends, one process per wire protocol.  Which credentials and
+# models each one serves is `providers:` below.
+servers:
+  openai-completions: {port: 8001}
+  anthropic-messages: {port: 8002}
+  openai-responses: {port: 8003}
+  # Embeddings, for the db's vector index.  A process of its own, and *not* one
+  # of the three above: those are chat protocols built from the `providers:`,
+  # and an embedding endpoint speaks neither — it is configured under
+  # `embeddings:`.  It starts before `context`, which asks it for a dimension
+  # before it can build an index at all.
+  embeddings: {port: 8004}
+  # The loop itself, shared by every conversation on this machine and stateless:
+  # the agent name is passed in on each call (`run_turn(..., agent="jack")`).  A
+  # plugin because what it holds is loops — state with a lifetime rather than a
+  # file.
+  agent: {port: 8000}
+  # A conversation's memory: the turn log, and the decision about which of its
+  # turns a turn runs on.  One database per `(agent, subagent)`, at
+  # `<data>/agents/<agent>/turns.db`, a worker's beside its parent's.  Its
+  # settings are the `context:` section.
+  context: {port: 8010}
+  # The tool *set*: which tools the model may call, what they are named, what
+  # the budget takes back — and the only process that decides it.  It holds no
+  # connection to anybody's server, and reads no config section but its own.
+  toolhub: {port: 8020}
+  # Other people's servers, held by the process that owns the section they are
+  # written in: `mcp:` by this one, `rest-api:` by the next.  Neither offers
+  # the model anything — each holds its entries' connections and *declares* them
+  # to the hub, which merges the rows and routes the calls back.  What that buys
+  # is that the hub keeps the tool set and no link to anybody.
+  mcp-tools: {port: 8033}
+  restapi-tools: {port: 8034}
+  # The programs the `cli:` section records as already on this machine.  Nothing
+  # here runs one yet (see DESIGN.md §9): what this server serves today is one
+  # catalogue row per entry, so that a search finds a command by what it does.
+  # Its key carries `-server` because `cli` is the catalogue source its rows
+  # belong to, and a source's rows cannot share an id with the tools of the
+  # server that publishes them.
+  cli-server: {port: 8032}
+  # The playbooks: `<data>/skills/`, one directory per skill, each with a
+  # `SKILL.md`.  It serves `skill_use` — the tool that reads one — and one
+  # catalogue row per installed skill, so that a search finds a playbook by what
+  # it is for.  A skill is a document and not a tool, so the row is not
+  # callable; the tool that *is* is `skill_use`.
+  skills-server: {port: 8031}
+  # WeChat, over the iLink bridge.  Not a family: it declares no catalogue rows
+  # and has no section of entries — what it holds is a login per agent and the
+  # conversation that login is in.  Its tools are the model's under their own
+  # names (`wechat_login`, `wechat_send_message`), because there is one set of
+  # tools in this system and the plugin serving one is not something the model
+  # needs to reason about.  A login is *scanned*, never configured:
+  # `wechat_login` puts a QR code in front of somebody, and the token that comes
+  # back lives in `<data>/agents/<agent>/wechat.yaml` — which is also how a
+  # shared process knows which agents exist.  A machine that should not talk to
+  # WeChat is a machine where nobody scans a code.  Port 8030, which v1's
+  # `builtins` had and nothing has had since; DESIGN.md §1.2, and README.md's
+  # "WeChat" section for the user-facing half.
+  wechat: {port: 8030}
+  # The private cabinet: notes, a diary, saved files, reports — the four kinds
+  # are one searchable corpus, and each agent's is its own directory
+  # (`<data>/agents/<agent>/cabinet/`) with markdown mirrors a person can read.
+  # Like `wechat` it reads no section at all, for the reason above: a cabinet is
+  # written, not configured.
+  cabinet: {port: 8035}
+  # The terminal's own inbox.  One process, shared like every other server here,
+  # holding a session per agent: a message arriving on another channel is handed
+  # to it by name, and it puts the words down the stream the window showing that
+  # conversation holds open — so they become the one thing a window already
+  # handles, something the person typed.  `slife2-wechat` is the caller today
+  # (DESIGN.md §1.2).  It reads no section of its own: an address is the whole
+  # of what is written down about it.
+  tui: {port: 8005}
+  # The clock: what one agent has scheduled, and every run of it, in
+  # `<agent>/schedule.db`.  The one server here that starts work nobody asked
+  # for at the moment it starts — a cron expression comes due and the agent is
+  # handed the task as a turn of its own, through the terminal (or the agent
+  # server, when no window is showing that conversation).  A plugin because what
+  # it holds is timers, which is the same reason `agent-task` is one, and it
+  # owns no section: a machine that should not run scheduled tasks is a machine
+  # where nobody writes one, exactly as with WeChat (DESIGN.md §1.7).
+  schedule: {port: 8039}
+  # The A2A mesh: agent-to-agent traffic over MQTT, on the published
+  # A2A-over-MQTT profile.  The one server here whose identity is *per agent* —
+  # the agent name is the MQTT client id and the request topic's last segment —
+  # so this one process holds a mesh per agent it serves, and a peer on this
+  # machine is reached exactly as one on another machine is.  What arrives is
+  # handed to the conversation (`hand_over`), and its section is `a2a:`
+  # (DESIGN.md §1.8).
+  a2a: {port: 8040}
+  # Generation: images, video, speech and transcripts, from the `media:`
+  # section.  One process for every provider, because which vendor draws a
+  # picture is a fact about a *model* and not about a process — the same
+  # arrangement as the model backends, and for the same reason.
+  media: {port: 8036}
+  # A public HTTPS URL for a local file, so something that cannot read this
+  # machine's disk — a vision model asked about a picture, an API that takes
+  # links and nothing else — can still fetch one.  The one server here that
+  # answers a second HTTP route: `GET /share/<token>` beside `/mcp`, on this
+  # same port, because the far end fetches that path *through* the tunnel.  The
+  # tunnel provider is the `file-tunnel:` section.
+  file-tunnel: {port: 8038}
+  # The background tasks: a loop of the calling agent's own, one per task,
+  # answered later by a message in the conversation that asked for it.  A plugin
+  # because what it holds is loops — the same reason the agent server is one —
+  # and unlike every other address here it *reaches* its peers rather than being
+  # reached by them: the hub for a tool list, a model server for the loop, and
+  # the terminal (or, when no window is showing, the agent server) to hand the
+  # answer over.  Its section is `agent-task:`, and it holds one key.
+  agent-task: {port: 8037}
+
+# ── Providers ─────────────────────────────────────────────────────────────────
 # One entry per provider.  `api` selects the wire protocol, and `base_url` /
 # `api_key` / `server` are shared by every model listed under it:
 #
@@ -21,10 +159,7 @@
 #                        from the chat-completions one above, not a flag on it,
 #                        so it is served by a process of its own
 #
-# slife2 starts the servers its config needs, on demand, and shares them between
-# instances.
-#
-# ── Models ──────────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
 # Each model entry:
 #   model                 API model name; doubles as the local id, referenced
 #                         elsewhere as "provider/model"
@@ -56,189 +191,237 @@
 # An omitted sampling field is *not* the same as a default value: it means send
 # nothing and let the gateway decide.  Several gateways reject a temperature
 # they did not ask for.
+providers:
+  deepseek:
+    api: openai-completions
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    models:
+      - model: deepseek-flash
+        name: DeepSeek Flash
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1000000
+        max_tokens: 384000
+        temperature: 0.7
+        top_p: 1.0
 
-# ── The servers ─────────────────────────────────────────────────────────────
-# One address per *wire protocol*, not per provider: a process speaks one
-# format, so every OpenAI-compatible provider is served by the same process and
-# `stream_chat(provider=..., model=...)` says whose credentials to use.  A
-# protocol no provider uses is not started — it would be a process holding
-# nobody's key.
-servers:
-  agent:
-    host: 127.0.0.1
-    port: 8000
-    path: /mcp
-  openai-completions:
-    host: 127.0.0.1
-    port: 8001
-    path: /mcp
-  anthropic-messages:
-    host: 127.0.0.1
-    port: 8002
-    path: /mcp
-  openai-responses:
-    host: 127.0.0.1
-    port: 8003
-    path: /mcp
-  # Embeddings, for the db's vector index.  A process of its own, and *not* one
-  # of the three above: those are chat protocols built from the `providers:`
-  # below, and an embedding endpoint speaks neither — it is configured under
-  # `embeddings:` at the bottom of this file.  It starts before `context`, which asks
-  # it for a dimension before it can build an index at all.
-  embeddings:
-    host: 127.0.0.1
-    port: 8004
-    path: /mcp
-  # A conversation's memory: the turn log, and the decision about which of its
-  # turns a turn runs on.  One database per `(agent, subagent)`, at
-  # `<data>/agents/<agent>/turns.db`, a worker's beside its parent's.
-  # Its settings are the `context:` section below.
-  context:
-    host: 127.0.0.1
-    port: 8010
-    path: /mcp
-  # The playbooks: `<data>/skills/`, one directory per skill, each with a
-  # `SKILL.md`.  It serves `skill_use` — the tool that reads one — and one
-  # catalogue row per installed skill, so that a search finds a playbook by what
-  # it is for.  A skill is a document and not a tool, so the row is not
-  # callable; the tool that *is* is `skill_use`.
-  skills-server:
-    host: 127.0.0.1
-    port: 8031
-    path: /mcp
-  # The programs the `cli:` section below records as already on this machine.
-  # Nothing here runs one yet (see DESIGN.md §9): what this server serves today
-  # is one catalogue row per entry, so that a search finds a command by what it
-  # does.  Its key carries `-server` because `cli` is the catalogue source its
-  # rows belong to, and a source's rows cannot share an id with the tools of the
-  # server that publishes them.
-  cli-server:
-    host: 127.0.0.1
-    port: 8032
-    path: /mcp
-  # WeChat, over the iLink bridge.  Not a family: it declares no catalogue rows
-  # and has no section of entries — what it holds is a login per agent and the
-  # conversation that login is in.  Its tools are the model's under their own
-  # names (`wechat_login`, `wechat_send_message`), because there is one set of
-  # tools here and the plugin serving one is not something the model reasons
-  # about.  Port 8030, which v1's `builtins` had and nothing has had since.
-  wechat:
-    host: 127.0.0.1
-    port: 8030
-    path: /mcp
-  # The private cabinet: notes, a diary, saved files, reports — the four kinds
-  # are one searchable corpus, and each agent's is its own directory
-  # (`<data>/agents/<agent>/cabinet/`) with markdown mirrors a person can read.
-  # Like
-  # `wechat`, it reads no config section at all: a cabinet is written, not
-  # configured.  Its bytes and mirrors live beside the data, not in a database
-  # anyone has to open.
-  cabinet:
-    host: 127.0.0.1
-    port: 8035
-    path: /mcp
-  # Generation: images, video, speech and transcripts, from the `media:` section
-  # at the bottom of this file.  One process for every provider, because which
-  # vendor draws a picture is a fact about a *model* and not about a process —
-  # the same arrangement as the model backends, and for the same reason.
-  media:
-    host: 127.0.0.1
-    port: 8036
-    path: /mcp
-  # A public HTTPS URL for a local file, so something that cannot read this
-  # machine's disk — a vision model asked about a picture, an API that takes
-  # links and nothing else — can still fetch one.  The tunnel provider is the
-  # `file-tunnel:` section at the bottom of this file.
+  scnet:
+    api: openai-completions
+    base_url: https://api.scnet.cn/api/llm/v1
+    api_key: ${SCNET_TOKEN_PLAN}
+    models:
+      - model: DeepSeek-V4
+        name: DeepSeek V4 Pro
+        reasoning: true
+        input:
+          - text
+        context_window: 1000000
+        max_tokens: 384000
+        temperature: 0.7
+        top_p: 1.0
+      - model: Kimi-K3
+        name: Kimi K3
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1048576
+        max_tokens: 131072
+        # This gateway rejects the standard thinking shape while reasoning
+        # anyway, so the field is left out entirely.
+        compat:
+          thinking: omit
+
+  bailian:
+    api: anthropic-messages
+    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
+    api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+    models:
+      - model: qwen3.8-max
+        name: Qwen3.8 Max
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 983616
+        max_tokens: 131072
+
+  # Nothing here speaks the Responses API yet, so the block above is what
+  # actually runs.  A provider for it looks like this — note that it is a
+  # separate provider entry, not a change to `deepseek`, because the protocol
+  # decides which process serves it:
   #
-  # The one server here that answers a second HTTP route: `GET /share/<token>`
-  # beside `/mcp`, on this same port, because the far end fetches that path
-  # *through* the tunnel.  Nothing else about it is unusual — which is why it
-  # is a plugin on this list and not a mechanism of its own.
-  file-tunnel:
-    host: 127.0.0.1
-    port: 8038
-    path: /mcp
-  # The terminal's own inbox.  One process, shared like every other server here,
-  # holding a session per agent: a message arriving on another channel is handed
-  # to it by name, and it puts the words down the stream the window showing that
-  # conversation holds open — so they become the one thing a window already
-  # handles, something the person typed.  `slife2-wechat` is the caller today
-  # (DESIGN.md §1.2).  It reads no section of its own: an address is the whole of
-  # what is written down about it.
-  tui:
-    host: 127.0.0.1
-    port: 8005
-    path: /mcp
-  # Other people's servers, held by the process that owns the section they are
-  # written in: `tools:` by this one, `rest-api:` by the next.  Neither offers
-  # the model anything — each holds its entries' connections and *declares* them
-  # to the hub, which merges the rows and routes the calls back.  What that buys
-  # is that the hub keeps the tool set and no link to anybody.
-  mcp-tools:
-    host: 127.0.0.1
-    port: 8033
-    path: /mcp
-  restapi-tools:
-    host: 127.0.0.1
-    port: 8034
-    path: /mcp
-  # The tool *set*: which tools the model may call, what they are named, what
-  # the budget takes back — and the only process that decides it.  It holds no
-  # connection to anybody's server, and reads no config section but this one.
-  toolhub:
-    host: 127.0.0.1
-    port: 8020
-    path: /mcp
-  # The background tasks: a loop of the calling agent's own, one per task,
-  # answered later by a message in the conversation that asked for it.  A plugin
-  # because what it holds is loops — the same reason the agent server is one —
-  # and unlike every other address here it *reaches* its peers rather than being
-  # reached by them: the hub for a tool list, a model server for the loop, and
-  # the terminal (or, when no window is showing, the agent server) to hand the
-  # answer over.  Its own section is `agent-task:` below, and it holds one key.
-  agent-task:
-    host: 127.0.0.1
-    port: 8037
-    path: /mcp
-  # The clock: what one agent has scheduled, and every run of it, in
-  # `<agent>/schedule.db`.  The one server here that starts work nobody asked
-  # for at the moment it starts — a cron expression comes due and the agent is
-  # handed the task as a turn of its own, through the terminal (or the agent
-  # server, when no window is showing that conversation).  A plugin because what
-  # it holds is timers, which is the same reason `agent-task` is one, and it owns
-  # **no section**: a machine that should not run scheduled tasks is a machine
-  # where nobody writes one, exactly as with WeChat.  DESIGN.md §1.7.
-  schedule:
-    host: 127.0.0.1
-    port: 8039
-    path: /mcp
-  # The A2A mesh: agent-to-agent traffic over MQTT, on the published
-  # A2A-over-MQTT profile.  The one server here whose identity is *per agent* —
-  # the agent name is the MQTT client id and the request topic's last segment —
-  # so this one process holds a mesh per agent it serves, and a peer on this
-  # machine is reached exactly as one on another machine is.  What arrives is
-  # handed to the conversation (`hand_over`), and its section is `a2a:` below.
-  # DESIGN.md §1.8.
-  a2a:
-    host: 127.0.0.1
-    port: 8040
-    path: /mcp
+  # openai:
+  #   api: openai-responses
+  #   base_url: https://api.openai.com/v1
+  #   api_key: ${OPENAI_API_KEY}
+  #   models:
+  #     - model: gpt-5.1
+  #       name: GPT-5.1
+  #       reasoning: true
+  #       input: [text, image]
+  #       context_window: 400000
+  #       max_tokens: 128000
+  #       compat:
+  #         # Only if this endpoint rejects the field; see the note above.
+  #         store: false
 
-# ── External tool servers ───────────────────────────────────────────────────
-# Other people's MCP servers, held by `slife2-mcp-tools` — which is why they
-# are `tools:` and not `servers:`.  The difference matters: `servers:` above is
-# *our* plugins, which slife2 starts, shares and stops, and a missing one is
-# a system that has come apart.  An entry here is somebody else's process; if it
-# is slow, paid or down, the hub says so through its `servers` tool and the
-# model simply has fewer tools, while the conversation keeps working.
+# Which model the agent starts with, as "provider/model".
+default: deepseek/deepseek-flash
+
+# ── The agent loop ────────────────────────────────────────────────────────────
+# How the agent server above runs one turn.  **The one section in this file with
+# two readers**: `slife2-agent` reads it, and so does `slife2-agent-task`, whose
+# tasks are the agent working with none of the asking conversation's history —
+# a prompt or a step count that meant something different there would be two
+# agents wearing one name.
+agent:
+  # Model calls allowed in one turn before it is cut off.  A model that keeps
+  # calling tools would otherwise run indefinitely; the cap ends the turn
+  # normally rather than raising.
+  max_steps: 16
+  # The system prompt is a Jinja2 template, rendered per turn with the agent
+  # name — `run_turn(..., agent="jack")` reaches it — because the server is
+  # shared and stateless, so two instances on one server are two names asking
+  # the same process.
+  #
+  # Left out, the template the distribution ships is used.  A path here is
+  # looked for relative to this file, which is the useful place for one you are
+  # editing:
+  #
+  #   system_prompt: "prompts/jack.j2"
+  #
+  # Inside it, `{{ agent_name }}` is the name the instance was started with.
+
+# ── Background tasks ──────────────────────────────────────────────────────────
+# How many agent tasks one agent may have running at once.  An **agent task** is
+# a loop of the agent's own — the same system prompt, the same model and the
+# same tools, and none of the asking conversation's history — started by the
+# model with a name and a description, and answered later by a message on the
+# `agent-task` channel.  The model has four tools over them —
+# `agent_task_start`, `agent_task_status`, `agent_task_list` and
+# `agent_task_cancel` — and not one of them waits for the work (DESIGN.md §1.3).
+agent-task:
+  # Tasks running at once, per agent.  A cap rather than a preference, and the
+  # only bound this feature has: the tool set is the one catalogue and nothing
+  # filters it, so a task may start a task — without this a model can grow loops
+  # without limit.  What it does *not* bound is how much work happens over time;
+  # `agent_task_list` and `agent_task_cancel` are what make a runaway visible
+  # and stoppable in the meantime, and DESIGN.md §9 holds the number that is
+  # still missing.
+  #
+  # It is also the only key a task owns, and that is the design: a task's prompt
+  # and its step count come out of `agent:` above, because a task is the agent
+  # working.
+  max_running: 4
+
+# ── Embeddings (semantic memory search) ───────────────────────────────────────
+# Where the db's vectors come from.  **A section of its own, holding only
+# OpenAI-compatible URLs**: each provider is a base_url, a key and the single
+# model id sent on `/v1/embeddings` — and none of them is one of the
+# `providers:` above, because an embedding endpoint speaks no chat protocol and
+# a chat backend built from those providers has no model to serve it with.
+#
+# The vector dimension is **never configured**.  It is discovered from the
+# endpoint at runtime — a table of known models first, then the endpoint's own
+# model listing, then a probe embedding whose length is the answer.  That is not
+# a convenience: the vector table fixes its width in its DDL and cannot be
+# altered afterwards, so the number has to be right before the table exists.
+#
+# There is deliberately **no `enabled` switch**.  A turn is stored with its
+# vector in one transaction, so an embedding model is not an extra the db can do
+# without — it is what lets the db record a turn at all.  Changing the model is
+# the supported change, and its cost is that the vector index is rebuilt whole
+# on the next start: every turn embedded again, because vectors from two models
+# cannot be ranked against each other.
+embeddings:
+  providers:
+    # A local embedding service: no credential and no network, and it outlives
+    # whatever vendor is current.  `bge-m3` is multilingual, which is what a
+    # history mixing Chinese and English needs.  It has to be running already —
+    # it is a separate installation, not a process slife2 starts.
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: bge-m3
+      api_key: local
+    # The same weights served by somebody else, for a machine without the local
+    # service.  Needs SILICONFLOW_API_KEY.
+    siliconflow:
+      base_url: https://api.siliconflow.cn/v1
+      model: BAAI/bge-m3
+      api_key: ${SILICONFLOW_API_KEY}
+  # A provider id, not a "provider/model" reference: there is one model per
+  # endpoint here, so the endpoint is the choice being made.  A value naming
+  # nothing falls back to the first provider.
+  active_model: siliconflow
+
+# ── Context ───────────────────────────────────────────────────────────────────
+# How a conversation's context is decided.  `slife2-context` owns the turn log
+# and, before every turn, makes **one model call** that reads the conversation
+# in hand and answers with what to keep of it plus what to recall from the log;
+# the turn runs on the two together.  This is v1's mechanism, ported, and the
+# reasons are in DESIGN.md §5.1.
+#
+# `ceiling` and `floor` are **fractions of the model's own context window**, so
+# they only mean anything for a model whose config declares one.  The ceiling is
+# what a kept context is measured against — a recall's budget is the headroom
+# below it — and the floor is the size a recall may spend when nothing was kept.
+#
+# `min_similarity` gates only a similarity the store actually *measured*: a turn
+# found by the keyword leg has no number to compare, and an exact match is a
+# stronger signal than a cosine neighbourhood.  `timeout` bounds the
+# discriminator call; past it the turn runs on the context it already has, which
+# is the fallback for every way that call can fail, not an error.
+context:
+  ceiling: 0.8
+  floor: 0.2
+  recall_limit: 40
+  min_similarity: 0.45
+  timeout: 20.0
+
+# ── How many tools the model may hold at once ─────────────────────────────────
+# The tools the model has loaded go out with *every* request, so the set is
+# bounded: over this many function tools, the least recently *called* are
+# unloaded again — before a turn is saved, by the harness, which is the moment
+# nothing is in flight.  A tool that has never been called since it was loaded
+# is ordered by when it was loaded, so a tool just brought in is not the first
+# to go either.  Nothing of slife2's own is ever evicted (`tool_search`,
+# `func_tool_load`, `skill_use`, `_func_tool_unload`), and neither is anything
+# from a server marked `autoload: true`.
+#
+# Being evicted costs a `tool_search` and a `func_tool_load`, not a capability —
+# and 100 is v1's number, arrived at by watching a real tool set.
+tool_load:
+  threshold: 100
+
+# ── MCP servers ───────────────────────────────────────────────────────────────
+# Other people's MCP servers: every entry below is one, served over stdio or
+# over HTTP, and nothing else lives here.  The section is `mcp:` — the catalogue
+# category its rows are declared under, because a section of this kind is named
+# for its category: `rest-api:` is `rest`, `skills:` is `skill`, `cli:` is
+# `cli`.  It was `tools:` while v1's `builtins:` was the other half of the pair
+# — ours on one side, everybody else's on the other — and what that name said
+# was the relationship rather than the family, which is why it went when
+# `builtins` did.  The plugin that connects to them is `mcp-tools`, and it is
+# the one that has to differ: every entry below is a catalogue source named
+# after itself, and a plugin cannot hold a source under its own name.
+#
+# The difference between `mcp:` and `servers:` is the one that matters, and it
+# is not in either name: `servers:` above is *our* plugins, which slife2 starts,
+# shares and stops, and a missing one is a system that has come apart.  An entry
+# here is somebody else's process; if it is slow, paid or down, the hub says so
+# through its `servers` tool and the model simply has fewer tools, while the
+# conversation keeps working.
 #
 # Every tool here arrives as `{name}__{tool}` — so `filesystem` below offers
 # `filesystem__read_file` — and the name is what the model calls.  The prefix is
 # what keeps two servers' tools apart, and it is for entries *here*: a plugin's
 # tools are the model's under their own names (`turn_read`, `skill_use`),
-# because
-# there is one set of tools in this system and the plugin serving one is not
-# something the model needs to reason about.
+# because there is one set of tools in this system and the plugin serving one is
+# not something the model needs to reason about.
 #
 #   command + args + env     stdio: a process slife2 starts
 #   url + headers            http: an endpoint somebody else runs
@@ -257,18 +440,13 @@ servers:
 #                            setting for one with ninety of them
 #
 # `env` and `headers` are the two places a tool server is handed a credential,
-# and both go through the same chain as a provider key: ${VAR} resolves through
-# shell env -> credstore -> literal default.
+# and both go through the chain at the top of this file.
 #
 # **Everything enabled here is connected when slife2 starts**, so the list is
 # the budget.  `enabled: false` is how a server stays configured without being
 # one of the processes at every start, and it is worth using: an entry that is
 # on is a process, a handshake, and its tools in every turn's list.
-tools:
-  # Local filesystem operations — read, write, list, and search files within
-  # allowed directories.  Off by default: `.` below is the *data directory*, so
-  # turning it on gives the model the config, the runtime state and the turn
-  # databases.  Point it at something narrower if that is not what you want.
+mcp:
   serper:
     command: npx
     args:
@@ -390,8 +568,14 @@ tools:
     env:
       HASDATA_API_KEY: ${HASDATA_API_KEY}
     description: Google Scholar search results, citation counts and citation export formats, as structured JSON (HasData). Local stdio build; credential via HASDATA_API_KEY.
+  desktop-commander:
+    command: npx
+    args:
+      - -y
+      - '@wonderwhy-er/desktop-commander@latest'
+    description: 'Swiss-army-knife for your own machine: run terminal commands with streaming output, drive long-running and interactive processes, and read/write/search/edit files (diff-based surgical edits, ripgrep search, Excel/PDF/DOCX).'
 
-# ── REST APIs as tools ──────────────────────────────────────────────────────
+# ── REST APIs as tools ────────────────────────────────────────────────────────
 # The same thing said a shorter way.  Writing `spec:` gets the standard
 # OpenAPI-to-MCP proxy (`uvx mcp-openapi-proxy`) with the environment it reads
 # filled in from this entry, and every endpoint in the document becomes a tool.
@@ -409,12 +593,6 @@ tools:
 # A spec is a large document and these proxies generate a tool per endpoint, so
 # one entry here can outweigh every other server in the list.  That is what
 # `enabled: false` is for.
-  desktop-commander:
-    command: npx
-    args:
-      - -y
-      - '@wonderwhy-er/desktop-commander@latest'
-    description: 'Swiss-army-knife for your own machine: run terminal commands with streaming output, drive long-running and interactive processes, and read/write/search/edit files (diff-based surgical edits, ripgrep search, Excel/PDF/DOCX).'
 rest-api:
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
@@ -427,7 +605,7 @@ rest-api:
     base_url: https://registry.modelcontextprotocol.io
     description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
 
-# ── Commands already on this machine ────────────────────────────────────────
+# ── Commands already on this machine ──────────────────────────────────────────
 # Neither of the two above, because there is nothing here for slife2 to start or
 # connect to: a `cli:` entry is a program that is already installed, written
 # down so the model can be told it exists.  No process, no URL, no credential.
@@ -442,7 +620,7 @@ rest-api:
 #   enabled       false keeps the entry written down and out of the model's
 #                 hands — the same switch, with the same meaning, as on a server
 #
-# The entry is the opt-in, exactly as an entry under `tools:` is: what is here
+# The entry is the opt-in, exactly as an entry under `mcp:` is: what is here
 # is what the model may be given, and there is no registry a model writes.
 #
 # Every entry is a row in the tool catalogue, named `cli:<name>`, so the model
@@ -450,90 +628,6 @@ rest-api:
 # *runs* one yet (`func_tool_load` says so, and DESIGN.md §9 is the change that
 # would) — being findable is the half that landed, and a command is not a tool
 # that could be loaded either way.
-#
-# The matching shape for a *playbook* rather than a command is the `skills/`
-# directory beside this file — one directory per skill, each with a SKILL.md.
-# Same family, written to be read instead of run — and catalogued the same way,
-# as `skill:<name>`, which is how a search reaches a playbook by what it is
-# about.
-# ── What a skill is given ───────────────────────────────────────────────────
-# The playbooks in `skills/` are read, not run — but a playbook that says
-# "run scripts/search.py" is worth nothing if that script dies on a missing API
-# key, and the skill's own header says which names it needs:
-#
-#   metadata: {"openclaw": {"requires": {"env": ["BAIDU_API_KEY"]}}}
-#
-# This section is the other half: where the value comes from.  It is the same
-# chain as a provider key — shell env -> credstore -> literal — which is the
-# point of writing it down.  A daemon started days ago never saw the key you
-# exported this morning, and a `keyring:...` value is not an environment
-# variable in the first place; an entry here is what turns either into what the
-# skill's script gets handed.
-#
-# A skill with no entry here is not misconfigured — the ambient environment is
-# a real answer, and a playbook that needs nothing is the common case.  Nothing
-# runs these scripts yet (DESIGN.md §9), so today this is what `skill_use`
-# reads to tell the model whether the skill it just read can actually work.
-# ── How many tools the model may hold at once ───────────────────────────────
-# The tools the model has loaded go out with *every* request, so the set is
-# bounded: over this many function tools, the least recently *called* are
-# unloaded again — before a turn is saved, by the harness, which is the moment
-# nothing is in flight.  A tool that has never been called since it was loaded
-# is ordered by when it was loaded, so a tool just brought in is not the first
-# to go either.  Nothing of slife2's own is ever evicted (`tool_search`,
-# `func_tool_load`, `skill_use`, `_func_tool_unload`), and neither is anything
-# from a server marked `autoload: true`.
-#
-# Being evicted costs a `tool_search` and a `func_tool_load`, not a capability —
-# and 100 is v1's number, arrived at by watching a real tool set.
-tool_load:
-  threshold: 100
-
-# ── Context ───────────────────────────────────────────────────────────────────
-# How a conversation's context is decided.  `slife2-context` owns the turn log
-# and, before every turn, makes **one model call** that reads the conversation
-# in hand and answers with what to keep of it plus what to recall from the log;
-# the turn runs on the two together.  This is v1's mechanism, ported, and the
-# reasons are in DESIGN.md §5.1.
-#
-# `ceiling` and `floor` are **fractions of the model's own context window**, so
-# they only mean anything for a model whose config declares one.  The ceiling is
-# what a kept context is measured against — a recall's budget is the headroom
-# below it — and the floor is the size a recall may spend when nothing was kept.
-#
-# `min_similarity` gates only a similarity the store actually *measured*: a turn
-# found by the keyword leg has no number to compare, and an exact match is a
-# stronger signal than a cosine neighbourhood.  `timeout` bounds the
-# discriminator call; past it the turn runs on the context it already has, which
-# is the fallback for every way that call can fail, not an error.
-context:
-  ceiling: 0.8
-  floor: 0.2
-  recall_limit: 40
-  min_similarity: 0.45
-  timeout: 20.0
-
-# ── WeChat ──────────────────────────────────────────────────────────────────
-# **There is no `wechat:` section, and that is the design.**  WeChat is always
-# on — a login cannot be configured, it is *scanned*: `wechat_login` puts a QR
-# code in front of somebody, and the token that comes back lives in
-# `<data>/agents/<agent>/wechat.yaml`, written by the plugin and read by
-# it at the next start.  Those files are also how a shared process knows which
-# agents exist, so a section here would be a second answer to a question the
-# files already answer.  A machine that should not talk to WeChat is a machine
-# where nobody scans a code.
-#
-# The one thing written down about it is the address above, under `servers:`,
-# and there is nothing else to say about it — no entries, no switch, no keys.
-# See README.md's "WeChat" section, and DESIGN.md §1.2 for why this plugin owns
-# no section at all.
-
-skills:
-  baidu-search:
-    env:
-      # `credstore set BAIDU_API_KEY`, or export it — both resolve here.
-      BAIDU_API_KEY: ${BAIDU_API_KEY}
-
 cli:
   yt-dlp:
     command: yt-dlp
@@ -549,171 +643,36 @@ cli:
       version: 0.1.5
       description: Official browser-harness package
 
-providers:
-  deepseek:
-    api: openai-completions
-    base_url: https://api.deepseek.com
-    api_key: ${DEEPSEEK_API_KEY}
-    models:
-      - model: deepseek-flash
-        name: DeepSeek Flash
-        reasoning: true
-        input:
-          - text
-          - image
-        context_window: 1000000
-        max_tokens: 384000
-        temperature: 0.7
-        top_p: 1.0
-
-  scnet:
-    api: openai-completions
-    base_url: https://api.scnet.cn/api/llm/v1
-    api_key: ${SCNET_TOKEN_PLAN}
-    models:
-      - model: DeepSeek-V4
-        name: DeepSeek V4 Pro
-        reasoning: true
-        input:
-          - text
-        context_window: 1000000
-        max_tokens: 384000
-        temperature: 0.7
-        top_p: 1.0
-      - model: Kimi-K3
-        name: Kimi K3
-        reasoning: true
-        input:
-          - text
-          - image
-        context_window: 1048576
-        max_tokens: 131072
-        # This gateway rejects the standard thinking shape while reasoning
-        # anyway, so the field is left out entirely.
-        compat:
-          thinking: omit
-
-  bailian:
-    api: anthropic-messages
-    base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
-    api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
-    models:
-      - model: qwen3.8-max
-        name: Qwen3.8 Max
-        reasoning: true
-        input:
-          - text
-          - image
-        context_window: 983616
-        max_tokens: 131072
-
-  # Nothing here speaks the Responses API yet, so the block above is what
-  # actually runs.  A provider for it looks like this — note that it is a
-  # separate provider entry, not a change to `deepseek`, because the protocol
-  # decides which process serves it:
-  #
-  # openai:
-  #   api: openai-responses
-  #   base_url: https://api.openai.com/v1
-  #   api_key: ${OPENAI_API_KEY}
-  #   models:
-  #     - model: gpt-5.1
-  #       name: GPT-5.1
-  #       reasoning: true
-  #       input: [text, image]
-  #       context_window: 400000
-  #       max_tokens: 128000
-  #       compat:
-  #         # Only if this endpoint rejects the field; see the note above.
-  #         store: false
-
-# Which model the agent starts with, as "provider/model".
-default: deepseek/deepseek-flash
-
-# ── The agent loop ──────────────────────────────────────────────────────────
-agent:
-  # Model calls allowed in one turn before it is cut off.  A model that keeps
-  # calling tools would otherwise run indefinitely; the cap ends the turn
-  # normally rather than raising.
-  max_steps: 16
-  # The system prompt is a Jinja2 template, rendered per turn with the agent
-  # name — `run_turn(..., agent="jack")` reaches it — because the server is
-  # shared and stateless, so two instances on one server are two names asking
-  # the same process.
-  #
-  # Left out, the template the distribution ships is used.  A path here is
-  # looked for relative to this file, which is the useful place for one you are
-  # editing:
-  #
-  #   system_prompt: "prompts/jack.j2"
-  #
-  # Inside it, `{{ agent_name }}` is the name the instance was started with.
-
-# ── Background tasks ────────────────────────────────────────────────────────
-# How many agent tasks one agent may have running at once.  An **agent task** is
-# a loop of the agent's own — the same system prompt, the same model and the
-# same tools, and none of the asking conversation's history — started by the
-# model with a name and a description, and answered later by a message on the
-# `agent-task` channel.  The model has four tools over them —
-# `agent_task_start`, `agent_task_status`, `agent_task_list` and
-# `agent_task_cancel` — and not one of them waits for the work (DESIGN.md §1.3).
+# ── What a skill is given ─────────────────────────────────────────────────────
+# The matching shape for a *playbook* rather than a command is the `skills/`
+# directory beside this file — one directory per skill, each with a SKILL.md.
+# Same family as `cli:` above, written to be read instead of run — and
+# catalogued the same way, as `skill:<name>`, which is how a search reaches a
+# playbook by what it is about.
 #
-# **`max_running` is the only key a task owns, and that is the design.**  A
-# task's prompt and its step count come out of `agent:` above, because a task is
-# the agent working: `agent:` is the one section in this file with two readers,
-# and a prompt or a step count that meant something different for a task would
-# be two agents wearing one name.
-agent-task:
-  # Tasks running at once, per agent.  A cap rather than a preference, and the
-  # only bound this feature has: the tool set is the one catalogue and nothing
-  # filters it, so a task may start a task — without this a model can grow loops
-  # without limit.  What it does *not* bound is how much work happens over time;
-  # `agent_task_list` and `agent_task_cancel` are what make a runaway visible
-  # and stoppable in the meantime, and DESIGN.md §9 holds the number that is
-  # still missing.
-  max_running: 4
-
-# ── Embeddings (semantic memory search) ─────────────────────────────────────
-# Where the db's vectors come from.  **A section of its own, holding only
-# OpenAI-compatible URLs**: each provider is a base_url, a key and the single
-# model id sent on `/v1/embeddings` — and none of them is one of the
-# `providers:` above, because an embedding endpoint speaks no chat protocol and
-# a chat backend built from those providers has no model to serve it with.
+# The playbooks are read, not run — but a playbook that says "run
+# scripts/search.py" is worth nothing if that script dies on a missing API key,
+# and the skill's own header says which names it needs:
 #
-# The vector dimension is **never configured**.  It is discovered from the
-# endpoint at runtime — a table of known models first, then the endpoint's own
-# model listing, then a probe embedding whose length is the answer.  That is not
-# a convenience: the vector table fixes its width in its DDL and cannot be
-# altered afterwards, so the number has to be right before the table exists.
+#   metadata: {"openclaw": {"requires": {"env": ["BAIDU_API_KEY"]}}}
 #
-# There is deliberately **no `enabled` switch**.  A turn is stored with its
-# vector in one transaction, so an embedding model is not an extra the db can do
-# without — it is what lets the db record a turn at all.  Changing the model is
-# the supported change, and its cost is that the vector index is rebuilt whole
-# on the next start: every turn embedded again, because vectors from two models
-# cannot be ranked against each other.
-embeddings:
-  providers:
-    # A local embedding service: no credential and no network, and it outlives
-    # whatever vendor is current.  `bge-m3` is multilingual, which is what a
-    # history mixing Chinese and English needs.  It has to be running already —
-    # it is a separate installation, not a process slife2 starts.
-    local:
-      base_url: http://127.0.0.1:17347/v1
-      model: bge-m3
-      api_key: local
-    # The same weights served by somebody else, for a machine without the local
-    # service.  Needs SILICONFLOW_API_KEY.
-    siliconflow:
-      base_url: https://api.siliconflow.cn/v1
-      model: BAAI/bge-m3
-      api_key: ${SILICONFLOW_API_KEY}
-  # A provider id, not a "provider/model" reference: there is one model per
-  # endpoint here, so the endpoint is the choice being made.  A value naming
-  # nothing falls back to the first provider.
-  active_model: siliconflow
+# This section is the other half: where the value comes from.  It is the chain
+# at the top of this file, and writing it down here is the point — a daemon
+# started days ago never saw the key you exported this morning, and a
+# `keyring:...` value is not an environment variable in the first place; an
+# entry here is what turns either into what the skill's script gets handed.
+#
+# A skill with no entry here is not misconfigured — the ambient environment is
+# a real answer, and a playbook that needs nothing is the common case.  Nothing
+# runs these scripts yet (DESIGN.md §9), so today this is what `skill_use`
+# reads to tell the model whether the skill it just read can actually work.
+skills:
+  baidu-search:
+    env:
+      # `credstore set BAIDU_API_KEY`, or export it — both resolve here.
+      BAIDU_API_KEY: ${BAIDU_API_KEY}
 
-# ── Generation (images, video, speech, transcripts) ─────────────────────────
+# ── Generation (images, video, speech, transcripts) ───────────────────────────
 # A provider table like `providers:`, with one difference that matters: an entry
 # declares what each of its models is *for* (`kind:`), because "which model
 # draws pictures" is a fact about a model rather than about a vendor.  The four
@@ -731,8 +690,8 @@ embeddings:
 #
 # `params:` is the model's own defaults (a resolution, a ratio, a duration),
 # merged *under* whatever the call passes; `voice:` is the same for speech.
-# `api_key:` resolves through the usual chain — `${VAR}` from the shell, then
-# credstore — and a key that does not resolve is reported when a call needs it.
+# `api_key:` goes through the chain at the top of the file, and a key that does
+# not resolve is reported when a call needs it.
 #
 # Generated files are written under `<data>/media/` and nowhere else: they are
 # work products rather than cabinet documents, nothing registers them, and the
@@ -775,13 +734,13 @@ media:
         - model: qwen-audio-3.0-asr-flash
           kind: asr
 
-# ── A public URL for a local file ───────────────────────────────────────────
-# The ACTIVE tunnel provider exposes this machine's `file-tunnel` port
-# (8038 above) as a public HTTPS URL; `expose_local_image` hands that URL out,
-# and `GET /share/<token>` on the same port serves the bytes.
+# ── A public URL for a local file ─────────────────────────────────────────────
+# The ACTIVE tunnel provider exposes this machine's `file-tunnel` port (8038
+# above) as a public HTTPS URL; `expose_local_image` hands that URL out, and
+# `GET /share/<token>` on the same port serves the bytes.
 #
-# Provider options support `${VAR}` / `${VAR:-default}`, resolved through the
-# shell env → credstore → literal default, like every other value in this file.
+# Provider options go through the chain at the top of this file, `${VAR}`,
+# `${VAR:-default}` and all.
 #
 # Providers differ in what they need and in what a *browser* sees:
 #
@@ -818,40 +777,6 @@ media:
 # this build does not have falls back to ngrok with a warning rather than
 # refusing to start: a tunnel is a subordinate dependency.  `tunnel_status`
 # reports the provider actually in use.
-# ── The A2A mesh ────────────────────────────────────────────────────────────
-# Agent-to-agent traffic over MQTT, and **the one section whose presence is
-# itself a setting**: a machine with no `a2a:` is a machine that is not on the
-# mesh, which is the same argument the `wechat:` section is absent by.  What it
-# holds is a broker address and the first two segments of the topic namespace
-# (`$a2a/v1/…/{org}/{unit}/{agent}`), which is what tells two groups on one
-# broker apart.
-#
-# **The broker is started for you if it is not there**, and that is this port's
-# one departure from v1, which left mosquitto to the user.  A config that says
-# `a2a:` has said it wants the mesh, so a missing broker is a missing dependency
-# rather than a preference: `mosquitto` is started on `broker.port`, and a broker
-# that will not serve is a *startup failure* naming it and its log — not a mesh
-# that silently is not one.  The broker is left running afterwards, because a
-# broker is a machine's, not a run's.
-#
-# Only a **local** broker is started.  `broker.host` naming another machine is
-# reached exactly the same way, and nothing local can stand in for it — so a
-# remote broker that is down is the same hard failure with no attempt made.
-#
-# `provider` is a hard constraint rather than a default: mosquitto is the only
-# broker this build speaks to, and anything else is refused when the config is
-# read, because the alternative is `a2a_*` tools offered to a model for a mesh
-# that was quietly switched off.  The model's four tools are `a2a_send_message`,
-# `a2a_cancel_task`, `a2a_list_agents` and `a2a_broadcast`.
-#
-a2a:
-  provider: mosquitto
-  broker:
-    host: localhost
-    port: 1883
-  org: default
-  unit: default
-
 file-tunnel:
   active: cloudflare
   providers:
@@ -881,3 +806,36 @@ file-tunnel:
       # recent network activity", and every window in between answers the
       # published URL with HTTP 530.
       protocol: ${CLOUDFLARED_PROTOCOL:-http2}
+
+# ── The A2A mesh ──────────────────────────────────────────────────────────────
+# Agent-to-agent traffic over MQTT, and **the one section whose presence is
+# itself a setting**: a machine with no `a2a:` is a machine that is not on the
+# mesh, the same way the absence of a `wechat:` is the whole of what says a
+# machine does not talk to WeChat.  What it holds is a broker address and the
+# first two segments of the topic namespace (`$a2a/v1/…/{org}/{unit}/{agent}`),
+# which is what tells two groups on one broker apart.
+#
+# **The broker is started for you if it is not there**, and that is this port's
+# one departure from v1, which left mosquitto to the user.  A config that says
+# `a2a:` has said it wants the mesh, so a missing broker is a missing dependency
+# rather than a preference: `mosquitto` is started on `broker.port`, and a
+# broker that will not serve is a *startup failure* naming it and its log — not
+# a mesh that silently is not one.  The broker is left running afterwards,
+# because a broker is a machine's, not a run's.
+#
+# Only a **local** broker is started.  `broker.host` naming another machine is
+# reached exactly the same way, and nothing local can stand in for it — so a
+# remote broker that is down is the same hard failure with no attempt made.
+#
+# `provider` is a hard constraint rather than a default: mosquitto is the only
+# broker this build speaks to, and anything else is refused when the config is
+# read, because the alternative is `a2a_*` tools offered to a model for a mesh
+# that was quietly switched off.  The model's four tools are `a2a_send_message`,
+# `a2a_cancel_task`, `a2a_list_agents` and `a2a_broadcast`.
+a2a:
+  provider: mosquitto
+  broker:
+    host: localhost
+    port: 1883
+  org: default
+  unit: default

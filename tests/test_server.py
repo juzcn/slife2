@@ -1216,7 +1216,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     cfg = replace(
         base,
         tool_load=ToolLoadSettings(threshold=3),
-        tools={
+        mcp={
             "fake": ToolServerSettings(name="fake", command="in-memory"),
         },
         agent=base.agent,

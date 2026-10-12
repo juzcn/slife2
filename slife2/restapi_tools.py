@@ -2,7 +2,7 @@
 
 A REST API is written down as a spec, a base URL and a key, and the config layer
 expands it into the `uvx mcp-openapi-proxy` command that serves it — so what
-arrives here is an ordinary stdio MCP server like every entry under `tools:`, and
+arrives here is an ordinary stdio MCP server like every entry under `mcp:`, and
 this plugin holds it the same way.  That is the whole of the difference between
 the two: the section, and the shape an entry is written in.
 

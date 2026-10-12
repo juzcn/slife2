@@ -14,13 +14,13 @@ decisions look arbitrary until you know what happens if you undo them.
 **"Plugin" is the word for one of ours, and it names an implementation rather
 than a protocol.** A plugin is an MCP server over Streamable HTTP — the same
 transport, the same JSON-RPC and the same tool listing as the servers under
-`tools:` — plus the *plugin contract*, which is the part this project adds on
+`mcp:` — plus the *plugin contract*, which is the part this project adds on
 top: state keyed by a client id rather than by a session, a tool that says who
 may call it, and an identity another process checks before it reuses what it
 found (`slife2.mcp_server`). The word is worth having because "MCP server" does
 not separate the servers slife2 starts from the twenty somebody else wrote, and
 that line is load-bearing everywhere below: a missing plugin fails the turn,
-where a missing entry under `tools:` is a model with fewer tools.
+where a missing entry under `mcp:` is a model with fewer tools.
 
 **Every server here is a plugin**, brought up on demand by `slife2` and shared
 by every instance (see §4) — and the terminal is not a server at all: it is a
@@ -46,7 +46,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                 ├── :8036/mcp ──▶ slife2-media         (images, video, speech, transcripts)
   │                                 ├── :8031/mcp ──▶ slife2-skills        (`skill_use`, the playbooks)
   │                                 ├── :8032/mcp ──▶ slife2-cli           (the `cli:` entries, as rows)
-  │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `tools:` entries)
+  │                                 ├── :8033/mcp ──▶ slife2-mcp-tools     (holds the `mcp:` entries)
   │                                 │                  └── MCP ──▶ external tool servers (stdio or http)
   │                                 └── :8034/mcp ──▶ slife2-restapi-tools (holds the `rest-api:` ones)
   │                                                    └── MCP ──▶ the OpenAPI proxy an entry expands into
@@ -135,7 +135,7 @@ does uvicorn.
 `slife2.mcp_server` has a transport of its own rather than a setting: what the
 ceiling buys is keeping a *peer* from making this process buffer an unbounded
 message, and a peer is exactly what a daemon we started is not. `slife2.gateway`,
-which dials the entries under `tools:` and `rest-api:`, keeps it. FastMCP 4.0.11
+which dials the entries under `mcp:` and `rest-api:`, keeps it. FastMCP 4.0.11
 does not pass the parameter through, which is the only reason reaching the knob
 takes a class rather than an argument.
 
@@ -169,7 +169,7 @@ So `db` is a library — it holds the turn files and the tool catalogue, and
 nothing else — while the embeddings server stays a plugin because it reads an
 endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
 `restapi-tools` families stay plugins under the same rule, pointed at somebody
-else's processes rather than at a file: `tools:` and `rest-api:` are config
+else's processes rather than at a file: `mcp:` and `rest-api:` are config
 sections, and the plugin that owns a section is the one that holds the
 connections its entries describe (§8). The gateway underneath them
 (`slife2.gateway`) is a library, and always was. **And the one *writer* of
@@ -191,7 +191,7 @@ import it, not the number of agents.
 
 **`slife2-wechat` is the first plugin here that holds no section and declares no
 rows.**  Every other one is a *family*: it owns a config section, and what it
-does with it is hold connections (`tools:`, `rest-api:`) or build rows from
+does with it is hold connections (`mcp:`, `rest-api:`) or build rows from
 documents (`skills:`, `cli:`) and declare them to the hub.  What this one holds
 is a credential and a conversation — the first table's
 "a credential, a provider SDK, somebody else's connection" row, with nothing
@@ -1884,7 +1884,7 @@ the semantic leg and counted by the budget — so `ToolStore.reset` calls
 still names is one the hub is about to ask about, and whether it answers is the
 runtime's to say. So the set of names
 that pass is handed is load-bearing — and it is not the plugins, which is the
-only list `Config.plugins()` gives. The entries under `tools:` and `rest-api:`,
+only list `Config.plugins()` gives. The entries under `mcp:` and `rest-api:`,
 and the two document sources, are named in the config too. Handed the plugins
 alone, a restart read every one of them as a source that had gone, and the truth
 came back only once the holding plugin had started, reached the entry and
@@ -2097,7 +2097,7 @@ slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins   
 the model is holding, what a name resolves to, what the budget takes back, and
 who may call what — every one of those is a question about the *whole* list, so
 it is answered in one place or it is answered twice and differently. What the hub
-does not own any more is a *connection*: the servers under `tools:` and
+does not own any more is a *connection*: the servers under `mcp:` and
 `rest-api:` are held by the two plugins named after those sections, and the hub
 is told about them. `slife2.gateway` is the link itself — connect, list, call,
 say whether it is answering — and it knows no catalogue, no category and no
@@ -2110,7 +2110,7 @@ arrive by `tools/list` and have to declare themselves the model's
 writes into a conversation's log and `send_message` drives another conversation,
 and those are exactly the tools a model would reach for if it could read their
 descriptions. What a plugin *holds* arrives by declaration instead, and is not
-gated, because it is the operator's configuration: a `tools:` entry, a playbook,
+gated, because it is the operator's configuration: a `mcp:` entry, a playbook,
 a command. The entry is the opt-in; there was never a mark to forget. So the
 default is still the safe half — a forgotten mark costs a tool that is absent,
 not a tool that is dangerous — and the rule that keeps the two apart is that a
@@ -2181,7 +2181,7 @@ rather than letting a name mean two things.
 
 **Nothing with a server behind it is served by the hub process.** Every plugin's
 tools come up through a connection and reach the model by the same road a
-`tools:` entry's do — `skill_use` and `arxiv__search` alike. The alternative, a
+`mcp:` entry's do — `skill_use` and `arxiv__search` alike. The alternative, a
 hub that served one of them itself, is the second mechanism this whole
 arrangement exists to avoid: that tool would not be in `servers()`, it would not
 have a connection that can fail, it would not be in whatever a tool search is
@@ -2375,7 +2375,7 @@ was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
 plugin gone and fails the turn, like the store. A missing *source* — a plugin
-that is not answering, a `tools:` entry whose process will not start — is not the
+that is not answering, a `mcp:` entry whose process will not start — is not the
 same kind of thing, and is said in its own words rather than reported as "that
 tool server is broken". A missing *upstream* is the operator's configuration and
 somebody else's process: reported by `servers()`, its rows left in the catalogue
@@ -2626,7 +2626,7 @@ second list is a list that goes stale the first time somebody adds a tool.
 
 **A model may edit the sections it can read, and what bounds that is the path an
 edit takes rather than who takes it.** The objection this answers is real and was
-made here first: an entry under `tools:` names a program slife2 will *start*, so
+made here first: an entry under `mcp:` names a program slife2 will *start*, so
 writing one is a capability — "a language model choosing a program is the same
 capability with a worse author". What that argument gets wrong is "bounded by
 what". Not the author of the bytes, but the road they travel: every one of the
@@ -2641,7 +2641,7 @@ entry an operator could have written, and the same names are refused
 (`toolfamily.refusal`: a name the hub is already connected under, or one the two
 document families file their rows beneath).
 
-**The one thing that is genuinely new, and it is not a permission.** A `tools:`
+**The one thing that is genuinely new, and it is not a permission.** A `mcp:`
 entry is a process, so a model that can write one can name a program that gets
 spawned — and the argument above does not make that safe, it makes it *legible*:
 it lands in the operator's file, in the section the section's comment explains,
@@ -2653,7 +2653,7 @@ alternative — an operator-only path — is a second way to write the same file
 therefore a second thing to keep in step. **And where families are one mechanism,
 so is their code** — in two places, because there are two mechanisms.
 
-`tools:` and `rest-api:` hold connections, and `slife2.toolfamily`'s
+`mcp:` and `rest-api:` hold connections, and `slife2.toolfamily`'s
 `build_family_server` is their server: `mcp_set` takes a command and
 `rest_api_set` a spec, so those stay apart — the parameter list *is* the schema
 the model reads — while the other four (`list`, `remove`, `set_enabled`,

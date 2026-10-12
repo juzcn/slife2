@@ -188,7 +188,7 @@ def test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row(
 ) -> None:
     """The re-enable is the *reconnect*, and not an update to a row that moved.
 
-    A `tools:` entry's rows carry no verdict of their own (`slife2.toolfamily`),
+    A `mcp:` entry's rows carry no verdict of their own (`slife2.toolfamily`),
     because the runtime is the only thing that can say whether a connection is
     answering — so a source that recovers puts back what the verdict withdrew
     through `_apply`'s reconnect, and the merge answers `updated: []` because
@@ -197,7 +197,7 @@ def test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row(
     **The difference is not bookkeeping.**  The update path rewrites the row's
     keyword document, so a family that stamped its own `enabled` on every row
     turned every boot into a full rewrite of the catalogue: the boot pass
-    withdrew the verdict on each row of every `tools:` entry, and the declaration
+    withdrew the verdict on each row of every `mcp:` entry, and the declaration
     wrote each one straight back as a "change" — measured on the real catalogue,
     239 rows per restart, logged as `0 added, N changed` about a config nobody
     edited.  `tool()` below sends no `status`, which is the shape the family

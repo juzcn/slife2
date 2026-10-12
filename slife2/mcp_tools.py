@@ -1,4 +1,4 @@
-"""slife2-mcp-tools — the `tools:` section, and the servers it names.
+"""slife2-mcp-tools — the `mcp:` section, and the servers it names.
 
 Other people's MCP servers, each one an entry the operator wrote down: a command
 to start or a URL to reach, with whatever credential it needs.  This is the
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "slife2-mcp-tools"
 
 #: This server's key in the config's `servers:` table, and the name the launcher
-#: starts it under.  It is `mcp-tools` rather than `tools` because the catalogue
+#: starts it under.  It is `mcp-tools` rather than `mcp` because the catalogue
 #: source of each entry is that entry's own name: a plugin cannot hold a source
 #: under its own name, or its verdict would be written across rows that have no
 #: connection behind them.
@@ -63,11 +63,12 @@ CATEGORY = "mcp"
 
 #: The config section this family owns, and the only thing it tells
 #: `slife2.configfile`: that module edits a section and knows nothing about what
-#: is in one.
-SECTION = "tools"
+#: is in one.  It is the category's own name, because a section of this kind is
+#: named for the category its rows are declared under.
+SECTION = "mcp"
 
 INSTRUCTIONS = (
-    "The MCP servers the config's `tools:` section names. This server is called "
+    "The MCP servers the config's `mcp:` section names. This server is called "
     "by the toolhub, not by a model: it holds the connections, and the tools "
     "themselves reach the model through the hub."
 )
@@ -91,7 +92,7 @@ WORDS = FamilyWords(
 
 # ── The management tools ────────────────────────────────────────────────
 # v1's `mcp_*` set, ported — the model may add, remove and switch a server, and
-# what it writes is the same `tools:` section the operator writes by hand.  The
+# what it writes is the same `mcp:` section the operator writes by hand.  The
 # difference from v1 is where the write goes: v1's gateway mutated a live pool of
 # its own, so every one of these had to reconcile "the file" against "the pool",
 # while here the family *is* the pool — the same object the file was read into —
@@ -101,7 +102,7 @@ WORDS = FamilyWords(
 def _prepare(
     config: Config, name: str, entry: dict[str, Any]
 ) -> tuple[ToolServerSettings | None, str]:
-    """Write one `tools:` entry, or answer with why it cannot be.
+    """Write one `mcp:` entry, or answer with why it cannot be.
 
     `(settings, "")` means it was written; `(None, refusal)` is a sentence for
     the caller to return.  Two refusals, and both happen *before* anything is
@@ -157,7 +158,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
 
     @mcp.tool(name="mcp_list", meta=FOR_THE_MODEL)
     async def mcp_list() -> str:
-        """List the MCP servers configured under `tools:`, with their state.
+        """List the MCP servers configured under `mcp:`, with their state.
 
         Each entry as the file writes it, and whether its link is answering.
         `mcp_list_tools` shows what one offers.
@@ -177,7 +178,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         enabled: bool = True,
         autoload: bool = False,
     ) -> str:
-        """Add or update an MCP server under `tools:` (upsert).
+        """Add or update an MCP server under `mcp:` (upsert).
 
         One entry is one transport: `command` for a process slife2 starts, `url`
         for an endpoint somebody else runs. This is the whole entry — a field
@@ -221,7 +222,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
 
     @mcp.tool(name="mcp_remove", meta=FOR_THE_MODEL)
     async def mcp_remove(name: str) -> str:
-        """Stop an MCP server and delete its entry from `tools:`.
+        """Stop an MCP server and delete its entry from `mcp:`.
 
         Its tools leave the catalogue at the next search. A package the command
         names stays on the machine.
@@ -233,7 +234,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
 
     @mcp.tool(name="mcp_set_enabled", meta=FOR_THE_MODEL)
     async def mcp_set_enabled(name: str, enabled: bool) -> str:
-        """Switch an MCP server on or off, keeping its entry in `tools:`.
+        """Switch an MCP server on or off, keeping its entry in `mcp:`.
 
         Off keeps the entry and stops the server being connected or started.
 
@@ -264,13 +265,13 @@ def build_server(
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
 ) -> FastMCP:
-    """Build the server over the `tools:` section, in file order."""
+    """Build the server over the `mcp:` section, in file order."""
     return build_family_server(
         config,
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,
         category=CATEGORY,
-        entries=config.tools.values(),
+        entries=config.mcp.values(),
         transports=transports,
         client_factory=client_factory,
         management=register_management,

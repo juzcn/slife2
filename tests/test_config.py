@@ -403,6 +403,20 @@ def test_a_leftover_tui_section_is_refused(tmp_path) -> None:
         load(write(tmp_path, "tui:\n  port: 9005\n"))
 
 
+def test_a_leftover_tools_section_is_refused(tmp_path) -> None:
+    """`tools:` is `mcp:` now, and this one is refused for the `tui:` reason
+    with more force behind it.
+
+    A top-level key nothing reads is not an error anywhere else in this loader,
+    so a config that still said `tools:` would load with every one of those
+    servers gone and nothing said — the operator's model would simply have
+    fewer tools, and nothing would name the reason.  The section is named for
+    the catalogue category its rows are declared under, and that is `mcp`.
+    """
+    with pytest.raises(ConfigError, match="tools: is `mcp:`"):
+        load(write(tmp_path, "tools:\n  serper:\n    command: npx\n"))
+
+
 def test_an_empty_providers_section_is_refused(tmp_path) -> None:
     """**Absent is the built-in provider; empty is a mistake.**
 
@@ -626,13 +640,13 @@ def test_api_key_is_resolved_lazily(tmp_path, monkeypatch: pytest.MonkeyPatch) -
 
 # --- the tool sections --------------------------------------------------------
 #
-# `tools:` is other people's MCP servers and `rest-api:` is other people's REST
+# `mcp:` is other people's MCP servers and `rest-api:` is other people's REST
 # APIs, and the second is expanded into the first at load time — so what these
 # are about is the expansion, and the refusals that keep an ambiguous entry from
 # becoming a silent precedence rule.
 
-TOOLS = """
-tools:
+MCP = """
+mcp:
   filesystem:
     command: npx
     args: [-y, server-filesystem, .]
@@ -659,7 +673,7 @@ rest-api:
 
 
 def test_a_stdio_entry_is_a_command(tmp_path) -> None:
-    server = load(write(tmp_path, TOOLS)).tools["filesystem"]
+    server = load(write(tmp_path, MCP)).mcp["filesystem"]
     assert (server.transport, server.command) == ("stdio", "npx")
     assert server.args == ("-y", "server-filesystem", ".")
     assert server.description == "Files on disk."
@@ -667,7 +681,7 @@ def test_a_stdio_entry_is_a_command(tmp_path) -> None:
 
 def test_an_entry_with_a_url_is_http(tmp_path) -> None:
     """Which field is set *is* the transport; there is no separate switch."""
-    server = load(write(tmp_path, TOOLS)).tools["arxiv"]
+    server = load(write(tmp_path, MCP)).mcp["arxiv"]
     assert server.transport == "http"
     assert server.url == "https://example.test/mcp"
 
@@ -676,9 +690,9 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
-    config = load(write(tmp_path, TOOLS))
-    assert config.tools["serper"].env["SERPER_API_KEY"] == "resolved"
-    assert config.tools["arxiv"].headers["Authorization"] == "Bearer resolved", (
+    config = load(write(tmp_path, MCP))
+    assert config.mcp["serper"].env["SERPER_API_KEY"] == "resolved"
+    assert config.mcp["arxiv"].headers["Authorization"] == "Bearer resolved", (
         "a header is a credential too"
     )
 
@@ -687,10 +701,10 @@ def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
     """The config layer is where a declarative entry becomes a runnable command.
 
     The entry becomes an ordinary stdio upstream here, so the plugin that holds
-    it — `slife2-restapi-tools` — sees the same shape as one under `tools:`, and
+    it — `slife2-restapi-tools` — sees the same shape as one under `mcp:`, and
     the hub sees a source like any other.  Two sections and one mechanism.
     """
-    server = load(write(tmp_path, TOOLS)).rest_apis["registry"]
+    server = load(write(tmp_path, MCP)).rest_apis["registry"]
     assert server.kind == "rest"
     assert (server.transport, server.command) == ("stdio", "uvx")
     assert server.args == ("mcp-openapi-proxy",)
@@ -712,7 +726,7 @@ def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
 
 def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
     with pytest.raises(ConfigError, match="needs `command`"):
-        load(write(tmp_path, "tools:\n  nothing:\n    args: [x]\n"))
+        load(write(tmp_path, "mcp:\n  nothing:\n    args: [x]\n"))
 
 
 def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
@@ -721,7 +735,7 @@ def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
     This is not hypothetical: v1's own config grew a `url` on an entry that
     still had a `command`, and its rule was that the URL won.
     """
-    text = "tools:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
+    text = "mcp:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
     with pytest.raises(ConfigError, match="both"):
         load(write(tmp_path, text))
 
@@ -735,7 +749,7 @@ def test_a_name_in_both_sections_is_refused(tmp_path) -> None:
     """Both would become `{name}__{tool}` in the model's list, so which won
     would be invisible at every point a person could look."""
     text = (
-        "tools:\n  twice:\n    command: npx\n"
+        "mcp:\n  twice:\n    command: npx\n"
         "rest-api:\n  twice:\n    spec: https://example.test/openapi.json\n"
     )
     with pytest.raises(ConfigError, match="collide"):
@@ -751,9 +765,9 @@ def test_a_disabled_entry_is_configured_but_not_connected(tmp_path) -> None:
     what keeps the row in the catalogue saying "there is a tool for this and
     somebody turned it off".
     """
-    config = load(write(tmp_path, TOOLS))
-    assert "off" in config.tools, "still in the file, and still readable"
-    assert config.tools["off"].enabled is False
+    config = load(write(tmp_path, MCP))
+    assert "off" in config.mcp, "still in the file, and still readable"
+    assert config.mcp["off"].enabled is False
 
 
 def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:

@@ -3,10 +3,10 @@
 **A plugin is an MCP server over Streamable HTTP — an implementation of the
 protocol, not a protocol of its own.**  Nothing here adds a method, a frame or a
 transport: a plugin answers the same JSON-RPC as any MCP server does, and the
-`arxiv` entry under `tools:` speaks the same wire.  Two things separate the
+`arxiv` entry under `mcp:` speaks the same wire.  Two things separate the
 words.  A *plugin* is started by slife2 and shared by every instance, which is
 what makes it required — the hub refuses to list anything when one is missing
-(DESIGN.md §8) — while an entry under `tools:` is somebody else's process that
+(DESIGN.md §8) — while an entry under `mcp:` is somebody else's process that
 may be slow, paid or down.  And a plugin honours the contract below, which is
 the part that is ours: what follows is not the protocol, it is what this project
 puts on top of it.
@@ -224,7 +224,7 @@ class _Ours(ClientTransport):
     *client* enforces it, and what it is for is keeping a peer from making this
     process buffer an unbounded message — which is exactly the right guard for a
     server nobody here started, and no guard at all on loopback to a daemon we
-    did.  So `slife2.gateway`, which dials the entries under `tools:` and
+    did.  So `slife2.gateway`, which dials the entries under `mcp:` and
     `rest-api:`, keeps it; every hop that goes through `open_server` does not.
     That split is the point of this class rather than a global setting: the
     question is *who is on the other end*, and the two paths are the two answers.

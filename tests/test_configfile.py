@@ -42,7 +42,7 @@ providers:
 default: local/big
 
 # ── Other people's servers ──────────────────────────────────────────────────
-tools:
+mcp:
   # Kept for a rainy day.  Not a description anybody wrote quickly.
   slow-one:
     command: npx
@@ -63,7 +63,7 @@ cli:
 """
 
 
-def added(path, name: str, section: str = "tools") -> str:
+def added(path, name: str, section: str = "mcp") -> str:
     """The lines a new entry occupies, so a test can read the entry it wrote.
 
     Split out because the interesting assertions are about what is *not* in the
@@ -104,7 +104,7 @@ def test_a_write_keeps_the_whole_file_around_it(tmp_path) -> None:
     path = write(tmp_path)
     before = path.read_text(encoding="utf-8")
 
-    upsert("tools", "newcomer", {"url": "https://new.test/mcp"}, path=path)
+    upsert("mcp", "newcomer", {"url": "https://new.test/mcp"}, path=path)
 
     after = path.read_text(encoding="utf-8")
     original = before.splitlines()
@@ -129,9 +129,9 @@ def test_an_update_replaces_the_entry_rather_than_patching_it(tmp_path) -> None:
     """
     path = write(tmp_path)
 
-    upsert("tools", "slow-one", {"command": "uvx", "args": ["other-server"]}, path=path)
+    upsert("mcp", "slow-one", {"command": "uvx", "args": ["other-server"]}, path=path)
 
-    entry = load(path).tools["slow-one"]
+    entry = load(path).mcp["slow-one"]
     assert entry.command == "uvx"
     assert entry.args == ("other-server",)
     assert entry.description == "", "a field the caller did not name is gone"
@@ -149,7 +149,7 @@ def test_a_field_that_says_nothing_is_not_written(tmp_path) -> None:
     path = write(tmp_path)
 
     upsert(
-        "tools",
+        "mcp",
         "newcomer",
         {"command": "npx", "args": [], "env": {}, "url": "", "description": None},
         path=path,
@@ -159,7 +159,7 @@ def test_a_field_that_says_nothing_is_not_written(tmp_path) -> None:
     assert "command: npx" in block
     assert "url" not in block, "an entry that names no url must not claim one"
     assert "env" not in block
-    assert load(path).tools["newcomer"].args == ()
+    assert load(path).mcp["newcomer"].args == ()
 
 
 def test_enabled_is_written_only_when_it_is_false(tmp_path) -> None:
@@ -171,15 +171,15 @@ def test_enabled_is_written_only_when_it_is_false(tmp_path) -> None:
     """
     path = write(tmp_path)
 
-    upsert("tools", "newcomer", {"url": "https://new.test/mcp"}, path=path)
+    upsert("mcp", "newcomer", {"url": "https://new.test/mcp"}, path=path)
     # Every `set` is the whole entry, so a second one restates what it keeps —
     # an update that named only `enabled` would replace the entry with one the
     # loader refuses for having no transport.
     entry = {"url": "https://new.test/mcp", "description": "d"}
-    upsert("tools", "newcomer", {**entry, "enabled": True}, path=path)
+    upsert("mcp", "newcomer", {**entry, "enabled": True}, path=path)
     assert "enabled" not in added(path, "newcomer")
 
-    upsert("tools", "newcomer", {**entry, "enabled": False}, path=path)
+    upsert("mcp", "newcomer", {**entry, "enabled": False}, path=path)
     assert "enabled: false" in added(path, "newcomer")
 
 
@@ -189,10 +189,10 @@ def test_enabled_is_written_only_when_it_is_false(tmp_path) -> None:
 def test_a_removal_takes_the_entry_and_says_whether_it_was_there(tmp_path) -> None:
     path = write(tmp_path)
 
-    assert remove("tools", "chinese", path=path) is True
+    assert remove("mcp", "chinese", path=path) is True
     assert "chinese" not in path.read_text(encoding="utf-8")
     assert "slow-one" in path.read_text(encoding="utf-8")
-    assert remove("tools", "chinese", path=path) is False
+    assert remove("mcp", "chinese", path=path) is False
 
 
 def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
@@ -206,8 +206,8 @@ def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
     before = path.read_text(encoding="utf-8")
     stamp = path.stat().st_mtime_ns
 
-    assert remove("tools", "nothing-here", path=path) is False
-    assert set_enabled("tools", "nothing-here", False, path=path) is False
+    assert remove("mcp", "nothing-here", path=path) is False
+    assert set_enabled("mcp", "nothing-here", False, path=path) is False
 
     assert path.read_text(encoding="utf-8") == before
     assert path.stat().st_mtime_ns == stamp
@@ -223,7 +223,7 @@ def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     hanging off it as the key, that comment, then `{}` at column zero — which is
     not YAML, so the write was refused and rolled back.  And the obvious fix —
     drop the section — is the wrong one here, because `slife2.yaml` explains each
-    section in a comment block *above* its key: a `tools:` that disappeared would
+    section in a comment block *above* its key: a `mcp:` that disappeared would
     take the paragraph with it, and come back at the bottom of the file the next
     time an entry was added.
 
@@ -266,11 +266,11 @@ def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:
     """`slife2.config` reads `enabled` off the entry, so that is where it goes."""
     path = write(tmp_path)
 
-    assert set_enabled("tools", "chinese", False, path=path) is True
-    assert load(path).tools["chinese"].enabled is False
+    assert set_enabled("mcp", "chinese", False, path=path) is True
+    assert load(path).mcp["chinese"].enabled is False
 
-    assert set_enabled("tools", "chinese", True, path=path) is True
-    assert load(path).tools["chinese"].enabled is True
+    assert set_enabled("mcp", "chinese", True, path=path) is True
+    assert load(path).mcp["chinese"].enabled is True
     assert "enabled" not in added(path, "chinese")
 
 
@@ -290,7 +290,7 @@ def test_a_file_the_loader_refuses_is_not_left_on_disk(tmp_path) -> None:
     before = path.read_text(encoding="utf-8")
 
     with pytest.raises(ConfigError) as raised:
-        upsert("tools", "broken", {"description": "neither transport"}, path=path)
+        upsert("mcp", "broken", {"description": "neither transport"}, path=path)
 
     assert "needs `command`" in str(raised.value)
     assert path.read_text(encoding="utf-8") == before
@@ -310,7 +310,7 @@ def test_a_section_edit_refuses_when_there_is_no_config_to_edit(
     assert not missing.exists()
 
     with pytest.raises(ConfigError) as raised:
-        upsert("tools", "newcomer", {"url": "https://new.test/mcp"})
+        upsert("mcp", "newcomer", {"url": "https://new.test/mcp"})
 
     assert "no slife2.yaml" in str(raised.value)
     assert not missing.exists(), "the refusal must not be a file it created"
@@ -380,9 +380,9 @@ def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
         seen = [one for one in current.get("args", []) if isinstance(one, str)]
         return {**current, "args": [*seen, "extra"]}
 
-    assert update_entry("tools", "slow-one", add, path=path) is True
+    assert update_entry("mcp", "slow-one", add, path=path) is True
 
-    entry = load(path).tools["slow-one"]
+    entry = load(path).mcp["slow-one"]
     assert entry.args == ("-y", "some-server", "extra")
     assert entry.command == "npx", "the caller only touched `args`"
     assert entry.enabled is False, "and only the list moved"
@@ -391,14 +391,14 @@ def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
 def test_an_update_that_answers_none_deletes_the_entry(tmp_path) -> None:
     path = write(tmp_path)
 
-    assert update_entry("tools", "slow-one", lambda current: None, path=path) is True
-    assert "slow-one" not in load(path).tools
-    assert "chinese" in load(path).tools, "its neighbours stay"
+    assert update_entry("mcp", "slow-one", lambda current: None, path=path) is True
+    assert "slow-one" not in load(path).mcp
+    assert "chinese" in load(path).mcp, "its neighbours stay"
 
 
 def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
     path = write(tmp_path)
     assert (
-        update_entry("tools", "ghost", lambda current: {"url": "u"}, path=path) is False
+        update_entry("mcp", "ghost", lambda current: {"url": "u"}, path=path) is False
     )
-    assert load(path).tools["ghost"].url == "u"
+    assert load(path).mcp["ghost"].url == "u"

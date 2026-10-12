@@ -119,7 +119,7 @@ def hub_for(
     # seed every one of them unloaded.
     config = replace(
         base,
-        tools={
+        mcp={
             **{
                 name: ToolServerSettings(name=name, command="in-memory", autoload=True)
                 for name in [*base.plugins(), *(connected or {})]
@@ -689,7 +689,7 @@ async def test_a_switched_off_server_is_reported_as_off() -> None:
 async def test_only_one_of_ours_may_declare() -> None:
     """Somebody else's server defining `list_sources` gets nothing.
 
-    The hub asks every entry under `tools:` for a tool list and takes all of it,
+    The hub asks every entry under `mcp:` for a tool list and takes all of it,
     so discovery by name would otherwise hand a stranger the one channel into the
     catalogue that the audience gate does not filter.
     """
@@ -760,7 +760,7 @@ async def test_a_plugins_tool_is_the_models_only_when_it_says_so() -> None:
     A plugin's tools belong to that plugin's own code until one of them
     says otherwise — because the ones that would leak are the ones a model
     would reach for: `remember` here stands in for a write into any agent's
-    database.  An entry under `tools:` needs no mark at all: the operator opted
+    database.  An entry under `mcp:` needs no mark at all: the operator opted
     in by writing it down, which is what the tests above are listing.
     """
     async with Client(
@@ -1242,7 +1242,7 @@ async def test_an_entry_removed_from_the_config_leaves_no_rows() -> None:
         await first.call_tool("list_tools", {})
         assert "fake__echo" in await found(first, "echo"), "recorded while it ran"
 
-    # The same data directory with the entry gone from `tools:`.
+    # The same data directory with the entry gone from `mcp:`.
     async with Client(hub_for()) as second:
         rows = await found(second, "echo")
         refused = await call(second, "func_tool_load", {"names": ["fake__echo"]})
@@ -1325,7 +1325,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
     """
     live = replace(
         default_config(),
-        tools={"fake": ToolServerSettings(name="fake", command="in-memory")},
+        mcp={"fake": ToolServerSettings(name="fake", command="in-memory")},
     )
     async with Client(
         build_hub(
@@ -1348,7 +1348,7 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
     # transport, and the row it left behind.
     off = replace(
         default_config(),
-        tools={
+        mcp={
             "fake": ToolServerSettings(name="fake", command="in-memory", enabled=False)
         },
     )
@@ -1398,7 +1398,7 @@ async def test_a_restart_does_not_read_the_configs_own_sources_as_gone() -> None
     on rows whose source the config no longer names (`slife2.db.ToolStore.reset`)
     — so the set of names it is handed has to be every name the config carries,
     not the plugins alone (`slife2.toolhub.configured_sources`).  Given the
-    plugins alone it read every `tools:` entry as a source that had gone, and the
+    plugins alone it read every `mcp:` entry as a source that had gone, and the
     truth came back only when the holding plugin had started, reached that entry
     and declared it: a real section is twenty `npx` servers, so in between a
     search called those tools unusable and `func_tool_load` refused them as "its
@@ -1432,7 +1432,7 @@ async def test_a_restart_does_not_read_the_configs_own_sources_as_gone() -> None
 
 
 def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
-    """A `tools:` entry has a connection, so its rows may not state a status.
+    """A `mcp:` entry has a connection, so its rows may not state a status.
 
     Whether a server is *answering* is the runtime's to say, because the runtime
     is the party that connects — and a family stamping `enabled` on each row
@@ -1441,7 +1441,7 @@ def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
     (`slife2.db.ToolStore._plan`), which rewrites the row's keyword document and
     reports a tool nobody touched as changed.  That is the other half of what a
     restart cost: the boot pass withdrew the verdict on every row of every
-    `tools:` entry, and this stamp wrote each one back as a change — measured on
+    `mcp:` entry, and this stamp wrote each one back as a change — measured on
     the real catalogue, 239 rows per restart, logged as `0 added, 239 changed`
     about a config nobody edited.
 
@@ -1519,7 +1519,7 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
     """
     config = replace(
         default_config(),
-        tools={"fake": ToolServerSettings(name="fake", command="in-memory")},
+        mcp={"fake": ToolServerSettings(name="fake", command="in-memory")},
     )
     hub = build_hub(
         config,
@@ -1722,7 +1722,7 @@ async def test_servers_says_which_are_ready_and_what_they_offer() -> None:
 
 @pytest.mark.asyncio
 async def test_a_plugin_that_is_not_answering_fails_the_list() -> None:
-    """The rule that separates a plugin from an entry in `tools:`.
+    """The rule that separates a plugin from an entry in `mcp:`.
 
     A model that has quietly lost `turn_read` is a failure nobody can see,
     so the hub refuses rather than serving a shorter list.  An upstream that is
@@ -1849,7 +1849,7 @@ async def test_an_upstream_that_is_down_costs_two_timeouts_not_more() -> None:
     """The other half of "once": a dead server must not be retried forever.
 
     Named for the *upstream*, because `slife2.gateway` has this same test at the
-    link's own layer: this one is the hub's half — a `tools:` entry, reached
+    link's own layer: this one is the hub's half — a `mcp:` entry, reached
     through the plugin that holds it.
     """
     make, made = clients(dies=True)

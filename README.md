@@ -7,15 +7,15 @@ implementation of the protocol, not one of its own. The TUI is a client and
 nothing else; the agent loop is a server and a client; each model backend is its
 own server, and so is the hub the tools come from — and so is the terminal's own
 inbox, which is a plugin like the rest. The word separates the servers slife2 starts from
-the ones somebody else wrote under `tools:`, and the difference is load-bearing:
+the ones somebody else wrote under `mcp:`, and the difference is load-bearing:
 **a plugin is required** — a missing one fails the turn — where an entry under
-`tools:` is optional and its absence just means fewer tools.
+`mcp:` is optional and its absence just means fewer tools.
 
 Two properties follow, and they are the point of the arrangement:
 
 - **A key exists only inside the process that needs it.** A provider's API key
   lives in the LLM server that calls it; a tool server's token lives in the
-  plugin that holds that server — `slife2-mcp-tools` for `tools:`,
+  plugin that holds that server — `slife2-mcp-tools` for `mcp:`,
   `slife2-restapi-tools` for `rest-api:`. The agent loop cannot leak either,
   because it never has one.
 - **The agent loop imports no provider SDK.** Switching providers is changing a
@@ -117,7 +117,7 @@ uv run slife2-agent            # the agent loop,             :8000
 uv run slife2-toolhub          # the model's tools,          :8020
 uv run slife2-skills           # the playbooks,              :8031
 uv run slife2-cli              # the cli: registry,          :8032
-uv run slife2-mcp-tools        # holds the tools: servers,   :8033
+uv run slife2-mcp-tools        # holds the mcp: servers,   :8033
 uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
 uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-cabinet          # notes, diary, files,        :8035
@@ -274,7 +274,7 @@ the turn, like every other missing plugin.
 
 The model's tool list — the ones slife2 ships and the ones other people run —
 is decided by **`slife2-toolhub`**, and it is the only process that decides it.
-It is not the process that *reaches* any of those servers: `tools:` is held by
+It is not the process that *reaches* any of those servers: `mcp:` is held by
 `slife2-mcp-tools` and `rest-api:` by `slife2-restapi-tools`, each of which
 declares what it holds — the source, its tools, whether it is answering — and the
 hub merges the rows, gates them, names them and routes the calls back. A plugin
@@ -300,7 +300,7 @@ loaded, which is the section after the config:
 # the write goes through `slife2/configfile` — one writer, the file's comments
 # kept, and the loader that reads this file at every start as the judge.
 
-tools:                                  # other people's MCP servers
+mcp:                                  # other people's MCP servers
   arxiv:
     url: https://arxiv.mcp.brunosan.de/mcp
   serper:
@@ -347,7 +347,7 @@ resolves through the same chain as a provider key.
 A `cli` entry is the odd one out: there is no process to start and no URL to
 connect to, because the program is already installed. It is written down so the
 model can be told it exists — and written *here*, in the operator's file,
-because an entry is the opt-in, exactly as an entry under `tools:` is. `install`
+because an entry is the opt-in, exactly as an entry under `mcp:` is. `install`
 is what a person is told when the command turns out not to be on `PATH`, which
 `cli_set` checks for while somebody is looking. **Every entry is a row in the
 tool catalogue** (`cli:yt-dlp`), so `tool_search` finds a command by what it does
@@ -387,7 +387,7 @@ first (DESIGN.md §9, "Tool approval").
 ### What the model is handed
 
 A tool's name carries the server it came from when there is one to carry: an
-entry under `tools:` reaches the model as `{name}__{tool}` —
+entry under `mcp:` reaches the model as `{name}__{tool}` —
 `arxiv__arxiv_search_papers`. **Ours do not.** `turn_read` and `tool_search` are
 slife2's tools, and `context__turn_read` was this system's own arrangement leaking
 into the one thing the model reads on every request: which plugin serves a tool
@@ -488,7 +488,7 @@ dangerous.
 **The hub reaches our plugins, and it is *told* about everything else.** Two
 kinds of thing arrive at it. A plugin's **own tools** come from `tools/list`, the
 way it would answer anybody. A plugin's **sources** are declared instead: a
-`tools:` entry, a `rest-api:` entry, a playbook, a command — none of which the
+`mcp:` entry, a `rest-api:` entry, a playbook, a command — none of which the
 hub can reach — are answered for by the plugin that owns that section, in one
 call to `list_sources`, and the hub merges the rows and routes every call back to
 the plugin that holds them. So this process holds no connection to a server
@@ -567,7 +567,7 @@ tools it offered while it was on stay in the catalogue, marked `disabled`, so a
 search still finds them. `slife2 down` takes those a step further — a plugin it
 stops takes the child processes that plugin started with it.
 
-A plugin is required and everything in `tools:` is optional: the hub asks
+A plugin is required and everything in `mcp:` is optional: the hub asks
 each plugin for a tool list, and one that cannot answer fails the turn rather
 than quietly continuing with fewer tools, while a server that is somebody else's
 is reported and left out. A model that has quietly lost `turn_read` is a
@@ -1029,7 +1029,7 @@ slife2/
 │                     #   is shared: hold, declare, route a call back, and the
 │                     #   management tools' sentences, which one `FamilyWords`
 │                     #   per section supplies the words for
-├─ mcp_tools.py       # slife2-mcp-tools: the `tools:` section — held, declared,
+├─ mcp_tools.py       # slife2-mcp-tools: the `mcp:` section — held, declared,
 │                     #   and editable by the `mcp_*` tools
 ├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, likewise
 ├─ wechat.py          # slife2-wechat: a WeChat login per agent, the four tools

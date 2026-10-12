@@ -3,7 +3,7 @@
 **A library, and not a plugin, by the test `DESIGN.md` §1.1 states**: it holds a
 file and nothing else, and a file needs no process — "one writer is what a SQLite
 lock already is", which is the same reason `slife2.db` is imported rather than
-asked.  What imports it is the four plugins that own a section: `tools:` by
+asked.  What imports it is the four plugins that own a section: `mcp:` by
 `slife2-mcp-tools`, `rest-api:` by `slife2-restapi-tools`, `cli:` by
 `slife2-cli`, `skills:` by `slife2-skills`.  Each one edits the section it
 already reads, and none of them knows anything about the others' — which is why
@@ -18,14 +18,14 @@ for exactly this — "so a rewrite does not eat the file's explanation of itself
 nothing in slife2 had ever written the file: `slife2.config` opens it with
 `YAML(typ="safe")`, which drops comments on the floor.  So this one loads the
 document in round-trip mode and edits it *as a document*: a key added under
-`tools:` is a key added to the mapping that is already there, and every comment
+`mcp:` is a key added to the mapping that is already there, and every comment
 around it stays where the operator put it.
 
 **A write is validated by the reader before it counts.**  After the swap, the
 whole file goes back through `slife2.config.load`, and a file it refuses is
 rolled back to what was there and the caller gets the error.  The alternative —
 trusting the edit — fails one process later, at the next start, in a process
-that has no idea an edit happened; and the entry that produced it (a `tools:`
+that has no idea an edit happened; and the entry that produced it (a `mcp:`
 entry with neither `command` nor `url`, say) would be one the tool reported as
 written.
 
@@ -282,7 +282,7 @@ def upsert(
 
     **Replace and not merge**, so a `set` says what the whole entry *is*: a
     field the caller leaves out is a field the entry does not have.  That is
-    what makes switching a `tools:` entry from `url` to `command` possible at
+    what makes switching a `mcp:` entry from `url` to `command` possible at
     all — a merge would keep the stale `url`, and the loader would then refuse
     the entry for naming two transports.  Flipping one field and leaving the
     rest alone is a *different* operation, and the one that has to read first:
@@ -321,7 +321,7 @@ def _empty_section(document: CommentedMap, section: str) -> None:
 
     **A section is not dropped when its last entry goes**, and getting that wrong
     is not cosmetic: `slife2.yaml` explains each section in a comment block above
-    its key, so a `tools:` that vanished would take a paragraph of the file's
+    its key, so a `mcp:` that vanished would take a paragraph of the file's
     documentation with it and put the section back at the bottom of the file the
     next time somebody added an entry.
 

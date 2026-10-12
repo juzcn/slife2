@@ -1900,7 +1900,7 @@ def store_for(agent: str, subagent: str = "") -> TurnStore:
 #: (`slife2.mcp_server`), while `mcp` and `rest` are somebody else's process,
 #: reached as a client.  The word is chosen for what it keeps apart in a
 #: sentence — a plugin *is* an MCP server, so calling ours "MCP servers" would
-#: distinguish them from the twenty under `tools:` not at all — and the
+#: distinguish them from the twenty under `mcp:` not at all — and the
 #: difference it names is load-bearing: `required` on the hub's connection, a
 #: missing one failing the turn, and tools that start loaded (DESIGN.md §8).
 PLUGIN = "plugin"
@@ -2255,7 +2255,7 @@ class ToolStore:
         self.threshold = max(1, int(threshold))
         #: Every source name the *config* carries, which is what the boot pass
         #: needs to tell a stale row from a slow one: see `reset`.  It is not the
-        #: peers alone — a `tools:` entry, a `rest-api:` one and the two document
+        #: peers alone — a `mcp:` entry, a `rest-api:` one and the two document
         #: sources are named in the config too, and a boot pass told only about
         #: the plugins reads every one of them as a source that has gone.  The
         #: caller assembles the set (`slife2.toolhub.configured_sources`), because
@@ -2636,7 +2636,7 @@ class ToolStore:
         **Ours are loaded; somebody else's are on demand.**  A plugin's tools
         are few and the model is expected to have them — a model that has
         quietly lost `now` and `calc` is the failure DESIGN.md §8 is built
-        around — while a server under `tools:` may offer ninety tools that cost
+        around — while a server under `mcp:` may offer ninety tools that cost
         a prompt on every call until one is wanted.  `autoload: true` is the
         operator saying this one is wanted, and it is the same set of sources
         `_protected` keeps from eviction: a tool that starts loaded because
@@ -2786,7 +2786,7 @@ class ToolStore:
         **`known` is therefore every name the config carries, and not the peers
         alone** — more so than when the wrong answer was a mark.  A source held
         by a plugin is named over the wire, but this runs *before* any wire — so
-        a boot pass told about the plugins only reads every `tools:` entry as a
+        a boot pass told about the plugins only reads every `mcp:` entry as a
         source that has gone, and the window it opens is not the moment the
         docstring above admits to: it lasts until the holding plugin has
         started, connected to that entry and declared it, which for a section of

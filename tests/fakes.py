@@ -375,7 +375,7 @@ def plugin_transports(
 
     **A hub with no plugins is a hub that lists nothing.**  It asks every
     server slife2 starts — that is where its tools come from, alongside the
-    entries under `tools:` — and it refuses to hand out a list when one of them
+    entries under `mcp:` — and it refuses to hand out a list when one of them
     does not answer, because a plugin that is not there is a system that has
     come apart rather than a model with fewer tools.
 
@@ -390,13 +390,13 @@ def plugin_transports(
     a test gets the real merge, the real search and the real budget with no
     embedding endpoint behind them.  `skills-server` and `cli-server` are where
     the rows in a default config come from, and `mcp-tools` and `restapi-tools`
-    are where the entries under `tools:` and `rest-api:` are reached and
+    are where the entries under `mcp:` and `rest-api:` are reached and
     declared — a `blank_plugin` in any of their places would leave the model
     with an empty list and a search with nothing to find, which is a hub under
     test only if what is being tested is a hub with no plugins.
 
     `overrides` replaces or adds a transport by name — a plugin the test
-    wants to misbehave, or an entry under `tools:` it wants wired.
+    wants to misbehave, or an entry under `mcp:` it wants wired.
     """
     from slife2.cli_server import build_server as build_cli
     from slife2.context_server import build_server as build_context
@@ -414,7 +414,7 @@ def plugin_transports(
         if name == "cli-server":
             return lambda settings: build_cli(config)
         if name == "mcp-tools":
-            # **The entries under `tools:` are reached through this one now**,
+            # **The entries under `mcp:` are reached through this one now**,
             # so a test's fake upstreams are handed to it rather than to the hub
             # — which is why `overrides` is keyed by entry name and lands here.
             return lambda settings: build_mcp_tools(

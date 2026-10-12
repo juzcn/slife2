@@ -191,7 +191,7 @@ def hub_with_upstream() -> FastMCP:
         default_config(),
         # `autoload` because this is a test about the hop, not about the load
         # gate: the tool servers here are wanted in the list from the start.
-        tools={
+        mcp={
             "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
         },
     )
@@ -213,7 +213,7 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         registry = ToolRegistry(await remote_tools(hub))
         # In the catalogue's order, which is the name's.  **Ours are bare** —
         # a plugin's tools read the same as the hub's own, because there is one
-        # set of tools here — and `fake__echo`, an entry under `tools:`, is the
+        # set of tools here — and `fake__echo`, an entry under `mcp:`, is the
         # one name that says whose it is.  The hub's four cross this hop like
         # everything else, `_func_tool_unload` included: it is the one
         # `_`-prefixed name a model sees, and the reason is in its own test.

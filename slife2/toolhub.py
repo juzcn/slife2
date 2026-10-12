@@ -9,7 +9,7 @@ server, to a REST API, to a program that wants an API key in its environment.
     slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins      (ours)
                              list_tools                    │
                              call_tool                     ├─ their own tools, by `tools/list`
-                             servers                       └─ what they declare: a `tools:` or
+                             servers                       └─ what they declare: a `mcp:` or
                              _func_tool_unload                `rest-api:` entry, held and called
                                     │                         by mcp-tools / restapi-tools
                                     └──in-process──▶  `slife2.db.ToolStore`
@@ -20,7 +20,7 @@ exist, what the model is holding, what a name resolves to, what the budget takes
 back, and who may call what — every one of those is a question about the *whole*
 list, so it is answered in one place or it is answered twice and differently.
 What it does **not** own any more is a connection to anybody but our own plugins:
-the servers under `tools:` and `rest-api:` are held by `slife2-mcp-tools` and
+the servers under `mcp:` and `rest-api:` are held by `slife2-mcp-tools` and
 `slife2-restapi-tools`, which say what they hold and run a call back when this
 process asks.  The credential story is unchanged — a tool server's key lives in
 the process that reaches it, and the agent loop never sees one — but the process
@@ -44,7 +44,7 @@ the model's (`slife2.audience`), because they belong to that plugin's code:
 conversation, and those are exactly the tools a model would reach for if it
 could read their descriptions.  **What a plugin holds** arrives by declaration
 instead — one tool, `list_sources`, answering with a source's whole list — and is
-not gated, because it is the operator's configuration: a `tools:` entry, a
+not gated, because it is the operator's configuration: a `mcp:` entry, a
 playbook, a command.  The entry is the opt-in; there was never a mark to forget.
 
 Which makes a source something a plugin owns rather than something the hub
@@ -124,7 +124,7 @@ REST APIs are not a second mechanism
 ------------------------------------
 A `rest-api:` entry is expanded *by the config layer* into the stdio command that
 serves it (`slife2.config._rest_api`), so what arrives at `slife2-restapi-tools`
-is an ordinary stdio server — the same kind of thing a `tools:` entry describes,
+is an ordinary stdio server — the same kind of thing a `mcp:` entry describes,
 held by the same code (`slife2.toolfamily`) and declared to this process the same
 way.  Nothing outside the config layer knows what REST is, which is the point:
 there is one kind of thing to connect to, and the wrapper people publish for
@@ -639,7 +639,7 @@ def _server_row(
     """One row of `servers()`, for a source whichever way the hub reaches it.
 
     **One shape, because it is one question.**  "Why is my tool missing" has to
-    read the same whether the answer is a plugin, an entry under `tools:` that
+    read the same whether the answer is a plugin, an entry under `mcp:` that
     this process connects to, or a source a plugin holds on its behalf — and two
     builders of the same row is how the third one ends up missing a field.
     """
@@ -757,7 +757,7 @@ class Upstream:
         #: cannot be reached is a tool the model does not have; a required one
         #: that cannot be reached is this system coming apart, and `list_tools`
         #: refuses rather than quietly serving a shorter list.  Nothing in
-        #: `tools:` sets this — it is what makes a plugin a plugin, and it
+        #: `mcp:` sets this — it is what makes a plugin a plugin, and it
         #: is read twice: for that failure rule, and for whether this server's
         #: tools have to ask before the model is given them (`_offered`).
         self.required = required
@@ -870,7 +870,7 @@ class Upstream:
         #: somewhere else, and "slife2 starts this server" is the only thing here
         #: that means *ours*.  Somebody else's server that happens to define a
         #: tool with this name gets nothing, which matters because the hub takes
-        #: every tool an entry under `tools:` offers.
+        #: every tool an entry under `mcp:` offers.
         self._declares = self.required and any(
             getattr(tool, "name", "") == LIST_SOURCES for tool in listed
         )
@@ -1315,7 +1315,7 @@ def local_tools(
     back are all questions about the *whole* catalogue — so the process that
     owns the set answers them, and no plugin can.  Everything else a model can
     *call* is served by a plugin: bare-named when it is that plugin's own tool
-    (`turn_read`), `{server}__{tool}` when it is an entry under `tools:`.  What the hub
+    (`turn_read`), `{server}__{tool}` when it is an entry under `mcp:`.  What the hub
     kept when `skill_use` moved out to `slife2-skills` is exactly this remainder,
     and the remainder is the reason `LocalTool` still exists at all.
 
@@ -1924,8 +1924,8 @@ def _parameters(schema: str) -> dict[str, Any]:
 def plugin_settings(config: Config, name: str) -> ToolServerSettings:
     """One of our own servers, as one upstream of the hub.
 
-    **Written here rather than under `tools:` because it is ours.**  An entry in
-    `tools:` is somebody else's process, which slife2 may fail to reach without
+    **Written here rather than under `mcp:` because it is ours.**  An entry in
+    `mcp:` is somebody else's process, which slife2 may fail to reach without
     anything being wrong; a plugin is one slife2 starts, and the hub treats it
     accordingly (`required` on an `Upstream`, which is also what makes its tools
     ask before they are offered to the model).
@@ -1958,7 +1958,7 @@ def configured_sources(config: Config) -> frozenset[str]:
 
     **And it is more than the plugins.**  A plugin is the only source name this
     process *connects* under, which is what the set used to be — but the
-    entries under `tools:` and `rest-api:` are named in the config too, and so
+    entries under `mcp:` and `rest-api:` are named in the config too, and so
     are the two document sources, and none of them has answered yet at the
     moment `reset` runs.  Handed the plugins alone, the boot pass read every one
     of them as a source that has gone: a restart marked every external tool
@@ -1977,7 +1977,7 @@ def configured_sources(config: Config) -> frozenset[str]:
     return frozenset(
         {
             *config.plugins(),
-            *config.tools,
+            *config.mcp,
             *config.rest_apis,
             SKILLS_SOURCE,
             CLI_SOURCE,
@@ -2330,7 +2330,7 @@ def build_server(
                 answering.  Deliberately not a shorter list instead: a plugin
                 that is gone is a system that has come apart, and a model that
                 has quietly lost `now` and `calc` is a failure nobody can see.  A
-                server from the `tools:` section is the opposite case and is
+                server from the `mcp:` section is the opposite case and is
                 simply left out — it is the operator's configuration and somebody
                 else's process, and its tools are in the catalogue with `error`
                 on them.  See DESIGN.md §5 and §8.
@@ -2466,7 +2466,7 @@ def build_server(
             return {
                 "text": (
                     f"{name!r} belongs to {source!r}, which is not a server this "
-                    f"hub is configured with any more — check `tools:` in the "
+                    f"hub is configured with any more — check `mcp:` in the "
                     f"config"
                 ),
                 "ok": False,

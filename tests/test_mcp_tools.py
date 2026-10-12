@@ -1,4 +1,4 @@
-"""`slife2-mcp-tools`' own five tools: the model editing `tools:`.
+"""`slife2-mcp-tools`' own five tools: the model editing `mcp:`.
 
 The family used to hold a section and declare it; now it can be *changed*, by
 the model, through the `mcp_*` names v1 used.  What these tests are about is the
@@ -41,7 +41,7 @@ default: local/big
 
 # The servers are here, and this comment is the file's; an edit nearby must not
 # eat it.
-tools:
+mcp:
   existing:
     command: in-memory
     env:
@@ -96,8 +96,8 @@ def written(isolated_runtime: Path) -> str:
 
 
 def section(isolated_runtime: Path) -> dict[str, Any]:
-    """The `tools:` section as the file has it."""
-    return read_section("tools", path=isolated_runtime / "slife2.yaml")
+    """The `mcp:` section as the file has it."""
+    return read_section("mcp", path=isolated_runtime / "slife2.yaml")
 
 
 # --- what the listing shows ---------------------------------------------------
@@ -260,7 +260,7 @@ async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) 
         listed = await ask(client, "mcp_list")
         gone = await ask(client, "mcp_list_tools", name="added")
 
-    assert "gone from `tools:`" in answer
+    assert "gone from `mcp:`" in answer
     assert "added" not in section(isolated_runtime)
     assert "added" not in listed
     assert "not a server this process holds" in gone
@@ -275,7 +275,7 @@ async def test_removing_something_that_is_not_there_says_so(isolated_runtime) ->
     async with Client(family(isolated_runtime)) as client:
         answer = await ask(client, "mcp_remove", name="never-existed")
 
-    assert "not a server under `tools:`" in answer
+    assert "not a server under `mcp:`" in answer
     assert written(isolated_runtime) == before
 
 

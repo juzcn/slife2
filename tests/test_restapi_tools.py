@@ -274,7 +274,7 @@ async def test_a_name_under_tools_is_refused_by_the_writer(isolated_runtime) -> 
     text = (
         CONFIG
         + """\
-tools:
+mcp:
   clash:
     command: npx
 """
@@ -292,7 +292,7 @@ tools:
         )
 
     assert (
-        answer.startswith("[refused]") and "already configured under `tools:`" in answer
+        answer.startswith("[refused]") and "already configured under `mcp:`" in answer
     )
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
 

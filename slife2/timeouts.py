@@ -102,7 +102,7 @@ class Ready:
     #: One of *our own* hops connecting.  Loopback to a daemon this system
     #: started, so this bounds a port that listens and never answers.
     connect_ours: float = 10.0
-    #: A `tools:` entry connecting.  Somebody else's process, possibly an `npx`
+    #: A `mcp:` entry connecting.  Somebody else's process, possibly an `npx`
     #: fetching itself, so it gets far more patience than our own hops.
     connect_tools: float = 60.0
     #: How long a listing waits for connects it started, before answering with
