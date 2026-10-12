@@ -9,7 +9,7 @@ nobody understands has to be an error rather than an empty window.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -55,15 +55,25 @@ def test_a_utc_datetime_becomes_local() -> None:
     same instant written two ways and compare as two different strings — which
     is a window that is wrong by the size of the offset, at the boundary only,
     and therefore never noticed.
+
+    **Asserted against this machine's offset rather than a fixed `+08:00`.**  The
+    offset the conversion produces is the one fact here that is not this
+    module's to decide, and a runner in UTC is a machine where "becomes local"
+    is a no-op: the old assertion named `+08:00` and passed only on a clock set
+    to it, so CI failed on all three platforms for six days.  What every
+    timezone shares is the property below — the instant survives, it comes back
+    in local time, and two spellings of it become one string.
     """
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
     local = normalize_bound("2026-01-01T00:00:00Z")
-    assert local == "2026-01-01T08:00:00+08:00" or local.endswith(
-        date(2026, 1, 1).isoformat()
-    )
-    assert datetime.fromisoformat(local).tzinfo is not None
-    assert datetime.fromisoformat(local) == datetime.fromisoformat(
-        "2026-01-01T00:00:00Z"
-    )
+
+    # The same instant, in local time.  Against the offset of *that* moment
+    # rather than of today: a zone that observes DST does not have one offset.
+    assert datetime.fromisoformat(local) == moment
+    assert datetime.fromisoformat(local).utcoffset() == moment.astimezone().utcoffset()
+
+    # Which is the whole point: one instant written two ways, one string.
+    assert normalize_bound("2026-01-01T08:00:00+08:00") == local
 
 
 # --- day words ----------------------------------------------------------------
