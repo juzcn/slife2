@@ -123,6 +123,7 @@ uv run slife2-wechat           # WeChat, a login per agent,  :8030
 uv run slife2-cabinet          # notes, diary, files,        :8035
 uv run slife2-media            # images, video, speech,      :8036
 uv run slife2-file-tunnel      # a public URL for a file,    :8038
+uv run slife2-schedule         # scheduled tasks, the clock, :8039
 uv run slife2-tui              # the terminal's inbox,       :8005
 uv run slife2-context          # turns, and the context,  :8010
 uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
@@ -762,6 +763,64 @@ set is the single catalogue and nothing filters it, so a task may start a task,
 and what that leaves unbounded is how much work happens over time rather than how
 much happens at once (DESIGN.md §9).
 
+### Scheduled tasks
+
+**The one thing here that starts work nobody asked for at the moment it starts.**
+A scheduled task is a name, a description and a cron expression, written down by
+the model; from then on `slife2-schedule` fires it, and when it comes due the
+agent is handed the description as a turn of its own — through the terminal, or
+through the agent server when no window is showing that conversation. **That turn
+is an order, not a notification**: it names the call to make (`agent_task_start`,
+under the scheduled task's own name), says not to wait or poll, and names the one
+ending — `schedule_run_settle` with a one-line note, once the answer arrives. A
+task that has come due is **not the agent's to decline**; `schedule_run_skip`
+exists for the runs that did not happen at all.
+
+| tool | what it does |
+|---|---|
+| `schedule_set` | Write a task (or replace one) — name, description, cron, timezone |
+| `schedule_remove` | Forget it, and everything it ever did |
+| `schedule_list` | What is scheduled, and when each next comes due |
+| `schedule_runs` | What it has actually done — one row per fire |
+| `schedule_run_now` | Run it now, or backfill a run that was missed |
+| `schedule_run_settle` | Close a run that has been done, with a one-line note |
+| `schedule_run_skip` | Close one that is not worth doing any more, and say why |
+
+```
+schedule_set(name="daily", description="Write the day's entry from the turns.",
+             cron="0 22 * * *", timezone="Asia/Shanghai")
+→ {"name": "daily", "cron": "0 22 * * *", "next_run": "2026-10-12T22:00:00+08:00", ...}
+```
+
+**The ledger is the feature.** A *run* is one fire, named by the moment it was
+**due** rather than by when it ran, and it moves `pending → ran | failed | missed
+| skipped`. The row is written before anything is handed over, so a fire cannot
+repeat on the next poll; a hand-over that is refused marks the run `failed`; one
+that does not come back leaves it `pending`, because a run whose fate is unknown
+is not reported as either. *No note means it failed* — the note `schedule_run_settle`
+takes is what a later reading of `schedule_runs` has instead of the work itself.
+
+**Tasks fire only while slife2 is running**, and what was missed is not hidden:
+coming up, the sweep fails anything a stopped process left open and records the
+newest fire each task missed — `schedule_runs(status="missed")` is where you find
+them — so a run can be backfilled with `schedule_run_now(name, due_at)` or closed
+with `schedule_run_skip`. Nothing announces them: **a fire is the only thing the
+clock ever says to a conversation**, and the ledger is where "did it run?" is
+answered (DESIGN.md §1.7, §9). A trigger wears no marker either, because the
+marker vocabulary is for matching a *result* to what produced it and a trigger is
+not a result — the `schedule:<task>` channel and the template's first line carry
+what a reader needs.
+
+A ledger lives at `<data>/agents/<agent>/schedule.db`, and there is **no config
+section** — an address is the whole of what is written down about the plugin. A
+task's `timezone` is an IANA name, and leaving it out means the machine's clock
+*as it is now*, which does not follow a daylight-saving change.
+
+```yaml
+# nothing to configure: a machine that should not run scheduled tasks is a
+# machine where nobody writes one
+```
+
 ## Where things live
 
 **One data directory holds everything** — the config that says what to run, the
@@ -776,6 +835,7 @@ runtime state of what is running, and the turns they produced:
     tools.db                       the tool catalogue — the one shared file
     <agent>/                       one directory is the whole of one agent
       turns.db                     its conversation, and what it runs on
+      schedule.db                  what it scheduled, and every run of it
       cabinet/                     notes/, diary/, reports/ as markdown and the
                                    saved files by category, with `.index.db`
                                    (the search index) inside

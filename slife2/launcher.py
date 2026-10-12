@@ -45,6 +45,7 @@ from slife2.config import (
     MCP_TOOLS_SERVER_NAME,
     MEDIA_SERVER_NAME,
     RESTAPI_TOOLS_SERVER_NAME,
+    SCHEDULE_SERVER_NAME,
     SKILLS_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     TUI_SERVER_NAME,
@@ -150,6 +151,14 @@ AGENT_TASK_SERVER = (
     AGENT_TASK_SERVER_NAME,
     "agent_task_list",
 )
+#: The clock.  It identifies itself by `schedule_list`, which takes no argument
+#: and needs nothing running — the state this plugin starts in, like the task
+#: server's own probe tool and for the same reason.
+SCHEDULE_SERVER = (
+    "slife2.schedule_server",
+    SCHEDULE_SERVER_NAME,
+    "schedule_list",
+)
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "embeddings": EMBEDDINGS_SERVER,
@@ -166,6 +175,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "tui": TUI_SERVER,
     "agent": AGENT_SERVER,
     "agent-task": AGENT_TASK_SERVER,
+    "schedule": SCHEDULE_SERVER,
 }
 
 #: The tool every model server answers to, and how they are named.  One tool
@@ -658,6 +668,13 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # up fails its own first hop, and that failure looks like the feature not
     # working rather than like a daemon that was still starting.
     "agent-task": ("toolhub", "tui", "agent"),
+    # The clock reaches two peers, and needs neither the hub nor a model: a fire
+    # puts a due task in front of the agent through the terminal, or through the
+    # agent server when no window is showing that conversation.  Ordering rather
+    # than correctness, like every edge here — a ledger whose first fire cannot
+    # be handed over is a run marked failed, which looks like the feature not
+    # working rather than like a daemon that was still starting.
+    "schedule": ("tui", "agent"),
     "toolhub": (
         "embeddings",
         "context",
@@ -669,6 +686,14 @@ NEEDS: dict[str, tuple[str, ...]] = {
         "cabinet",
         "media",
         "file-tunnel",
+        "schedule",
+        # **`agent-task` is not here, and it cannot be.**  The comment above
+        # says this edge is kept for every plugin the hub asks, and the hub does
+        # ask it — but a task's loop *runs on* the hub's tool list, so an edge
+        # from the hub to `agent-task` closes a cycle the launcher refuses to
+        # start (`ensure_all` raises).  What the edge is for is a plugin that
+        # would otherwise be asked before it is up; one that waits on the hub
+        # itself is up by definition by the time the hub can answer.
     ),
 }
 

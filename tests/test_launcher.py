@@ -72,6 +72,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "toolhub",
         "agent",
         "agent-task",
+        "schedule",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
     assert modules == {
@@ -92,6 +93,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.toolhub",
         "slife2.server.server",
         "slife2.agent_task_server",
+        "slife2.schedule_server",
     }
 
 
@@ -287,6 +289,7 @@ def test_one_server_per_wire_protocol() -> None:
         "toolhub",
         "agent",
         "agent-task",
+        "schedule",
     ]
 
 
@@ -342,6 +345,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "toolhub",
         "agent",
         "agent-task",
+        "schedule",
     ]
 
 
@@ -365,10 +369,15 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     order between the two is the one edge that is new here.
     """
     names = [spec.name for spec in launcher.specs(default_config())]
-    assert names[-2:] == ["agent", "agent-task"]
+    assert names[-3:] == ["agent", "agent-task", "schedule"]
     assert "agent" in launcher.NEEDS["agent-task"]
+    # The clock reaches a conversation and nothing else: it makes no model call
+    # and asks the hub for no tools (DESIGN.md §1.7), so its peers are the
+    # terminal and the agent server behind it — the same fallback path a task's
+    # answer takes.
+    assert set(launcher.NEEDS["schedule"]) == {"tui", "agent"}
     # Everything else is a dependency of one of them, whatever kind it is.
-    assert set(names[:-2]) == {
+    assert set(names[:-3]) == {
         "llm:openai-completions",
         "embeddings",
         "context",

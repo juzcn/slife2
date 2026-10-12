@@ -200,6 +200,18 @@ servers:
     host: 127.0.0.1
     port: 8037
     path: /mcp
+  # The clock: what one agent has scheduled, and every run of it, in
+  # `<agent>/schedule.db`.  The one server here that starts work nobody asked
+  # for at the moment it starts — a cron expression comes due and the agent is
+  # handed the task as a turn of its own, through the terminal (or the agent
+  # server, when no window is showing that conversation).  A plugin because what
+  # it holds is timers, which is the same reason `agent-task` is one, and it owns
+  # **no section**: a machine that should not run scheduled tasks is a machine
+  # where nobody writes one, exactly as with WeChat.  DESIGN.md §1.7.
+  schedule:
+    host: 127.0.0.1
+    port: 8039
+    path: /mcp
 
 # ── External tool servers ───────────────────────────────────────────────────
 # Other people's MCP servers, held by `slife2-mcp-tools` — which is why they

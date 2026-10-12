@@ -57,7 +57,6 @@ is drawn when a window opens and restores.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, Callable
@@ -72,14 +71,13 @@ from fastmcp.exceptions import ToolError
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
-    AGENT_SERVER_NAME,
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
-    TUI_SERVER_NAME,
     Config,
     load_cached,
 )
+from slife2.handover import hand_over
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult, harness_call
@@ -95,7 +93,6 @@ from slife2.messages import Message
 from slife2.prompt import render
 from slife2.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
 from slife2.tools import ToolRegistry
-from slife2.tui import control
 
 logger = logging.getLogger(__name__)
 
@@ -161,13 +158,6 @@ RETIRED = 32
 #: name is what the model addresses a task by, and the description is there so
 #: that a name it chose a while ago still means something.
 DESCRIPTION_CHARS = 120
-
-#: How long to wait on a peer that is *handed* something rather than asked.  The
-#: window is quick — `submit` returns when the words are down the stream, not
-#: when the turn ends — and the agent server is not, because its fallback runs a
-#: whole turn before it answers.  Two numbers for two different promises.
-WINDOW_TIMEOUT_SECONDS = 10.0
-AGENT_TIMEOUT_SECONDS = 600.0
 
 #: How long to wait on the toolhub.  The same number the agent server uses, for
 #: the same reason: `list_tools` may briefly wait for tool servers that are
@@ -753,132 +743,34 @@ def build_server(
 
     # ── the way back ─────────────────────────────────────────────────────
 
-    async def submit_to(
-        window: Client, agent: str, text: str, channel: str
-    ) -> bool | None:
-        """One `submit`, classified: written, refused, or unknown.
-
-        **The refusal and the unknown are different answers and the difference is
-        the whole of this function.**  `slife2.tui.control.refused` is what tells
-        them apart, and it has to be asked rather than tested for: everything a
-        tool handler raises arrives at this end as a `ToolError`, so the *type*
-        cannot tell a refusal from a stream that dropped.  A refusal is the one
-        failure that proves nothing was written — the terminal looks its session
-        up before it posts anything — and everything else means the words may be
-        down the stream already.  Repeating those is how one answer arrives
-        *twice*, which is what a boolean here produced, and §1.2 states the same
-        rule from the caller's side: a caller that gave up cannot know, so it
-        does not repeat.
-        """
-        try:
-            await window.call_tool(
-                "submit",
-                {"agent": agent, "text": text, "channel": channel},
-                timeout=WINDOW_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-            if control.refused(exc):
-                logger.info("no window is showing %s: %s", agent, exc)
-                return False
-            logger.warning("the hand-over to %s did not come back: %s", agent, exc)
-            return None
-        return True
-
-    async def to_window(agent: str, text: str, channel: str) -> bool | None:
-        """Hand a message to the window showing this agent's conversation.
-
-        Opened per call and closed after it, the way `slife2-wechat` hands one
-        over: this happens once per task rather than once per turn, and a
-        long-lived connection to a plugin that may restart is a connection to
-        re-establish.  An injected client is used as it is and left open — it
-        belongs to whoever handed it in.
-        """
-        if window_client is not None:
-            return await submit_to(window_client, agent, text, channel)
-        try:
-            window = await open_server(
-                config.server("tui").url,
-                name=TUI_SERVER_NAME,
-                fallback_tool="submit",
-                timeout=WINDOW_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:  # noqa: BLE001 - nothing was written, because nothing was reached
-            logger.info("no window for %s could be reached: %s", agent, exc)
-            return False
-        try:
-            return await submit_to(window, agent, text, channel)
-        finally:
-            with contextlib.suppress(Exception):
-                await window.__aexit__(None, None, None)
-
-    async def to_agent(agent: str, text: str, channel: str) -> None:
-        """Continue the agent's own conversation, because no window is showing it.
-
-        §3's "a caller which is not displaying the conversation can still
-        continue one", which is what that sentence is for: the turn runs, is
-        recorded, and is drawn when a window opens and restores.  `subagent` is
-        left empty and that is the point — this is the agent's own conversation,
-        not a worker's.
-        """
-        if agent_client is not None:
-            await agent_client.call_tool(
-                "send_message", {"agent": agent, "prompt": text, "channel": channel}
-            )
-            return
-        server = await open_server(
-            config.server("agent").url,
-            name=AGENT_SERVER_NAME,
-            fallback_tool="send_message",
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
-        try:
-            await server.call_tool(
-                "send_message",
-                {"agent": agent, "prompt": text, "channel": channel},
-                timeout=AGENT_TIMEOUT_SECONDS,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await server.__aexit__(None, None, None)
-
     async def deliver(task: AgentTask) -> None:
         """Hand a finished task's answer to the conversation that asked for it.
 
-        The window first, because that is where a message becomes a turn and
-        what puts the answer on screen in the person's own queue (DESIGN.md
-        §1.2).  **Anything that stops that path falls back rather than losing
-        the answer**: a task that finished with nobody watching is the case a
-        background task exists for — start it, close the window, walk away — and
-        a fallback that failed too is the one outcome worth a loud log line.
+        **The hand-over itself is `slife2.handover`, and it is shared with
+        `slife2-schedule`** — the window first, the agent server as the fallback,
+        and three answers rather than two about whether it worked.  Two plugins
+        that both put a message into a conversation nobody asked them about is
+        one more copy than this project keeps of anything, so what is left here
+        is only the part that *is* an agent task's: what an answer wears, and
+        what "delivered" means when it does not arrive.
+
+        A task that finished with nobody watching is the case a background task
+        exists for — start it, close the window, walk away — so nothing here is a
+        failure until both paths have been tried.  **`None` is not tried again
+        anywhere else**: it means the call did not come back, which says nothing
+        about whether the words were written, and a second copy of an answer is
+        worse than a late one because the agent would act on it twice.
         """
-        text = f"{marker(task)} {task.text}"
-        channel = channel_for(task)
-        handed = await to_window(task.agent, text, channel)
-        if handed is True:
-            task.delivered = True
-            return
-        if handed is None:
-            # **Not repeated anywhere else.**  The words may already be in the
-            # conversation — a call that did not come back says nothing either
-            # way — and a second copy of an answer is worse than a late one: the
-            # agent would act on it twice.  This is the one outcome that is
-            # logged loudly, and the count is logged rather than the words.
-            logger.error(
-                "agent task %s: the hand-over to %s did not come back, so its "
-                "answer (%d characters) was not handed anywhere else",
-                task.name,
-                task.agent,
-                len(task.text),
-            )
-            return
-        try:
-            await to_agent(task.agent, text, channel)
-            task.delivered = True
-        except Exception:  # noqa: BLE001 - nothing left to try, and it must be said
-            logger.exception(
-                "agent task %s: the answer could not be handed over at all",
-                task.name,
-            )
+        handed = await hand_over(
+            config,
+            task.agent,
+            f"{marker(task)} {task.text}",
+            channel_for(task),
+            what=f"agent task {task.name}",
+            window_client=window_client,
+            agent_client=agent_client,
+        )
+        task.delivered = handed is True
 
     # ── whose task ───────────────────────────────────────────────────────
 

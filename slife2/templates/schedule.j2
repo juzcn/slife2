@@ -1,0 +1,25 @@
+▸ Scheduled task: {{ name }}
+
+{{ description }}
+
+It came due at {{ due_at }}. Nobody asked for this just now — the clock did — and
+that timestamp is the run's name: you say it back when you close the run.
+
+**1. Start it as a background task, under exactly this name.**
+
+    agent_task_start(name="{{ name }}", description="<the description above>")
+
+It runs as you, on your own context, and the call returns at once. **Do not wait
+for it, and do not poll it.**
+
+**2. Close the run when its answer comes back.**
+
+The answer arrives by itself, as a message on the `agent-task:{{ name }}` channel
+wearing `[AsyncTaskResult:…]`. Nothing about it reaches this ledger on its own —
+so when it arrives, close the run with what it produced:
+
+    schedule_run_settle(name="{{ name }}", due_at="{{ due_at }}", note="<one line>")
+
+The note is what this ledger keeps instead of the work: what you found, or what
+you made, or where it went. Until you call that, the run stays `pending` — the one
+state nobody can account for — and `schedule_runs` will show it as such.

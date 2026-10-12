@@ -57,6 +57,7 @@ from textual.widgets import Static, TextArea
 from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
 from slife2.markers import strip as strip_marker
+from slife2.schedule_server import CHANNEL as SCHEDULE_CHANNEL
 from slife2.tui.theme import GLYPHS, PALETTE
 from slife2.wechat import CONFIG_KEY as WECHAT_CHANNEL
 from slife2.wechat import MARKER_PREFIX as WECHAT_MARKER
@@ -115,6 +116,15 @@ def channel_prefix(channel: str) -> str:
         # is deliberately *not* the key spelled again: `agent-task:research` is
         # an address, and what a person is being told is who answered.
         return f"AsyncTaskResult({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{SCHEDULE_CHANNEL}:"):
+        # The clock, and which task came due.  **There is no marker to take off
+        # here** — unlike an agent task's answer, a trigger wears none, because
+        # the marker vocabulary is for matching a result to what produced it and
+        # a trigger is not a result (DESIGN.md §1.7).  So what the channel
+        # carries is the *whole* of what the window can say about where this came
+        # from, which is why every message this plugin hands over names a task —
+        # including the reconciliation, which is sent per task for this reason.
+        return f"Scheduled({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
     # this window inventing a speaker (DESIGN.md §1.3).

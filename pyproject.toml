@@ -61,6 +61,17 @@ dependencies = [
     # this one as unavailable when it is selected.
     "ngrok>=1.6.0",
     "jinja2>=3.1.0",
+    # Cron, for the scheduled tasks (`slife2.schedule`, DESIGN.md §1.7).  **v1's
+    # dependency, for v1's feature, and after v1's own argument with itself**: the
+    # design notes for that feature say "no apscheduler, no croniter, hand-write
+    # the parser" and the implementation used croniter anyway.  What decided it
+    # there is what decides it here — the five fields are trivial and the corners
+    # are not: `day_or`, the DST rule, and `strict` cross-field validation, which
+    # is what rejects `0 9 31 2 *` before an enabled task that can never fire is
+    # written down.  Only `get_next`, `get_prev` and `is_valid` are used, and only
+    # from one module: `slife2.schedule` owns the timezone policy and the error
+    # contract, so nothing else in this project imports it.
+    "croniter>=6.2.4",
     # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
     # per connection by `slife2.db`, which is why it is a dependency of the
     # package rather than something a backend process holds.  A floor rather
@@ -70,6 +81,15 @@ dependencies = [
     # of that alpha this project depends on.  Wheels are `py3-none-*` for every
     # platform CI builds on, so there is no interpreter-specific tag to match.
     "sqlite-vec>=0.1.9",
+    # **Never imported, and required on one platform.**  `zoneinfo` reads the
+    # system's IANA database where there is one — macOS and Linux have it — and
+    # has nothing to read on Windows, where this project is developed.  So
+    # `ZoneInfo("Asia/Shanghai")` raises `ZoneInfoNotFoundError` on a Windows
+    # machine without this package, which turns every named timezone in
+    # `slife2.schedule` into a failure nobody can reproduce from Linux.  v1's
+    # dependency with v1's comment, kept because the reason is invisible from an
+    # import that does not exist: `zoneinfo` loads it by name, from C.
+    "tzdata>=2026.5",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -89,6 +109,7 @@ classifiers = [
 slife2 = "slife2:main"
 slife2-agent = "slife2.server.server:main"
 slife2-agent-task = "slife2.agent_task_server:main"
+slife2-schedule = "slife2.schedule_server:main"
 slife2-context = "slife2.context_server:main"
 slife2-skills = "slife2.skills_server:main"
 slife2-cli = "slife2.cli_server:main"

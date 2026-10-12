@@ -14,6 +14,9 @@ it.
         tools.db      the tool catalogue — one file for the data dir, and the
                       only thing here that is not an agent's own
         <agent>/      turns.db    the conversation, and what it runs on
+                      schedule.db what this agent has scheduled, and every
+                                  fire of it — the ledger `slife2-schedule`
+                                  keeps, and the file it finds agents by
                       cabinet/    notes, diary, saved files, reports — as
                                   markdown and bytes a person can open, with
                                   the index over them (`.index.db`) inside
@@ -183,6 +186,39 @@ def catalogue_db() -> Path:
     to keep in step.
     """
     return agents_dir() / "tools.db"
+
+
+#: The ledger's own file name, spelt once: `schedule_db` builds a path from it
+#: and `schedule_dbs` finds every one of them with it.
+_SCHEDULE_DB = "schedule.db"
+
+
+def schedule_dbs() -> list[Path]:
+    """Every agent's ledger on this machine.
+
+    **This is how one shared process finds the agents it serves.**  There is no
+    registry of agents anywhere — a login, a conversation and a schedule all
+    come into existence because somebody used one, and the directory they landed
+    in is the record.  `slife2-wechat` reads the logins it wrote for the same
+    reason, and `slife2.schedule_server`'s poll reads these.
+    """
+    return sorted(agents_dir().glob(f"*/{_SCHEDULE_DB}"))
+
+
+def schedule_db(agent: str) -> Path:
+    """One agent's scheduled-task ledger: `<agent>/schedule.db`.
+
+    Beside `turns.db` rather than in a file of its own, for §5's reason — an
+    agent's state is a directory, and isolation is the filesystem rather than a
+    `WHERE` clause — and **the file is also how the plugin finds agents**: it is
+    one shared process serving every agent, so the poll loop walks
+    `agents/*/schedule.db` exactly as `slife2-wechat` walks the logins it wrote.
+    Whose ledger each one is comes from the `meta` row inside it, not from the
+    directory, because a directory holds the *sanitised* agent name
+    (`slife2.db.safe_agent_name`) and the two differ for a name with a space or
+    a slash in it.
+    """
+    return agent_dir(agent) / _SCHEDULE_DB
 
 
 def skills_dir() -> Path:

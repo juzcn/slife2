@@ -93,6 +93,7 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
         EMBEDDINGS_SERVER_NAME,
         MCP_TOOLS_SERVER_NAME,
         RESTAPI_TOOLS_SERVER_NAME,
+        SCHEDULE_SERVER_NAME,
         SKILLS_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
@@ -118,6 +119,9 @@ def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
     )
     assert importlib.import_module("slife2.llm.embeddings_server").SERVER_NAME == (
         EMBEDDINGS_SERVER_NAME
+    )
+    assert importlib.import_module("slife2.schedule_server").SERVER_NAME == (
+        SCHEDULE_SERVER_NAME
     )
     for api, module in API_BACKENDS.items():
         assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]

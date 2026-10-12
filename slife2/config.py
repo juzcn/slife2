@@ -211,6 +211,14 @@ FILE_TUNNEL_SERVER_NAME = "slife2-file-tunnel"
 #: agent server is: no file is the answer to a running loop.
 AGENT_TASK_SERVER_NAME = "slife2-agent-task"
 
+#: The clock: the one thing here that starts work nobody asked for at the moment
+#: it starts (`slife2.schedule_server`, DESIGN.md §1.7).  A plugin for the same
+#: reason `agent-task` is one — what it holds is timers, which is state with a
+#: lifetime rather than a file — and it owns no config section at all: v1 had
+#: none for this feature either, and a machine that should not run scheduled
+#: tasks is a machine where nobody writes one.
+SCHEDULE_SERVER_NAME = "slife2-schedule"
+
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
 #: the order `slife2.config.Config.plugins` reads them out in.
@@ -276,6 +284,7 @@ LOCAL_SERVERS = (
     "toolhub",
     "agent",
     "agent-task",
+    "schedule",
 )
 
 
@@ -1210,6 +1219,14 @@ def default_config() -> Config:
             # answer over.  It reads one section of its own, `agent-task:`, and
             # only for its cap; a task's prompt and step count are the agent's.
             "agent-task": ServerSettings(port=8037),
+            # The clock, and the ledger of what it fired: what one agent has
+            # scheduled, and every run of it, in `<agent>/schedule.db`.  A plugin
+            # because what it holds is timers — the same argument as the line
+            # above — and it reaches two peers rather than being reached by them:
+            # the terminal, or the agent server when no window is showing, to put
+            # a due task in front of the agent as a turn of its own.  It owns no
+            # section: an address is the whole of what is written down about it.
+            "schedule": ServerSettings(port=8039),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),

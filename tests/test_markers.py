@@ -68,6 +68,20 @@ def test_an_agent_tasks_answer_wears_the_task_it_came_from() -> None:
     assert channel_prefix(CHANNEL) == f"{CHANNEL}> "
 
 
+def test_a_scheduled_trigger_says_which_task_came_due() -> None:
+    """The clock's messages wear **no marker** — there is nothing to match a
+    result to, because a trigger is not a result (DESIGN.md §1.7) — so the
+    channel carries the whole of what the window can say about where it came
+    from, and every message this plugin hands over names a task."""
+    from slife2.schedule_server import CHANNEL as SCHEDULE_CHANNEL
+
+    assert channel_prefix(f"{SCHEDULE_CHANNEL}:daily") == "Scheduled(daily)> "
+    # A schedule message with no task in it cannot happen: a fire is the only
+    # thing this plugin hands over, and a trigger always names the task it is
+    # about (`slife2.schedule_server`), which is what keeps this branch total.
+    assert channel_prefix(SCHEDULE_CHANNEL) == f"{SCHEDULE_CHANNEL}> "
+
+
 def test_the_two_channels_a_window_already_knew_are_unchanged() -> None:
     """The window's own turns are the person's, and WeChat keeps the spelling
     v1 gave its bubble — one less thing to relearn."""

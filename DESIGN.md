@@ -859,6 +859,162 @@ which is why `slife2/file_tunnel/providers.py` holds the ~60 lines v1 kept in a
 shared `slife2.net`: here there is one caller, and §1.1's rule about libraries
 is that the implementation goes where the capability is.
 
+### 1.7 The scheduled task, and what a clock costs
+
+**`slife2-schedule` is v1's 定时任务, and it is the one thing here that starts
+work nobody asked for at the moment it starts.**  A **scheduled task** is a name,
+a description and a cron expression, written down; a **run** is one fire of it —
+also written down, with what came of it.  The model writes the definition and
+reads the ledger; the clock is what fires it; and the answer reaches the
+conversation the way every other out-of-band message does.
+
+**A plugin, by §1.1's table, and by the sentence that table already justified
+`agent-task` with: what it holds is timers.**  That is not a figure of speech — a
+timer is state with a lifetime, and both halves of it are wrong anywhere but in a
+process of its own.  In a library every importer gets its own clock, so two
+instances of one agent fire the same task twice and a task written by one process
+is invisible to the next; in the agent server it would be a loop the conversation
+owns, which is exactly the arrangement §3 exists to argue against.  A plugin is
+started once, shared by every instance, and outlives every turn — which is what a
+clock has to be.
+
+**It is not a second `agent-task`, and the difference is the one §1.3 turns on.**
+That section's whole claim about a task is **"nothing is recorded"** — the answer
+*is* the record, the task lives in the process's memory, and a restart is
+supposed to lose it.  A scheduled task is the inverse on every one of those
+points: the definition and the ledger are the feature, `pending → ran | failed |
+missed | skipped` exists *because* the process goes down, and `UNIQUE(task_id,
+due_at)` exists so that a fire which happened twice on the clock is one run.  A
+scheduled task is the thing that survives a restart; an agent task is the thing
+that is not supposed to.  Folding them together would impose durability on the
+ephemeral case §1.3 deliberately kept stateless — and §1.3 is an essay on what a
+second loop *costs*, so the test to apply is whether the object is genuinely
+different.  It is: durable, timed and repeatable against ephemeral and one-shot.
+
+**What it does not own is the loop, and that is the decision that makes this
+plugin small.**  v1 split the feature three ways — *timing* | *execution* |
+*record* — and the execution half was a dispatch into its subagent worker pool.
+slife2 has no pool: what hangs a worker off its parent is §9's deferred half, and
+there is nothing here to dispatch into.  So the fire does what §1.2 is for —
+`slife2-tui`'s `submit` puts the task in front of the agent as a turn of its own,
+with the agent server's `send_message` as the fallback when no window is showing
+— and **the template is an order rather than a notification.**  It names the call
+to make (`agent_task_start`, under the scheduled task's *own* name, so the answer
+comes back on `agent-task:<name>` and the marker says which task it was), tells
+the agent not to wait or poll, and names **one** ending: `schedule_run_settle`
+with the due time and a one-line note, once the answer arrives.  That is v1's
+three-way split kept exactly — timing here, execution there — with `agent-task`
+standing in for the worker pool this build does not have, and the *dispatch*
+written in prose because prose is what a prompt is made of.
+
+**A task that has come due is not the agent's to decline**, which is why the
+trigger offers no way out of it: one instruction, one ending.  `schedule_run_skip`
+is still in the tool set, and it is for the runs that *did not happen* — one that
+could not be started, one whose moment passed while slife2 was down — where the
+alternatives are doing it late or leaving a `pending` row that the ledger cannot
+account for.  The difference is the one this section keeps making: what a prompt
+tells the agent to do is a decision about the common case, and a tool that exists
+is a decision about the rest.
+
+Nothing in this plugin makes a model call, and the loop it assembles is no loop
+at all: a poll, a store, and seven tools.
+
+**The product of a run is not its business either.**  v1's `memfiles` owned the
+`reports` table *and* the schedules, so `report_save` backfilled `report_id` and
+flipped the run to `ran` inside one write — the store was the thing that knew a
+report meant a run had succeeded.  §1.4 records that the split is already made:
+slife2's cabinet has a report keyed by its **title**, and it knows nothing about
+schedules.  What replaces the backfill is one explicit call, `schedule_run_settle`
+with a one-line **note** of what the run produced.  That is one tool v1 did not
+have to expose, and it is the honest price of two plugins where there was one
+rather than a coupling invented to hide it.
+
+**The ledger's rules, which are v1's, are the whole of the correctness here:**
+
+* **`pending → ran | failed | missed | skipped`, and no note means failed.**  The
+  row is written *before* the hand-over, so a fire cannot be repeated on the next
+  poll: the anchor is the newest `due_at` on record, and recording is what moves
+  it.  A hand-over that *refuses* proved nothing was written and the run is
+  marked `failed`; a hand-over that does not come back is §1.2's third answer and
+  leaves the row `pending`, because a run whose fate is unknown must not be
+  reported as either.
+* **A gap is recorded once, not once per fire.**  Coming up after a week down, a
+  five-minute task has fourteen hundred fires behind it; v1's sweep would have
+  written a row for each, which is a ledger that makes the gap *less* visible.
+  So the sweep marks **the newest missed fire per task per gap** — one row saying
+  "this was due and slife2 was not running", which is the fact a person acts on.
+* **Nothing is announced, and the ledger is why that is enough.**  v1 printed
+  unsettled runs into every turn's prompt, which is one plugin reaching into a
+  prompt another plugin owns — the same objection §1.4 raises about `USER.md` —
+  so that is out.  What is *also* out, for now, is the obvious replacement of
+  handing the agent a note on the trigger's channel: a run that was missed or
+  that never settled is **recorded**, `schedule_runs` lists it by state, and an
+  agent that wants to know reads it there.  So a **fire is the only thing this
+  plugin ever says to a conversation** — one path into it, one template, and a
+  reader who learns one thing rather than two.  That the agent has to think to
+  look is the cost, and DESIGN.md §9 holds it rather than this section quietly
+  growing a second message.
+
+**And neither of those messages wears a marker, which is a decision rather than
+an omission.**  A marker exists so a *result* can be matched to what produced it
+— `[AsyncTaskResult:{…}]` carries the task's id, name and state — and the
+vocabulary is per-writer precisely because each writer's marker says something
+different.  A trigger is not a result: it carries no id a caller needs back, and
+what produced it is a clock.  The two facts it does have to carry are already
+carried by other means — **the channel** says a message did not come from the
+person (`schedule:daily`, drawn as its own bubble by
+`slife2.tui.widgets.channel_prefix`), and the **template's own first line** says
+which task, exactly as `agent_task.j2` opens with `▸ Agent task: {{ name }}`.
+And the long case this feature exists for — a run the agent hands to
+`agent_task_start` — comes back wearing `[AsyncTaskResult:{…}]` anyway, because
+that is what an agent task's answer wears.
+
+**The cron parser is `croniter`, which is v1's dependency and v1's decision made
+twice.**  Its design notes for this feature say "no apscheduler, no croniter,
+hand-write the parser"; the implementation used croniter anyway, and this is the
+second time the same argument has ended the same way.  What it turns on is that
+the five fields are trivial and their corners are not: cron's `day_or` rule — a
+restricted day-of-month and a restricted day-of-week are a **union**, which is
+nobody's guess at first reading — the DST rule, and `strict` cross-field
+validation, which is what stops `0 9 31 2 *` from being stored as a task that is
+enabled and can never fire.  A hand-written parser that got `day_or` backwards
+would be wrong once a month and look like a clock problem.
+
+It is used the way v1 used it: **one module wraps it and nothing else imports
+it.**  `slife2.schedule` owns the timezone policy (an explicit IANA zone, else the
+system local one) and the error contract (`ScheduleError`), so a `ZoneInfo` that
+does not exist surfaces as the one exception a caller already catches rather than
+as a `ZoneInfoNotFoundError` escaping through it.  What that wrapper still has to
+say out loud is the part cron leaves underspecified: **a fire follows the wall
+clock of its task's timezone**, and an empty zone holds the offset the machine is
+on *now* rather than the one it will be on — so a task with no zone named does not
+follow a DST change, and a named zone does.
+
+**Its database is one file per agent, and that is also how it finds them.**  The
+ledger is `<data>/agents/<agent>/schedule.db`, beside `turns.db`, for §5's reason
+— agents are isolated by file rather than by a `WHERE` clause — and the shared
+process learns which agents exist by listing those directories, exactly as
+`slife2-wechat` learns it from the logins it wrote (`slife2.yaml`'s note on the
+`wechat` server).  The poll loop is one loop for every agent, which is the second
+half of why this is a plugin: two instances of one agent must not both fire.
+
+**Whose a ledger is comes from a row inside it, not from the directory's name**,
+and that is the one place this feature contradicts `slife2.paths`' rule that
+nothing inside an agent's directory repeats its name.  The rule is about a file
+that could be renamed out of step; this is about a *sanitised* name that is not
+the agent's — `a/b` lands in `a_b/` (`slife2.db.safe_agent_name`) — where the
+directory therefore cannot say whose ledger it is.  A trigger sent under the
+sanitised name would go to a conversation that is not the one that asked, and
+nothing about it would look wrong, so the row is worth the exception.  A ledger
+that does not carry one is skipped with a warning rather than guessed at.
+
+**It owns no config section, and v1 had none either.**  What is written down
+about it is an address under `servers:`.  A machine that should not run scheduled
+tasks is a machine where nobody writes one — the same argument the `wechat`
+section is absent by — and every number the feature has is pacing inside the
+plugin, where a number with no decision behind it belongs.  What that leaves
+open is the one thing §9 names: nothing bounds how many tasks exist.
+
 ## 2. Streaming: one pattern, used twice
 
 MCP `tools/call` is a request/response. A TUI needs tokens as they arrive. Both
@@ -2469,6 +2625,19 @@ cannot say all three is a wish rather than a decision.
   make a runaway visible and stoppable, which is a mitigation and not a bound. A
   rate, or a depth, is the number still missing — and neither is worth building
   before somebody has watched one.
+- **A bound on how many scheduled tasks exist.** `agent-task: max_running` is a
+  cap; the clock has none, and v1 had none either. A task is a row, its tool set
+  is the one catalogue and nothing filters it, and a cron is bounded by time —
+  so a runaway here is many tasks each firing rarely rather than one loop, and
+  `schedule_list` with `schedule_remove` is what makes it visible and stoppable.
+  `agent-task:` is also the shape the number would take (a section, one key),
+  which is why `schedule` has none yet.
+- **A word to the agent about runs nobody closed.** A `missed` or `failed` run is
+  recorded and findable with `schedule_runs`, and **nothing says so** (§1.7): the
+  agent has to think to look. The change is small and the seam is obvious — a
+  message handed over on the trigger's own channel, which is a template and one
+  call in `sweep_once` — and it is deferred because the ledger already holds the
+  answer and nobody has watched a missed run go unnoticed yet.
 - **Subagents.** `Loop.records` exists, so a worker's round trips are the ones
   not written to the log, and `send_message` takes a `subagent`: a worker's
   conversation is a separate key with its own history, inbox and lock, in the
