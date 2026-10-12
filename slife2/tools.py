@@ -74,12 +74,21 @@ model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
 tool and is protected the same way; `_check_new_input` is one, and is drawn by
 nothing at all today, for a reason that has nothing to do with who calls it.
+
+**And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
+are read off every call and stripped before dispatch — the one part of this
+module that is about the *call* rather than about the tool, and the reason it is
+here rather than in the loop is that their names are vocabulary while their
+rules are a contract the model reads in the prompt.  What *enforces* them lives
+elsewhere: the approval gate and the clock in `slife2.loop`, the background in
+`slife2.async_tasks`.  The section comment above :class:`Meta` is where the
+three are argued.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +126,240 @@ def is_harness(name: str) -> bool:
     return name.startswith(HARNESS_PREFIX)
 
 
+# ── The three per-call meta-parameters ────────────────────────────────────────
+#
+# **Every tool takes three arguments it does not declare.**  `_timeout` says how
+# long this one call may take, `_async` says to run it in the background, and
+# `_approve` says to ask the operator first.  They are a system-prompt contract
+# and not schema fields, which is v1's decision and its reason: re-describing
+# three parameters on every one of a hundred schemas is the largest per-request
+# context tax this system could pay, and every one of those descriptions would
+# be the same sentence.
+#
+# **They are reserved names, and they are read off every call.**  A tool that
+# genuinely wanted an argument called `_timeout` cannot have one — the loop
+# pops all three before dispatch, unconditionally, because a name that is
+# sometimes a meta-parameter and sometimes a business argument is a name no
+# reader could interpret.  The leading underscore is the same mark
+# `HARNESS_PREFIX` is, for the same reason: these are the machinery's names,
+# and the model only ever *writes* them.
+#
+# **The strip is a copy and never an edit.**  The call the model made is what
+# goes back into the conversation and out to the provider on the next request
+# (`Message.to_wire`), so what the *tool* is dispatched with and what the
+# *history* keeps are two dicts, and the second one still carries all three.
+# Removing them from history would be rewriting what the model said.
+
+#: Seconds; how long this one call may take.  Positive only, and it overrides
+#: every default — `0`, negative and missing all mean "use the default", and
+#: **never** "no bound" (`bind_timeout`).
+TIMEOUT_PARAM = "_timeout"
+
+#: Truthy; run the call in the background and answer a task id instead of a
+#: result (`slife2.async_tasks`).
+BACKGROUND_PARAM = "_async"
+
+#: Truthy; ask whoever is watching before running the call (`slife2.loop`).
+APPROVE_PARAM = "_approve"
+
+#: All three, for the one place that strips them.
+META_PARAMS = (TIMEOUT_PARAM, BACKGROUND_PARAM, APPROVE_PARAM)
+
+#: What the three look like **on the schema of every tool the model is handed**.
+#:
+#: **Schema rather than prompt, and that is the opposite of v1's choice.**  v1
+#: declared them once in the system prompt, on the argument that re-describing
+#: three parameters on sixty schemas is the largest per-request context tax the
+#: system could pay.  v2 pays it, for what the other arrangement costs: the
+#: prompt is the *operator's file* (`config.agents[x].system_prompt`), so a block
+#: the harness appended there would be one more thing an operator's own prompt has
+#: to be kept in step with — and a tool's contract belongs next to the tool, where
+#: a model reading *that* tool's arguments finds it.  The three are optional
+#: everywhere, so nothing a tool declares has to change, and the loop strips all
+#: three before dispatch (`split_meta`).
+META_PROPERTIES: dict[str, Any] = {
+    TIMEOUT_PARAM: {
+        "type": "number",
+        "description": (
+            "Seconds this one call may take. Overrides the tool's own default; "
+            "0 or less means 'use the default', never 'no limit'."
+        ),
+    },
+    BACKGROUND_PARAM: {
+        "type": "boolean",
+        "description": (
+            "Run this call in the background and answer a task_id instead of a "
+            "result. Its result is handed back to the conversation when it is "
+            "done, wearing [AsyncToolCallResult:{...}] with the call id, tool, "
+            "task_id and status; check_async reports status, cancel_async "
+            "abandons it. Unbounded unless _timeout is given too."
+        ),
+    },
+    APPROVE_PARAM: {
+        "type": "boolean",
+        "description": (
+            "Ask the user to confirm before this call runs. Where nobody is "
+            "watching, the call runs without asking."
+        ),
+    },
+}
+
+
+def advertised(spec: ToolSpec) -> ToolSpec:
+    """A tool's schema as the model is given it: its own, plus the three.
+
+    **Kept apart from `Tool.spec` rather than merged into it**, and the split is
+    load-bearing: `declares_timeout` reads the tool's *own* declaration to decide
+    who enforces a deadline, so a `_timeout` hiding in that view would make every
+    tool look like one that declares its own bound.  One view is what the tool
+    says about itself; this one is what every tool is also offered.
+    """
+    parameters = dict(spec.parameters)
+    properties = dict(parameters.get("properties") or {})
+    # The tool's own descriptions win a name collision, and there is no such
+    # collision to have: the three are reserved (`META_PARAMS`), so a tool that
+    # declared one would have it popped before dispatch and never see it.
+    properties.update(
+        {
+            name: field
+            for name, field in META_PROPERTIES.items()
+            if name not in properties
+        }
+    )
+    parameters["properties"] = properties
+    parameters.setdefault("type", "object")
+    return ToolSpec(name=spec.name, description=spec.description, parameters=parameters)
+
+
+@dataclass(frozen=True)
+class Meta:
+    """What one call's meta-parameters asked for.
+
+    Parsed once per call and carried as this rather than as three loose values,
+    because the loop reads all three in one place and passes them on together.
+    """
+
+    #: The positive number the model asked for, or None — which means "nobody
+    #: said", not "no bound" and not zero.  `bind_timeout` is what turns None
+    #: into a decision, and the decision is the tool's own if it declares one.
+    timeout: float | None
+    #: Run it in the background.  Truthiness, not a strict boolean: v1's rule,
+    #: and the safe direction — `"false"` is a string, and backgrounding a call
+    #: the model meant to wait for is recoverable where the reverse is not.
+    background: bool
+    #: Ask before running.  Truthiness for the same reason, and it fails the
+    #: same safe way: anything the model wrote that is not empty asks.
+    approve: bool
+
+
+def split_meta(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Meta]:
+    """One call's arguments, and what its meta-parameters said.
+
+    The returned dict is a copy without the three reserved names; `arguments`
+    itself is untouched, which is what keeps the model's own history intact
+    (see the section comment above).
+
+    A malformed `_timeout` — the model writing `"5 seconds"`, which they do —
+    degrades to "nobody said" rather than raising.  It is the model's own call
+    that would die: an exception here escapes a whole batch of concurrent calls
+    and ends the turn, which is a disproportionate answer to a bad number.
+    """
+    rest = {name: value for name, value in arguments.items() if name not in META_PARAMS}
+    return rest, Meta(
+        timeout=parse_timeout(arguments.get(TIMEOUT_PARAM)),
+        background=bool(arguments.get(BACKGROUND_PARAM)),
+        approve=bool(arguments.get(APPROVE_PARAM)),
+    )
+
+
+def parse_timeout(value: Any) -> float | None:
+    """A `_timeout` as a positive number of seconds, or None.
+
+    None means "nobody said" and covers all four ways of saying nothing: the
+    argument absent, `None`, zero-or-negative, and text that is not a number.
+    v1's rule, and the reason it is a rule rather than a convenience: the tool
+    reading `timeout=0` into `wait_for(..., timeout=0)` fires *instantly*, so a
+    pass-through zero would be the exact opposite of the "0 = no bound" the
+    prompt promises.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        logger.debug("tool timeout not a number, ignored: %r", value)
+        return None
+    return seconds if seconds > 0 else None
+
+
+def declares_timeout(spec: ToolSpec | None) -> bool:
+    """Whether a tool takes its own `timeout` argument.
+
+    A property-name check on the schema, which is v1's test.  What it decides is
+    who enforces the deadline: a tool that declares one enforces it itself (it
+    is the only party that knows what it is waiting for), and the loop must not
+    wrap it — a second timer is a second answer to one question, and the shorter
+    of the two would be the one that fired.
+    """
+    if spec is None:
+        return False
+    properties = spec.parameters.get("properties")
+    return isinstance(properties, dict) and "timeout" in properties
+
+
+def bind_timeout(
+    arguments: dict[str, Any], spec: ToolSpec | None, asked: float | None
+) -> float | None:
+    """Put a per-call timeout where the tool that has to honour it will read it.
+
+    Two shapes, and which one applies is `declares_timeout`:
+
+    * **The tool declares `timeout`** — the number is written into its own
+      argument and the tool enforces it (the media tools work this way: a render
+      says how long it is willing to wait, and the plugin owns the polling).  A
+      non-positive request is *removed* rather than forwarded, so the tool's own
+      default governs; absence is how a tool hears "use your default".  The
+      answer is None: the loop has nothing left to enforce.
+    * **The tool does not** — a bare `timeout` the model appended anyway is read
+      as the per-call bound and taken out of the arguments, because a tool
+      server validates its parameters and would reject the whole call with
+      "Unexpected keyword argument" — v1 measured that, and a turn that dies
+      over one extra key is the worst possible price for a good intention.  The
+      answer is the number the loop should enforce, or None when nobody asked.
+
+    Either way `arguments` is what the tool will be dispatched with.
+    """
+    if declares_timeout(spec):
+        if asked is not None:
+            # int(), so a sub-second request truncates — and a request that
+            # truncates to 0 is dropped rather than forwarded, because the
+            # tools that read this argument document "0 = your default" and one
+            # of them would fire instantly on it (v1's B2/B3).
+            whole = int(asked)
+            if whole > 0:
+                arguments["timeout"] = whole
+            else:
+                arguments.pop("timeout", None)
+        elif arguments.get("timeout") is not None:
+            # A schema-valid `timeout` that is zero or negative gets the same
+            # treatment as `_timeout: 0`: removed, so the tool's default governs
+            # instead of a zero that means "instantly".  Text that is not a
+            # number is left alone — it is schema-valid, the tool is the party
+            # that will read it, and its own complaint is a better answer than
+            # this module's guess (v1's rule, kept).
+            try:
+                bare = float(arguments["timeout"])
+            except (TypeError, ValueError):
+                bare = 1.0
+            if bare <= 0:
+                arguments.pop("timeout", None)
+        return None
+
+    if asked is None:
+        asked = parse_timeout(arguments.pop("timeout", None))
+    return asked
+
+
 class ToolFailed(Exception):
     """A tool that failed *without* anything going wrong inside it.
 
@@ -149,11 +392,32 @@ class ToolRegistry:
 
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {t.spec.name: t for t in tools or []}
+        #: Built once, because `specs` is read at the top of every step of every
+        #: turn: augmenting sixty schemas per request would be paying the
+        #: per-request tax this design already pays twice (see `META_PROPERTIES`).
+        self._advertised: list[ToolSpec] = [
+            advertised(t.spec) for t in self._tools.values()
+        ]
 
     @property
     def specs(self) -> list[ToolSpec]:
-        """What to advertise to the model."""
-        return [t.spec for t in self._tools.values()]
+        """What to advertise to the model — every tool, with the three.
+
+        See :func:`advertised`: what a tool *declares* is `Tool.spec`, and this
+        is that plus the meta-parameters every tool accepts.
+        """
+        return list(self._advertised)
+
+    def spec_of(self, name: str) -> ToolSpec | None:
+        """One tool's schema, or None for a name this registry does not have.
+
+        For the caller that has to read a tool's declaration *before* it runs —
+        `slife2.loop` asks whether the tool takes its own `timeout` — and who
+        must not guess it from the arguments: a tool nobody declared is not a
+        tool that declares nothing.
+        """
+        tool = self._tools.get(name)
+        return tool.spec if tool is not None else None
 
     async def execute(self, call: ToolCall) -> tuple[str, bool]:
         """Run a call, returning `(result_text, ok)`.

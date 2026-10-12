@@ -67,7 +67,7 @@ import contextlib
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -76,7 +76,10 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2 import attachments, configfile
+from slife2.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
+from slife2.async_tasks import Deliver, async_tools
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
@@ -91,7 +94,14 @@ from slife2.config import (
     load_cached,
 )
 from slife2.context import turn_note, with_note
-from slife2.events import ContextChosen, TurnEvent, TurnObserver, encode
+from slife2.events import (
+    ContextChosen,
+    ToolApprovalRequested,
+    TurnEvent,
+    TurnObserver,
+    encode,
+)
+from slife2.handover import hand_over
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult, harness_call
@@ -106,7 +116,7 @@ from slife2.mcp_server import (
     serve,
     tool_payload,
 )
-from slife2.messages import Message
+from slife2.messages import Message, ToolCall
 from slife2.prompt import render as render_system_prompt
 from slife2.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
 from slife2.tools import Tool, ToolRegistry
@@ -122,19 +132,12 @@ SERVER_NAME = "slife2-agent"
 #: makes a model call the plugin has already bounded by `context.timeout` plus a
 #: recall that may embed a query.  A peer that is *gone* is a different matter
 #: again — that fails the turn outright; see `slife2.mcp_server.open_server`.
-CONTEXT_TIMEOUT_SECONDS = 120.0
-
-#: How long to wait on the toolhub.  Longer than the db server's, because
-#: this call is not a write after the fact: `list_tools` is what the turn's tool
-#: list is built from, and it may briefly wait for tool servers that are still
-#: connecting (`slife2.toolhub.LIST_SETTLE_SECONDS`).  A timeout shorter than
-#: that would turn "waiting for a server that is starting" into a failed turn.
-TOOLHUB_TIMEOUT_SECONDS = 30.0
 
 #: How long a conversation survives with nothing asked of it.  This is
 #: housekeeping, not a lifetime a caller can observe: the sweep only reclaims
-#: memory, and the next message under the same key starts the state again.
-LOOP_IDLE_SECONDS = 30 * 60.0
+#: memory, and the next message under the same key starts the state again — the
+#: background tasks a turn started are not the loop's and are not swept with it
+#: (`slife2.async_tasks`).
 
 #: How many messages one loop may have waiting.  The client's per-call timeout
 #: starts when the call is made, not when its turn starts, so an unbounded queue
@@ -249,6 +252,17 @@ class Pending:
     #: given one cannot come to different conclusions about the same file.
     images: list[str]
     channel: str
+    #: Whether this caller can be asked a question mid-turn and will answer it.
+    #:
+    #: **It is the caller's to say, and nobody else can.**  v1 answered the same
+    #: question with "is a handler installed", which worked because one process
+    #: was one host — here every turn arrives at the same server, and whether
+    #: anybody is watching is a fact about *this* call rather than about the
+    #: process: the TUI is watched, a WeChat message is not, and the two can
+    #: address one conversation an hour apart.  False is the safe default for
+    #: the same reason it is v1's rule: a caller that cannot answer must never
+    #: be asked, or the model's request for a check becomes a turn that hangs.
+    watched: bool = False
     #: Set by the turn that folded this message into itself, and **only when that
     #: turn produced a result**.  `None` is therefore the honest "nothing folded
     #: this in — run your own turn", and one field carries both the branch and
@@ -343,6 +357,13 @@ class Loop:
     api: str = ""
     model_id: str = ""
     accepts_images: bool = True
+    #: The `_approve` calls this conversation is holding for an answer, by call
+    #: id.  On the loop because a turn is what fills and empties it, and the
+    #: answer arrives on a *different* call (`answer_approval`) that must not
+    #: wait for the lock the waiting turn is holding — so this is the one piece
+    #: of a loop's state that is read and written while its lock is held, and
+    #: that is why it is a dict of futures rather than a queue.
+    approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
 
     @property
     def records(self) -> bool:
@@ -363,6 +384,8 @@ def build_server(
     backend: LLMBackend | None = None,
     context_client: Client | None = None,
     hub_client: Client | None = None,
+    window_client: Client | None = None,
+    agent_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
@@ -370,6 +393,12 @@ def build_server(
     `backend`, `context_client` and `hub_client` are injectable so the whole
     server — model call, tools, the restore, the rebuild, the write — can be
     exercised over the in-memory transport with no network at all.
+
+    `window_client` and `agent_client` are the same seam for the one thing this
+    server *hands* rather than asks: a background call's result, on its way back
+    into the conversation it came from (`slife2.handover`, which is where the
+    window-first-then-the-agent-server policy is argued).  They are the same pair
+    `slife2.agent_task_server` takes, for the same reason.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -401,6 +430,12 @@ def build_server(
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
+    #: The two peers a background result is *handed* to rather than asked of —
+    #: the window, and this server as its own fallback (`slife2.handover`).
+    #: Injected only by a test: in production both are opened per hand-over,
+    #: because that is once per finished call rather than once per turn.
+    window_conn: Client | None = window_client
+    agent_conn: Client | None = agent_client
 
     def current() -> Config:
         """The config a *new* conversation is built from.
@@ -463,7 +498,7 @@ def build_server(
                     config.server("context").url,
                     name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
-                    timeout=CONTEXT_TIMEOUT_SECONDS,
+                    timeout=_T.timeouts.work.context,
                 )
             assert context_conn is not None  # open_server returns one or raises
             return context_conn
@@ -490,7 +525,16 @@ def build_server(
                     config.server("toolhub").url,
                     name=TOOLHUB_SERVER_NAME,
                     fallback_tool="list_tools",
-                    timeout=TOOLHUB_TIMEOUT_SECONDS,
+                    # **No request deadline on the connection**, and this is the
+                    # correction that matters most in this file: `timeout=` here
+                    # is a clock on *every* request that travels over the link,
+                    # and the number it used to hold (30 s, `list_tools`'
+                    # patience) therefore became the deadline for whatever tool
+                    # the model happened to call — a listing's number killing a
+                    # render.  The asks this process makes of the hub state their
+                    # own patience where they are made
+                    # (`slife2.toolclient.HUB_TIMEOUT_SECONDS`), and a *tool
+                    # call* is bounded by the loop and by nobody else.
                 )
             assert hub_conn is not None
             return hub_conn
@@ -521,7 +565,18 @@ def build_server(
         return await remote_tools(await hub(), client_id)
 
     async def registry(client_id: ClientId) -> ToolRegistry:
-        return ToolRegistry(await turn_tools(client_id))
+        """What the model may call: the hub's tools, plus the mechanism's own.
+
+        **Two tools are added here rather than served by the hub**, and they are
+        the only ones: `check_async` and `cancel_async` are the vocabulary of
+        `_async: true`, and the work they describe is this process's — the
+        background tasks a turn started live in `slife2.async_tasks`, not in the
+        hub, which knows nothing about whose call it was.  They are therefore
+        outside the catalogue: the budget cannot unload them and `tool_search`
+        cannot find them, which is what a tool the mechanism itself needs
+        deserves (v1's system tools sat in every registry the same way).
+        """
+        return ToolRegistry(await turn_tools(client_id) + async_tools())
 
     async def remember_turn(
         agent: str,
@@ -592,7 +647,12 @@ def build_server(
         turn_id = payload.get("turn_id")
         return int(turn_id) if isinstance(turn_id, int) else None
 
-    async def make_loop(active: LLMBackend, client_id: ClientId) -> AgentLoop:
+    async def make_loop(
+        active: LLMBackend,
+        client_id: ClientId,
+        approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
+        deliver: Deliver | None = None,
+    ) -> AgentLoop:
         return AgentLoop(
             active,
             await registry(client_id),
@@ -602,9 +662,21 @@ def build_server(
             # call is: every refresh has to hand back tools for *this*
             # conversation, and a bare `registry` would forget whose it was.
             refresh=partial(registry, client_id),
+            # None when this turn's caller cannot be asked — see `Pending.watched`
+            # and `ask`, which is the other half of this.
+            approve=approve,
+            # And None when there is no conversation to hand a background
+            # call's result back to — see `hand_back`, which is the other half
+            # of that.
+            deliver=deliver,
         )
 
-    async def loop_for(loop: Loop, client_id: ClientId) -> AgentLoop:
+    async def loop_for(
+        loop: Loop,
+        client_id: ClientId,
+        approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
+        deliver: Deliver | None = None,
+    ) -> AgentLoop:
         """The agent loop for a conversation, bound to that conversation.
 
         **Keyed by the model reference, and that is a fix rather than a
@@ -621,7 +693,7 @@ def build_server(
         per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return await make_loop(backend, client_id)
+            return await make_loop(backend, client_id, approve, deliver)
 
         reference = loop.model
         async with opening:
@@ -649,7 +721,7 @@ def build_server(
                 )
                 logger.info("model %s via %s", reference, url)
         return await make_loop(
-            model_backends[reference].with_key(*client_id), client_id
+            model_backends[reference].with_key(*client_id), client_id, approve, deliver
         )
 
     # --- the registry --------------------------------------------------------
@@ -676,7 +748,7 @@ def build_server(
         A conversation with a turn in flight is never idle, whatever its
         timestamp says: its own turn refreshes `last_used` when it finishes.
         """
-        cutoff = time.monotonic() - LOOP_IDLE_SECONDS
+        cutoff = time.monotonic() - _T.timeouts.pacing.loop_idle
         for client, loop in list(loops.items()):
             if loop.lock.locked():
                 continue
@@ -1128,7 +1200,83 @@ def build_server(
             # cannot tell.  (The model's own route reports through the tool's
             # answer, which is the model's to read.)
             logger.warning("attachment not attached: %s", refusal)
-        agent_loop = await loop_for(loop, (loop.agent, loop.subagent))
+
+        async def ask(call: ToolCall) -> bool:
+            """Hand one `_approve` request to whoever is watching, and wait.
+
+            **The wait is on a future in the loop's own `approvals`**, because
+            the answer does not come back on this call: the observer's stream
+            runs one way, so the watching client answers with a call of its own
+            (`answer_approval`).  That is also why the entry is dropped in a
+            `finally` — a cancelled turn, an answered prompt and a client that
+            died all leave through here, and an entry left behind is a future
+            nobody will ever resolve.
+
+            Emitting the event *before* awaiting is the whole of the handshake:
+            a client that never hears the request cannot answer it, and the case
+            that matters is the client that hears it and does not answer — which
+            is what the turn's own cancellation is for, and why this method does
+            not invent a bound of its own.
+            """
+            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            loop.approvals[call.id] = future
+            try:
+                await observer.on_event(
+                    ToolApprovalRequested(call.id, call.name, call.arguments)
+                )
+                return await future
+            finally:
+                loop.approvals.pop(call.id, None)
+
+        async def deliver(text: str) -> bool:
+            """Hand a finished background call's result back to this conversation.
+
+            **A result nobody comes back for is a result lost**, which is the one
+            thing backgrounding must not do: the call was made for this
+            conversation, and v1's only road back was the model remembering to
+            poll.  So it is delivered the way every other piece of work this
+            system does in the background delivers its answer — the window first,
+            the agent server as the fallback (`slife2.handover`, where those two
+            answers and the third one are argued).
+
+            **`bool(...)` of three answers, and both "no" cases mean the same
+            thing here**: `False` is a refusal that provably wrote nothing and
+            `None` is a hand-over that did not come back, and a caller that
+            cannot tell which happened may not claim either.  Either way the task
+            keeps its result for `check_async` to hand over — the fallback road
+            under the fallback road, and the reason nothing is ever dropped for
+            want of a window.
+
+            It goes to the **agent's** conversation and not the subagent's,
+            because `send_message` addresses a conversation by `(agent,
+            subagent)` and hand-over names only the agent: a worker's background
+            call is reported where the person is, which is the only place a
+            result can be read by somebody.
+            """
+            return bool(
+                await hand_over(
+                    current(),
+                    loop.agent,
+                    text,
+                    ASYNC_TOOL_CHANNEL,
+                    what=(
+                        f"the result of a background call in "
+                        f"{describe((loop.agent, loop.subagent))}"
+                    ),
+                    window_client=window_conn,
+                    agent_client=agent_conn,
+                )
+            )
+
+        agent_loop = await loop_for(
+            loop,
+            (loop.agent, loop.subagent),
+            # Only a caller that said it can be asked is asked (see
+            # `Pending.watched`).  With None the loop grants the request and the
+            # call runs, which is v1's rule for a turn with nobody behind it.
+            ask if item.watched else None,
+            deliver,
+        )
         cancelled = False
         try:
             # The parts, built above and after the rebuild — the rebuild
@@ -1244,7 +1392,7 @@ def build_server(
             # for.  Bounded, because a store that has stopped answering must not
             # hold up the shutdown.
             if background:
-                await asyncio.wait(list(background), timeout=5.0)
+                await asyncio.wait(list(background), timeout=_T.timeouts.grace.drain)
             for client in clients.values():
                 await close_server(client)
             clients.clear()
@@ -1350,6 +1498,62 @@ def build_server(
         # own comment has said it covers that case from the beginning; the code
         # did not.
         return take_waiting(client_id) or NOTHING_WAITING
+
+    @mcp.tool
+    async def answer_approval(
+        agent: str, call_id: str, approved: bool, subagent: str = ""
+    ) -> dict[str, Any]:
+        """Answer one `_approve` request, and say whether anything was waiting.
+
+        **This server's own surface, not a tool** — it sits beside
+        `send_message`, `reset` and `transcript`, and the model never reaches
+        this process at all: a model reads a prompt and writes arguments, and
+        the thing that answers a person's question is the person.  Whoever draws
+        the prompt is therefore the one caller it has (`slife2.tui.client`).
+
+        **A separate call, because the turn's channel runs one way.**  The turn
+        that is waiting already told whoever is watching *what* it is waiting for
+        (`ToolApprovalRequested`, on the progress stream), and the answer cannot
+        travel back up that stream — a progress notification is a report, not a
+        question.  So it arrives here instead, on the same server and **not
+        behind the conversation's lock**: that lock is held by the very turn
+        that is waiting, and a prompt whose answer had to wait for the turn to
+        end would be a prompt that could never be answered.
+
+        **Nothing waiting is an answer and not an error.**  A prompt that was
+        drawn and then overtaken — the turn was cancelled, or somebody answered
+        twice — leaves this call with no future to resolve.  That is a race
+        rather than a broken client, so it is reported (`answered: false`) rather
+        than raised, and the client that lost the race says so and stops.
+
+        Args:
+            agent: The conversation the waiting turn belongs to.
+            call_id: The id from the `ToolApprovalRequested` that was drawn.
+            approved: True to let the call run, False to refuse it.
+            subagent: The other half of the conversation's key.
+
+        Returns:
+            `answered` — whether a waiting turn took this answer — and `text`,
+            which is what to tell the reader when it did not.
+        """
+        loop = loops.get((agent, subagent))
+        waiting = loop.approvals.get(call_id) if loop is not None else None
+        if waiting is None or waiting.done():
+            return {
+                "answered": False,
+                "text": (
+                    f"Nothing is waiting for an answer about {call_id!r}: the "
+                    f"call already ran, or that turn has ended."
+                ),
+            }
+        waiting.set_result(bool(approved))
+        logger.info(
+            "tool_approval answered=%s call=%s %s",
+            bool(approved),
+            call_id,
+            describe((agent, subagent)),
+        )
+        return {"answered": True, "text": ""}
 
     # ── The model config tools ───────────────────────────────────────────
     # v1's `model_*` set, on the process that *resolves* the model rather than
@@ -1783,6 +1987,7 @@ def build_server(
         model: str = "",
         images: list[str] | None = None,
         channel: str = "",
+        watched: bool = False,
     ) -> dict[str, Any]:
         """Say something to a conversation and get that turn's answer.
 
@@ -1842,6 +2047,16 @@ def build_server(
                 a parameter rather than something this server infers.  It is also
                 what a turn's footnote carries, so a model reading a conversation
                 can tell a person's turn from a worker's.
+            watched: Whether **this caller can be asked a question mid-turn and
+                will answer it**.  A turn whose model asks to be checked
+                (`_approve`) sends the request to whoever is watching and waits
+                for the answer, which arrives as a call of its own
+                (`answer_approval`) — so a caller that will not make that call
+                must say so here, or the turn waits for an answer nobody will
+                send.  False means the request is granted and the call runs,
+                which is the right answer for a channel with nobody behind it
+                (WeChat, a scheduled task, another agent) and for every client
+                that has not been taught to draw a prompt.
 
         Returns:
             `text` (the final answer), `usage`, `steps`, `stop_reason`, the
@@ -1865,7 +2080,12 @@ def build_server(
                 f"the conversation."
             )
 
-        item = Pending(prompt=prompt, images=list(images or []), channel=channel)
+        item = Pending(
+            prompt=prompt,
+            images=list(images or []),
+            channel=channel,
+            watched=watched,
+        )
         loop.inbox.append(item)
         outcome = Outcome()
         try:

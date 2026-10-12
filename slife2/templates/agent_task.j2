@@ -5,6 +5,13 @@ conversation, the same context, the same tools. Nobody is waiting on it and
 nobody can answer a question — the message you send when you stop is the whole of
 what comes back, and it is handed back to the conversation on its own.
 
+**Two things you cannot do here, and both are about not nesting one async thing
+inside another.** You cannot hand a tool call to the background (`_async`): this
+task is one turn, so a result arriving after it would have nowhere to go — call
+the tools you need in the ordinary way and wait for them. And you cannot start
+another task from inside this one: whatever has to happen later belongs in your
+answer, for the conversation to do in its own time.
+
 {{ description }}
 
 Work it through with the tools you have, and answer with the result itself —

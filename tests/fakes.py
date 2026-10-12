@@ -115,7 +115,12 @@ class FakeBackend:
         return turn.result
 
 
-def text_turn(text: str, *, chunks: list[str] | None = None, delay: float = 0.0):
+def text_turn(
+    text: str,
+    *,
+    chunks: list[str] | None = None,
+    delay: float = 0.0,  # timeouts: the value this test is built around, not a budget
+):  # timeouts: the value this test is built around, not a budget
     """A scripted turn that answers with text and calls no tools.
 
     `chunks` defaults to splitting the text one character at a time, which is
@@ -167,6 +172,9 @@ class FakeAgentClient:
         #: How many times the history was read, so a test can prove a window
         #: reads it once rather than once per connection.
         self.reads = 0
+        #: What `answer_approval` was called with, in order — the half of the
+        #: `_approve` handshake that leaves the window (`slife2.tui.app`).
+        self.answers: list[tuple[str, bool]] = []
 
     async def connect(self) -> None:
         if self._connect_error is not None:
@@ -193,6 +201,17 @@ class FakeAgentClient:
             raise ConnectionError("not connected")
         self.switches.append(ref)
         return self.switch_answer
+
+    async def answer_approval(self, call_id: str, approved: bool) -> str:
+        """Answer the way the server does: the sentence is empty when taken.
+
+        Empty means a waiting turn took it; a sentence means nothing was
+        waiting — the turn ended first, which is a race and not an error.
+        """
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.answers.append((call_id, approved))
+        return ""
 
     async def run_turn(
         self,

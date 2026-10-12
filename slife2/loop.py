@@ -13,12 +13,14 @@ one made it harder to test than it needed to be.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from slife2.async_tasks import Deliver, schedule, started
 from slife2.events import (
     NULL_OBSERVER,
     TextDelta,
@@ -32,9 +34,26 @@ from slife2.events import (
 )
 from slife2.llm.base import Chunk, LLMBackend
 from slife2.messages import Message, ToolCall, Usage
-from slife2.tools import HARNESS_PREFIX, ToolRegistry
+from slife2.tools import HARNESS_PREFIX, ToolRegistry, bind_timeout, split_meta
 
 logger = logging.getLogger(__name__)
+
+#: What the model reads when its own request to be checked was refused.  v1's
+#: sentence, and it starts with `Error` because that is what makes the call read
+#: as a failure in the transcript rather than as a result that happens to be
+#: discouraging (`slife2.tools` states the same rule for a tool's own failures).
+DENIED = "Error: Tool execution was denied by user."
+
+#: What the model reads when it asks for a background call in a loop that has
+#: nowhere to hand the result back to — today that is an agent task's own loop
+#: (`slife2.agent_task_server`), which runs one turn and has no second one for an
+#: answer to arrive in.  **Actionable rather than merely true**: the model can fix
+#: this in one step, and a mode that quietly ran the call here instead would have
+#: taught it that `_async` does nothing.
+BACKGROUND_UNAVAILABLE = (
+    "Error: a background call is not available here. "
+    "Call the tool again without `_async`."
+)
 
 
 def harness_call(name: str) -> ToolCall:
@@ -91,6 +110,8 @@ class AgentLoop:
         *,
         max_steps: int = 16,
         refresh: Callable[[], Awaitable[ToolRegistry]] | None = None,
+        approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
+        deliver: Deliver | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tools
@@ -103,6 +124,23 @@ class AgentLoop:
         #: is — this is a coroutine that returns a registry, and it is the server
         #: that hands one over.
         self._refresh = refresh
+        #: How the harness is asked to confirm one call, or None when nobody can
+        #: be.  **The loop does not know whether anyone is watching** (the module
+        #: docstring's third promise), so it cannot answer "is there an operator"
+        #: itself — it asks the thing that does, and a caller that has nobody to
+        #: ask passes None.  None means the model's `_approve` is granted rather
+        #: than refused, which is v1's rule for the same situation and the safe
+        #: direction: refusing would turn "nobody is here to say yes" into a tool
+        #: the model can never use.
+        self._approve = approve
+        #: Where a background call's result goes when it is ready, or None for a
+        #: loop nobody's conversation is behind.  **It is handed in for the same
+        #: reason `approve` is**: the loop is a pure function over a message list
+        #: and does not know which conversation it is running — the *server*
+        #: does, and only the server can put a message back into one
+        #: (`slife2.handover`).  A background call that nobody is behind keeps its
+        #: result in the registry instead, for `check_async` to hand over.
+        self._deliver = deliver
         #: Model calls allowed in one turn before it is cut off.  A model that
         #: keeps calling tools would otherwise burn tokens indefinitely; the
         #: cap produces an ordinary result, not an exception.
@@ -160,6 +198,31 @@ class AgentLoop:
         `auto` returns a name or `None`, which is v1's split: the caller decides
         *whether* something arrived — cheaply, without a call — and this decides
         nothing about tools at all.  The registry is what knows a name.
+
+        **Three arguments the model may add to any call.**  `_timeout`, `_async`
+        and `_approve` are read off every call and stripped before dispatch, so
+        no tool ever sees them (`slife2.tools` names them and argues the strip).
+        What the loop does with each:
+
+        * `_timeout` — how long this one call may take.  **It is the only clock
+          the loop ever holds**: there is no default and no per-turn budget,
+          because the loop does not know what any tool is doing, and a number
+          that applies to every tool is a number that is wrong for most of them.
+          A bound exists exactly when somebody who knows asked for one — the
+          model in its arguments, or the tool in its own schema, in which case
+          the tool enforces it and the loop stays out of the way.  Enforcement is
+          therefore **exactly one timer per call**, and never two.
+        * `_async` — the call is handed to the background and the model is
+          answered with a task id (`slife2.async_tasks`).  It still passes
+          through the approval gate first, and it is still announced as started.
+          **A loop with nowhere to hand the result back is the one that refuses
+          it** (`self._deliver is None`): an agent task's loop is that case
+          today, and it says so in a sentence the model can act on rather than
+          running the call quietly.
+        * `_approve` — the harness is asked before the call runs, through
+          `self._approve`.  A caller with nobody to ask passes None, and then the
+          call simply runs: refusing would be answering a request for a check
+          with a tool the model can never use.
         """
         messages.append(Message(role="user", content=user))
 
@@ -242,27 +305,7 @@ class AgentLoop:
 
             # Phase B: run the batch and feed every result back.
             for call in result.tool_calls:
-                await self._emit(
-                    observer, ToolCallStarted(call.id, call.name, call.arguments)
-                )
-                # Timed here because this is the only place that knows when the
-                # call ran: the event carried a duration from the beginning —
-                # short key, codec, two tests — and the producer filled it with
-                # a zero, so the transcript could not have shown one whatever it
-                # did with it.
-                started = time.monotonic()
-                text, ok = await self._tools.execute(call)
-                await self._emit(
-                    observer,
-                    ToolCallFinished(
-                        call_id=call.id,
-                        name=call.name,
-                        ok=ok,
-                        result_preview=preview(text),
-                        result_chars=len(text),
-                        elapsed_ms=int((time.monotonic() - started) * 1000),
-                    ),
-                )
+                text, _ok = await self._one(call, observer)
                 messages.append(
                     Message(role="tool", content=text, tool_call_id=call.id)
                 )
@@ -285,6 +328,142 @@ class AgentLoop:
             steps=self._max_steps,
             stop_reason="max_steps",
         )
+
+    async def _one(self, call: ToolCall, observer: TurnObserver) -> tuple[str, bool]:
+        """Run one call the way its own meta-parameters asked, and report it.
+
+        The whole of one call sits here — the strip, the gate, the clock, the
+        two events — because each of those is a fact about *this* call and the
+        order between them is the thing that is easy to get wrong:
+
+        * **Nothing is announced before the gate answers.**  A call the operator
+          refused never happened as far as the transcript is concerned: v1's
+          rule, and the reason is the display — a panel that appeared and then
+          said "denied" would have told a reader the tool ran.
+        * **The clock starts after the announcement**, so a call's duration is
+          the call and not the time somebody spent deciding.
+        * **The call is announced with the arguments the model wrote**, including
+          the meta-parameters, while the dispatch carries the stripped copy:
+          what a reader sees is what the model said, and what the tool sees is
+          what the tool takes.
+        """
+        arguments, meta = split_meta(call.arguments)
+        # The tool's own schema decides who enforces the deadline, so the number
+        # is put where it will be read and what is left for this method is
+        # whatever nobody else took (`slife2.tools.bind_timeout`).
+        bound = bind_timeout(arguments, self._tools.spec_of(call.name), meta.timeout)
+        dispatch = replace(call, arguments=arguments)
+
+        if meta.background and self._deliver is None:
+            # **A background call needs somewhere for its result to go**, and a
+            # loop with no way back has none: the call would run, the model would
+            # be handed a task id, and the answer would sit in a registry nobody
+            # can ask — `check_async` is not in a registry whose loop has no
+            # `deliver` at all, because the transport that builds one builds both
+            # (`slife2.server.server.registry`).
+            #
+            # So the mode is refused, and *before* the approval gate: asking an
+            # operator to confirm a call that is not going to run would be
+            # spending somebody's attention on nothing.
+            logger.info("tool_background_unsupported name=%s", call.name)
+            return BACKGROUND_UNAVAILABLE, False
+
+        if meta.approve and self._approve is not None and not await self._approve(call):
+            logger.info("tool_denied name=%s", call.name)
+            return DENIED, False
+
+        await self._emit(observer, ToolCallStarted(call.id, call.name, call.arguments))
+        # Timed here because this is the only place that knows when the call ran:
+        # the event carried a duration from the beginning — short key, codec, two
+        # tests — and the producer filled it with a zero, so the transcript could
+        # not have shown one whatever it did with it.
+        started = time.monotonic()
+        if meta.background:
+            text, ok = await self._background(dispatch, bound)
+        else:
+            text, ok = await self._foreground(dispatch, bound)
+        await self._emit(
+            observer,
+            ToolCallFinished(
+                call_id=call.id,
+                name=call.name,
+                ok=ok,
+                result_preview=preview(text),
+                result_chars=len(text),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            ),
+        )
+        return text, ok
+
+    async def _foreground(
+        self, dispatch: ToolCall, bound: float | None
+    ) -> tuple[str, bool]:
+        """Run a call this turn is waiting on, or say it took too long.
+
+        `bound` is None for every call nobody asked about, and that is the
+        ordinary case rather than a gap: a tool is a real action somewhere else,
+        and cutting one off is a thing that has to be *asked for*.  Cancellation
+        is what a bound is here — the await is cancelled where it stands, and
+        what the far end does about a cancelled call is its own business
+        (`slife2.tools` keeps the result a string, so the sentence below is this
+        method's to write and cannot be a tool's).
+        """
+        if bound is None:
+            return await self._tools.execute(dispatch)
+        try:
+            async with asyncio.timeout(bound):
+                return await self._tools.execute(dispatch)
+        except TimeoutError:
+            # v1's sentence, verbatim.
+            logger.warning("tool_timeout name=%s timeout=%s", dispatch.name, bound)
+            return f"Error: Tool '{dispatch.name}' timed out ({bound}s).", False
+
+    async def _background(
+        self, dispatch: ToolCall, bound: float | None
+    ) -> tuple[str, bool]:
+        """Hand a call to the background, and answer the id the model polls.
+
+        **The bound applies only when the model asked for one.**  Backgrounding
+        exists to escape the bounds a foreground call is subject to, so applying
+        the foreground's anyway would undo the thing that was asked for.  A tool
+        with its own `timeout` argument has already been handed the number; a
+        tool without one is wrapped when the model named a number and runs bare
+        when nobody did — v1's mapping exactly, and the same mapping the
+        foreground path uses, which is why this method takes `bound` rather than
+        deciding anything.
+        """
+        coro = self._result(dispatch)
+        if bound is not None:
+            coro = asyncio.wait_for(coro, timeout=bound)
+        # **The call's own id and name go with it**, because nothing else can
+        # supply them later: `check_async` is given a task id and nothing else —
+        # a call the model makes a step or a turn afterwards is carrying none of
+        # this — and a result that cannot say which call it answers is one the
+        # model has to match up from memory.
+        task_id = schedule(
+            coro,
+            call_id=dispatch.id,
+            tool=dispatch.name,
+            deliver=self._deliver,
+        )
+        # v1's sentence, under the marker the registry wrote
+        # (`slife2.async_tasks.started`): the sentence is what the model acts on,
+        # and the marker is what a screen and a reader of the transcript pair
+        # this call's two halves by.
+        return started(task_id, dispatch.id, dispatch.name), True
+
+    async def _result(self, dispatch: ToolCall) -> str:
+        """One call's answer as text, for the background registry to hold.
+
+        **A background task stores text, not `(text, ok)`.**  The registry's
+        whole vocabulary is the string the poller reads back, and a failure is
+        already text by the time it reaches here (`ToolRegistry.execute` renders
+        one, which is the rule that makes this possible) — so `_ok` is not lost,
+        it is the `Error` the string starts with, which is exactly what
+        `check_async` reads to decide whether the task failed.
+        """
+        text, _ok = await self._tools.execute(dispatch)
+        return text
 
     async def _drain(
         self, chunks: AsyncIterator[Chunk], observer: TurnObserver

@@ -40,6 +40,7 @@ from fakes import (
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2 import attachments
 from slife2.config import DEFAULT_AGENT, ModelSettings, default_config
 from slife2.context import TURN_PREFIX, TURN_SUFFIX
@@ -71,7 +72,10 @@ def answering(text: str) -> FakeBackend:
     return FakeBackend(ScriptedTurn(result=StreamChatResult(text=text)))
 
 
-def asks_for_a_tool(*, delay: float = 0.0) -> ScriptedTurn:
+def asks_for_a_tool(
+    *,
+    delay: float = 0.0,  # timeouts: the value this test is built around, not a budget
+) -> ScriptedTurn:  # timeouts: the value this test is built around, not a budget
     """The step that calls a tool — and so gives the turn a second boundary.
 
     A turn that answers in one step has no boundary after its first, which is
@@ -250,6 +254,11 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     process turns a conversation's model into, so the edit and the read that
     honours it are one process.  They are listed with the rest because a
     server's tool list is what it serves, not what it recommends.
+
+    **`answer_approval` is the one entry here that a *client* calls rather than
+    a model or the harness**: it is how the window answers an `_approve`
+    request a turn is parked on, and it is on this server because the waiting
+    turn is (`slife2.loop`'s gate, DESIGN.md §8.8).
     """
     async with Client(
         build_server(
@@ -261,6 +270,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # business — this is about which names it serves, and what they are.
     assert sorted(t.name for t in tools) == [
         "_check_new_input",
+        "answer_approval",
         "attach_image",
         "model_list",
         "model_remove",
@@ -605,7 +615,7 @@ async def test_an_idle_conversation_simply_starts_again(
     reaped is in the prompt the next one sends, which is the observable form of
     that.
     """
-    monkeypatch.setattr("slife2.server.server.LOOP_IDLE_SECONDS", 0.0)
+    monkeypatch.setattr(_T.timeouts.pacing, "loop_idle", 0.0)
     backend = FakeBackend(
         ScriptedTurn(result=StreamChatResult(text="first")),
         ScriptedTurn(result=StreamChatResult(text="second")),
@@ -652,7 +662,10 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
     an unanswered tool exchange a 400 from several providers.
     """
     backend = FakeBackend(
-        text_turn("slow answer", delay=0.15),
+        text_turn(
+            "slow answer",
+            delay=0.15,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
         text_turn("second answer"),
     )
     server = build_server(
@@ -738,7 +751,9 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     happened to say the same thing.
     """
     backend = FakeBackend(
-        asks_for_a_tool(delay=0.1),
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
         text_turn("It is 42, and yes to that too."),
         # Scripted so that a second turn *can* run: if the message were not
         # folded in, this test would fail on the assertion below rather than on
@@ -796,7 +811,9 @@ async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
             return super().stream(messages, tools)
 
     backend = FailsOnTheSecondCall(
-        asks_for_a_tool(delay=0.1),
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
         text_turn("second answer"),
     )
     hub_client, server = wired(backend, context)
@@ -817,7 +834,15 @@ async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
 @pytest.mark.asyncio
 async def test_a_cancelled_message_leaves_the_lock_free(context, hub) -> None:
     """A caller that goes away while queued is not a lock held forever."""
-    backend = FakeBackend(text_turn("slow", delay=0.2), text_turn("next"))
+    backend = FakeBackend(
+        text_turn(
+            "slow",
+            delay=0.2,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "next"
+        ),  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
@@ -855,7 +880,15 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     Asserted through the next turn rather than by reaching inside: what the
     model is sent is the only thing that actually matters.
     """
-    backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "fine"
+        ),  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
@@ -885,7 +918,12 @@ async def test_an_interrupted_turn_is_still_recorded(
     from slife2.paths import DATA_ENV_VAR, agent_dir
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    backend = FakeBackend(text_turn("never finished", delay=0.4))
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     async with Client(
         build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
     ) as context_client:
@@ -1704,7 +1742,10 @@ async def over_http(server: FastMCP) -> AsyncGenerator[str]:
         yield f"http://127.0.0.1:{port}/mcp"
     finally:
         uv.should_exit = True
-        await asyncio.wait_for(serve_task, timeout=5)
+        await asyncio.wait_for(
+            serve_task,
+            timeout=5,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
         sock.close()
 
 
@@ -1760,7 +1801,15 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
     an assistant message whose tool calls are only partly answered — is a 400
     from every provider, and nothing inside the process can show that.
     """
-    backend = FakeBackend(text_turn("never finished", delay=0.4), text_turn("fine"))
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "fine"
+        ),  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )

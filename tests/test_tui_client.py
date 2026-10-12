@@ -107,6 +107,10 @@ async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
         "channel": "tui",
         "model": "deepseek/deepseek-flash",
         "images": ["data:image/png;base64,AA"],
+        # And that this caller can be asked a question mid-turn: a window draws
+        # the `_approve` prompt and answers it, so its turns wait for a person
+        # rather than running unasked (`slife2.tui.app`, DESIGN.md §8.8).
+        "watched": True,
     }
     assert client.client_id == ("jack", "")
 

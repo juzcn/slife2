@@ -96,6 +96,31 @@ class ToolCallStarted:
 
 
 @dataclass(frozen=True)
+class ToolApprovalRequested:
+    """A tool call is waiting for somebody to confirm it.
+
+    The model asked to be checked (`_approve`), and this is the request on its
+    way to whoever is watching — the loop emits it and then waits.  **The answer
+    does not travel back on this stream**: it arrives as a *call* (`answer_
+    approval`) on whatever is watching, because a turn's progress channel runs
+    one way and a prompt that could only be answered by a reply to a
+    notification would be a prompt nothing could answer.
+
+    It is emitted only where somebody can be asked.  A caller with nobody to ask
+    never sees one, and the call simply runs — so a display that shows this event
+    and waits is a display that was promised an answer.
+    """
+
+    call_id: str
+    name: str
+    #: What is being asked about, carried here rather than read back off the
+    #: tool panel: the panel is drawn *after* the answer (a refused call mounts
+    #: nothing), so the prompt is the only place a reader can see what it is
+    #: they are being asked to allow.
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ToolCallFinished:
     """A tool ran.  `ok` is False when the tool reported an error.
 
@@ -140,6 +165,7 @@ TurnEvent = (
     | TextDelta
     | ThinkingDelta
     | ToolCallStarted
+    | ToolApprovalRequested
     | ToolCallFinished
     | TurnFinished
 )
@@ -201,6 +227,13 @@ def encode(event: TurnEvent) -> str:
                 # Omitted when empty: most calls carry no arguments in the
                 # display sense, and a notification is not the place for an
                 # empty object on every single tool.
+                **({"args": arguments} if arguments else {}),
+            }
+        case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
+            payload = {
+                "t": "tool_approval",
+                "id": call_id,
+                "name": name,
                 **({"args": arguments} if arguments else {}),
             }
         case ToolCallFinished(
@@ -268,6 +301,13 @@ def decode(message: str) -> TurnEvent | None:
         case "tool_start" if isinstance(payload.get("name"), str):
             arguments = payload.get("args")
             return ToolCallStarted(
+                call_id=str(payload.get("id") or ""),
+                name=payload["name"],
+                arguments=arguments if isinstance(arguments, dict) else {},
+            )
+        case "tool_approval" if isinstance(payload.get("name"), str):
+            arguments = payload.get("args")
+            return ToolApprovalRequested(
                 call_id=str(payload.get("id") or ""),
                 name=payload["name"],
                 arguments=arguments if isinstance(arguments, dict) else {},

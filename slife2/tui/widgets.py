@@ -61,6 +61,7 @@ from slife2.a2a.server import CHANNEL as A2A_CHANNEL
 from slife2.a2a.server import MARKER_PREFIX as A2A_MARKER
 from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
+from slife2.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
 from slife2.markers import strip as strip_marker
 from slife2.schedule_server import CHANNEL as SCHEDULE_CHANNEL
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -71,7 +72,12 @@ from slife2.wechat import MARKER_PREFIX as WECHAT_MARKER
 #: together.  A marker that is not in here is one this window does not know
 #: about, and an unknown marker is left alone rather than guessed at — which is
 #: what makes adding a channel a line in this list.
-MARKERS: tuple[str, ...] = (WECHAT_MARKER, ASYNC_TASK_MARKER, A2A_MARKER)
+MARKERS: tuple[str, ...] = (
+    WECHAT_MARKER,
+    ASYNC_TASK_MARKER,
+    ASYNC_CALL_MARKER,
+    A2A_MARKER,
+)
 
 #: So `_add` can hand back the widget type it was given.
 WidgetT = TypeVar("WidgetT", bound=Static)
@@ -79,6 +85,13 @@ WidgetT = TypeVar("WidgetT", bound=Static)
 #: How much of a tool's primary argument the header row shows.  The point of
 #: the row is to be readable at a glance, so it is a glance's worth.
 PRIMARY_ARG_CHARS = 72
+
+#: How much of an approval request's arguments the row shows, and how many of
+#: them.  A glance's worth, as the tool panel's own `PRIMARY_ARG_CHARS` is: the
+#: question is "may this run", and a call whose arguments run to a page cannot be
+#: answered from a page anyway.
+APPROVAL_ARG_CHARS = 120
+APPROVAL_ARG_LINES = 6
 
 #: How much reasoning an expanded thinking block shows.  Reasoning runs long —
 #: it is the model talking to itself — and past a few hundred characters nobody
@@ -423,6 +436,15 @@ class ChatView(VerticalScroll):
         opened by the first thing that has something to put in it.
         """
         return self._add(picker, "model-picker")
+
+    def add_approval(self, prompt: ApprovalPrompt) -> ApprovalPrompt:
+        """Mount an approval row inline, at the tail.
+
+        **Nothing is closed for it**, for the picker's reason exactly: a call can
+        be put to the person in the middle of an answer that is still arriving,
+        and ending the block would drop the rest of that answer.
+        """
+        return self._add(prompt, "approval-prompt")
 
     def add_error(self, text: str) -> None:
         self._turn_open = False
@@ -831,7 +853,13 @@ class ToolCallWidget(VerticalScroll):
     def set_complete(
         self, result: str, is_error: bool, result_chars: int, elapsed_ms: int
     ) -> None:
-        self._result = result
+        # **The marker comes off before it is kept, not before it is drawn.**
+        # A tool result may wear one — a background call's result does
+        # (`slife2.async_tasks`), and it is the same shape a handed-over message
+        # wears — and the panel is a display: the marker is machinery's words for
+        # other machinery, and a person reading a result should get the sentence
+        # that follows it.
+        self._result = strip_marker(result, *MARKERS)
         self._is_error = is_error
         self._result_chars = result_chars
         self._elapsed_ms = elapsed_ms
@@ -1196,6 +1224,133 @@ class ModelPicker(Static):
         line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
         line.append("Switched to ", f"bold {PALETTE['green']}")
         line.append(self._chosen.ref, f"bold {PALETTE['text']}")
+        return line
+
+    def plain_text(self) -> str:
+        """What this row shows, for the transcript's own `plain_text`."""
+        content = self.content
+        return content.plain if isinstance(content, Text) else str(content)
+
+
+class ApprovalPrompt(Static):
+    """One tool call, waiting for the person to allow it.
+
+    The model asked to be checked before a call ran (`_approve`), the loop is
+    parked on the answer, and this row is the question: which tool, what it would
+    be called with, and the keys that answer.  v1's row in v2's clothes — a row in
+    the transcript rather than a modal, so the question and the answer sit
+    together in the history.
+
+    **The bindings are `priority`, and the `TextArea` below is why** — the
+    picker's reason, one keystroke further: without them `y` and `n` would be
+    typed into the prompt and `Esc` would cancel the whole *turn* instead of
+    refusing one call, so the key a person presses here would sometimes be the
+    one that throws their turn away.
+
+    **A decided row stays, as its status line.**  The panel for the tool itself
+    is mounted *after* an approval and never for a refusal, so this line is the
+    only place a refused call is ever seen — which is v1's arrangement and the
+    reason the denial is drawn here rather than as a tool result.
+
+    **Losing focus without a decision refuses.**  A prompt left undecided is
+    worse than a wasted keystroke: the loop is waiting on this future, and it
+    would wait until somebody cancelled the turn.
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("y", "approve", "Approve", priority=True, show=False),
+        Binding("n", "deny", "Deny", priority=True, show=False),
+        Binding("escape", "deny", "Deny", priority=True, show=False),
+    ]
+
+    def __init__(
+        self, name: str, arguments: dict, future: asyncio.Future[bool]
+    ) -> None:
+        super().__init__("")
+        self._name = name
+        self._arguments = dict(arguments)
+        self._future = future
+        self._decided: bool | None = None
+        self.update(self._body())
+
+    # --- the keys ------------------------------------------------------------
+
+    def action_approve(self) -> None:
+        """Let the call run."""
+        self._decide(True)
+
+    def action_deny(self) -> None:
+        """Refuse it — `n` and `Esc` are the same answer, as they were in v1."""
+        self._decide(False)
+
+    def on_blur(self) -> None:
+        """Focus went elsewhere: nothing was granted.  See the docstring."""
+        self._decide(False)
+
+    @property
+    def pending(self) -> bool:
+        """Whether this row is still waiting for an answer.
+
+        A decided row keeps the class, so a caller looking for "the approval
+        that is blocking the loop" selects on this rather than on the widget.
+        """
+        return self._decided is None
+
+    def _decide(self, approved: bool) -> None:
+        """Resolve the future once, and re-render as the decision.
+
+        Once, because the blur that follows every decision would otherwise set
+        the same future a second time — and a resolved future raises rather than
+        shrugs (`ModelPicker._decide`'s reason, verbatim).
+        """
+        if self._decided is not None:
+            return
+        self._decided = approved
+        if not self._future.done():
+            self._future.set_result(approved)
+        self.update(self._body())
+
+    # --- the row -------------------------------------------------------------
+
+    def _body(self) -> Text:
+        if self._decided is not None:
+            return self._decided_line()
+        line = Text()
+        line.append(f"{GLYPHS['running']} ", f"bold {PALETTE['amber']}")
+        line.append(self._name, f"bold {PALETTE['text']}")
+        line.append("  requests approval", PALETTE["amber"])
+        # A glance's worth of the arguments, and the count of what is left: the
+        # question is "may this run", and a call whose arguments run to a page
+        # cannot be answered from a page anyway.
+        items = list(self._arguments.items())
+        for key, value in items[:APPROVAL_ARG_LINES]:
+            shown = str(value)
+            if len(shown) > APPROVAL_ARG_CHARS:
+                shown = shown[:APPROVAL_ARG_CHARS] + GLYPHS["ellipsis"]
+            line.append(f"\n  {key} = ", PALETTE["dim"])
+            line.append(shown, PALETTE["muted"])
+        rest = len(items) - APPROVAL_ARG_LINES
+        if rest > 0:
+            line.append(f"\n  {GLYPHS['ellipsis']} {rest} more", PALETTE["dim"])
+        line.append("\n")
+        line.append("y ", PALETTE["dim"])
+        line.append("approve", f"bold {PALETTE['green']}")
+        line.append("   n/Esc ", PALETTE["dim"])
+        line.append("deny", f"bold {PALETTE['red']}")
+        return line
+
+    def _decided_line(self) -> Text:
+        line = Text()
+        if self._decided:
+            line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
+            line.append("approved", f"bold {PALETTE['green']}")
+        else:
+            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
+            line.append("denied", f"bold {PALETTE['red']}")
+        line.append("  ", PALETTE["dim"])
+        line.append(self._name, f"bold {PALETTE['text']}")
         return line
 
     def plain_text(self) -> str:

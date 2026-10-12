@@ -68,6 +68,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
 from slife2.config import (
@@ -131,7 +132,6 @@ CHANNEL = "agent-task"
 #: agent server's reasons: `remember` happens once the answer already exists,
 #: `restore` replays a whole context, and `rebuild` makes a model call the
 #: plugin has already bounded by `context.timeout`.
-CONTEXT_TIMEOUT_SECONDS = 120.0
 
 #: What the answer wears, so the model can read the task's id back out of the
 #: row.  It is **content**, not an annotation this build derives: it goes into
@@ -164,7 +164,6 @@ DESCRIPTION_CHARS = 120
 #: still connecting (`slife2.toolhub.LIST_SETTLE_SECONDS`), and a timeout
 #: shorter than that turns "waiting for a server that is starting" into a failed
 #: task.
-TOOLHUB_TIMEOUT_SECONDS = 30.0
 
 #: What a call that does not say which agent it is for is told.  A shared
 #: process cannot guess it: one `slife2-agent-task` serves every agent, and
@@ -380,7 +379,10 @@ def build_server(
                     config.server("toolhub").url,
                     name=TOOLHUB_SERVER_NAME,
                     fallback_tool="list_tools",
-                    timeout=TOOLHUB_TIMEOUT_SECONDS,
+                    # No clock on the connection: a request deadline there would
+                    # be one on every request that crosses it, tool calls
+                    # included.  The asks this process makes state their own
+                    # patience where they are made (`slife2.toolclient`).
                 )
         return hub_conn
 
@@ -402,7 +404,7 @@ def build_server(
                     config.server("context").url,
                     name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
-                    timeout=CONTEXT_TIMEOUT_SECONDS,
+                    timeout=_T.timeouts.work.context,
                 )
         return context_conn
 
@@ -604,6 +606,14 @@ def build_server(
             # a tool loaded mid-task is in the next call's list rather than
             # nowhere.
             refresh=partial(registry, task),
+            # **No `deliver`, and so no `_async` here — a stated limitation**
+            # (DESIGN.md §9, "Background work inside an agent task").  This loop
+            # runs one turn and has no second one for a background result to
+            # arrive in, so there is nowhere to hand one back to: the loop
+            # therefore *refuses* the mode with a sentence the model can act on
+            # (`BACKGROUND_UNAVAILABLE`) rather than running the call quietly, and
+            # this registry has no `check_async` to offer either — the two are one
+            # decision (`slife2.server.server.registry`).
         )
         result = await loop.run_turn(messages, opening)
         # After the turn and not during it: the tool list goes out with every

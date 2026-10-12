@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT, TUI_SERVER_NAME
 from slife2.events import TurnEvent, decode
 from slife2.mcp_server import close_server, open_server
@@ -27,14 +28,18 @@ from slife2.tui.control import ATTACH, Handover
 from slife2.tui.control import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
-#: How long a whole turn may take.  A turn is several model calls plus tool
-#: runs, so the default client timeout would abandon it mid-stream and look
-#: like a bug in the loop rather than a timeout.
+#: How long one of this client's *management* calls may take — `model_switch`,
+#: `reset`, `transcript`: a question to our own daemon that it answers from
+#: memory or from the store.
 #:
-#: This is a *turn's* budget and not a wait's: the app holds its own queue of
-#: submissions and sends the next one only once the previous has finished, so a
-#: call is never sitting on the server waiting its turn while this clock runs.
-TURN_TIMEOUT_SECONDS = 900.0
+#: **There is deliberately no number for the turn itself.**  A turn is several
+#: model calls plus tool runs, and one of those runs may legitimately take
+#: twenty minutes (a render); a clock here would be the thing that cut it off,
+#: and it would report the cut as a failure of the *loop* rather than as a
+#: limit somebody chose.  What bounds a turn is the turn: every step inside it
+#: is bounded where it is run, and the person watching has Esc — a deadline and
+#: a keyboard are two answers to one question, and the keyboard is the one that
+#: knows whether the thing being waited on is work or a hang.
 
 #: How every tool in this system says no: a sentence beginning with this, which
 #: a model reads as an answer and a person reads as a refusal.  Spelled once
@@ -137,6 +142,24 @@ class AgentClient(Protocol):
         """
         ...
 
+    async def answer_approval(self, call_id: str, approved: bool) -> str:
+        """Answer the `_approve` request a turn is waiting on, and say what happened.
+
+        **It is a call of its own because the turn's channel runs one way**: the
+        request arrives as a progress notification (`ToolApprovalRequested`), and
+        a notification cannot carry an answer back.  So the window answers here,
+        on the same connection, while the turn that asked is still parked inside
+        `send_message` — which is why this must not wait for anything the server
+        holds per conversation: the waiting turn holds that.
+
+        The returned sentence is the server's, and it is empty when a waiting
+        turn took the answer.  **Losing the race is not an error**: the turn may
+        have ended (the person pressed Esc a moment before pressing `y`), and a
+        client that raised over it would call a prompt that arrived too late a
+        failure of the connection.
+        """
+        ...
+
 
 class MCPAgentClient:
     """An :class:`AgentClient` backed by an MCP connection.
@@ -163,7 +186,7 @@ class MCPAgentClient:
         agent: str = DEFAULT_AGENT,
         subagent: str = "",
         model: str = "",
-        timeout: float | None = TURN_TIMEOUT_SECONDS,
+        timeout: float | None = None,
     ):
         self._url = url
         #: Who this client is.  It selects the conversation's system prompt and
@@ -182,7 +205,10 @@ class MCPAgentClient:
         #: the model that was just chosen, and not on the one this client was
         #: built with.
         self._model = model
-        self._timeout = timeout
+        # None means "the registry's management patience", resolved here
+        # rather than in the signature: a def-time default captures the value at
+        # import (`slife2.timeouts` states the rule).
+        self._timeout = _T.timeouts.work.management if timeout is None else timeout
         self._client: Client | None = None
         #: Serialises `connect`, which has an await between its check and its
         #: use.  See the comment there.
@@ -223,7 +249,12 @@ class MCPAgentClient:
                 self._url,
                 name=AGENT_SERVER_NAME,
                 fallback_tool="send_message",
-                timeout=self._timeout,
+                # **No clock on the connection**, because a connection-level
+                # deadline is a deadline on *every* call that crosses it — turns
+                # included (see `slife2.timeouts.work.management`).  Each call states
+                # its own patience below, which is where a number that applies to
+                # one thing belongs.
+                timeout=None,
             )
 
     async def close(self) -> None:
@@ -280,6 +311,28 @@ class MCPAgentClient:
         turns = (result.data or {}).get("turns")
         return list(turns) if isinstance(turns, list) else []
 
+    async def answer_approval(self, call_id: str, approved: bool) -> str:
+        """Answer one `_approve` request.  See `AgentClient.answer_approval`."""
+        if self._client is None:
+            raise ConnectionError("not connected")
+        try:
+            result = await self._client.call_tool(
+                "answer_approval",
+                {
+                    "agent": self._agent,
+                    "subagent": self._subagent,
+                    "call_id": call_id,
+                    "approved": approved,
+                },
+                timeout=self._timeout,
+            )
+        except ToolError:
+            raise
+        except Exception:
+            await self.close()
+            raise
+        return str((result.data or {}).get("text") or "")
+
     async def run_turn(
         self,
         prompt: str,
@@ -309,6 +362,13 @@ class MCPAgentClient:
             # another's); for one another channel handed the window, it is that
             # channel's key, and the window is only the thing running it.
             "channel": channel,
+            # **This client can be asked a question and will answer it.**  A
+            # window draws the `_approve` prompt and answers it with
+            # `answer_approval` below, so a turn whose model asks to be checked
+            # waits for a person here rather than running unasked — which is the
+            # only reason the meta-parameter exists.  Every other caller in the
+            # system leaves this False, and their turns grant the request.
+            "watched": True,
         }
         # Omitted rather than sent empty: an empty string and an absent key mean
         # the same thing to the server — "you choose" — and a payload that says
@@ -328,7 +388,10 @@ class MCPAgentClient:
                 # *silent no-op* without one.  Omitting it produces a turn that
                 # works perfectly and shows nothing until the very end — see
                 # `slife2.events`.
-                timeout=self._timeout,
+                # **And no deadline on the call**, said explicitly rather than
+                # left to the default: this is the one call whose length is the
+                # answer's own business (`slife2.timeouts.work.management`).
+                timeout=None,
             )
         except ToolError:
             # The server answered and the turn failed inside it — a bad API key,

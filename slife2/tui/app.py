@@ -47,11 +47,13 @@ from textual.binding import Binding
 from textual.message import Message as TextualMessage
 from textual.worker import Worker
 
+import slife2.timeouts as _T
 from slife2.config import DEFAULT_AGENT, Config
 from slife2.events import (
     ContextChosen,
     TextDelta,
     ThinkingDelta,
+    ToolApprovalRequested,
     ToolCallFinished,
     ToolCallStarted,
     TurnEvent,
@@ -69,6 +71,7 @@ from slife2.tui.restore import as_turns, restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import (
     WINDOW_CHANNEL,
+    ApprovalPrompt,
     ChatView,
     HistoryInput,
     ModelChoice,
@@ -82,7 +85,6 @@ logger = logging.getLogger(__name__)
 #: this window its messages is not answering.  A pause rather than a spin: the
 #: usual reason is that it has not started yet or is being restarted, and both
 #: are over in a second or two.
-RECONNECT_SECONDS = 2.0
 
 
 class TurnEventMessage(TextualMessage):
@@ -232,6 +234,10 @@ class SlifeApp(App[None]):
         #: one and leave the first's future unresolved, so the second press is
         #: the one that does nothing — v1's guard, and v1's reason for it.
         self._switching = False
+        #: The approval row on screen, if one is.  Held so a cancelled turn can
+        #: refuse the call it was holding: the loop is parked on that future, and
+        #: a prompt nothing ever answers would keep the turn from ending.
+        self._approval: ApprovalPrompt | None = None
         #: Where this window *attaches* so a message arriving on another channel
         #: can be handed to it (`slife2.tui.control`) — the plugin's address, and
         #: the window is its client.  Empty means no inbox, which is what a test
@@ -363,7 +369,7 @@ class SlifeApp(App[None]):
                 )
                 complained = True
                 await self._window.close()
-                await asyncio.sleep(RECONNECT_SECONDS)
+                await asyncio.sleep(_T.timeouts.pacing.reconnect)
             else:
                 return
 
@@ -618,6 +624,10 @@ class SlifeApp(App[None]):
                 self._transcript.append_thinking(text)
             case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
                 self._transcript.add_tool_start(call_id, name, arguments)
+            case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
+                # **The turn is parked on this**, so it is answered off the
+                # message pump rather than in it — see `_ask_approval`.
+                self._ask_approval(call_id, name, arguments)
             case ToolCallFinished(
                 call_id=call_id,
                 ok=ok,
@@ -648,6 +658,14 @@ class SlifeApp(App[None]):
         cancellation from the one an exit or a reset causes; see
         `_interrupting`.
         """
+        # **The prompt is refused first.**  The loop is parked on that future,
+        # and a row left undecided on a turn that is going away is an answer
+        # nobody will ever give — v1's rule, which denied the prompt *because*
+        # the turn was being cancelled rather than leaving it for the
+        # cancellation to sweep up.  Before the early return, so a row whose
+        # turn has already ended is still answered rather than left hanging.
+        if self._approval is not None:
+            self._approval.action_deny()
         if self._turn is None or self._turn.done():
             return False
         self._interrupting = True
@@ -756,6 +774,60 @@ class SlifeApp(App[None]):
             return
         self._transcript.add_note(answer)
         self._apply_model(choice)
+
+    def _ask_approval(self, call_id: str, name: str, arguments: dict[str, Any]) -> None:
+        """Put one tool call to the person, and answer it off the message pump.
+
+        **Sync, for the picker's reason** (`action_switch_model`): this runs
+        inside the message pump, and awaiting the answer here would block the
+        very pump that has to deliver the `y` or the `Esc` that gives it.  The
+        answer is awaited by a worker instead.
+
+        **One at a time, structurally.**  The loop runs a batch's calls one after
+        another and waits on each answer before the next, so two prompts cannot
+        arrive together — v1 needed a lock for this because its batch ran in
+        parallel; here the shape of the loop is the guarantee.
+        """
+        future: asyncio.Future[bool] = asyncio.Future()
+        prompt = self._transcript.add_approval(ApprovalPrompt(name, arguments, future))
+        self._approval = prompt
+        prompt.focus()
+        self.run_worker(
+            self._finish_approval(call_id, future),
+            group="approval",
+            exit_on_error=False,
+        )
+
+    async def _finish_approval(
+        self, call_id: str, future: asyncio.Future[bool]
+    ) -> None:
+        """Send the answer back to the turn that is waiting.
+
+        A worker rather than a plain task so the window unmounting cancels it:
+        the thing it is waiting on is a key, and nothing is going to press one in
+        a window that is closing.
+        """
+        approved = await future
+        self._approval = None
+        # The prompt takes the focus back, whether or not anything was approved:
+        # the row had it while it asked, and what the person did before `y` was
+        # type.
+        self.query_one(HistoryInput).focus()
+        assert self._client is not None
+        try:
+            await self._ensure_connected()
+            if not self._connected:
+                raise ConnectionError(self._connection_text)
+            answer = await self._client.answer_approval(call_id, approved)
+        except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
+            self._transcript.add_error(f"the answer was not delivered: {exc}")
+            return
+        # **A sentence means nobody was waiting for it**: the turn ended while
+        # the prompt was up — a cancel, or another window answering the same
+        # call.  Said rather than dropped, because a prompt that silently did
+        # nothing looks exactly like one that failed.
+        if answer:
+            self._transcript.add_note(answer)
 
     def _apply_model(self, choice: ModelChoice) -> None:
         """Move the bar onto the model the switch just put the conversation on.
