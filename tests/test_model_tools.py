@@ -11,11 +11,11 @@ model added to a provider does not lose the ones beside it.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
-import pytest_asyncio
 from fastmcp import Client
 
 from slife2.config import DEFAULT_AGENT, load, load_cached
@@ -313,8 +313,8 @@ providers:
     assert written(isolated_runtime) == before
 
 
-@pytest_asyncio.fixture(loop_scope="function")
-async def answering_server(isolated_runtime):
+@asynccontextmanager
+async def answering_server(isolated_runtime: Path):
     """`server_for`'s server, plus the two peers a turn needs to run.
 
     The real context and hub servers over the in-memory transport, exactly as
@@ -322,7 +322,12 @@ async def answering_server(isolated_runtime):
     rather than an endpoint.  A switch is about conversations that are *running*,
     so the test needs a conversation that can: asserting on the file after a
     switch is not the same claim, and it is the one the whole tool exists for.
+
+    An ordinary context manager rather than a fixture, like `server_for` beside
+    it: it is entered inside a test rather than around one, and what it stands up
+    is what the `async with` tears down.
     """
+    write_config(isolated_runtime)
     live = load()
     async with (
         Client(
@@ -357,16 +362,14 @@ async def test_switching_moves_the_conversations_already_running(
     conversation keeps its key and its history; what moves is the model it
     reaches, from its next turn.
     """
-    write_config(isolated_runtime)
-    async with answering_server(isolated_runtime) as server:
-        async with Client(server) as client:
-            first = await client.call_tool(
-                "send_message", {"agent": DEFAULT_AGENT, "prompt": "one"}
-            )
-            switched = await ask(client, "model_switch", ref="local/small")
-            second = await client.call_tool(
-                "send_message", {"agent": DEFAULT_AGENT, "prompt": "two"}
-            )
+    async with answering_server(isolated_runtime) as server, Client(server) as client:
+        first = await client.call_tool(
+            "send_message", {"agent": DEFAULT_AGENT, "prompt": "one"}
+        )
+        switched = await ask(client, "model_switch", ref="local/small")
+        second = await client.call_tool(
+            "send_message", {"agent": DEFAULT_AGENT, "prompt": "two"}
+        )
 
     assert first.data["model"] == "local/big", "it starts on the default"
     assert "moved with it" in switched, "and the answer says what happened"
