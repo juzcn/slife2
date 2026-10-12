@@ -2036,6 +2036,46 @@ Three load-bearing details:
   broken observer cannot end a turn — the loop swallows its exceptions, but
   deliberately lets `CancelledError` through.
 
+### 7.1 The clocks
+
+**Every await that can block has a bound, and it belongs to the layer that
+awaits it.** A callee never sets a total for its caller: this is v1's
+owner-of-await rule, and it is why `slife2.gateway` holds no clock of its own
+and why `slife2.mcp_server`'s transport delegates read and write (v1's registry
+spelled that line `read: None # DELEGATED — owned by the loop's tool budget`). A
+bound at a lower layer applies to *every* message that crosses it, so a number
+meant for one thing becomes the deadline for whatever the far end happens to be
+doing — and a tool that takes twenty minutes is a tool doing its job, not a link
+to give up on.
+
+**The only total in this system is one somebody stated.** There is no turn
+deadline, and **no default tool-call budget** — v1 had one (`work.tool_budget`,
+120 s) and v2 does not, because a single number applied to every tool is wrong
+for most of them: a search and a render are both tools. What bounds a call is the
+model's `_timeout` or the tool's own declared parameter, and otherwise nothing.
+Where a clock *is* needed and the work can legitimately be long, it is an
+**inactivity** bound rather than a wall clock: the model stream has one (120 s of
+silence, reset by every chunk), and the registry's comment says why the
+difference is the whole of that number.
+
+**One file is the single source of truth for the numbers**, `slife2/timeouts.py`,
+with roles that say what kind of value each one is: *budgets* bound an await,
+*cadences* say how often something runs. Consumers read them at call time
+(`_T.timeouts.ready.probe`), never into a module constant or a def-time default,
+so a test can patch one and so nothing drifts from the value it was measured
+against. `validate()` asserts the relations that go wrong silently — an outer
+bound shorter than an inner one is an inner bound that never fires — and fails at
+import rather than in production. The relations themselves are argued where they
+are declared: the hub's patience must outlast the hub's own settle wait, the
+hand-over to the agent server (a whole turn) must outlast the one to a window (a
+write), a tunnel's heal window must outlast a read of the URL it published.
+
+**And a gate keeps it that way** (`tests/test_no_magic_timeouts.py`, ported from
+v1): a time-style literal anywhere in `slife2/` or `tests/` fails CI unless it is
+in the registry or carries a `# timeouts:` note saying why it stays. What the
+gate cannot check is which of two numbers should be bigger; that is what the
+invariants are for.
+
 ## 8. The toolhub
 
 **Where the model's tools come from, and the one process that decides it.** It
@@ -2730,6 +2770,65 @@ tool that was gone. The trim is now a pair in the conversation, which puts it in
 front of both readers — and puts the tool in the model's list, because a pair
 whose name is not declared is a request the backends refuse.
 
+### 8.8 The three meta-parameters
+
+**`_timeout`, `_async` and `_approve` are arguments no tool declares.** The model
+may add any of them to any call; the loop reads all three off and strips them
+before dispatch, so no tool server ever sees one — which is also why they are
+reserved names: a name that is sometimes a meta-parameter and sometimes a
+business argument is one no reader could interpret. The strip is a **copy**: what
+the *tool* is dispatched with and what the *history* keeps are two dicts, and the
+second still carries them, because removing them there would be rewriting what
+the model said.
+
+**They travel in the schema, and that is the opposite of v1's choice.** v1
+declared them once in the system prompt, on the argument that re-describing three
+parameters on sixty schemas is the largest per-request context tax the system
+could pay. v2 pays it, for what the other arrangement costs *here*: the prompt is
+the operator's file (`config.agents[x].system_prompt`), so a block the harness
+appended there would be a second thing every operator's prompt had to be kept in
+step with, and a tool's contract belongs beside the tool — a model reading *that*
+tool's arguments finds it there. `slife2.tools.advertised` is the one place the
+three are added, and `Tool.spec` stays the tool's own declaration, so
+`declares_timeout` cannot mistake `_timeout` for a tool that enforces its own
+bound.
+
+**`_timeout` is a number the model states, and `0` is never "no bound".** It
+overrides a tool's own default; a tool with a native `timeout` parameter is the
+single enforcer (the loop does not wrap it — exactly one timer per call); a tool
+without one is wrapped by the loop, and the sentence it writes on expiry is v1's.
+A bare `timeout` the model appends to a tool whose schema does not declare one is
+read as the bound *and removed*, because a tool server validates its parameters
+and would refuse the whole call over one extra key — the failure v1 measured and
+the reason the alias exists.
+
+**`_async` hands the call to the background and the result comes back by
+itself.** The model gets a `task_id` and a marker — `[AsyncToolCallResult:{…}]`,
+carrying the tool call's id, the tool, the task and the status — because the
+answer arrives as a message of its own, in a later turn possibly, and without the
+id in it the two are related only by the model's memory. The registry is the
+process's (v1's: a task belongs to the *call*), it is bounded only by a cap on
+finished entries, and a turn being cancelled does not cancel the task — which is
+the whole of what background means. What is not v1's is the delivery: a finished
+call's result is **handed back into the conversation it came from**
+(`slife2.handover`: the window first, the agent server as the fallback) rather
+than being held for a poll, and a *cancellation* is handed back too — a
+cancellation nobody hears about leaves a panel on screen that is running forever.
+So `check_async` answers where the call **is**, and the one thing it still carries
+is a result that could not be handed back, because the alternative to returning
+it there is losing it.
+
+**`_approve` asks the person, and the asking is the caller's to declare.** The
+gate is model-driven — pure model judgment, no `requires_approval` on any tool —
+and the loop pauses, emits `ToolApprovalRequested`, and waits on a future it is
+handed. **The answer is a call** (`answer_approval`) rather than a reply on the
+progress stream, because that stream runs one way; it deliberately does not take
+the conversation's lock, because the turn that is waiting holds it. A caller that
+cannot be asked says so (`send_message(..., watched=…)`) and the call simply
+runs, which is v1's rule for a turn with nobody behind it; a refusal mounts no
+tool panel at all, because a panel that appeared and then said "denied" would
+have told a reader the tool ran.
+
 ## 9. Deferred
 
 Named so they are decisions rather than oversights. Each entry says what is
@@ -2806,16 +2905,17 @@ cannot say all three is a wish rather than a decision.
 - **`grep`.** v1 had a third search mode — a real regex over the text, bounded,
   unranked — for the queries neither index can describe: a partial spelling, a
   path, a symbol. v1's notes say the model reached for it most often.
-- **Tool approval.** Deferrable while slife2's own tools were side-effect-free,
-  and then the management tools landed: `skill_set` writes files whose paths a
-  model chose, `mcp_set` writes a `command:` that slife2 will start, and neither
-  asks anybody first. §8 argues the write is *legible* — one writer, the loader
-  as judge, the result in a file a person reads — and legible is not gated, so
-  the gap is open rather than closed by construction. v1 answered with a
-  model-driven `_approve` parameter, which is the shape to be suspicious of: the
-  model being asked is the model asking. §8.7 still says where the answer goes —
-  the hub, the one place that knows the whole set — and what it has to cover is a
-  named list of tool names rather than a category.
+- **A policy that forces approval.** The *model-driven* half is built (8.8): the
+  model may attach `_approve` to any call, the terminal answers it, and a refusal
+  runs nothing. What is still missing is the other direction — a call the model
+  does **not** ask about and that must be confirmed anyway. v1 had no such thing
+  either, and the shape it would take is the one §8.7 names: the hub, the one
+  place that knows the whole set, holding a **named list of tool names** rather
+  than a category, because a category is a rule somebody has to be right about
+  and a name is a rule somebody wrote down. The cost of the gap is concrete:
+  `skill_set` writes files whose paths a model chose and `mcp_set` writes a
+  `command:` that slife2 will start, and neither is gated by anything but the
+  model's own judgment about whether to ask.
 - **Device-code OAuth for tool servers.** v1's gateway ran the whole RFC 8628
   flow, kept tokens in the OS keyring through `credstore`, and held the token
   beside the configured headers so a re-auth did not churn them. Not ported:
@@ -2876,6 +2976,22 @@ cannot say all three is a wish rather than a decision.
   `(agent, subagent)`. A spawn tool has to decide that first, and then how it
   collects results, whether a worker is multi-turn, how deep nesting goes, and
   whether cancelling a parent cancels its children.
+- **Background work inside an agent task.** A task's loop **refuses `_async`**
+  (`slife2.loop`'s `BACKGROUND_UNAVAILABLE`) rather than running the call quietly,
+  because a task has nowhere to hand a result back to: it runs one turn, has no
+  inbox and no second turn, and the road every other background result takes —
+  the window, then the agent server (`slife2.handover`) — leads to the *agent's*
+  conversation, which is not the one that made the call. So a model working in a
+  task is told to call the tool again without `_async`, and the task's registry
+  carries no `check_async`/`cancel_async` either (they are one decision: a
+  registry with no way back has no business handing out task ids). Where it would
+  go: the task's turn wants what the agent server's turn already has — a queue
+  and a harness tool the pair can name — so that a result arriving mid-turn
+  reaches that turn at its next step boundary. What the current answer costs: a
+  tool that takes minutes cannot be started and forgotten inside a task, and a
+  *nested* task (a task starting a task) is the same limitation seen from the
+  other side — allowed today, bounded by `agent-task: max_running` rather than by
+  any rule about nesting, which is what makes the whole family feel unfinished.
 - **A client id on the turn record.** Nothing reads it yet, and adding a column
   to `turn` means deleting every existing `turns.db` (§5 has no migration layer).
   Getting it wrong is worse than the gap: the new INSERT would raise

@@ -415,6 +415,41 @@ quietly lost `turn_read` is a failure nobody can see — and somebody else's
 do when their entry says `autoload: true`, which is how a server whose tools are
 wanted every turn is written down as such. Everything else arrives on demand.
 
+### Three arguments every tool takes
+
+**Every tool accepts three meta-parameters the model may add to any call.** They
+are not in any tool's schema of its own — they are added to every schema on its
+way out (`slife2.tools.advertised`), and the loop reads them off and strips them
+before dispatch, so no tool server ever sees one.
+
+```yaml
+# any tool call, from the model
+{ "e": "6*7", "_timeout": 30 }              # this one call may take 30 s
+{ "prompt": "a cat", "_async": true }        # run it in the background
+{ "path": "notes.md", "_approve": true }     # ask the user first
+```
+
+- **`_timeout`** — seconds. It overrides the tool's own default; `0` or less
+  means "use the default", **never** "no limit". A tool that declares its own
+  `timeout` argument enforces it itself (exactly one timer per call); with
+  neither, the call runs until it finishes. There is **no default budget**: a
+  number applied to every tool is wrong for most of them.
+- **`_async`** — run it in the background. The model gets a `task_id` and the
+  result is **handed back into the conversation** when it arrives, wearing
+  `[AsyncToolCallResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`; the
+  window shows it and the reply itself is a message on the `async-tool` channel.
+  `check_async` answers where the call *is* (running, finished, failed,
+  cancelled), and `cancel_async` abandons it. **An agent task's own loop has no
+  `_async`** — it runs one turn, so there would be nowhere to hand a result back
+  to, and it says so rather than pretending (DESIGN.md §9).
+- **`_approve`** — ask the user before the call runs. The terminal draws an
+  inline row (`y` approve, `n`/`Esc` deny) and answers with `answer_approval`;
+  the loop waits on that answer and refuses the call if it is denied, mounting no
+  tool panel. **A channel with nobody behind it does not ask and the call simply
+  runs** — WeChat, a scheduled run, another agent, and any client that has not
+  been taught to draw the prompt (a caller that *can* answer says so with
+  `send_message(..., watched=true)`, which the terminal does).
+
 ### The budget, and the pairs the harness writes
 
 The list is bounded, because it goes out with every request: over
