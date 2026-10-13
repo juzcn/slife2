@@ -954,6 +954,17 @@ as the fallback when no window is showing) and that turn has **one instruction**
 
 > call `schedule_run_now` with the due time the trigger carried.
 
+**And the trigger says whose task it is.**  The hand-over already carries the
+agent as its *address* — the window to type into, the server to fall back to —
+and an address is not a thing the model reading the turn can see.  So the words
+name the owner as well, and that name is all a conversation holding no such task
+has to go on: without it, a trigger that was mis-delivered and a trigger for a
+task this agent never had are one message, and the honest answer to both is "not
+mine, and I cannot say whose".  With it, the reader can say whose it claims to be
+and hold its own ledger against the claim — which is the whole of the diagnosis
+available from inside one conversation, and the reason the answer to a trigger
+nobody can act on is a *report* rather than a repair.
+
 **That call is this plugin starting the work itself**, as an ordinary agent task
 under the scheduled task's own name — the same thing a model would get by calling
 `agent_task_start`, except that here *this process* is the caller.  And that is

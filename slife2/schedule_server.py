@@ -122,6 +122,7 @@ from slife2.schedule_store import (
     Task,
     moment_of,
 )
+from slife2.timeutil import InvalidTimeBound, normalize_bound
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,15 @@ async def fire(
     started by nothing (the module docstring has the argument for splitting it
     that way rather than dispatching here).
 
+    **The words say whose task it is, and they are the only place that can.**
+    `store.agent` is also the address this is handed to, so for a hand-over that
+    went the way it was aimed at the name is the reader's own — but a hand-over's
+    address is a fact about the *delivery*, and the model reading the trigger sees
+    only the words.  So a trigger that reaches a conversation whose ledger holds
+    no such task would otherwise be indistinguishable from one that was mis-aimed;
+    naming the owner makes it a claim the reader can check, and the answer it
+    replaces is "not mine, and I cannot say whose".
+
     **The record comes first.**  A run is written as `pending` before anything is
     handed over, which is what makes an interrupted fire *visible*: the anchor has
     moved, so the poll will not try it again, and a `pending` row is a thing the
@@ -303,6 +313,7 @@ async def fire(
             name=task.name,
             description=task.description,
             due_at=due_at,
+            agent=store.agent,
         ),
         channel_for(task.name),
         what=f"scheduled task {task.name}",
@@ -892,6 +903,10 @@ def build_server(
         arrives on its own, and **the run closes itself** when that task ends, so
         nothing here has to be remembered later.
 
+        `due_at` names the run — the moment it was due, as the trigger carried
+        it. Any spelling of that moment will do; a value that is not a moment is
+        refused rather than answered with "no such run".
+
         With no `due_at` it is a new run due at this moment, for work somebody
         wants done early. With the `due_at` of a run that was **missed** or that
         failed to start, it re-opens *that* run — the same run, the same due time
@@ -906,12 +921,7 @@ def build_server(
         task = task_of(agent, name.strip())
         stamp = due_at.strip()
         if stamp:
-            found = store.run(task.name, stamp)
-            if found is None:
-                raise ToolError(
-                    f"{task.name!r} has no run due at {stamp!r}; {SCHEDULE_RUNS} "
-                    f"lists what it has."
-                )
+            stamp = _key_of(store, task.name, stamp)
             reopened = store.reopen(task.name, stamp)
             assert reopened is not None
             if reopened.status != PENDING:
@@ -944,10 +954,10 @@ def build_server(
     ) -> dict[str, Any]:
         """Close a run that is not going to happen, and say why.
 
-        The run by its due time,
-        or the newest one still open — and the opposite ending. A skipped run is
-        an answer rather than a gap: the ledger says the task came due, that
-        nobody did it, and what the reason was.
+        The run by its due time — any spelling of that moment will do — or the
+        newest one still open; and the opposite ending. A skipped run is an
+        answer rather than a gap: the ledger says the task came due, that nobody
+        did it, and what the reason was.
 
         **A task that has come due is not yours to decline** — the trigger tells
         you to run it. This is for the runs that *did not happen*: one that could
@@ -958,17 +968,48 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         task = task_of(agent, name.strip())
-        stamp = due_at.strip() or _newest_open(store, task)
+        stamp = due_at.strip()
+        stamp = _key_of(store, task.name, stamp) if stamp else _newest_open(store, task)
         settled = store.settle(task.name, stamp, SKIPPED, note=note.strip())
-        if settled is None:
-            raise ToolError(
-                f"{task.name!r} has no run due at {stamp!r}; {SCHEDULE_RUNS} "
-                f"lists what it has."
-            )
+        assert settled is not None  # the run was read a moment ago
         logger.info("scheduled run of %s skipped for %s", task.name, agent)
         return settled.row()
 
     return mcp
+
+
+def _key_of(store: ScheduleStore, name: str, stamp: str) -> str:
+    """The key a run answers to, for a `due_at` a model wrote — or the refusal.
+
+    **A run is keyed by the string it was written with, and a model writes the
+    same moment its own way.**  `+00:00` for a moment this ledger holds in local
+    time, `20261013T110700`, a space where the column has a `T`, no offset at
+    all: each of those is that instant and none of them is that key, so the
+    lookup would answer "there is no run due at …" — the answer a real no-match
+    gives.  `slife2.timeutil` exists to stop exactly that, and its own rule is
+    that a bound nobody understood must not produce the same answer as a
+    no-match, so a value in no grammar is told apart from a run that is not
+    there.  Both refusals are here rather than at the two call sites because both
+    tools take the same argument and would otherwise write the same two
+    sentences.
+
+    **The stamp as written is tried first, and that first try is not a courtesy.**
+    `at()` puts an offset into *today's* local zone, so re-spelling a key that
+    already matches would break a run written on the other side of a
+    daylight-saving change: the row says `-05:00`, the machine now says `-04:00`,
+    and the run stops being findable under its own due time.
+    """
+    if store.run(name, stamp) is not None:
+        return stamp
+    try:
+        spelled = normalize_bound(stamp, role="due_at")
+    except InvalidTimeBound as exc:
+        raise ToolError(str(exc)) from exc
+    if spelled != stamp and store.run(name, spelled) is not None:
+        return spelled
+    raise ToolError(
+        f"{name!r} has no run due at {stamp!r}; {SCHEDULE_RUNS} lists what it has."
+    )
 
 
 def _newest_open(store: ScheduleStore, task: Task) -> str:

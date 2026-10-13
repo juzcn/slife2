@@ -28,7 +28,7 @@ import socket
 import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -492,6 +492,11 @@ async def test_a_task_that_has_come_due_is_handed_to_the_conversation(
     assert handed["channel"] == f"{CHANNEL}:daily"
     assert "▸ Scheduled task: daily" in handed["text"]
     assert DESCRIPTION in handed["text"]
+    # **Whose task it is, in the words** — the only place it can be, since the
+    # `agent` above is an address and a model never sees one.  Without it a
+    # trigger is unanswerable for a conversation that holds no such task: the
+    # reader can say "not mine" and nothing more.
+    assert f"{AGENT}'s task" in handed["text"]
 
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING
@@ -504,6 +509,35 @@ async def test_a_task_that_has_come_due_is_handed_to_the_conversation(
     assert run.due_at in handed["text"]
     assert SCHEDULE_RUN_NOW in handed["text"]
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
+
+
+async def test_a_trigger_names_the_agent_whose_ledger_holds_the_run(
+    window: Window,
+) -> None:
+    """**The one thing that tells a mis-delivery from a reader's own ledger.**
+
+    A trigger that arrives where no such task is written down leaves the reader
+    with a dead end: `schedule_run_now` refuses, `schedule_run_skip` refuses, the
+    ledger is empty — and every one of those is *correct*, because a run is
+    written into the ledger of the agent whose task it is and there is nothing
+    here to start or settle.  What was missing was not a path but a fact: whose
+    run the trigger was talking about, which the words have to carry because a
+    hand-over's address never reaches the model.
+
+    `OTHER`'s ledger rather than this agent's, which is the case that tells the
+    two apart — the name written into the words is the ledger's own agent, not
+    the machine's default and not something read off the task's name.
+    """
+    async with Client(build(window)) as client:
+        await write(client, agent=OTHER, cron=EVERY_MINUTE)
+
+    await poll_once(default_config(), window_client=window.client, reference=later(90))
+
+    assert len(window.handed) == 1
+    handed = window.handed[0]
+    assert handed["agent"] == OTHER
+    assert f"{OTHER}'s task" in handed["text"]
+    assert f"{AGENT}'s task" not in handed["text"]
 
 
 async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
@@ -869,6 +903,62 @@ async def test_skipping_a_run_is_an_answer_rather_than_a_gap(tasks: Tasks) -> No
     assert skipped["note"] == "the day is over"
     # A run that never happened has no moment it happened at.
     assert skipped["ran_at"] == ""
+
+
+async def test_a_run_is_found_by_the_moment_rather_than_its_spelling(
+    tasks: Tasks,
+) -> None:
+    """**A run's key is a moment, and a model hands the moment back its own way.**
+
+    The row is keyed by the string `slife2.clock` wrote, so the same instant
+    spelled in UTC — or as a bare `Z`, or `20261013T060012` — equals no row at
+    all, and the answer was "there is no run due at …", which is what a *real*
+    no-match answers.  `slife2.timeutil` is the module that exists to stop a
+    model-written bound doing that, and this is the schedule plugin asking it the
+    same question the turn log asks.
+
+    A bare `Z` on the same instant is the spelling that means the same test on
+    every machine: the row was written in this machine's local time, so the two
+    strings agree only once the conversion happens — and they are two different
+    strings whatever that time is.
+    """
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        utc = datetime.fromisoformat(run["due_at"]).astimezone(UTC)
+        skipped = await ask(
+            client,
+            SCHEDULE_RUN_SKIP,
+            {
+                "name": "daily",
+                "due_at": utc.isoformat().replace("+00:00", "Z"),
+                "note": "written in UTC",
+            },
+        )
+
+    assert skipped["due_at"] == run["due_at"]
+    assert skipped["status"] == SKIPPED
+
+
+async def test_a_due_at_in_no_grammar_is_told_apart_from_a_run_that_is_gone(
+    tasks: Tasks,
+) -> None:
+    """**"That is not a moment" and "there is no such run" are two sentences.**
+
+    `slife2.timeutil`'s own rule, and the reason it raises rather than passing an
+    unreadable bound through: a string nobody understood must not produce the
+    same answer as a real no-match.  Before this, prose for a `due_at` answered
+    "there is no run due at 'the day it was due'" — which reads as *the run is
+    gone*, and sends a reader looking for a fault in the ledger instead of in the
+    argument it was handed.  Both tools take the argument, so both say it.
+    """
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        for tool in (SCHEDULE_RUN_SKIP, SCHEDULE_RUN_NOW):
+            with pytest.raises(ToolError, match="expected an ISO date or datetime"):
+                await ask(
+                    client, tool, {"name": "daily", "due_at": "the day it was due"}
+                )
 
 
 async def test_skipping_with_no_due_at_closes_the_newest_open_run(

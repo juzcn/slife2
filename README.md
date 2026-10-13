@@ -889,8 +889,9 @@ due_at)` or closed with `schedule_run_skip`. Nothing announces them: **a trigger
 is the only thing the clock ever says to a conversation**, and the ledger is where
 "did it run?" is answered (DESIGN.md §1.7, §9). A trigger wears no marker either,
 because the marker vocabulary is for matching a *result* to what produced it and a
-trigger is not a result — the `schedule:<task>` channel and the template's first
-line carry what a reader needs.
+trigger is not a result — the `schedule:<task>` channel carries which task, and
+the words say **whose ledger the run is in**, which is the one thing that tells a
+trigger delivered to the wrong conversation from a reader's own.
 
 A ledger lives at `<data>/agents/<agent>/schedule.db`, and there is **no config
 section** — an address is the whole of what is written down about the plugin. A
