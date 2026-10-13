@@ -1,8 +1,8 @@
 """Shared test setup.
 
-Two autouse fixtures, each guarding something every test would otherwise have to
-remember, and the first is the difference between a test suite and a loaded gun:
-**every test runs against its own data directory.**
+Three autouse fixtures, each guarding something every test would otherwise have
+to remember, and the first is the difference between a test suite and a loaded
+gun: **every test runs against its own data directory.**
 
 The reason is the last act of `slife2.main`.  When the last client exits it stops
 the shared MCP servers, and "the last client" is decided by pid liveness against
@@ -24,15 +24,143 @@ same reason: the token estimator will fetch a few megabytes of vocabulary over
 the network the first time it is asked for one, and a suite that claims to need
 no network must not acquire one because a test happened to size a turn.  Its
 docstring below says what it pins and how a test opts back in.
+
+The third is **the same gun as the first, pointed at the addresses**.  The two
+that guard a directory cover `/agents`; nothing covered the ports, and a port is
+what a hand-over needs.
 """
 
 from __future__ import annotations
 
+import importlib
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from slife2 import tokens
+
+#: Every module that dials one of *our* servers, and the names it does it
+#: through.  Named as strings because importing the plugin stack — `fastmcp`,
+#: the loop, the model clients — is not something a conftest should make every
+#: worker do at collection time; the fixture resolves them on first use.
+#:
+#: The list is the whole guard, so it is worth saying what each dial reaches:
+#:
+#:   * `handover` — the window, and the agent server as the fallback.  Both put
+#:     words into somebody's conversation.
+#:   * `agent_task_server` — the hub, the context store and the model for a
+#:     task's own turn.  A forgotten `backend=` is a live, paid call.
+#:   * `schedule_server` — the agent-task plugin it dispatches a run to.
+#:   * `server.server` — the same three, for a turn of the agent's own, which is
+#:     the one leak that would *write* to a developer's real conversation.
+#:   * `context_server` — the model its discriminator needs to choose a context.
+#:   * `llm.client` — `open_backend`, which is how anything above reaches a
+#:     model server at all.
+#:   * `embedder` — the embeddings endpoint, the other paid address.
+#:
+#: `slife2.tui.client` is deliberately **not** here: that one is how a test
+#: reaches a server it started itself on an ephemeral port (`test_a2a`,
+#: `test_tui_control`), and refusing it would take away the only way to exercise
+#: a stream end to end.
+_DIALERS: dict[str, tuple[str, ...]] = {
+    "slife2.handover": ("open_server",),
+    "slife2.agent_task_server": ("open_server", "open_backend"),
+    "slife2.schedule_server": ("open_server",),
+    "slife2.server.server": ("open_server", "open_backend"),
+    "slife2.context_server": ("open_server",),
+    "slife2.llm.client": ("open_server",),
+    "slife2.embedder": ("open_server",),
+}
+
+
+@pytest.fixture(autouse=True)
+def no_live_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put this machine's running slife2 out of every test's reach.
+
+    **A config's addresses are the machine's, and a test's are nobody's.**  The
+    data-directory guard above stops a test from stopping real daemons; this one
+    stops it from *talking* to them, which is worse because it cannot be told
+    apart from success.  A plugin takes its peers as arguments —
+    `window_client`, `agent_client`, `hub_client`, `context_client`,
+    `backend`, `tasks_client` — and `None` means "the real address in the
+    config", which in a test is the developer's stack listening on the standard
+    ports.  So a test that forgot one does not fail: it types into a live
+    conversation, or hands a live conversation a trigger for a task whose ledger
+    is in a `tmp_path` the live process has never heard of.
+
+    That is not hypothetical.  It is what a full run of this suite did to a
+    running `jack`: a `daily` schedule set in `test_schedule.py` came due against
+    the real clock and was handed to the real window, which ran a turn asking
+    about a task its own ledger has never held — and every `test_agent_task.py`
+    answer whose test passed no `window=` arrived in the same conversation, one
+    per test, each one naming a task in a registry only the test process has.
+    The model on the other end spent a turn on each, correctly reporting that
+    none of it was its own.
+
+    **`open_server` is the seam because every one of those dials goes through
+    it**, and patching it in the *dialling module* is what this codebase already
+    does when a test wants to say what a peer answered (`test_wechat`,
+    `test_runtime`, `test_server`).  A test that wants a real one still gets it by
+    patching the name itself — its `monkeypatch` is this same object and undoes
+    first — and a test that merely *left a peer out* now fails with the sentence
+    that names what to pass instead, which is the whole point: the leak is loud
+    rather than silent.
+    """
+
+    def refuse(url: str, *args: Any, **kwargs: Any) -> Any:
+        """Stand in for the connection, and say which peer was left out.
+
+        The arguments are only read to name it — every dialler passes a
+        different pair (`name=` for a plugin, `server_name=` and a model for a
+        backend) — because the sentence is a diagnosis, and "hand over the
+        window" is worth more than "hand over the peer".
+        """
+        left_out = ", ".join(
+            str(part)
+            for part in (kwargs.get("name"), kwargs.get("server_name"), *args)
+            if part
+        )
+        raise RuntimeError(
+            f"a test tried to open a real connection to {url}"
+            + (f" ({left_out})" if left_out else "")
+            + ". This machine's slife2 may be running, and a test that reaches it "
+            "types into a live conversation. Hand the plugin the peer instead: "
+            "`window_client=`, `agent_client=`, `hub_client=`, `context_client=`, "
+            "`backend=`, `tasks_client=` — or patch this name in the module under "
+            "test if the connection is the thing being tested."
+        )
+
+    for name, attributes in _DIALERS.items():
+        module = importlib.import_module(name)
+        for attribute in attributes:
+            if hasattr(module, attribute):
+                monkeypatch.setattr(module, attribute, refuse)
+
+
+@pytest.fixture
+def real_dialer(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """Put a real `open_server` back in one module, and say so at the call site.
+
+    **The escape `no_live_stack` promises, made askable.**  Two tests are *about*
+    the dial rather than tripped up by it — one probes a port nothing is
+    listening on to assert the sentence `open_server` writes for that, and one
+    proves a dispatch that cannot reach its peer still closes the run — and both
+    would pass with the refusal in place while testing nothing they claim to.
+    Handing them the real function is the same move `real_tokenizer` makes for
+    the vocabulary, and it is deliberately a *fixture* rather than each test
+    patching the name itself: reaching for the original means importing where the
+    original lives, and a test that has to know that is a test that has stopped
+    being about its own subject.
+    """
+
+    def restore(module: str) -> None:
+        real = importlib.import_module("slife2.mcp_server").open_server
+        monkeypatch.setattr(importlib.import_module(module), "open_server", real)
+
+    return restore
+
 
 #: The real resolver, captured before anything patches it.  `monkeypatch`
 #: replaces the module *attribute*, so holding the function object is what lets

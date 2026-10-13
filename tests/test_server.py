@@ -1386,7 +1386,9 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
 
 
 @pytest.mark.asyncio
-async def test_opening_a_loop_fails_when_the_context_store_is_gone(hub) -> None:
+async def test_opening_a_loop_fails_when_the_context_store_is_gone(
+    hub, real_dialer: Any
+) -> None:
     """A missing context store is a broken system, not a degraded one.
 
     Asked before anything is spent rather than at the write: the point of the
@@ -1397,7 +1399,13 @@ async def test_opening_a_loop_fails_when_the_context_store_is_gone(hub) -> None:
     down` looks like from the agent server's side.  Port 9 rather than the
     configured 8010, which would make this pass or fail on whether the developer
     happens to have slife2 running.
+
+    **The sentence asserted is `open_server`'s, so the dial is the subject** and
+    it is the real one being asked — `real_dialer` says so, because the suite's
+    `no_live_stack` guard refuses every dial a test did not inject, and a test
+    that refuses its own subject asserts a sentence the product never wrote.
     """
+    real_dialer("slife2.server.server")
     base = default_config()
     cfg = replace(
         base,

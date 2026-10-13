@@ -779,26 +779,36 @@ async def test_a_task_the_peer_no_longer_holds_closes_the_run(tasks: Tasks) -> N
     assert "never seen" in run.error
 
 
-async def test_the_poll_asks_after_the_task_has_ended(tasks: Tasks) -> None:
+async def test_the_poll_asks_after_the_task_has_ended(
+    tasks: Tasks, window: Window
+) -> None:
     """Both ends of a run's life in one pass: the clock's fires, then the asking
     about what is in flight.
 
-    **Asserted on the run `run_now` started, not on the newest one**, and that is
-    a flake rather than a preference.  The task here fires `EVERY_MINUTE` and this
-    is the one poll in the file that asks with the *real* clock, so a pass that
-    straddles a minute boundary opens a second run behind the one under test:
-    `newest` then answers with a row nothing has reported on yet and the
-    assertion fails, about once in a few hundred runs, for a reason that has
-    nothing to do with what is being tested.  Naming the run makes the extra one
-    harmless — which is also the rule the module docstring gives: ask a question
-    about the moment you chose.
+    **The moment is chosen rather than read off the clock, and the fire is handed
+    to a recorder.**  This is the one poll in the file whose subject *is* a fire —
+    `EVERY_MINUTE` with a `run_now` run already open beside it — so it needs a
+    minute boundary behind the anchor to exist, and it needs the pass that finds
+    it to have somewhere to put the trigger.  A pass on the real clock gives both
+    by accident (and, straddling a boundary twice, a second run that `newest`
+    would answer with); `later(90)` gives the first on purpose and `window` the
+    second, which is the rule the module docstring gives: ask a question about
+    the moment you chose.
+
+    The assertion is on the run `run_now` started rather than on the newest one
+    for the same reason — the pass opens a run of its own behind it.
     """
     async with Client(build(tasks=tasks)) as client:
         await write(client)
         started = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
     tasks.status = TASK_FINISHED
 
-    did = await poll_once(default_config(), tasks_client=tasks.client)
+    did = await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
 
     assert any(line.endswith("closed") for line in did)
     run = ledger().run("daily", started["due_at"])
@@ -1054,14 +1064,22 @@ async def test_a_ledger_that_cannot_be_opened_is_skipped_not_fatal() -> None:
 # ── a dispatch whose peer will not answer ────────────────────────────────────
 
 
-async def test_a_dispatch_whose_peer_cannot_be_reached_closes_the_run() -> None:
+async def test_a_dispatch_whose_peer_cannot_be_reached_closes_the_run(
+    real_dialer: Any,
+) -> None:
     """**Opening the agent-task peer is part of the dispatch.**
 
     `tasks_server` used to sit outside the `try`, so a port that is not listening
     escaped as a raw non-`ToolError` *and* left the run `pending` with an empty
     `agent_task_id` — the state `in_flight` skips and the sweep only reaches at
     startup.  The failure has to leave a run something can resolve.
+
+    **What raises is the connection, so the connection is the subject** —
+    `real_dialer` puts the real `open_server` back, because the suite's
+    `no_live_stack` guard refuses every dial a test did not inject, and the
+    refusal would stand in for the dead port this test is built around.
     """
+    real_dialer("slife2.schedule_server")
     config = default_config()
     config.servers["agent-task"] = ServerSettings(port=free_port())
     async with Client(build_server(config, polling=False)) as client:
