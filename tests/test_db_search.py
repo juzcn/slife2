@@ -465,32 +465,39 @@ async def test_a_rebuild_embeds_the_turns_in_batches(tmp_path, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_bound_list_is_capped_before_sqlite_sees_it(tmp_path) -> None:
-    """**The cap belongs on the fused list**, and this is the query that binds it.
+async def test_a_bound_list_longer_than_sqlite_takes_is_bound_in_chunks(
+    tmp_path,
+) -> None:
+    """**The cap is on the statement, not on the answer**, and this is the query
+    that binds it.
 
     Nothing the caller passes bounds a search's shortlist: every question brings
     up to `limit * 4` ids of its own and the keyword leg as many again, so about
     forty sentences reach SQLite's ceiling for bound variables (32766, measured)
     and raise `OperationalError: too many SQL variables` — a search that does not
-    answer at all, where the best of a truncated candidate list still answers.
-    All three stores read their page through this one query, which is where the
-    cap therefore is.  Forty thousand ids is under no SQLite's limit unless
-    something truncates.
+    answer at all.  All three stores read their page through this one query,
+    which is where the cap therefore is, and the answer is chunks rather than a
+    shorter list: the ranking is already complete when the ids get here, so a
+    page that had quietly lost its tail would be the one thing a caller cannot
+    tell from a short page.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())
+    await store.save_turn(messages=CORPUS[1], embedder=StubEmbedder())
 
     with store._connect() as connection:
         rows = rows_in_order(
             connection,
-            [1, *range(2, 40_000)],
+            [1, *range(3, 40_000), 2],
             select="SELECT rowid AS turn_id, * FROM turn",
             column="rowid",
             key="turn_id",
             limit=5,
         )
 
-    assert [int(row["turn_id"]) for row in rows] == [1], "the top of the order"
+    # The order is the caller's, and an id past the first chunk is found like
+    # any other: 2 sits at the end of a list forty thousand long.
+    assert [int(row["turn_id"]) for row in rows] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -561,6 +568,32 @@ async def test_the_writes_happen_on_another_thread(tmp_path) -> None:
     await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())
 
     assert seen["writes"] != seen["loop"]
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_answers_nothing_is_not_a_finished_index(tmp_path) -> None:
+    """**An empty answer is a failure, not the end of the work.**
+
+    The build loop had an arm that read "the model answered with nothing for
+    this batch" as "the index is as complete as it will get" and stopped: the
+    turns that were owed a vector stayed owed, `index_status` counted the
+    missing ones, and the loop that was supposed to place them had already
+    returned as though it were done.  `_embed_turns` refuses a short answer, so
+    that arm was unreachable — and what it *said* was the one thing an empty
+    answer does not mean.
+    """
+
+    class Silent(StubEmbedder):
+        async def embed(self, texts):
+            return []
+
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())
+
+    with pytest.raises(RuntimeError) as raised:
+        await store.sync_indexes(Silent(identity="stub:silent"))
+
+    assert "searchable only by keyword" in str(raised.value)
 
 
 @pytest.mark.asyncio

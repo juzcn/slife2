@@ -808,22 +808,27 @@ def rows_in_order(
     no `WHERE` — and a page that silently ignores its own window is worse than a
     shorter page.
 
-    **The list is capped at `MAX_SQL_VARS`, here, because this is the one place
-    that binds it.**  A search's shortlist is the union of a leg's ids per
-    question and is not bounded by anything the caller passed; a statement with
-    more values than SQLite accepts raises `OperationalError`, which is a search
-    that does not answer at all where a shortened candidate list answers with the
-    best of what it had.  The caller's list is already in its final order, so
-    what is kept is the top of it.
+    **The list is bound in chunks of `MAX_SQL_VARS`, here, because this is the
+    one place that binds it.**  A search's shortlist is the union of a leg's ids
+    per question and is not bounded by anything the caller passed, and a
+    statement with more values than SQLite accepts raises `OperationalError`.
+    The truncation that used to answer that — keep the top of the list — was
+    worse than it looked: the ranking was already complete, the caller's list is
+    already in its final order, and a page that had quietly lost its tail is the
+    one thing a caller cannot tell from a short page.  `_ids_in_window` binds in
+    the same chunks for the same reason.
     """
-    wanted = list(ordered)[:MAX_SQL_VARS]
+    wanted = list(ordered)
     if not wanted:
         return []
-    where = f"WHERE {column} IN ({_marks(wanted)})"
-    if clauses:
-        where += f" {where_clause(list(clauses))}"
-    rows = connection.execute(f"{select} {where}", (*wanted, *values)).fetchall()
-    found = {int(row[key or column]): row for row in rows}
+    found: dict[int, sqlite3.Row] = {}
+    for start in range(0, len(wanted), MAX_SQL_VARS):
+        chunk = wanted[start : start + MAX_SQL_VARS]
+        where = f"WHERE {column} IN ({_marks(chunk)})"
+        if clauses:
+            where += f" {where_clause(list(clauses))}"
+        rows = connection.execute(f"{select} {where}", (*chunk, *values)).fetchall()
+        found.update({int(row[key or column]): row for row in rows})
     return [found[rowid] for rowid in wanted if rowid in found][:limit]
 
 
@@ -1199,7 +1204,7 @@ class TurnStore:
                     record.context_tokens,
                 ),
             )
-            turn_id = int(cursor.lastrowid or 0)
+            turn_id = _rowid(cursor, what="a turn")
             connection.execute(
                 "INSERT INTO turn_fts (rowid, search) VALUES (?, ?)",
                 (turn_id, record.search),
@@ -1324,7 +1329,10 @@ class TurnStore:
 
         Ids with no row are dropped rather than refused: a turn can be missing
         because a file was rebuilt or a row pruned, and a restore that refused to
-        run over one absent id would turn a partial loss into a total one.
+        run over one absent id would turn a partial loss into a total one.  What
+        that costs is a conversation that comes back shorter than it was, so the
+        drop is counted and named in the log rather than passed over in silence —
+        the ids are the only thing that says a log is damaged at all.
 
         Chunked, because the list can be longer than one statement may bind
         (`MAX_SQL_VARS`) and an unbounded `IN (…)` is a query that works in
@@ -1342,6 +1350,13 @@ class TurnStore:
                 ).fetchall()
                 for row in rows:
                     found[int(row["turn_id"])] = _row_to_record(row)
+        if len(found) != len(wanted):
+            logger.warning(
+                "%d of %d turns in a live context have no row: %s",
+                len(wanted) - len(found),
+                len(wanted),
+                [turn_id for turn_id in wanted if turn_id not in found],
+            )
         return [found[turn_id] for turn_id in wanted if turn_id in found]
 
     def _ids_in_window(
@@ -1499,9 +1514,12 @@ class TurnStore:
 
         It terminates because every turn selected here is one `_place_vectors`
         then writes a chunk row for — `_turns_without_vectors` selects rows with
-        none, and a turn with nothing to embed is not selected at all.  The `not
-        vectors` arm is the guard on that: a model that answers with nothing for
-        a batch would otherwise be asked for the same batch for ever.
+        none, and a turn with nothing to embed is not selected at all.  A model
+        that answers with nothing is *not* the other way out: `_embed_turns`
+        refuses an answer shorter than the batch it was asked for, so this ends
+        either with every turn placed or with the failure named.  (An arm here
+        used to read an empty answer as "the index is as complete as it will
+        get", which is the one thing an empty answer does not mean.)
         """
         await self._off_loop(self._sync_text_index)
         await self._off_loop(self.ensure_indexes, embedder)
@@ -1510,8 +1528,6 @@ class TurnStore:
             if not missing:
                 break
             vectors = await self._embed_turns(missing, embedder)
-            if not vectors:
-                break
             await self._off_loop(self._place_vectors, vectors)
 
     async def _embed_turns(
@@ -1600,7 +1616,13 @@ class TurnStore:
                     (
                         int(row["rowid"]),
                         searchable_text(
-                            _loads(row["messages"], []), row["summary"], row["tags"]
+                            _loads(
+                                row["messages"],
+                                [],
+                                what=f"turn {row['rowid']}'s messages",
+                            ),
+                            row["summary"],
+                            row["tags"],
                         ),
                     )
                     for row in rows
@@ -1641,7 +1663,15 @@ class TurnStore:
         found = [
             (int(row["rowid"]), text)
             for row in rows
-            if (text := embed_text(_loads(row["messages"], []))).strip()
+            if (
+                text := embed_text(
+                    _loads(
+                        row["messages"],
+                        [],
+                        what=f"turn {row['rowid']}'s messages",
+                    )
+                )
+            ).strip()
         ]
         return found[:limit] if limit else found
 
@@ -1904,6 +1934,22 @@ def vector_identity(embedder: Embedder) -> str:
     return f"{textindex.RULES_VERSION}|{embedder.identity}|{embedder.dimension}"
 
 
+def _rowid(cursor: sqlite3.Cursor, *, what: str) -> int:
+    """The rowid an INSERT just made, or the failure that it made none.
+
+    **`or 0` is not a default here, it is a wrong fact.**  A rowid is what names
+    a row to the keyword index, the vector index and the live-context list, so
+    an INSERT that did not happen used to leave several rows agreeing on `0` —
+    a turn nothing could ever find, in an index that counted as complete.
+    `lastrowid` is `None` only when the statement recorded nothing, which is a
+    fault rather than a case to carry on from (DESIGN.md §10.1).
+    """
+    rowid = cursor.lastrowid
+    if rowid is None:
+        raise RuntimeError(f"{what} recorded no rowid")
+    return int(rowid)
+
+
 def _write_vectors(
     connection: sqlite3.Connection, turn_id: int, vectors: list[list[float]]
 ) -> None:
@@ -1923,7 +1969,10 @@ def _write_vectors(
         )
         connection.execute(
             "INSERT INTO turn_vec (rowid, embedding) VALUES (?, ?)",
-            (int(row.lastrowid or 0), sqlite_vec.serialize_float32(vector)),
+            (
+                _rowid(row, what="a turn chunk"),
+                sqlite_vec.serialize_float32(vector),
+            ),
         )
 
 
@@ -1931,11 +1980,22 @@ def _write_vectors(
 
 
 def read_context(connection: sqlite3.Connection) -> list[int]:
-    """The persisted live-context list, in the order it was written."""
+    """The persisted live-context list, in the order it was written.
+
+    **A damaged list is refused rather than read as empty.**  The empty list
+    means something here — "this conversation's context has not been recorded",
+    which is every file predating the table, and one of the three things a
+    rebuild may decide — and it is also what `_loads` would answer for a
+    `turn_ids` whose JSON will not parse.  Those are not the same fact, and the
+    difference is not academic: `append_context` reads this list and appends to
+    it, so a damaged list read as `[]` becomes a **one-turn context** on the
+    next save, permanently and without a word.  `_structural` is the refusal,
+    and DESIGN.md §10.1 is the rule it follows.
+    """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
         return []
-    return normalise_ids(_loads(row["turn_ids"], []))
+    return normalise_ids(_structural(row["turn_ids"], what="context.turn_ids"))
 
 
 def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:
@@ -2021,7 +2081,9 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
     """
     return TurnRecord(
         turn_id=int(row["turn_id"]),
-        messages=_loads(row["messages"], []),
+        messages=_loads(
+            row["messages"], [], what=f"turn {int(row['turn_id'])}'s messages"
+        ),
         summary=str(row["summary"] or ""),
         tags=str(row["tags"] or ""),
         created_at=str(row["created_at"]),
@@ -2034,12 +2096,41 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
     )
 
 
-def _loads(raw: Any, default: Any) -> Any:
+def _loads(raw: Any, default: Any, *, what: str) -> Any:
+    """A stored value, tolerating one that will not parse.
+
+    **For a field, and never for a structure.**  A turn whose `messages` are
+    damaged is one damaged turn, and refusing to read any history because of it
+    would turn a small problem into a total one — so the caller's default is the
+    answer and the warning is the report.  `_structural` is the other half, and
+    the question that tells them apart is what the empty value *means*: here it
+    means "this one turn's body is unreadable", which is a smaller claim than
+    the damaged value made.  There it means something the damage did not
+    (DESIGN.md §10.1).
+
+    `what` is not decoration: a damaged row that is read as empty leaves a log
+    line as the only trace of it, so the line has to say *which* row — the
+    alternative is an operator counting rows by hand.
+    """
     try:
         return json.loads(raw)
     except (TypeError, ValueError):
-        logger.warning("a stored value did not parse; reading it as empty")
+        logger.warning("%s did not parse; reading it as empty", what)
         return default
+
+
+def _structural(raw: Any, *, what: str) -> Any:
+    """A stored value whose damage the caller cannot carry on past.
+
+    Raised rather than answered with a default, and it names what could not be
+    read.  A damaged *structure* has no honest empty value, because whatever
+    reads it goes on to write: an empty list is a decision, and the damage did
+    not make it.
+    """
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"a stored value did not parse: {what}") from exc
 
 
 def store_for(agent: str, subagent: str = "") -> TurnStore:
@@ -2790,7 +2881,7 @@ class ToolStore:
                         entry["last_used"],
                     ),
                 )
-                rowid = int(cursor.lastrowid or 0)
+                rowid = _rowid(cursor, what=f"the tool {entry['name']!r}")
                 self._index(connection, rowid, entry)
                 _write_tool_vectors(
                     connection, str(entry["name"]), vectors.get(entry["name"], [])
@@ -3018,7 +3109,17 @@ class ToolStore:
         has the argument — but a *caller* naming this method has asked for the
         pass, so it keeps the meaning an empty set has always had.
         """
-        known = self.known or frozenset()
+        if self.known is None:
+            # **Not told is not told "none".**  `self.known or frozenset()`
+            # used to collapse the two, which made this method the destructive
+            # case the constructor's own comment says it must never be: a store
+            # nobody told which sources the config carries deleted every
+            # `plugin`, `mcp` and `rest` row in the file and their vectors, on
+            # a call it was asked for outright.  `__init__` already declines to
+            # run the pass for that store; the state it declines to run is now
+            # the state the method has (DESIGN.md §10.1).
+            return {"forgotten": 0}
+        known = self.known
         with self._connect() as connection:
             where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
             if known:
@@ -3691,17 +3792,15 @@ class ToolStore:
         # It terminates because `_place` writes a chunk row for every tool it
         # was handed, and every tool has at least a name to be a chunk of
         # (`tool_document`) — so a row that was selected is a row that is no
-        # longer missing.  The `not vectors` arm is the guard on that: if the
-        # model ever answers with nothing for a batch, stopping is the only
-        # alternative to selecting the same batch for ever.
+        # longer missing.  An empty answer is not the other way out: `_embed`
+        # refuses an answer shorter than the batch, so the loop ends either with
+        # every tool placed or with the failure named.
         placed = 0
         while True:
             missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
             if not missing:
                 break
             vectors = await self._embed(missing, embedder)
-            if not vectors:
-                break
             await asyncio.to_thread(self._place, vectors)
             placed += len(vectors)
         return {
@@ -3950,7 +4049,10 @@ def _write_tool_vectors(
         )
         connection.execute(
             "INSERT INTO tool_vec (rowid, embedding) VALUES (?, ?)",
-            (int(cursor.lastrowid or 0), sqlite_vec.serialize_float32(vector)),
+            (
+                _rowid(cursor, what=f"a chunk of {name!r}"),
+                sqlite_vec.serialize_float32(vector),
+            ),
         )
 
 

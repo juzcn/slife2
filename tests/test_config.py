@@ -7,6 +7,9 @@ unambiguous, and parameters that are absent rather than defaulted.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 
 import slife2.config
@@ -613,6 +616,70 @@ def test_unset_without_default_stays_literal(monkeypatch: pytest.MonkeyPatch) ->
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
 
+def test_a_keyring_that_failed_is_not_read_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A credential nobody could read is not a credential that is absent.**
+
+    The lookup swallowed *every* credential-store failure into None, so a keyring
+    that exists but is locked or corrupt became "not found" and the `${VAR}` text
+    then travelled as the secret itself.  The declared degrade is a host with no
+    backend at all; a backend that is there and refuses raises, where the secret
+    is resolved.
+    """
+    import credstore
+
+    def locked(key: str) -> str | None:
+        raise RuntimeError("the keyring is locked")
+
+    monkeypatch.setattr(credstore, "get_credential", locked)
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="locked"):
+        resolve_secret("${SLIFE2_TEST_KEY}")
+
+
+def test_no_keyring_at_all_still_degrades_to_the_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared degrade survives: with no backend, credstore answers None and
+    the chain steps past it to the reference (`DESIGN.md` §10.2)."""
+    import credstore
+
+    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
+
+
+def test_a_keyring_uri_that_failed_is_not_left_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A keyring URI nobody could resolve is not a URI that is absent.**
+
+    The `keyring:` branch swallowed *every* failure into `pass`, so a keyring
+    that exists but is locked, or a credential that was never stored, left the
+    `keyring:service/key` reference to travel as the secret itself.  Only a host
+    with no `credstore` at all degrades to the reference; a backend that is
+    there and refused raises where the secret is resolved.
+    """
+    import credstore
+
+    def missing(value: str) -> str:
+        raise KeyError("Credential 'slife/deepseek' not found in keyring")
+
+    monkeypatch.setattr(credstore, "resolve_uri", missing)
+    with pytest.raises(KeyError, match="not found"):
+        resolve_secret("keyring:slife/deepseek")
+
+
+def test_no_credstore_at_all_leaves_a_keyring_uri_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared degrade survives: with no backend, a `keyring:` reference is
+    left exactly as written (`DESIGN.md` §10.2)."""
+    monkeypatch.setitem(sys.modules, "credstore", None)
+    assert resolve_secret("keyring:slife/deepseek") == "keyring:slife/deepseek"
+
+
 def test_reference_embedded_in_a_larger_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLIFE2_TEST_HOST", "example.test")
     assert resolve_secret("https://${SLIFE2_TEST_HOST}/v1") == "https://example.test/v1"
@@ -893,12 +960,111 @@ def test_no_skills_section_is_no_skills(tmp_path) -> None:
     assert default_config().skills == {}
 
 
+def test_a_skills_entry_that_is_not_a_mapping_is_refused(tmp_path) -> None:
+    """**A value that cannot be read is not a value that is absent.**
+
+    `skills.<name>: just-a-name` was read as an empty, enabled entry, so the
+    operator's key was dropped with nothing said and the model later ran a
+    playbook that died on the credential this section exists to supply.  Every
+    other entry-holding section refuses this shape through `_mapping`
+    (`_cli_tools`, `_tool_server`), and this one now does too.
+    """
+    with pytest.raises(ConfigError, match=r"skills\.baidu-search: expected a mapping"):
+        load(write(tmp_path, "skills:\n  baidu-search: just-a-name\n"))
+
+
 def test_no_cli_section_is_no_cli_entries(tmp_path) -> None:
     """Absent means empty, like every other section: a config written before
     this existed still loads, and it ships with no external command at all."""
     config = load(write(tmp_path, A_PROVIDER))
     assert config.cli == {}
     assert default_config().cli == {}
+
+
+# --- embeddings: which endpoint answers ---------------------------------------
+#
+# The table is a list of endpoints, and `active_model` picks one.  A name the
+# file does not define is a mistake, not a vote for the first endpoint — a
+# substitution there changes where every vector comes from and, with it, the
+# index's recorded identity.
+
+EMBEDDINGS_TWO = """
+embeddings:
+  providers:
+    first:
+      base_url: http://127.0.0.1:17347/v1
+      model: m-one
+    second:
+      base_url: http://127.0.0.1:17348/v1
+      model: m-two
+"""
+
+
+def test_an_unknown_active_model_is_refused_rather_than_substituted(tmp_path) -> None:
+    """**A name the config does not define is not the first name it does.**
+
+    A stale `active_model` used to fall back to the first provider, so vectors
+    came from an endpoint nobody chose and the index's identity changed
+    underneath with nothing in any file to say why.  The refusal names both the
+    missing model and the ones that exist.
+    """
+    path = write(tmp_path, EMBEDDINGS_TWO + "  active_model: gone\n")
+    with pytest.raises(ConfigError, match="gone") as caught:
+        load(path)
+    assert "first" in str(caught.value) and "second" in str(caught.value)
+
+
+def test_no_active_model_still_takes_the_first(tmp_path) -> None:
+    """The designed default, not a substitution: naming none is not naming a
+    name that does not exist."""
+    config = load(write(tmp_path, EMBEDDINGS_TWO))
+    assert config.embeddings.active == "first"
+    assert config.embeddings.active_provider().model == "m-one"
+
+
+def test_a_code_built_settings_with_an_unknown_active_is_refused() -> None:
+    """The same rule for a `Config` assembled in code rather than read: an
+    `active` nobody defined must not quietly select `next(iter(...))`."""
+    from slife2.config import EmbeddingProviderSettings, EmbeddingsSettings
+
+    settings = EmbeddingsSettings(
+        providers={
+            "one": EmbeddingProviderSettings(
+                name="one", base_url="http://127.0.0.1:1/v1", model="m"
+            )
+        },
+        active="gone",
+    )
+    with pytest.raises(ConfigError, match="gone"):
+        settings.active_provider()
+
+
+# --- media: the registered fall-through ---------------------------------------
+
+MEDIA_STALE_DEFAULT = """
+media:
+  defaults:
+    image: test/gone
+  providers:
+    test:
+      api: openai-compat
+      base_url: https://example.test/v1
+      models:
+        - model: img
+          kind: image
+"""
+
+
+def test_a_stale_media_default_falls_through_to_the_first_of_the_kind(
+    tmp_path,
+) -> None:
+    """The one registered step past v1's four: a `defaults[kind]` that no longer
+    resolves is a *weaker* statement than the caller's, so the first model of the
+    kind answers rather than the call stopping — and the answer's own
+    `provider/model` is what makes the substitution visible (`DESIGN.md` §10.2).
+    """
+    provider, model = load(write(tmp_path, MEDIA_STALE_DEFAULT)).media.resolve("image")
+    assert (provider.name, model.model) == ("test", "img")
 
 
 # --- the config as a file that can change ------------------------------------
@@ -936,3 +1102,33 @@ def test_load_cached_does_not_answer_one_file_for_another(tmp_path) -> None:
 
 def test_load_cached_with_no_file_is_the_defaults() -> None:
     assert load_cached().default == default_config().default
+
+
+def test_a_stat_failure_is_not_read_as_a_fresh_load(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A file that cannot be read is not a file that changed.**
+
+    `path.stat()` failing — a permissions error, a racing delete — was caught
+    and turned into an unrelated `load`, which handed a *fresh* `Config` to a
+    caller whose whole staleness test is object identity: the edit it was asking
+    about would look like it never happened, with nothing reported.
+    """
+    path = write(tmp_path, A_PROVIDER)
+    monkeypatch.setattr(slife2.config, "_latest", None)
+
+    real_is_file = Path.is_file
+    real_stat = Path.stat
+
+    def fake_is_file(self: Path) -> bool:
+        return True if self == path else real_is_file(self)
+
+    def fake_stat(self: Path, *args, **kwargs):
+        if self == path:
+            raise PermissionError("denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    with pytest.raises(ConfigError, match="cannot read"):
+        load_cached(str(path))

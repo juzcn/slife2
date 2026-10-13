@@ -7,6 +7,8 @@ that a directory which merely *looks* busy is not mistaken for a checkout.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from slife2.paths import (
@@ -69,6 +71,33 @@ def test_a_config_alone_does_not_make_a_checkout(
     (tmp_path / "slife2.yaml").write_text("default: ''\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert in_checkout() is False
+
+
+def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A path that cannot be read is not a path that is not a checkout.**
+
+    `in_checkout` swallowed every `OSError` into False, so a `pyproject.toml`
+    that was there but unreadable — permissions, a racing delete — read as "not
+    a checkout" and sent the whole data directory to `~/.slife2` with nothing
+    said.  Only "no such file" now answers False.
+    """
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "slife2"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    real_read_text = Path.read_text
+
+    def denied(self: Path, *args, **kwargs):
+        if self.name == "pyproject.toml":
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        in_checkout()
 
 
 def test_the_environment_overrides_both(

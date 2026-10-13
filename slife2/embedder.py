@@ -49,10 +49,19 @@ class RemoteEmbedder:
 
     def __init__(self, client: Client, described: dict[str, Any]) -> None:
         self._client = client
-        self._identity = "|".join(
-            str(described.get(field) or "")
-            for field in ("provider", "model", "base_url")
-        )
+        #: The three fields that say *which* endpoint this is.  All are
+        #: required: a `""` slot makes a changed model or a repointed endpoint
+        #: invisible in the identity, and the identity is the lever that turns
+        #: either into a rebuild (DESIGN.md §5.1) — the same argument the width
+        #: and input limit are refused on below.
+        fields = ("provider", "model", "base_url")
+        if not all(str(described.get(field) or "") for field in fields):
+            raise RuntimeError(
+                f"the embeddings server described itself without a provider, a "
+                f"model or a base_url ({described!r}), so a changed model or a "
+                f"repointed endpoint would not be a different index"
+            )
+        self._identity = "|".join(str(described[field]) for field in fields)
         self._dimension = int(described.get("dimension") or 0)
         self._max_chars = int(described.get("max_chars") or 0)
         if not self._dimension or not self._max_chars:

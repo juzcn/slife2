@@ -21,6 +21,7 @@ from slife2.db import (
     TOOL_RESULT_CHARS,
     ToolStore,
     TurnStore,
+    _rowid,
     compact_tool_results,
     message_text,
     safe_agent_name,
@@ -150,6 +151,24 @@ async def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     records, _ = store.turns()
     assert [r.messages for r in records] == [[{"role": "assistant", "c": 2}], []]
     assert records[1].messages == []
+
+
+def test_an_insert_that_recorded_nothing_is_not_a_rowid_of_zero() -> None:
+    """**`lastrowid or 0` is a wrong fact, not a default.**
+
+    A rowid is what names a row to the keyword index, the vector index and the
+    live-context list, so an INSERT that recorded nothing used to leave all
+    three agreeing on `0` — a turn nothing could ever find, in an index that
+    counted as complete.  `lastrowid` is `None` only when the statement inserted
+    nothing, and that is a fault to name rather than a case to carry on from.
+    """
+
+    class Nothing:
+        lastrowid = None
+
+    with pytest.raises(RuntimeError) as raised:
+        _rowid(Nothing(), what="a turn")
+    assert "a turn" in str(raised.value)
 
 
 def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:

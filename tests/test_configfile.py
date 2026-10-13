@@ -9,12 +9,15 @@ is not left on disk.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from slife2.config import ConfigError, load
 from slife2.configfile import (
     config_path,
     read_scalar,
+    read_section,
     remove,
     set_enabled,
     set_scalar,
@@ -457,3 +460,123 @@ def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
         update_entry("mcp", "ghost", lambda current: {"url": "u"}, path=path) is False
     )
     assert load(path).mcp["ghost"].url == "u"
+
+
+# --- a value that cannot be read is not a value that is absent ----------------
+#
+# DESIGN.md §10.1's first deformation, at the one place in this module where it
+# is data loss rather than a wrong answer: every path below used to answer
+# "there is nothing here" about a value it could not read, and then — on the
+# write paths — replace it with the empty one it had just invented.
+#
+# Both fixtures are **valid YAML**, which is the point: a section that is a
+# string is a mistake a person makes in a file they hand-edit, and it is not a
+# file ruamel refuses.  Written as `mcp: "oops"` above the entries it would not
+# parse at all, and the test would be measuring the parser rather than the
+# reader.
+
+#: `mcp:` as a scalar, with nothing under it.
+BROKEN_SECTION = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+        name: 'Big one'
+default: local/big
+
+mcp: "oops"
+"""
+
+#: And one entry inside a section that is a mapping.
+BROKEN_ENTRY = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+        name: 'Big one'
+default: local/big
+
+mcp:
+  chinese: "oops"
+"""
+
+
+def test_a_section_that_is_not_a_mapping_is_refused_not_answered_empty(tmp_path):
+    """`mcp: "oops"` is a mistake, and a listing that answers `{}` buries it.
+
+    `slife2.config._mapping` refuses the same shape at load, so answering empty
+    here was this reader disagreeing with the one that decides whether the
+    system starts — and disagreeing quietly, until the next start.
+    """
+    path = write(tmp_path, BROKEN_SECTION)
+
+    with pytest.raises(ConfigError) as raised:
+        read_section("mcp", path=path)
+    assert "`mcp:`" in str(raised.value)
+
+    assert read_section("a2a", path=path) == {}, "an absent section is still empty"
+
+
+def test_an_entry_that_is_not_a_mapping_is_refused_not_dropped(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+
+    with pytest.raises(ConfigError) as raised:
+        read_section("mcp", path=path)
+    assert "`mcp.chinese:`" in str(raised.value)
+
+
+def test_a_write_will_not_replace_a_section_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_SECTION)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        upsert("mcp", "new", {"command": "x"}, path=path)
+
+    assert path.read_text(encoding="utf-8") == before, "the operator's value stays"
+
+
+def test_the_switch_will_not_replace_an_entry_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        set_enabled("mcp", "chinese", False, path=path)
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_an_update_will_not_replace_an_entry_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        update_entry("mcp", "chinese", lambda current: {"url": "u"}, path=path)
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_mode_that_could_not_be_kept_is_said_rather_than_swallowed(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """**§8.7 states the swap as preserving the file's mode**, and the failure
+    was `except OSError: pass`: the config came back at `mkstemp`'s `0600`,
+    which tightens a file somebody had made group-readable — another user of
+    the machine loses the config and nothing says why.
+    """
+    path = write(tmp_path)
+
+    def refuse(*args, **kwargs):
+        raise OSError("not permitted")
+
+    monkeypatch.setattr(os, "chmod", refuse)
+    with caplog.at_level("WARNING"):
+        upsert("mcp", "new", {"command": "x"}, path=path)
+
+    assert "the file's mode was not kept" in caplog.text
+    assert load(path).mcp["new"].command == "x", "and the write still happened"

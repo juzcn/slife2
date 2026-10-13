@@ -76,6 +76,25 @@ def test_a_utc_datetime_becomes_local() -> None:
     assert normalize_bound("2026-01-01T08:00:00+08:00") == local
 
 
+def test_a_bound_that_reaches_the_offset_step_unparseable_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Unreachable-by-construction code that weakens an invariant is gone.**
+
+    The re-parse that puts a bound back into local-offset form used to `return
+    resolved` on failure — the un-normalised string — which is exactly the
+    silent window the module exists to prevent.  The branch cannot happen
+    through `normalize_bound`'s own grammars, so it is driven here by handing
+    the offset step a value `fromisoformat` refuses: it now raises
+    `InvalidTimeBound` rather than returning the bound as written.
+    """
+    import slife2.timeutil as timeutil
+
+    monkeypatch.setattr(timeutil, "_canonical", lambda value: "2026-10-07Txx:yy")
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound("half past whenever")
+
+
 # --- day words ----------------------------------------------------------------
 
 

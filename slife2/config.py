@@ -305,17 +305,20 @@ def _credstore_lookup(key: str) -> str | None:
     The env var name *is* the credential-store key, so ``DEEPSEEK_API_KEY``
     resolves whether it was exported or stored with ``credstore set``.
 
-    Every failure is swallowed into None.  credstore spans three platform
-    backends plus an encrypted-file fallback, and a machine with no keyring at
-    all (a CI runner, a container) must degrade to "not found" rather than take
-    the process down over a secret it may not even need.
+    **No backend at all degrades to "not found"; a backend that failed does
+    not.**  credstore itself answers None when this host has no keyring — a CI
+    runner, a container — and that is the declared degrade: the chain steps past
+    it to the reference.  A keyring that *is* there and refused (locked, corrupt,
+    a platform credstore does not support) raises instead, because reading that
+    as "not found" turns a credential nobody could read into a credential that
+    is absent, and the `${VAR}` text then travels as the secret itself
+    (DESIGN.md §10.1).  The failure lands where the secret is resolved.
     """
     try:
         from credstore import get_credential
-
-        return get_credential(key)
-    except Exception:  # noqa: BLE001 - a keyring that is not there is one this chain steps past
-        return None
+    except ImportError:
+        return None  # credstore is not installed: there is no backend to consult
+    return get_credential(key)
 
 
 def resolve_secret(value: object) -> str:
@@ -324,17 +327,29 @@ def resolve_secret(value: object) -> str:
     Takes `object` because YAML hands back ints and bools for unquoted scalars,
     and an API key written as a bare number should become a string rather than
     an exception.
+
+    **A keyring that is not installed degrades; a keyring that failed does
+    not.**  With no `credstore` there is no backend to consult, so a
+    ``keyring:`` reference falls to the `${VAR}` pass below and is left verbatim,
+    which is the declared degrade `_credstore_lookup` also names.  With one
+    installed, a `resolve_uri` that raises — the credential is not stored, the
+    backend is locked — is allowed out: reading it as "not found" would leave
+    the ``keyring:`` text to travel as the secret itself, which is the
+    deformation DESIGN.md §10.1 names.  The failure lands where the secret is
+    resolved.
     """
     if not isinstance(value, str):
         return str(value)
 
     try:
         from credstore import is_keyring_uri, resolve_uri
-
+    except ImportError:
+        # no backend to consult, so a `keyring:` reference is left to the
+        # `${VAR}` pass below, which leaves it verbatim — the declared degrade
+        pass
+    else:
         if is_keyring_uri(value):
             return resolve_uri(value)
-    except Exception:  # noqa: BLE001 - an unresolvable reference is left verbatim, by design
-        pass
 
     def _replace(match: re.Match[str]) -> str:
         var, default = match.group(1), match.group(2)
@@ -526,18 +541,28 @@ class EmbeddingsSettings:
     active: str = ""
 
     def active_provider(self) -> EmbeddingProviderSettings:
-        """The provider in use, falling back to the first.
+        """The provider in use — `active`, or the first when none was named.
 
         Raises:
             ConfigError: If there are none, which `_embeddings` refuses at load
                 time — so reaching this means a `Config` assembled in code
-                rather than read from a file.
+                rather than read from a file — or if `active` names a provider
+                this config does not have.  Substituting the first for an
+                unknown name is the deformation §10.1 names: vectors would come
+                from an endpoint nobody chose, and the index's recorded identity
+                would change with nothing in any file to say why.
         """
         if not self.providers:
             raise ConfigError("no embedding provider configured")
-        if self.active in self.providers:
-            return self.providers[self.active]
-        return next(iter(self.providers.values()))
+        if not self.active:
+            return next(iter(self.providers.values()))
+        if self.active not in self.providers:
+            known = ", ".join(sorted(self.providers))
+            raise ConfigError(
+                f"embeddings.active_model: {self.active!r} is not a configured "
+                f"provider; it has: {known}"
+            )
+        return self.providers[self.active]
 
 
 @dataclass(frozen=True)
@@ -904,6 +929,17 @@ class MediaSettings:
         statement than the one before it, so nothing here can override something
         the caller said.
 
+        **The fourth step is also the fifth, and that is a registered
+        fallback**: a `defaults[kind]` whose reference no longer resolves falls
+        through to the first model of the kind rather than stopping the call.
+        It is kept because the failure it prevents is a config that stops
+        answering because one word went stale, and it is visible because the
+        answer carries its own `provider/model`.  *Gives up:* the operator's
+        `defaults:` intent for that kind.  *Does not cover:* a reference that
+        names a model of the wrong kind or an unknown provider, which is refused
+        here.  *Failure goes:* nowhere beyond the answer itself — flag for
+        `DESIGN.md` §10.2.
+
         Raises:
             ConfigError: If nothing can answer — including the case of a
                 reference that names a model of the wrong kind, which is
@@ -917,10 +953,9 @@ class MediaSettings:
                 return self._named(default, kind)
             except ConfigError:
                 # A stale `defaults:` entry falls through to the first model of
-                # the kind rather than stopping the call: the failure it
-                # prevents is a config that stops answering because one word
-                # went stale, and what it allows is visible in the answer's own
-                # `provider/model`.
+                # the kind rather than stopping the call — the registered
+                # fallback the docstring states, and one the answer's own
+                # `provider/model` makes visible (DESIGN.md §10.2).
                 pass
         for provider in self.providers.values():
             for entry in provider.models:
@@ -982,10 +1017,11 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` falls back rather than raising**, which is the rule
-    `embeddings.active_model` already follows and the reason a tunnel is
-    allowed it: a tunnel is a *subordinate* dependency, and a name this build
-    does not have must not be able to keep the plugin from loading.  What a
+    **An unknown `active:` falls back rather than raising**, which is §1.6's
+    registered exception and the reason a tunnel is allowed it (it is no longer
+    shared with `embeddings.active_model`, which now refuses an undefined
+    name): a tunnel is a *subordinate* dependency, and a name this build does
+    not have must not be able to keep the plugin from loading.  What a
     malformed *shape* does is the opposite — the loader refuses that, like
     every other section, because a `providers:` that is not a mapping is a
     mistake somebody has to be told about rather than a vendor this build
@@ -1425,6 +1461,10 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     staleness test is `config is not self._config`, rebuilt the provider table
     and every cached SDK client on every model call.  That is the state a fresh
     checkout starts in, so it was the common case rather than a corner.
+
+    A file that is there but cannot be *stat'd* is neither: it raises, naming
+    the path, rather than being read as "changed" and quietly answered with a
+    fresh object (DESIGN.md §10.1).
     """
     global _latest
     path = find_config_path(explicit)
@@ -1438,8 +1478,12 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         return config
     try:
         stat = path.stat()
-    except OSError:
-        return load(explicit)
+    except OSError as exc:
+        # A stat that failed is not a file that changed.  Reading it as one
+        # would hand a fresh `Config` to a caller whose whole staleness test is
+        # object identity, so the edit would look like it never happened
+        # (DESIGN.md §10.1).  `load` reports an unreadable file the same way.
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
     if _latest is not None and _latest[0] == path and _latest[1] == stamp:
         return _latest[2]
@@ -1571,13 +1615,13 @@ def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
     over keeps working and keeps meaning the same thing.
 
     **An unknown `provider:` is refused rather than downgraded.**  This is the
-    section's whole difference from the two others that fall back
-    (`file_tunnel.active`, `embeddings.active`): those name a *subordinate*
-    dependency this build may not have, where falling back leaves a working
-    system; this names the transport of the feature, where falling back would
-    leave `a2a_*` tools offered to a model for a mesh that is not running.  v1
-    answered that case with a warning and `enabled = False`, which is the
-    silence-with-tools outcome, so it does not port.
+    section's whole difference from `file_tunnel.active`, the one remaining
+    section that falls back (§1.6): that names a *subordinate* dependency this
+    build may not have, where falling back leaves a working system; this names
+    the transport of the feature, where falling back would leave `a2a_*` tools
+    offered to a model for a mesh that is not running.  v1 answered that case
+    with a warning and `enabled = False`, which is the silence-with-tools
+    outcome, so it does not port.
     """
     if raw is None:
         return base
@@ -1898,11 +1942,13 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     *is* there may not be empty, because there is no configuration in which the
     db plugin runs without an embedding model.
 
-    A stale `active_model` falls back to the first provider rather than
-    refusing, which is v1's rule and the useful one: the failure it prevents is
-    a config that stops loading because one word went stale, and the failure it
-    allows — vectors silently coming from a provider nobody chose — is visible
-    in `slife2 status` and in the index's recorded identity.
+    **An `active_model` this config does not define is refused, naming the
+    providers that do exist.**  It used to fall back to the first provider, so
+    vectors came from an endpoint nobody chose and the index's recorded
+    identity changed underneath — a name the config does not define is not a
+    vote for the first name that does (DESIGN.md §10.1).  A section that names
+    no `active_model` still takes the first, which is the designed default and
+    not a substitution.
     """
     if raw is None:
         return base
@@ -1919,9 +1965,15 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
         for name, spec in providers_raw.items()
     }
     active = str(section.get("active_model") or "")
+    if active and active not in providers:
+        known = ", ".join(sorted(providers))
+        raise ConfigError(
+            f"embeddings.active_model: {active!r} is not a configured provider; "
+            f"it has: {known}"
+        )
     return EmbeddingsSettings(
         providers=providers,
-        active=active if active in providers else next(iter(providers)),
+        active=active or next(iter(providers)),
     )
 
 
@@ -2137,15 +2189,23 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     that a name here exist on disk: the directory is the truth about what is
     installed (`slife2.skills`), and an entry for a skill somebody has not put
     in the folder yet is a key waiting for its lock rather than a mistake.
+
+    **An entry that is not a mapping is refused**, as it is in every other
+    section that holds entries (`_cli_tools`, `_tool_server`).  Read as an empty
+    enabled entry it dropped the operator's key with nothing said, and the model
+    later ran a playbook that died on the credential this section exists to
+    supply (DESIGN.md §10.1).
     """
+    entries = _mapping(raw.get("skills"), "skills")
+    for name, spec in entries.items():
+        if not isinstance(spec, dict):
+            raise ConfigError(f"skills.{name}: expected a mapping")
     return {
         str(name): SkillSettings(
-            env=_secrets(spec.get("env"), f"skills.{name}.env")
-            if isinstance(spec, dict)
-            else {},
-            enabled=bool(spec.get("enabled", True)) if isinstance(spec, dict) else True,
+            env=_secrets(spec.get("env"), f"skills.{name}.env"),
+            enabled=bool(spec.get("enabled", True)),
         )
-        for name, spec in _mapping(raw.get("skills"), "skills").items()
+        for name, spec in entries.items()
     }
 
 

@@ -431,16 +431,37 @@ def test_a_source_that_is_switched_off_is_not_a_source_that_is_down(
 def test_the_boot_pass_counts_what_it_forgot(tmp_path) -> None:
     """`reset` answers with what it removed, which is what a log line reads.
 
-    Nothing connected means no source is named, so every stored row is one the
-    config cannot speak for — and a run that changes nothing, because nothing
-    had been stored yet, says so rather than reporting work it did not do.
+    A caller that has read the config and found no sources says so with an
+    **empty set**, so every stored row is one the config cannot speak for — and
+    a run that changes nothing, because nothing had been stored yet, says so
+    rather than reporting work it did not do.
     """
-    store = ToolStore(tmp_path / "tools.db", threshold=100)
+    path = tmp_path / "tools.db"
+    store = ToolStore(path, threshold=100, known=frozenset())
     assert store.reset() == {"forgotten": 0}
 
     merge(store, "arxiv", "mcp", [tool("arxiv__search"), tool("arxiv__other")])
     assert store.reset() == {"forgotten": 2}
     assert store.reset() == {"forgotten": 0}, "already gone"
+
+
+def test_a_store_told_nothing_forgets_nothing_even_when_asked(tmp_path) -> None:
+    """The other caller, and the method has to keep the distinction too.
+
+    `known=None` is "nobody said which sources the config carries", which is not
+    the empty set however many times the pass is asked for.  It used to be
+    collapsed by `self.known or frozenset()`, so a caller that constructed a
+    store without the argument and then called `reset` deleted the catalogue —
+    the destructive case `ToolStore.__init__` declines to run, reached through
+    the method it declines to run it with (DESIGN.md §10.1).
+    """
+    path = tmp_path / "tools.db"
+    told = ToolStore(path, threshold=100, known={"arxiv"})
+    merge(told, "arxiv", "mcp", [tool("arxiv__search")])
+
+    untold = ToolStore(path, threshold=100)
+    assert untold.reset() == {"forgotten": 0}
+    assert [row[0] for row in rows_in(untold)] == ["arxiv__search"]
 
 
 def test_a_verdict_keeps_the_rows_and_a_removal_does_not(tmp_path) -> None:

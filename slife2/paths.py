@@ -116,12 +116,19 @@ def in_checkout(directory: Path | None = None) -> bool:
     here".  Both of those are true of other projects' directories and of a
     production folder somebody happened to put a config in, and being wrong
     about this decides where a database is written.
+
+    **A marker that cannot be read is not a marker that is not there.**  Only
+    "no such file" answers False; a permissions error, or a directory sitting
+    where the marker should be, raises, because reading either as "not a
+    checkout" would send a checkout's whole data directory to `~/.slife2` with
+    nothing said (DESIGN.md §10.1).
     """
     marker = (directory or Path.cwd()) / _CHECKOUT_MARKER
     try:
-        return _PROJECT_NAME in marker.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    return _PROJECT_NAME in text
 
 
 def data_dir() -> Path:
@@ -136,6 +143,13 @@ def data_dir() -> Path:
     happens to be started from.
 
     `SLIFE2_DATA_DIR` overrides both, and `--data-dir` sets that.
+
+    **The `~/.slife2` root is a registered fallback**: it is what an installation
+    with no checkout gets, so a checkout that is not *recognised* writes its
+    databases to the home directory instead of beside itself.  *Gives up:* the
+    checkout's own directory; *does not cover:* an override, which wins; *failure
+    goes:* nowhere visible until a file is missing where it was expected — flag
+    for `DESIGN.md` §10.2.
     """
     override = os.environ.get(DATA_ENV_VAR)
     path = (

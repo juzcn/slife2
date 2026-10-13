@@ -131,8 +131,14 @@ def _swap(path: Path, text: str) -> None:
         if path.exists():
             try:
                 os.chmod(tmp, path.stat().st_mode & 0o7777)
-            except OSError:
-                pass
+            except OSError as exc:
+                # **Said out loud, because the mode is a promise this makes.**
+                # DESIGN.md §8.7 states the swap as preserving the file's mode;
+                # swallowing this left the config at `mkstemp`'s `0600`, which
+                # *tightens* a file somebody had made group-readable — an
+                # unreadable config for another user of the same machine, and
+                # nothing anywhere to say why (DESIGN.md §10.1).
+                logger.warning("%s: the file's mode was not kept: %s", path, exc)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -157,17 +163,37 @@ def read_section(
     Plain Python and not a round-trip document because this is a *read*: nothing
     here is written back, and a caller returning it from a tool needs something
     FastMCP can serialise.
+
+    **A section this cannot read is refused, and not answered as empty.**  The
+    reader is `slife2.config`, and a section that is not a mapping is a
+    `ConfigError` there rather than an empty section — so answering `{}` here
+    would be this function disagreeing with the one that decides whether the
+    system starts, and disagreeing *quietly*: a listing tool would report a
+    section that has four entries as one that has none, and the operator would
+    see the truth only on the next start.  Reading a value that is not there as
+    a value that is empty is the first deformation in DESIGN.md §10.1, and the
+    listing tools are exactly where it does the most damage — the model is told
+    about a config nobody has.
     """
     target = path or config_path()
     document = _read(target)
     values = document.get(section)
-    if not isinstance(values, dict):
+    if values is None:
         return {}
-    return {
-        str(name): dict(entry)
-        for name, entry in values.items()
-        if isinstance(entry, dict)
-    }
+    if not isinstance(values, dict):
+        raise ConfigError(
+            f"{target}: `{section}:` is not a mapping, so nothing under it can "
+            "be read. Fix the section, or take it out."
+        )
+    entries: dict[str, dict[str, Any]] = {}
+    for name, entry in values.items():
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"{target}: `{section}.{name}:` is not a mapping. Reading it as "
+                "an entry that is not there is what hides it."
+            )
+        entries[str(name)] = dict(entry)
+    return entries
 
 
 def config_path() -> Path:
@@ -195,15 +221,26 @@ def _section(
 ) -> CommentedMap | None:
     """The top-level mapping *section*, created when it is missing.
 
-    A malformed value — the operator wrote a string where a mapping goes — is
-    replaced by an empty one rather than raising, because every caller has
-    already decided to write here and the alternative is a traceback out of a
-    tool call.  That the value was malformed is the reader's to complain about,
-    and it does: `slife2.config` refuses a section that is not a mapping.
+    **A malformed value is refused and not replaced.**  It used to be replaced
+    by an empty mapping, on the argument that every caller has already decided
+    to write here and that the reader is the one to complain — and the reader
+    does (`slife2.config` refuses a section that is not a mapping), but that is
+    a complaint at the *next start* about a value this call has already
+    destroyed.  The operator's `mcp: "oops"` became `mcp: {}` on the way past,
+    and the tool that did it reported success; the write is refused now, naming
+    the section, because a value that cannot be read is not a value that is
+    absent (DESIGN.md §10.1) — and the one place that difference is *data loss*
+    rather than a wrong answer is here.
     """
     current = document.get(section)
     if isinstance(current, dict):
         return cast(CommentedMap, current)
+    if current is not None:
+        raise ConfigError(
+            f"`{section}:` is not a mapping, so there is nothing to write an "
+            "entry into — writing one would replace what is there. Fix the "
+            "section, or take it out."
+        )
     if not create:
         return None
     current = CommentedMap()
@@ -503,8 +540,12 @@ def set_enabled(
             return
         entry = current[name]
         if not isinstance(entry, dict):
-            entry = CommentedMap()
-            current[name] = entry
+            # Not replaced by an empty entry: that write reported success and
+            # destroyed whatever the operator had put there (DESIGN.md §10.1).
+            raise ConfigError(
+                f"`{section}.{name}:` is not a mapping, so there is no entry to "
+                "switch. Fix the entry, or take it out."
+            )
         if enabled:
             entry.pop("enabled", None)
         else:
@@ -549,6 +590,14 @@ def update_entry(
             return
         existed = name in values
         raw = values.get(name)
+        if raw is not None and not isinstance(raw, dict):
+            # Handed to `change` as "not there yet" this used to *become* the
+            # entry `change` returns, which is the operator's value replaced by
+            # a tool's idea of it (DESIGN.md §10.1).
+            raise ConfigError(
+                f"`{section}.{name}:` is not a mapping, so there is no entry to "
+                "change — fixing it would replace what is there."
+            )
         current = dict(raw) if isinstance(raw, dict) else {}
         result = change(current)
         if result is None:
