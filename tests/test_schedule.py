@@ -648,6 +648,37 @@ async def test_a_ledger_that_does_not_say_whose_it_is_is_skipped(
     assert "does not say whose ledger" in caplog.text
 
 
+async def test_a_ledger_that_cannot_be_opened_is_an_error_not_a_quiet_skip(
+    window: Window, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The clock serving the other agents is what used to hide this one.**
+
+    `schedule_list` reads the caller's own ledger, so an operator asking about
+    another agent sees a healthy clock while that agent's tasks never fire
+    again.  The skip stays — one damaged file must not stop the loop, which is
+    the whole point of one pass over every agent — and it moves to an error
+    naming the file, which is the only place it can be seen.
+    """
+    async with Client(build(window)) as client:
+        await write(client, name="mine", agent=AGENT)
+
+    dead = paths.schedule_db(OTHER)
+    dead.parent.mkdir(parents=True, exist_ok=True)
+    dead.write_text("this file is not a database\n", encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="slife2.schedule_server"):
+        did = await poll_once(
+            default_config(), window_client=window.client, reference=later(90)
+        )
+
+    assert [line.split(":")[0] for line in did] == [AGENT], (
+        "one agent's damage stopped the clock for the agent that was healthy"
+    )
+    assert any(str(dead) in record.getMessage() for record in caplog.records), (
+        "an agent's schedule went quiet with nothing said about the file"
+    )
+
+
 # ── starting a run's work ────────────────────────────────────────────────────
 
 

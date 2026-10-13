@@ -34,6 +34,7 @@ from slife2.llm.server_common import (
     Translate,
     build_backend_server,
     read_int,
+    render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
@@ -68,7 +69,10 @@ def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
     under `image_url`, Anthropic wants the media type and the base64 payload as
     separate fields.  A part this function does not recognise is dropped rather
     than passed through, because passing an unknown block to the Messages API is
-    a 400 on every call that contains one.
+    a 400 on every call that contains one — and it is *named* when it is dropped,
+    because an attachment or a newer part type that disappears without a word is
+    the failure this module cannot see from inside.  A part that is not a mapping
+    at all is dropped and named the same way, for the same reason.
     """
     if content is None:
         return []
@@ -78,6 +82,12 @@ def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for part in content:
         if not isinstance(part, dict):
+            logger.warning(
+                "anthropic: dropping a content part that is %r, not a mapping "
+                "— the Messages API takes block mappings only, so it cannot be "
+                "passed through, but the caller's part is now missing",
+                type(part).__name__,
+            )
             continue
         match part.get("type"):
             case "text":
@@ -88,6 +98,13 @@ def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
                 source = _image_source(part.get("image_url"))
                 if source is not None:
                     blocks.append({"type": "image", "source": source})
+            case other:
+                logger.warning(
+                    "anthropic: dropping a content part of type %r — it is not "
+                    "a block the Messages API takes, so it cannot be passed "
+                    "through, but the caller's attachment is now missing",
+                    other,
+                )
     return blocks
 
 
@@ -103,6 +120,14 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     (This function used to refuse a remote URL, on the argument that fetching one
     was a capability this plugin should not have.  The premise was wrong for this
     form of it: the provider fetches.)
+
+    A url in neither form — a `file:` URL, a bare word — is dropped, because a
+    source the Messages API cannot read is a 400 on every call that carries one.
+    So is a `data:` URL that names a type and carries no payload: there are no
+    bytes to read.  Both are *named* when they are dropped — one by its scheme,
+    the other by the type it claimed — for the reason the unrecognised part type
+    one function up is named: an attachment that vanishes without a word is the
+    failure this module cannot see from inside (§10.1).
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
     if not isinstance(url, str) or not url:
@@ -110,10 +135,23 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     if url.startswith(("http://", "https://")):
         return {"type": "url", "url": url}
     if not url.startswith("data:"):
+        scheme, _, _ = url.partition(":")
+        logger.warning(
+            "anthropic: dropping an image from a %r source — it is neither a "
+            "`data:` URL nor an http(s) one, so the Messages API has no source "
+            "block to read it as, and the caller's attachment goes with it",
+            scheme,
+        )
         return None
     header, _, data = url.partition(",")
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
     if not data:
+        logger.warning(
+            "anthropic: dropping an image whose `data:` source claims to be %s "
+            "but carries no payload — there are no bytes to read as a base64 "
+            "source, and the caller's attachment goes with it",
+            media_type,
+        )
         return None
     return {"type": "base64", "media_type": media_type, "data": data}
 
@@ -149,8 +187,34 @@ def to_anthropic_messages(
             # The system prompt is a string parameter here, and a system message
             # carrying content parts is not a thing either API supports — so a
             # list is taken for the text in it and nothing else.
-            if isinstance(message.content, str) and message.content:
-                system_parts.append(message.content)
+            #
+            # **Taken, and not dropped**: reading only `str` content meant a
+            # system turn carrying blocks contributed nothing at all, with no
+            # word anywhere — a prompt the caller wrote left the request
+            # (DESIGN.md §10.1).  The blocks are built by the same converter the
+            # other roles use, so a `str` is one text block and a list is what
+            # it says it is; a block that is not text is dropped with a warning,
+            # because the API has no field to put it in.
+            blocks = to_anthropic_blocks(message.content)
+            text = "".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if block.get("type") == "text"
+            )
+            other = [
+                str(block.get("type"))
+                for block in blocks
+                if block.get("type") != "text"
+            ]
+            if other:
+                logger.warning(
+                    "anthropic: a system turn carries %s, which the system "
+                    "prompt has no field for — the text beside it is kept and "
+                    "these are left out",
+                    ", ".join(other),
+                )
+            if text:
+                system_parts.append(text)
             continue
 
         if message.role == "tool":
@@ -160,12 +224,13 @@ def to_anthropic_messages(
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        # Tool results are text; anything else would have to be
-                        # rendered, and a result that is not a string is a bug
-                        # upstream rather than something to guess at here.
-                        "content": message.content
-                        if isinstance(message.content, str)
-                        else "",
+                        # A tool result is text, but a caller can legitimately
+                        # send something else — `tool_result.content` is a block
+                        # list here — so a non-string is *rendered* rather than
+                        # replaced with "": answering "" for a result nobody
+                        # wrote drops the tool's whole output from the request
+                        # and leaves nothing anywhere saying it went.
+                        "content": render_tool_result(message.content),
                     }
                 ],
             )
@@ -215,6 +280,13 @@ def thinking_parameter(
 
     `compat.thinking: omit` or `disabled` suppress it, for a gateway that
     rejects the field while reasoning anyway.
+
+    **A cap too small to hold a budget is refused, not quietly downgraded.**  A
+    model the config says reasons, with a `max_tokens` that cannot leave a
+    legal `budget_tokens`, is a configuration that cannot be satisfied — turning
+    thinking off with a warning is a weaker path standing in for the capability
+    that was asked for (§10.1), and the caller is told nothing either way.  So
+    it raises, naming the model and the two numbers.
     """
     if not settings.reasoning or settings.thinking in ("omit", "disabled"):
         return None
@@ -223,21 +295,19 @@ def thinking_parameter(
     # constraints leave a valid budget only when the cap is above the floor.
     # The clamp used to guard the second alone — `max(1024, …)` then `min(…,
     # max_tokens - 1)` — so a model with `max_tokens: 1024`, the very value the
-    # comment here names, came out at 1023 and 400'd on every call.  A cap that
-    # cannot hold a budget has no thinking to give, and saying so is the answer.
+    # comment here names, came out at 1023 and 400'd on every call.
     budget = min(
         max(MIN_THINKING_BUDGET, int(max_tokens * THINKING_BUDGET_SHARE)),
         max_tokens - 1,
     )
     if budget < MIN_THINKING_BUDGET:
-        logger.warning(
-            "%s: max_tokens=%d leaves no room for a %d-token thinking budget; "
-            "thinking is off",
-            settings.model,
-            max_tokens,
-            MIN_THINKING_BUDGET,
+        raise ValueError(
+            f"{settings.model}: max_tokens={max_tokens} leaves no room for the "
+            f"{MIN_THINKING_BUDGET}-token minimum thinking budget that "
+            f"`reasoning: true` asks for; raise max_tokens above "
+            f"{MIN_THINKING_BUDGET}, or set this model's `compat.thinking` to "
+            f"`omit` to say thinking is not wanted."
         )
-        return None
     return {"type": "enabled", "budget_tokens": budget}
 
 

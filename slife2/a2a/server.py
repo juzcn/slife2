@@ -384,10 +384,32 @@ def _wire(session: Session) -> None:
         cancelled: bool,
         peer: str,
         kind: str = "task",
+        failed: bool = False,
     ) -> None:
         if not result and not cancelled:
             return
-        if kind == "message":
+        if failed:
+            # **A send that never landed is told as itself.**  The mesh's
+            # requester ladder ran out with no reply at all (`_deliver`), so
+            # this is not the peer answering and must not be rendered as one:
+            # "completed"/"replied" over a message no peer sent is exactly the
+            # confident negative the model would act on instead of re-sending
+            # (DESIGN.md §10.1).  The words are the mesh's — the failure is the
+            # requester's, not the peer's — and the marker and channel stay a
+            # terminal reply's, so the line lands where the task was discussed.
+            if kind == "message":
+                text = (
+                    f"{marker(peer, type='message')}"
+                    f"**{peer}** was never reached, so nothing will answer your "
+                    f"message:\n\n{result}"
+                )
+            else:
+                text = (
+                    f"{marker(peer, corr_id or None, type='task_response')}"
+                    f"**{peer}** was never reached, so no result will arrive for "
+                    f"this task (ID: `{corr_id}`):\n\n{result}"
+                )
+        elif kind == "message":
             # A MESSAGE conversation was answered: a bare message reply, no
             # task involved.
             text = (
@@ -631,9 +653,7 @@ def build_server(
         if found is None:
             found = Session(agent=agent, mesh=A2AMesh(live().a2a, agent))
             _wire(found)
-            found.writer = asyncio.create_task(
-                _drain(found, live(), window_client)
-            )
+            found.writer = asyncio.create_task(_drain(found, live(), window_client))
             sessions[agent] = found
         return found
 
@@ -674,8 +694,15 @@ def build_server(
                 session.connect_error = str(e)
                 # connect() can fail mid-way (broker refused, timeout, our name
                 # already taken) — never leak a half-started mesh on retry.
-                with contextlib.suppress(Exception):
+                try:
                     await session.mesh.disconnect()
+                except Exception as teardown:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: a responder that advertised before the outbound connect failed is still on the broker, and a failure here leaves it advertised with nobody to retire it (DESIGN.md §1.8)
+                    logger.error(
+                        "a2a %s: the mesh would not be torn down after a failed "
+                        "connect, so it may stay advertised: %s",
+                        agent,
+                        teardown,
+                    )
                 raise ToolError(
                     f"could not join the mesh as {agent!r} on {settings.address}: {e}"
                 ) from e
@@ -765,8 +792,15 @@ def build_server(
             for session in sessions.values():
                 if session.writer is not None:
                     session.writer.cancel()
-                with contextlib.suppress(Exception):
+                try:
                     await session.mesh.disconnect()
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+                    logger.error(
+                        "a2a %s: the mesh would not leave the broker on "
+                        "shutdown, so it may stay advertised: %s",
+                        session.agent,
+                        e,
+                    )
             for session in sessions.values():
                 if session.writer is not None:
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -821,8 +855,15 @@ def build_server(
             # reason to stop listening for it.  The reason itself was taken by
             # `connected`, which is where every caller says which one it is.
             if session.release(WINDOW):
-                with contextlib.suppress(Exception):
+                try:
                     await session.mesh.disconnect()
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+                    logger.error(
+                        "a2a %s: the mesh would not leave the broker as its "
+                        "window left, so the agent may stay advertised: %s",
+                        session.agent,
+                        e,
+                    )
 
     # ═══════════════════════════════════════════════════════════════════════
     # The mesh tools (standard A2A operations, v1's four)

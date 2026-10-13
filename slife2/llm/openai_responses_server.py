@@ -41,6 +41,7 @@ from slife2.llm.server_common import (
     Translate,
     build_backend_server,
     read_int,
+    render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
@@ -67,11 +68,20 @@ def to_responses_parts(content: Any) -> list[dict[str, Any]]:
     A part this function does not recognise is dropped rather than passed
     through: an unknown item in the input list is a 400 on every call that
     carries one, and the neutral form has exactly two kinds because that is what
-    the agent server can produce: `slife2.attachments.parts` builds them.
+    the agent server can produce: `slife2.attachments.parts` builds them.  It is
+    *named* when it is dropped, because a part type this build does not know —
+    an attachment, or a newer kind — otherwise disappears without a word.  A
+    part that is not a mapping at all is dropped and named the same way.
     """
     parts: list[dict[str, Any]] = []
     for part in content or []:
         if not isinstance(part, dict):
+            logger.warning(
+                "openai-responses: dropping a content part that is %r, not a "
+                "mapping — this API takes input items as mappings only, so it "
+                "cannot be passed through, but the caller's part is now missing",
+                type(part).__name__,
+            )
             continue
         match part.get("type"):
             case "text":
@@ -82,6 +92,13 @@ def to_responses_parts(content: Any) -> list[dict[str, Any]]:
                 image = to_input_image(part.get("image_url"))
                 if image is not None:
                     parts.append(image)
+            case other:
+                logger.warning(
+                    "openai-responses: dropping a content part of type %r — it "
+                    "is not an item this API takes, so it cannot be passed "
+                    "through, but the caller's attachment is now missing",
+                    other,
+                )
     return parts
 
 
@@ -97,11 +114,23 @@ def to_input_image(raw: Any) -> dict[str, Any] | None:
     `http(s)` URL through untouched for the provider to fetch).  Anything else — a
     `file:` URL, a bare word — is an image source in neither form, and is dropped
     rather than sent to 400 on every call that carries one.
+
+    It is *named* when it is dropped, by its scheme, for the reason the
+    unrecognised part type one function up is named: an attachment that vanishes
+    without a word is the failure this module cannot see from inside (§10.1).
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
     if not isinstance(url, str) or not url:
         return None
     if not url.startswith(("data:", "http://", "https://")):
+        scheme, _, _ = url.partition(":")
+        logger.warning(
+            "openai-responses: dropping an image from a %r source — it is "
+            "neither a `data:` URL nor an http(s) one, so it is not an "
+            "`input_image` this API takes, and the caller's attachment goes "
+            "with it",
+            scheme,
+        )
         return None
     return {"type": "input_image", "image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
 
@@ -148,12 +177,12 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
                 {
                     "type": "function_call_output",
                     "call_id": message.tool_call_id or "",
-                    # Tool results are text.  Anything else would have to be
-                    # rendered, and a result that is not a string is a bug
-                    # upstream rather than something to guess at here.
-                    "output": message.content
-                    if isinstance(message.content, str)
-                    else "",
+                    # A tool result is text, but a caller can legitimately send
+                    # something else, so a non-string is *rendered* rather than
+                    # replaced with "": answering "" for a result nobody wrote
+                    # drops the tool's whole output from the request and leaves
+                    # nothing anywhere saying it went.
+                    "output": render_tool_result(message.content),
                 }
             )
             continue

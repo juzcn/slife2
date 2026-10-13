@@ -96,10 +96,15 @@ class ToolCallAccumulator:
     def complete(self) -> list[ToolCall]:
         """Assemble the calls, ordered by index.
 
-        A call whose arguments did not parse becomes an empty argument dict
-        rather than an error: the tool then reports the problem to the model,
-        which is a feedback loop the model can act on, where an exception here
-        would just end the turn.
+        A call whose arguments did not parse **fails the turn** rather than
+        becoming an empty argument dict: `_parse_arguments` refuses it there,
+        naming the call, because a truncated or corrupt fragment stream is the
+        provider's fault and reading it as `{}` re-attributes it to the model —
+        which then sees a validation error about its own call and retries the
+        call it never got wrong (§10.1: a value that cannot be read is not a
+        value that is absent).  A call that genuinely took no arguments is
+        unaffected: an empty string still parses to no arguments, which is a
+        real absence rather than a damaged one.
         """
         calls = []
         for index in sorted(self._parts):
@@ -111,22 +116,45 @@ class ToolCallAccumulator:
                     # refer to.  A synthetic id keeps the pairing valid.
                     id=part.id or f"call_{index}",
                     name=part.name,
-                    arguments=_parse_arguments(part.arguments),
+                    arguments=_parse_arguments(
+                        part.arguments, part.name or f"call_{index}"
+                    ),
                 )
             )
         return calls
 
 
-def _parse_arguments(raw: str) -> dict[str, Any]:
-    """Parse a reassembled arguments string, degrading to empty on bad JSON."""
+def _parse_arguments(raw: str, call: str) -> dict[str, Any]:
+    """Parse a reassembled arguments string — or refuse it, naming the call.
+
+    An empty string is a call with no arguments, which is a real value.  A
+    non-empty one that is not JSON is damage: the stream was cut short or the
+    provider mangled it, and answering `{}` for it hands the model an empty
+    argument dict it never sent.  So the refusal is a `ValueError` naming the
+    tool and the fragment, and the caller's turn dies with the fault attributed
+    where it happened.
+
+    **Valid JSON that is not an object is the same damage.**  `[]`, `"x"` and
+    `null` all parse, and a call's arguments are an object by the protocol — so
+    coercing one to `{}` is the very substitution refused above, just past the
+    parser instead of through it (§10.1: a value that cannot be read is not a
+    value that is absent).
+    """
     if not raw.strip():
         return {}
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("tool call arguments did not parse as JSON: %.200s", raw)
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"the arguments for tool call {call!r} did not parse as JSON "
+            f"({exc}): {raw[:200]!r}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"the arguments for tool call {call!r} are not a JSON object but "
+            f"{type(parsed).__name__}: {raw[:200]!r}"
+        )
+    return parsed
 
 
 @dataclass
@@ -215,6 +243,31 @@ def read_int(source: Any, attribute: str) -> int:
     stream.
     """
     return int(getattr(source, attribute, 0) or 0)
+
+
+def render_tool_result(content: Any) -> str:
+    """A tool result as the text every wire here takes, whatever shape it arrived in.
+
+    A tool result is text on every backend this build speaks, and both adapters
+    that build their request field by field used to answer `""` for a result
+    that was not already a string — beneath a comment saying a non-string result
+    is a bug upstream, then the guess the comment warns against: the tool's
+    whole output vanished from the request with nothing said, and the model
+    answered a question it had never been handed the material for.  Anthropic
+    makes that reachable rather than theoretical: `tool_result.content` is
+    legitimately a block list, so a list is a shape a caller can really send.
+
+    So the result is *rendered* — JSON text, which is what a structured result
+    already means — and never invented.  Deliberately not the place that decides
+    a list of image blocks should stay blocks: no wire here carries a picture in
+    a tool result, and a JSON rendering is a fact the model can read where the
+    empty string was a fact hidden.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=True, default=str)
 
 
 class ProviderClients:

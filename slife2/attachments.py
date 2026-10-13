@@ -50,11 +50,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: Suffix -> media type, for what a provider is told the bytes are.  Only the
-#: common raster formats carry their real one: an SVG or an ICO is sent as
-#: `image/png` because that is the guess a vision API accepts, and v1 made the
-#: same trade — a wrong-but-plausible type is a 400 the caller can read, while a
-#: right-and-unaccepted one is a 400 with no way forward.
+#: Suffix -> media type, for what a provider is told the bytes are.  A suffix
+#: this table does not hold is **refused**, not guessed: the header decides how
+#: the far end decodes the payload, so a wrong one is bytes nobody can read.
+#: `media/adapters._data_uri` refuses an unknown suffix for the same question,
+#: and two routes to a provider may not disagree about one thing — the earlier
+#: guess here (`image/png` for an SVG or an ICO) is the disagreement this table
+#: now closes.
 MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -80,7 +82,11 @@ def _encode(source: str) -> tuple[str, str]:
     `image` block has a `url` source — so nothing in this system makes a request
     anybody did not ask for.  (v1 did exactly this.)
 
-    Anything else is a path on this machine: read, capped, and base64-encoded.
+    Anything else is a path on this machine: read, capped, and base64-encoded —
+    with the media type its suffix names, or refused when the suffix names none
+    this build knows (`MEDIA_TYPES`).  The refusal is the same rule
+    `media/adapters._data_uri` applies to the same question: a guessed type is
+    bytes the far end cannot decode, and the two routes must not disagree.
 
     **The reason comes back with the failure, and that is the point of the
     pair.**  This used to answer `""` and leave `resolve` to work out *why* from
@@ -95,7 +101,13 @@ def _encode(source: str) -> tuple[str, str]:
     path = Path(source).expanduser()
     if not path.is_file():
         return "", f"{source}: no such file"
-    media_type = MEDIA_TYPES.get(path.suffix.lower(), "image/png")
+    media_type = MEDIA_TYPES.get(path.suffix.lower(), "")
+    if not media_type:
+        return "", (
+            f"{source}: {path.suffix or '(no suffix)'} is not an image format "
+            f"this knows ({', '.join(sorted(MEDIA_TYPES))}) — the bytes would "
+            f"arrive at the provider under a guessed type it cannot decode"
+        )
     # **Asked of the file before it is read**, not of the bytes afterwards: an
     # oversized source is refused *without* allocating it, which matters because
     # the cap exists precisely for the file nobody should be holding in memory.
@@ -230,11 +242,18 @@ def image_note(part: dict[str, Any]) -> str:
     The size is derived from the payload rather than stored: base64 carries four
     characters per three bytes, so the arithmetic is exact enough for a reader
     deciding whether to ask for the picture again.
+
+    **A type it cannot read is named, not guessed.**  A `data:` URL names its
+    media type in the header, and a remote URL is named by itself; a part whose
+    source is neither — one the record kept without an address, or a `data:` URL
+    with no type — was rendered as a bare `image`, a claim about a picture this
+    function never had, in the one place a restored turn reads back (§10.1).  It
+    says the source is unnamed instead.
     """
     url = part.get("image_url")
     url = url.get("url") if isinstance(url, dict) else None
     media_type, _, payload = str(url or "").partition(";base64,")
-    media_type = media_type.removeprefix("data:") or "image"
+    media_type = media_type.removeprefix("data:") or "an unnamed source"
     size = f", ~{len(payload) * 3 // 4 // 1024} KB" if payload else ""
     return (
         f"[image not stored: {media_type}{size} — the prompt names the file, "

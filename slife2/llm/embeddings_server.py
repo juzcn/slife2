@@ -21,6 +21,13 @@ silent one: inserts of a different length are rejected one by one while a
 correct-looking index stays empty.  Three ways to learn it, tried in order:
 a table of known models, the endpoint's own model listing, and finally a probe
 embed of one character, whose length *is* the answer.
+
+**The input limit is discovered too, and refused when it cannot be.**  The
+width can be *measured*; an input limit cannot be measured without sending the
+oversized input, which is the failure this module's history records — a rejected
+chunk, and an indexer stalled on that turn for ever.  So the limit comes from
+the table or the endpoint's listing, and a model whose endpoint reports neither
+is refused rather than handed a default (DESIGN.md §10.1).
 """
 
 from __future__ import annotations
@@ -52,10 +59,10 @@ SERVER_NAME = "slife2-llm-embeddings"
 #: This server's key in the config's `servers:` table.
 CONFIG_KEY = "embeddings"
 
-#: Widths and input limits of models whose answers are known, so the common case
-#: costs no probe request.  Both numbers are per model, not per provider: the
-#: same weights served by a local daemon and by a hosted API embed identically,
-#: which is what makes this table a fact about the model id.
+#: Widths and input limits of models whose answers are known, so the common
+#: case costs no probe request.  Both numbers are per model, not per provider:
+#: the same weights served by a local daemon and by a hosted API embed
+#: identically, which is what makes this table a fact about the model id.
 _KNOWN_MODELS: dict[str, tuple[int, int]] = {
     # model id: (dimension, max input tokens)
     "bge-m3": (1024, 8192),
@@ -65,9 +72,6 @@ _KNOWN_MODELS: dict[str, tuple[int, int]] = {
     "text-embedding-ada-002": (1536, 8191),
     "nomic-embed-text": (768, 8192),
 }
-
-#: The input limit assumed for a model this module does not know.
-_DEFAULT_MAX_TOKENS = 8192
 
 #: Characters per token, for turning that limit into a character budget.  One,
 #: deliberately: an earlier estimate of about four let a thirty-thousand
@@ -119,11 +123,13 @@ class EmbeddingClient:
     async def describe(self) -> dict[str, Any]:
         """What the db needs to know before it can build an index.
 
-        The width is established once per process and remembered by the caller;
-        this is the only place the three-step ladder lives.
+        Both numbers are established once per process and remembered by the
+        caller: the width by the three-step ladder in `_dimension_of`, and the
+        input limit by `_input_limit_of`, which is table-or-listing and refuses
+        rather than guessing.
         """
         dimension = await self._dimension_of()
-        max_tokens = self._known[1] if self._known else _DEFAULT_MAX_TOKENS
+        max_tokens = await self._input_limit_of()
         return {
             "provider": self.provider.name,
             "model": self.provider.model,
@@ -131,6 +137,79 @@ class EmbeddingClient:
             "dimension": dimension,
             "max_chars": max_tokens * _CHARS_PER_TOKEN,
         }
+
+    async def _input_limit_of(self) -> int:
+        """The model's input limit, by table or by the endpoint's listing.
+
+        **A model this module does not know is not assumed to accept 8192
+        tokens.**  The width *can* be measured — a one-character probe's length
+        is the answer — but an input limit cannot be measured without sending
+        the oversized input, which is the exact failure this module's history
+        records: a chunk past the limit was rejected, and v1's indexer stalled on
+        that turn for ever.  So the limit is asked for, and a model whose
+        endpoint does not report one is refused rather than handed a guess
+        (DESIGN.md §10.1).
+
+        Raises:
+            RuntimeError: If neither the table nor the endpoint answers — either
+                because the endpoint reported no limit, or because its listing
+                could not be read, and the message says which.
+        """
+        if self._known is not None:
+            return self._known[1]
+
+        reported = await self._listed_input_limit()
+        if reported:
+            logger.info(
+                "%s: input limit %d read from the endpoint's model listing",
+                self.provider.model,
+                reported,
+            )
+            return reported
+
+        raise RuntimeError(
+            f"{SERVER_NAME}: {self.provider.model!r} is not a model with a known "
+            f"input limit and {self.provider.base_url!r} does not report one; "
+            f"point at an endpoint that reports an input limit or use a known "
+            f"model"
+        )
+
+    async def _listed_input_limit(self) -> int:
+        """The input limit the endpoint reports for its model, if it reports one.
+
+        Read from the same listing as the width, and for the same reason: an
+        endpoint with several models behind one base_url is where a guess goes
+        wrong, and it is the endpoint that knows which of its models takes how
+        much.  Most OpenAI-compatible endpoints report nothing here, which is
+        why the caller refuses rather than defaulting.
+
+        **A listing that could not be read is not a listing that reports no
+        limit.**  The width can be measured without the endpoint's help, so an
+        unreadable listing there falls through to the probe; an input limit
+        cannot, so the two answers must stay apart and this one is raised rather
+        than returned as a `0` the caller cannot tell from silence (DESIGN.md
+        §10.1).
+
+        Raises:
+            RuntimeError: If the listing itself could not be read, naming the
+                endpoint — which the caller's own refusal then distinguishes
+                from an endpoint that answered and reports no limit.
+        """
+        try:
+            listing = await self.client().models.list()
+        except Exception as exc:  # noqa: BLE001 — named in the refusal below, not swallowed
+            raise RuntimeError(
+                f"{SERVER_NAME}: the input limit for {self.provider.model!r} "
+                f"could not be read: the model listing at "
+                f"{self.provider.base_url!r} did not answer ({exc})"
+            ) from exc
+        for entry in getattr(listing, "data", []) or []:
+            if getattr(entry, "id", "") != self.provider.model:
+                continue
+            reported = getattr(entry, "max_input_tokens", None)
+            if isinstance(reported, int) and reported > 0:
+                return reported
+        return 0
 
     async def _dimension_of(self) -> int:
         """The width, by table, by listing, or by measurement — in that order."""
@@ -173,10 +252,15 @@ class EmbeddingClient:
         answers nothing and the probe runs.  It is kept because the endpoints
         that do report it are the ones with several models behind one base_url,
         which is exactly where guessing goes wrong.
+
+        **Here an unreadable listing may be the silent one.**  The ladder this
+        feeds measures the width without the endpoint's help, so a listing that
+        could not be read and one that reports no width both fall to the probe —
+        the difference the input limit cannot afford (DESIGN.md §10.1).
         """
         try:
             listing = await self.client().models.list()
-        except Exception as exc:  # noqa: BLE001 — an unhelpful listing is not fatal
+        except Exception as exc:  # noqa: BLE001 — the probe below measures the width instead
             logger.debug("%s: no model listing (%s)", self.provider.model, exc)
             return 0
         for entry in getattr(listing, "data", []) or []:

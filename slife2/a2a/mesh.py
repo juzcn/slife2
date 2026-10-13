@@ -219,17 +219,29 @@ def _backoff_delay(attempt: int) -> float:
 
 
 def _decode_payload(msg) -> dict | None:
-    """Decode an MQTT payload to JSON; None when empty or unparseable.
+    """Decode an MQTT payload to JSON; ``None`` when there is nothing to read.
 
-    ``utf-8 replace`` keeps a binary or mis-encoded payload from raising,
-    and an unparseable body is dropped by callers rather than fatal.
+    **An empty payload and a corrupt one are not the same answer**
+    (DESIGN.md §10.1).  An empty body is how a publisher retires a card
+    (``_handle_discovery``), so it is ``None`` without a word.  A body that is
+    not JSON is somebody else's process sending this build something it cannot
+    read, and the caller drops it either way — so a silent ``None`` left the
+    topic with no evidence at all of the message that was thrown away.  It is
+    named here, at warning, with the topic it came off; the payload itself is
+    not quoted, because it is a peer's bytes and may be anything.
+
+    Both still answer ``None``, because dropping is each caller's answer —
+    what changes is that only one of them is a fact nobody needs to hear.
+    ``utf-8 replace`` keeps a binary or mis-encoded body from raising.
     """
     raw = msg.payload.decode("utf-8", "replace") if msg.payload else ""
     if not raw:
         return None
     try:
         return json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        topic = getattr(getattr(msg, "topic", None), "value", "?")
+        logger.warning("a2a_payload_undecodable topic=%s err=%s", topic, e)
         return None
 
 
@@ -446,7 +458,13 @@ def _user_property(props, key: str) -> str:
 def _presence_status(props) -> str:
     """Map the standard ``a2a-status`` presence property to online/offline.
 
-    Absent property (a card without presence stamping) defaults to online.
+    **Absent defaults to "online", and that is a decision rather than an
+    oversight** — it is what a card stamped by an implementation that does not
+    set presence means, and what our own readiness gate rests on
+    (``_handle_discovery``).  What it costs is that a *deleted* card, which
+    carries no property either, would read as an announcement: every caller
+    that can be handed one therefore refuses the empty payload *before* asking
+    this, and that ordering is load-bearing rather than tidy.
     """
     status = _user_property(props, "a2a-status")
     if not status:
@@ -562,8 +580,8 @@ class A2AMesh:
 
         # Agent-side callbacks — replaced by the plugin before connect().
         self.on_inbound_task = lambda source, content, task_id, kind="task": None
-        self.on_task_completion = lambda corr_id, result, cancelled, peer, kind="task": (
-            None
+        self.on_task_completion = (
+            lambda corr_id, result, cancelled, peer, kind="task", failed=False: None
         )
         self.on_agent_change = lambda card, event: None
         # A peer's CancelTask, delivered to the agent: the model is told and
@@ -606,6 +624,8 @@ class A2AMesh:
         raises *before* connecting at all when another agent already holds our
         name on the broker (see :meth:`_probe_own_name`) — joining would take
         that agent's session over and duplicate every task sent to the name.
+        The same check raises when it cannot run at all, rather than letting a
+        probe that failed pass for a name that is free.
         """
         await self.disconnect()
         self._closing = False
@@ -650,6 +670,14 @@ class A2AMesh:
         retained card on our own discovery topic.
 
         Returns a description of the claim, or ``None`` when the name is free.
+
+        **A probe that failed is not a probe that found nothing** (DESIGN.md
+        §10.1).  A connection that could not be made or read used to be
+        swallowed at debug and answered ``None``, which reads as "the name is
+        free" — the one verdict this check exists to give, and the one it must
+        never guess: a duplicated name means every task sent to it runs twice.
+        The failure is the connect's now, raised naming the broker the probe
+        could not ask.
         """
         kwargs = self._mqtt_cfg.client_kwargs(
             identifier=(
@@ -672,10 +700,10 @@ class A2AMesh:
                 except TimeoutError:
                     return None
         except (aiomqtt.MqttError, OSError, ValueError) as e:
-            # An unreachable or rejecting broker is not a name problem — the
-            # connect below reports it, with the error that belongs to it.
-            logger.debug("a2a_name_probe_failed err=%s", e)
-        return None
+            raise RuntimeError(
+                f"the name probe against {self.broker_address} failed, so it is "
+                f"not known whether {self.agent_name!r} is already in use there: {e}"
+            ) from e
 
     def _foreign_claim(self, msg) -> str | None:
         """Whether *msg* is another agent holding our name — and how it looks.
@@ -775,6 +803,16 @@ class A2AMesh:
 
         Subscribes discovery wildcard + our reply sessions; reconnects on drop
         until shutdown.  Publishes requests only — the responder owns presence.
+
+        **Only the MQTT library's own errors are read as a dropped connection.**
+        ``AttributeError`` and ``ValueError`` used to be caught beside
+        ``MqttError`` as transport noise, which made them the one class of
+        failure this loop could not report: they are exactly what a bug in
+        ``_handle_reply``/``_handle_event`` raises, so a handler that started
+        returning the wrong shape reconnected the client for ever, cleared the
+        roster on every reconnect, and said nothing anywhere.  A dropped
+        connection is the library's to declare; everything else reaches the
+        clause that logs it.
         """
         kwargs = self._mqtt_cfg.client_kwargs(
             identifier=(
@@ -828,12 +866,14 @@ class A2AMesh:
                                 break
                     except asyncio.CancelledError:
                         raise
-                    except (aiomqtt.MqttError, AttributeError, ValueError):
+                    except aiomqtt.MqttError:
                         pass  # connection dropped → reconnect below
                     except Exception:  # noqa: BLE001 - a handler bug must not be read as a disconnect, and naming the handlers' exceptions would be naming every one a future handler might raise
-                        # A handler/parse bug must not masquerade as a
-                        # disconnect (that would spin reconnects); log and
-                        # keep consuming.
+                        # A handler or parse bug — an AttributeError off a body
+                        # whose shape changed, a ValueError off a value nothing
+                        # checked — is logged with its traceback rather than
+                        # swallowed as a drop, so the reconnect below is not the
+                        # only trace it leaves.
                         logger.exception("a2a_outbound_loop_error")
             except asyncio.CancelledError:
                 raise
@@ -993,20 +1033,36 @@ class A2AMesh:
             # TASK_REQUEST: record the terminal state on the task store.
             record = get_store().get(task_id)
             if record is None:
-                return
-            if state == "cancelled":
-                get_store().record_cancel(task_id)
-            elif state == "completed":
-                get_store().record_result(task_id)
+                # **Pruned, and a peer's answer is still an answer.**  The store
+                # is process-local and evicts the oldest *pending* record once
+                # it is over its cap, so a peer that answers slowly enough
+                # finishes a task this process no longer holds — and `send`,
+                # read above, is what still knows whose it was.  Dropped here as
+                # it used to be, the result was lost with nothing said anywhere.
+                #
+                # There is nothing to record against, so this arm delivers and
+                # falls through: the cleanup below is the one place a terminal
+                # reply stops being tracked, and returning early from here left
+                # the send and its correlations in the tables for ever.
+                logger.warning("a2a_reply_without_record task=%s", task_id)
+                if send is not None:
+                    self.on_task_completion(
+                        task_id, result, cancelled, send.agent, "task"
+                    )
             else:
-                get_store().record_error(task_id)
-            self.on_task_completion(
-                task_id,
-                result,
-                cancelled,
-                record.agent_name,
-                "task",
-            )
+                if state == "cancelled":
+                    get_store().record_cancel(task_id)
+                elif state == "completed":
+                    get_store().record_result(task_id)
+                else:
+                    get_store().record_error(task_id)
+                self.on_task_completion(
+                    task_id,
+                    result,
+                    cancelled,
+                    record.agent_name,
+                    "task",
+                )
         # Terminal reply → the send is finished; stop tracking its delivery and
         # drop EVERY routing entry for this task — the primary correlation and
         # every retry correlation the peer may have answered on (the terminal
@@ -1059,6 +1115,19 @@ class A2AMesh:
         exhausted.  A peer that already received (and deduped) the request
         answers a retry with a ``working`` replay — which counts as the first
         reply, confirming delivery while the task keeps running.
+
+        **Exhaustion is told to the conversation, not just to the log.**  A
+        warning here left the send dead and the conversation waiting for an
+        arrival ``a2a_send_message`` had promised it ("The result will arrive in
+        this conversation"), with the task row ``pending`` for ever.  So the
+        ladder's last word takes the same callback a terminal reply does
+        (:attr:`on_task_completion`) with the failure's own words, and the
+        envelope is told it is a failure so it is not rendered as an answer.
+        The store record is deliberately left alone: no reply arrived, so the
+        peer's real ending is unknown, and marking the row `failed` would be a
+        verdict this process has no business giving (DESIGN.md §10.1).  Left
+        `pending`, a late terminal still routes — the ``finally`` below keeps
+        every correlation for exactly that — and records the true outcome.
         """
         try:
             try:
@@ -1068,9 +1137,20 @@ class A2AMesh:
             while not (self._closing or send.delivered):
                 if send.attempts >= _MAX_ATTEMPTS:
                     logger.warning(
-                        "a2a_delivery_exhausted task=%s attempts=%d",
+                        "a2a_delivery_exhausted task=%s peer=%s attempts=%d",
                         send.task_id,
+                        send.agent,
                         send.attempts,
+                    )
+                    self.on_task_completion(
+                        send.task_id,
+                        f"it was sent {send.attempts} times over the requester "
+                        f"retry ladder and never acknowledged. Send it again if "
+                        f"it still matters.",
+                        False,
+                        send.agent,
+                        "task" if send.record else "message",
+                        failed=True,
                     )
                     return
                 await asyncio.sleep(_backoff_delay(send.attempts - 1))
@@ -1080,9 +1160,10 @@ class A2AMesh:
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex[:16])
                 except Exception as e:  # noqa: BLE001 - a failed attempt is retried, not raised: the budget below is what decides, and every client error means the same thing here
-                    logger.debug(
-                        "a2a_delivery_retry_failed task=%s err=%s",
+                    logger.warning(
+                        "a2a_delivery_retry_failed task=%s attempt=%d err=%s",
                         send.task_id,
+                        send.attempts,
                         e,
                     )
                     continue  # still under the attempts budget — try again

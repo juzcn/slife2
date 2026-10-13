@@ -18,6 +18,7 @@ URL is not a working one.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import types
@@ -486,8 +487,17 @@ def test_the_ssh_binary_option_is_honoured() -> None:
     assert LocalhostRunTunnel({"ssh": "/opt/ssh"})._binary == "/opt/ssh"
 
 
-def test_a_bad_remote_port_falls_back_rather_than_raising() -> None:
-    assert LocalhostRunTunnel({"remote_port": "not a number"})._remote_port == 80
+def test_a_malformed_remote_port_is_refused() -> None:
+    """§1.6 declares exactly one warn-instead-of-refuse in this section — an
+    unknown provider *name* — and says a malformed *shape* is refused.  A bad
+    value in a known option is that same mistake: reading "not a number" as 80
+    silently forwards a different remote port than the config wrote."""
+    with pytest.raises(ValueError, match=r"remote_port 'not a number'"):
+        LocalhostRunTunnel({"remote_port": "not a number"})
+    # An absent option is still the documented default, and a written one is
+    # honoured — only a malformed value is a mistake worth refusing.
+    assert LocalhostRunTunnel({})._remote_port == 80
+    assert LocalhostRunTunnel({"remote_port": "8080"})._remote_port == 8080
 
 
 def test_cloudflare_runs_a_quick_tunnel_for_the_local_port() -> None:
@@ -512,6 +522,25 @@ def test_a_missing_binary_is_terminal_and_names_itself(monkeypatch) -> None:
         CloudflareQuickTunnel().start(8038)
     with pytest.raises(RuntimeError, match="ssh client not found"):
         LocalhostRunTunnel().start(8038)
+
+
+def test_the_resolved_binary_path_is_reported(monkeypatch) -> None:
+    """A CLI binary is found on PATH first, then by guessed install locations.
+
+    Which one ran is otherwise invisible — the provider's name does not say it,
+    and a PATH copy and a ``Program Files`` copy are different programs — so the
+    resolved path is reported once it has been found.
+    """
+    lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED]
+    install_popen(monkeypatch, LinesStdout(lines))
+    monkeypatch.setattr(
+        providers, "_which", lambda binary, extra=(): "/opt/cf/cloudflared"
+    )
+    tunnel = CloudflareQuickTunnel()
+    tunnel.start(8038)
+    assert tunnel.binary_path == "/opt/cf/cloudflared"
+    assert tunnel.status()["binary"] == "/opt/cf/cloudflared"
+    tunnel.stop()
 
 
 # --- spawning, readiness and the reader ---------------------------------------
@@ -595,6 +624,39 @@ def test_a_rotated_hostname_is_swapped_in_place() -> None:
     assert tunnel.status() == {"state": "active", "url": "https://new.lhr.life"}
 
 
+def test_a_dead_reader_warns_and_names_the_child(caplog) -> None:
+    """Once a tunnel is up this thread is what swaps in a rotated hostname.
+
+    A reader that dies at debug level stops that swap with nothing said — the
+    published URL then goes stale and every later fetch fails, invisibly.  The
+    warning names the child so the failure can be traced to one spawn.
+    """
+
+    class ExplodingStdout:
+        closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise OSError("pipe closed")
+
+        def close(self):
+            self.closed = True
+
+    tunnel = LocalhostRunTunnel()
+    tunnel._proc = FakeProcess(ExplodingStdout())
+    with caplog.at_level(logging.WARNING):
+        tunnel._read_output(tunnel._proc)
+
+    assert tunnel._eof_event.is_set()
+    assert any(
+        "tunnel_reader_died" in record.getMessage()
+        and "localhost.run" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_is_alive_follows_the_child() -> None:
     tunnel = LocalhostRunTunnel()
     assert tunnel.is_alive() is False  # never started
@@ -655,9 +717,15 @@ def test_losing_every_connector_reads_as_not_alive(monkeypatch) -> None:
     tunnel.stop()
 
 
-def test_an_unanswered_probe_falls_back_to_the_childs_output(monkeypatch) -> None:
-    """A probe that cannot connect says nothing about the tunnel, so it must
-    not be read as an outage."""
+def test_a_failed_probe_is_not_permission_to_trust_the_scrape(monkeypatch) -> None:
+    """A metrics server that was announced and could not answer is *unknown*.
+
+    The scraped connector set stays full straight through a QUIC outage — no
+    "Unregistered" line follows a "Serve tunnel error" — so letting it stand in
+    for the answer the probe could not give is exactly how a flapping tunnel
+    reports healthy.  §1.6 declares the scrape only for a build that announces
+    no metrics server, which this is not.
+    """
 
     def refuse(**kwargs):
         raise OSError("connection refused")
@@ -667,6 +735,15 @@ def test_an_unanswered_probe_falls_back_to_the_childs_output(monkeypatch) -> Non
     tunnel._registered = {"0"}
     tunnel._metrics_base = "http://127.0.0.1:20241"
     assert tunnel._metrics_ready() is None
+    assert tunnel._transport_alive() is False, "the scrape is not a substitute"
+
+
+def test_without_a_metrics_server_the_scraped_set_is_the_answer() -> None:
+    """§1.6's boundary: the scrape is the fallback for a build that announces
+    no metrics server to ask — which is the only case that licenses it."""
+    tunnel = CloudflareQuickTunnel()
+    tunnel._registered = {"0"}
+    assert tunnel._metrics_base is None
     assert tunnel._transport_alive() is True
 
 

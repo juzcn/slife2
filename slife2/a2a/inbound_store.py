@@ -150,21 +150,32 @@ class InboundStore:
         one orphaned by the last, and dropping it here would silently forgive a
         reply the peer is still owed — but the section is still held to
         :data:`_MAX_ENTRIES` like the live one.
+
+        **A file that cannot be read is refused, not read as empty**
+        (DESIGN.md §10.1).  The old answer — a warning and a return — left an
+        empty store whose very next `_save` wrote itself over the file, so the
+        evidence was consumed with the data, and what was lost that way is the
+        one thing this file is for: the peers a previous process died owing an
+        answer, which then went neither answered nor reported.  The read raises
+        naming the file instead, and because it runs before `open`'s write, the
+        refusal is also what makes the overwrite impossible.
         """
         try:
             raw = _yaml().load(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return
         except (OSError, ValueError, YAMLError) as e:
-            # A corrupt state file must never block the mesh — losing it costs
-            # the stale list, which is a reminder, not protocol state.
-            logger.warning("a2a_inbound_state_unreadable err=%s", e)
-            return
+            raise ValueError(
+                f"the inbound ledger at {self._path} could not be read ({e}); "
+                f"it is not empty, so reading it as empty would overwrite what "
+                f"a previous process left owing — move the file aside to start "
+                f"from nothing"
+            ) from e
         if not isinstance(raw, dict):
             return
         self._agent = str(raw.get("agent") or self._agent)
-        self._stale = self._parse(raw.get("stale"))
-        for task_id, task in self._parse(raw.get("pending")).items():
+        self._stale = self._parse("stale", raw.get("stale"))
+        for task_id, task in self._parse("pending", raw.get("pending")).items():
             self._stale.setdefault(task_id, task)
         # ``_trim`` runs on ``pending`` at every add, but ``stale`` is only ever
         # filled HERE — so without this the section was exempt from the cap the
@@ -174,13 +185,37 @@ class InboundStore:
         if self._stale:
             logger.info("a2a_inbound_orphaned count=%d", len(self._stale))
 
-    def _parse(self, section) -> dict[str, InboundTask]:
-        out: dict[str, InboundTask] = {}
+    def _parse(self, name: str, section) -> dict[str, InboundTask]:
+        """Read one named section of the ledger, refusing what cannot be read.
+
+        **A section that is not a mapping is damage, not an empty section**
+        (DESIGN.md §10.1).  Read as ``{}`` it was written back as one on the
+        next `_save`, so a peer a previous process died owing an answer was
+        dropped from a file whose whole purpose is to remember it — the same
+        loss the file-level read refuses one function up, one level down.  A
+        non-mapping section, and a non-mapping entry inside one, each raise
+        naming the section and the row rather than being quietly forgotten.
+
+        ``None`` is the absent section — no ``pending`` or ``stale`` key at all
+        — and that is genuinely empty, so it answers ``{}`` without a word.
+        """
+        if section is None:
+            return {}
         if not isinstance(section, dict):
-            return out
+            raise ValueError(
+                f"the {name!r} section of the inbound ledger at {self._path} is "
+                f"not a mapping ({section!r}); it is not empty, so reading it as "
+                f"empty would overwrite what a previous process left owing"
+            )
+        out: dict[str, InboundTask] = {}
         for task_id, entry in section.items():
             if not isinstance(entry, dict):
-                continue
+                raise ValueError(
+                    f"the entry {task_id!r} in the {name!r} section of the "
+                    f"inbound ledger at {self._path} is not a mapping ({entry!r}); "
+                    f"it is not empty, so reading it as empty would overwrite what "
+                    f"a previous process left owing"
+                )
             out[str(task_id)] = InboundTask(
                 task_id=str(task_id),
                 peer=str(entry.get("peer", "unknown")),
@@ -196,10 +231,19 @@ class InboundStore:
         A temp file in the same directory and `os.replace`, the same guarantee
         `slife2.wechat.save_session` gives and for the same reason: this file is
         rewritten on every inbound task's arrival and completion.  There is
-        nothing here to preserve — it is machine-written, and losing it costs a
-        reminder rather than protocol state — so the atomic replace alone is the
-        guarantee it needs: a reader sees all of the old file or all of the new
-        one.
+        nothing here to preserve from the *previous* write — it is
+        machine-written — so the atomic replace alone is the guarantee it needs:
+        a reader sees all of the old file or all of the new one.
+
+        **A write that did not land is reported, not whispered.**  This file is
+        the only line between a task that is orphaned and one that was never
+        seen (DESIGN.md §1.8), so a write that fails costs exactly the fact the
+        next process would have read — and nothing else will ever say so.  It is
+        still not the caller's failure: an inbound task was answered from
+        memory, and refusing the arrival because the disk is full would fail a
+        turn over bookkeeping.  So the failure is not raised — it is an error
+        naming the file, which is the only place an operator will see it — and
+        the caller goes on.
         """
         payload = {
             "agent": self._agent,
@@ -215,7 +259,13 @@ class InboundStore:
                 os.fsync(opened.fileno())
             os.replace(tmp, self._path)
         except OSError as e:
-            logger.warning("a2a_inbound_state_write_failed err=%s", e)
+            logger.error(
+                "a2a_inbound_state_write_failed path=%s err=%s — what this "
+                "process is holding is not on disk, so a restart would read it "
+                "as ids it has never seen",
+                self._path,
+                e,
+            )
 
     @staticmethod
     def _trim(section: dict[str, InboundTask]) -> None:

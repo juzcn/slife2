@@ -64,15 +64,41 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
 
     Set `compat.thinking: enabled` to ask explicitly, `disabled` to forbid it,
     and `omit` to say so out loud.
+
+    **A value outside those spellings is refused, not read as "send nothing".**
+    The field has a closed set, and a typo (`enabledd`) used to fall through the
+    match to `case _` — so the operator's intent was dropped with no word while
+    the request went out unchanged, the deformation §10.1 names: a weaker path
+    silently standing in for the one that was asked for.  The refusal names the
+    value and the spellings this adapter knows.
     """
     match settings.thinking:
         case "enabled":
-            budget = int((settings.max_tokens or 8192) * THINKING_BUDGET_SHARE)
+            # **The budget is a share of a number the config has to have said.**
+            # An absent `max_tokens` used to become 8192 here, which is this
+            # adapter inventing an output budget for somebody else's model — and
+            # the thinking budget is half of it, so the invented number decided
+            # how long the model could think.  `thinking: enabled` without a cap
+            # is a configuration that cannot be satisfied, and §10.1's rule for
+            # that is to say so where it is used.
+            if not settings.max_tokens:
+                raise ValueError(
+                    f"{settings.model}: compat.thinking is `enabled` and the "
+                    "model declares no `max_tokens`, which is what the thinking "
+                    "budget is a share of — set one, or write `omit`."
+                )
+            budget = int(settings.max_tokens * THINKING_BUDGET_SHARE)
             return {"type": "enabled", "budget_tokens": budget}
         case "disabled":
             return {"type": "disabled"}
-        case _:
+        case "omit" | "":
             return None
+        case other:
+            raise ValueError(
+                f"{settings.model}: compat.thinking {other!r} is not a spelling "
+                f"this adapter knows — write `enabled`, `disabled` or `omit`, or "
+                f"leave the field absent to send nothing."
+            )
 
 
 def to_provider_messages(
@@ -231,8 +257,15 @@ def translate(event: Any) -> list[ProviderEvent]:
 #: use, and a gateway whose spelling is not on this list produces reasoning the
 #: transcript silently never shows.  Silent is the problem: nothing errors, the
 #: answer is correct, and the only symptom is a line that should have been
-#: there.
+#: there.  So a delta carrying a field this adapter does not recognise is
+#: *named* — once per process, per set of names, so a busy stream logs it once
+#: rather than once per token.
 _REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
+
+#: Field-name sets already reported as unrecognised.  Keyed by the set so a
+#: gateway that later changes which unknown field it sends is reported again,
+#: and so the warning costs one line rather than one per streamed token.
+_reported_unknown_fields: set[tuple[str, ...]] = set()
 
 
 def _reasoning(delta: Any) -> str:
@@ -241,6 +274,14 @@ def _reasoning(delta: Any) -> str:
     Also looks in the model's `extra` fields, because an SDK that does not know
     a name puts it there rather than dropping it — which is how a field that IS
     present ends up invisible to `getattr`.
+
+    **And it says so when it finds one it does not recognise.**  `_REASONING_FIELDS`
+    is a list of spellings, not of all spellings, so a gateway using a fourth
+    one streams reasoning that reaches the transcript never — invisibly, because
+    nothing errors and the answer is still correct.  Logging the unrecognised
+    names once makes that gateway findable from the log instead of from a reader
+    noticing the missing line (§10.1: an unreadable value must not be a silent
+    absence).
     """
     for field in _REASONING_FIELDS:
         value = getattr(delta, field, None)
@@ -253,6 +294,16 @@ def _reasoning(delta: Any) -> str:
             value = extra.get(field)
             if isinstance(value, str) and value:
                 return value
+        unknown = tuple(sorted(key for key in extra if key not in _REASONING_FIELDS))
+        if unknown and unknown not in _reported_unknown_fields:
+            _reported_unknown_fields.add(unknown)
+            logger.warning(
+                "reasoning may be dropped: this delta carried field(s) %s, and "
+                "this adapter reads reasoning from %s only — a gateway's own "
+                "spelling for it is invisible here",
+                ", ".join(unknown),
+                ", ".join(_REASONING_FIELDS),
+            )
     return ""
 
 

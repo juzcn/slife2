@@ -183,18 +183,19 @@ def render_qr(content: str) -> str:
     makes a code fit on a screen without a window to resize.  The model copies
     this into its reply, and the person scans the screen they are reading.
 
-    **Without `qrcode` the content is returned as it came**, which for this
-    bridge is a URL — a person can still open it, and a plugin that refuses to
-    start its login over a missing rendering library would be trading the whole
-    feature for the convenience of one.  v1's fallback, and v1's reason.
+    **Without `qrcode` this refuses rather than handing back the payload.**  It
+    used to return the content as it came — a URL the caller then told the model
+    to show "so it can be scanned", which is not something a URL can be, so a
+    weaker path was selected silently (DESIGN.md §10.1).  The `ImportError`
+    goes to the caller, which says what actually happened instead of reading a
+    link as a code.
     """
     if not content:
         return ""
-    try:
-        import qrcode
-    except ImportError:
-        logger.warning("qrcode is not installed; handing over the URL instead")
-        return content
+    # The one import of this package, inside the one function that draws it
+    # (pyproject's note): a build without it still runs everything else.
+    import qrcode
+
     code = qrcode.QRCode(border=1, box_size=1)
     code.add_data(content)
     code.make(fit=True)
@@ -344,26 +345,39 @@ def load_session(agent: str) -> dict[str, Any]:
 
     Unreadable reads as absent rather than raising: the file is a cache of a
     login, the login can be had again by scanning, and a torn write must not be
-    able to stop the plugin from starting.
+    able to stop the plugin from starting.  *Why* it could not be read is the
+    second value of :func:`_read_session`, which `ready` puts into
+    `restore_note`; this public half answers only the mapping.
     """
-    return _read_session(session_path(agent))
+    saved, _ = _read_session(session_path(agent))
+    return saved
 
 
-def _read_session(path: Path) -> dict[str, Any]:
-    """One login file as a mapping, or `{}` — for a file missing or unreadable.
+def _read_session(path: Path) -> tuple[dict[str, Any], str]:
+    """One login file as a mapping, and — when it could not be read — why.
 
     The path-shaped half of :func:`load_session`, because the startup scan has
     the path already and must read the name out of the file rather than the
     directory it sits in.
+
+    **A file that will not parse is named, not read as no file at all**
+    (DESIGN.md §10.1).  The outcome stays a cache miss — a login can be had
+    again by scanning, and refusing to start over one would trade the whole
+    feature for it — but an empty mapping on its own is indistinguishable from
+    a machine that never scanned, so the status answer built from it told
+    somebody with a damaged file to scan a *first* code while the file naming
+    their account sat on disk.  The damage rides back beside the mapping, and
+    `ready` puts it where the status answer reads it (`restore_note`): the file,
+    and what went wrong with it.
     """
     try:
         raw = _yaml().load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
-    except Exception:  # noqa: BLE001 — a corrupt cache is a cache miss
-        logger.warning("wechat session %s could not be read; ignoring it", path)
-        return {}
-    return raw if isinstance(raw, dict) else {}
+        return {}, ""
+    except Exception as e:  # noqa: BLE001 — a corrupt cache is a cache miss
+        logger.warning("wechat session %s could not be read: %s; ignoring it", path, e)
+        return {}, f"the saved login at {path} could not be read ({e})"
+    return (raw if isinstance(raw, dict) else {}), ""
 
 
 def save_session(agent: str, session: Mapping[str, Any]) -> Path:
@@ -397,14 +411,34 @@ def save_session(agent: str, session: Mapping[str, Any]) -> Path:
 
 def clear_session(agent: str) -> bool:
     """Forget a login — the ack cursor goes with it, as it is only meaningful
-    alongside a live session."""
+    alongside a live session.
+
+    ``True`` when no saved login is left afterwards, which is the state every
+    caller is after: a login that was never there is already that state.  The
+    old answer said ``False`` for it, which made "nothing to forget"
+    indistinguishable from "the file would not go" — so `logout`'s answer, "the
+    saved login is gone", stood over a file that was still on disk, and the next
+    start adopted the account again.  A removal that fails is now a ``False``
+    **and an error naming the file**, because the caller that reports the login
+    gone has read the wrong answer otherwise.  Callers that only want the
+    session tidied (`_adopt`, `login`, `status`) may ignore the return; the fact
+    is left in the log for them.
+    """
     path = session_path(agent)
     if not path.exists():
-        return False
-    with contextlib.suppress(OSError):
-        path.unlink()
         return True
-    return False
+    try:
+        path.unlink()
+    except OSError as exc:
+        logger.error(
+            "wechat %s: the saved login at %s could not be removed: %s — the "
+            "next start will adopt this account again",
+            agent,
+            path,
+            exc,
+        )
+        return False
+    return True
 
 
 #: How this plugin hands a message to the agent: `(agent, prompt)`, and it is a
@@ -518,7 +552,7 @@ class Wechat:
         re-triggerable by any tool call.
         """
         for path in sorted(self._agents.glob(f"*/{SESSION_NAME}")):
-            saved = _read_session(path)
+            saved, _ = _read_session(path)
             # The raw name off the file, and the directory only as a fallback:
             # the directory is a *sanitised* name and using it as the key is the
             # second-session bug this key exists to prevent.
@@ -575,20 +609,39 @@ class Wechat:
         """
         if session.client.is_logged_in:
             return
-        saved = load_session(session.agent)
+        saved, damage = _read_session(session_path(session.agent))
+        if damage:
+            # **The file is named, not read as no login at all** (DESIGN.md
+            # §10.1).  The status answer repeats `restore_note` verbatim, so a
+            # damaged cache now says which file it is and what was wrong with it
+            # rather than telling somebody who already scanned to scan again.
+            session.restore_note = damage
         if saved.get("bot_token"):
             await self._adopt(session, saved)
 
     async def _resume(self, session: Session) -> None:
         """The startup path: restore if there is anything to restore.
 
-        **Nothing is said from here.**  A login picked up at start-up is not a
-        change to the link, and this process comes up before the terminal does —
-        the line belongs to what happens while a window is there (`_announce`,
-        and `_adopt` for why the state is marked known rather than announced).
+        **Nothing is said to the window from here.**  A login picked up at
+        start-up is not a change to the link, and this process comes up before
+        the terminal does — the line belongs to what happens while a window is
+        there (`_announce`, and `_adopt` for why the state is marked known
+        rather than announced).
+
+        **And nothing is said by *raising* either.**  This runs from a spawned
+        task whose only reporter is `_spawn`'s callback, and the three outcomes
+        `_adopt` tells apart each write a `restore_note` of their own; a fourth
+        failure — a bug in `ready`, a file that cannot be read — used to be
+        swallowed by `contextlib.suppress(Exception)` with no line anywhere at
+        all.  It is logged now: silent about a login is the one thing this must
+        not be, and a note is not a reason to say the file is fine either.
         """
-        with contextlib.suppress(Exception):
+        try:
             await self.ready(session)
+        except Exception as exc:  # noqa: BLE001 — a boot that failed is not a boot that stopped
+            logger.warning(
+                "wechat %s: the saved login was not resumed: %s", session.agent, exc
+            )
 
     async def _adopt(self, session: Session, saved: Mapping[str, Any]) -> bool:
         """Take a saved login up, and start watching it.
@@ -786,7 +839,7 @@ class Wechat:
                 self._persist(session)
             except Exception as exc:  # noqa: BLE001 — the loop's job is to keep going
                 client.last_error = str(exc)
-                logger.debug("wechat %s: poll failed: %s", session.agent, exc)
+                logger.warning("wechat %s: poll failed: %s", session.agent, exc)
             backoff = (
                 min(backoff * BACKOFF_FACTOR, _T.timeouts.pacing.wechat_backoff_max)
                 if client.last_error
@@ -912,6 +965,15 @@ class Wechat:
         `saved_at` would be worse than wasteful, because that field is the
         login's age and refreshing it every few seconds is a login that never
         expires.  v1 merged the cursor into the file for the same reason.
+
+        **A cursor that did not land is not a cursor that moved, and it is said
+        out loud.**  This was a `debug` line, which made the one consequence it
+        has invisible: the file is the only thing that tells the next start
+        where the stream had got to, so a write that failed leaves the bridge's
+        whole replay window to be re-ingested and answered again as fresh turns
+        — the same messages said twice, by a process that believed it had
+        already read them.  The warning names the file, and `persisted` is left
+        where it was so the next poll tries again.
         """
         cursor = session.client.updates_buf
         if not cursor or cursor == session.persisted or not session.client.is_logged_in:
@@ -922,7 +984,14 @@ class Wechat:
         try:
             save_session(session.agent, written)
         except OSError as exc:
-            logger.debug("wechat %s: cursor not saved: %s", session.agent, exc)
+            logger.warning(
+                "wechat %s: the ack cursor could not be written to %s: %s — "
+                "after a restart this stream is re-read from its old place, so "
+                "those messages are answered again",
+                session.agent,
+                session_path(session.agent),
+                exc,
+            )
             return
         session.persisted = cursor
 
@@ -1039,7 +1108,21 @@ class Wechat:
         session.qr_task = self._spawn(
             self._qr_watch(session, qrcode, ilink.BASE_URL, attempts=0)
         )
-        rendered = render_qr(content)
+        try:
+            rendered = render_qr(content)
+        except ImportError:
+            # **A URL is not a code, so the sentence says which one this is**
+            # (DESIGN.md §10.1).  Without the rendering library there is nothing
+            # scannable to put in the reply, and telling the model to show a
+            # link "so it can be scanned" is a false instruction: the person
+            # opens the link instead.
+            return (
+                "The login code could not be drawn on this machine — the "
+                "`qrcode` package is missing — so there is nothing to scan.\n\n"
+                f"Send the person this link to open instead: {content}\n\n"
+                "`wechat_check_status` reports how the login is going. It "
+                "expires after about ten minutes."
+            )
         return (
             "Show this in your reply, so it can be scanned from the screen the "
             "person is looking at:\n\n"
@@ -1050,6 +1133,27 @@ class Wechat:
         )
 
     async def _qr_watch(
+        self, session: Session, qrcode: str, base_url: str, *, attempts: int
+    ) -> None:
+        """Follow one QR, and leave the session in a state whatever happens.
+
+        **Every exit from the loop below is a `qr_state`**, and the one that
+        raised was the exception to it: the task died, `_spawn`'s callback put
+        the traceback in the log, and `qr_state` stayed `waiting` for ever — so
+        `wechat_check_status` went on telling the model that a login QR was
+        waiting to be scanned, about a watch that no longer existed.  The guard
+        is here and not around the call that raised it first
+        (`poll_login_status`, on a body nothing could read) because the next one
+        would be a different line.
+        """
+        try:
+            await self._qr_follow(session, qrcode, base_url, attempts=attempts)
+        except Exception as exc:  # noqa: BLE001 — a dead watch is a state, not a traceback
+            session.qr_state = "error"
+            session.qr_error = f"The login could not be followed: {exc}"
+            logger.warning("wechat %s: the QR watch ended: %s", session.agent, exc)
+
+    async def _qr_follow(
         self, session: Session, qrcode: str, base_url: str, *, attempts: int
     ) -> None:
         """Follow one QR until it is confirmed, replaced, or out of time."""
@@ -1326,7 +1430,17 @@ class Wechat:
         return f"Sent to {peer}."
 
     async def logout(self, session: Session) -> str:
-        """`wechat_logout`: stop watching, forget the login, forget its QR."""
+        """`wechat_logout`: stop watching, forget the login, forget its QR.
+
+        **The login is only gone if the file is.**  `clear_session` used to
+        swallow the unlink failure and answer `False`, which every caller threw
+        away — so this tool said "the saved login is gone" over a file that was
+        still there, and the next start adopted the same account the logout was
+        asked to end.  The teardown still happens (the loop stops, the client is
+        replaced, the link is announced down), and what changes is the answer:
+        a removal that failed is reported with the path, so the model can say
+        the one thing that is true and a person can remove the file.
+        """
         self._cancel(session.poll)
         session.poll = None
         for typed in list(session.typing):
@@ -1346,7 +1460,7 @@ class Wechat:
         session.persisted = ""
         session.saved_at = 0.0
         session.restore_note = ""
-        clear_session(session.agent)
+        forgotten = clear_session(session.agent)
         # The one departure nobody has to discover: the model asked for it.  Said
         # from here rather than from the loop's exit, because `logout` cancels
         # that loop where it stands (`_poll`).
@@ -1356,6 +1470,13 @@ class Wechat:
         # and a logout somebody asked for would be silent (`_announce`).
         await self._announce(session)
         logger.info("wechat %s: logged out", session.agent)
+        if not forgotten:
+            return (
+                f"Logged out of WeChat, but its saved login at "
+                f"{session_path(session.agent)} could not be removed, so the "
+                f"next start would adopt that account again — remove the file "
+                f"by hand to be forgotten for good."
+            )
         return (
             "Logged out of WeChat, and the saved login is gone. Call "
             "`wechat_login` to connect again."

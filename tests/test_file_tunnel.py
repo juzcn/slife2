@@ -77,6 +77,7 @@ class FakeTunnel:
         self.stops = 0
         self.edge_ip = ""
         self.edge_via_proxy = False
+        self.binary_path = ""
 
     @property
     def is_active(self) -> bool:
@@ -442,6 +443,23 @@ async def test_status_says_what_the_tunnel_is_doing() -> None:
     assert '"state": "active"' in reported
     assert '"reachable": true' in reported
     assert '"provider": "ngrok"' in reported
+
+
+@pytest.mark.asyncio
+async def test_status_names_the_program_that_actually_ran() -> None:
+    """A CLI provider resolves its binary on PATH first, then in guessed install
+    locations (`providers._which`), so the provider name alone does not say which
+    program is running.  `tunnel_status` reads the resolved `binary_path` — the
+    same way it reads `edge_ip` — and reports it, so the path is readable from
+    the one tool that reports the tunnel's live facts.
+    """
+    tunnel = FakeTunnel()
+    tunnel.binary_path = "/opt/cf/cloudflared"
+
+    async with Client(server_for(tunnel)) as client:
+        reported = await ask(client, "tunnel_status")
+
+    assert '"binary": "/opt/cf/cloudflared"' in reported
 
 
 @pytest.mark.asyncio

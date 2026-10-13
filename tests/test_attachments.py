@@ -93,6 +93,25 @@ def test_a_source_named_twice_is_attached_once(tmp_path) -> None:
     assert len(pairs) == 1
 
 
+def test_an_unknown_suffix_is_refused_rather_than_guessed(tmp_path) -> None:
+    """The header decides how the far end decodes the bytes.
+
+    An SVG was sent as `image/png` here while `media/adapters._data_uri`
+    *refused* an unknown suffix for the same question — two routes to a provider
+    disagreeing about one thing.  Refusing is the one rule both follow now: a
+    guessed type is bytes the model cannot read, and the refusal names the
+    suffix.
+    """
+    path = image(tmp_path, name="diagram.svg", data=b"<svg/>")
+    pairs, refusals = attachments.resolve([path.as_posix()])
+
+    assert pairs == []
+    assert len(refusals) == 1
+    assert "diagram.svg" in refusals[0]
+    assert ".svg" in refusals[0]
+    assert "image/png" not in refusals[0]
+
+
 # --- where it lands -----------------------------------------------------------
 
 
@@ -194,3 +213,25 @@ def test_the_drop_understands_the_wire_shape_too() -> None:
 
     assert attachments.drop(wire) == 1
     assert wire[0]["content"][0]["text"].startswith("[image not stored: image/jpeg")
+
+
+def test_the_note_names_the_source_it_knows() -> None:
+    """The note is what the *record* keeps, so it must not invent a media type.
+
+    A `data:` URL names its type in the header and a remote URL is named by
+    itself, but a part with no readable source was rendered as a bare `image` —
+    a claim about a picture this function never saw, in the one sentence a
+    restored turn reads back (§10.1).  What it knows, it names.
+    """
+    typed = attachments.image_note(
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    )
+    assert "image/png" in typed
+
+    remote = attachments.image_note(
+        {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}}
+    )
+    assert "https://x.test/a.png" in remote
+
+    unnamed = attachments.image_note({"type": "image_url", "image_url": {}})
+    assert "image not stored: an unnamed source" in unnamed

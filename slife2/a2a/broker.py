@@ -128,15 +128,18 @@ def is_wildcard(host: str) -> bool:
     return host.strip().lower() in WILDCARD_HOSTS
 
 
-def _probe(host: str, port: int) -> bool:
+def _probe(host: str, port: int) -> bool | None:
     """Whether something accepts a connection at this address.
 
-    The timeout is chosen by which kind of address it is — a local one refuses
-    in microseconds and only needs a guard against a hung listener, a remote one
-    has a network in the way — so a caller never has to remember that one
-    question costs different amounts at different distances.  The two numbers
-    live in `slife2.timeouts` (`ready.probe_local` / `ready.probe_remote`),
-    which is the one place any of this module's clocks is written down.
+    Mirrors `runtime.tcp_listening`'s three answers, so an undetermined probe is
+    not read here as a port that is closed; the caller takes `None` where it
+    took `False`.  The timeout is chosen by which kind of address it is — a
+    local one refuses in microseconds and only needs a guard against a hung
+    listener, a remote one has a network in the way — so a caller never has to
+    remember that one question costs different amounts at different distances.
+    The two numbers live in `slife2.timeouts` (`ready.probe_local` /
+    `ready.probe_remote`), which is the one place any of this module's clocks is
+    written down.
     """
     timeout = (
         _T.timeouts.ready.probe_local

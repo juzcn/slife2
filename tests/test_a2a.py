@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from a2a_over_mqtt import make_properties
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -41,6 +42,7 @@ from slife2.a2a import broker
 from slife2.a2a import server as a2a_server
 from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
+    _MAX_ATTEMPTS,
     A2AMesh,
     AgentCard,
     AgentName,
@@ -76,7 +78,7 @@ from slife2.a2a.server import (
     channel_for,
     marker,
 )
-from slife2.a2a.task_store import TaskStore
+from slife2.a2a.task_store import TaskStore, get_store
 from slife2.audience import client_meta, for_the_model
 from slife2.config import A2ASettings, default_config
 from slife2.paths import a2a_inbound_path, a2a_inbound_paths
@@ -169,14 +171,21 @@ def test_a_presence_line_is_v1s_and_only_for_real_transitions() -> None:
 class FakeMessage:
     """The three fields the handlers read off an `aiomqtt` message."""
 
-    def __init__(self, topic: str, payload: bytes, status: str = "") -> None:
+    def __init__(
+        self, topic: str, payload: bytes, status: str = "", corr: str = ""
+    ) -> None:
         self.topic = type("Topic", (), {"value": topic})()
         self.payload = payload
-        self.properties = (
-            type("Props", (), {"UserProperty": [("a2a-status", status)]})()
-            if status
-            else None
-        )
+        if status:
+            self.properties = type(
+                "Props", (), {"UserProperty": [("a2a-status", status)]}
+            )()
+        elif corr:
+            # The routing a reply carries: the correlation data its request went
+            # out with is the only way back to the send it answers.
+            self.properties = make_properties(correlation_data=corr)
+        else:
+            self.properties = None
 
 
 def test_an_empty_payload_decodes_to_nothing_rather_than_raising() -> None:
@@ -185,6 +194,31 @@ def test_an_empty_payload_decodes_to_nothing_rather_than_raising() -> None:
     assert _decode_payload(FakeMessage("t", b'{"a": 1}')) == {"a": 1}
     # A mis-encoded body is replaced rather than fatal — callers drop it.
     assert _decode_payload(FakeMessage("t", b"\xff\xfe")) is None
+
+
+def test_a_corrupt_payload_is_named_where_an_empty_one_is_not(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**An empty body is normal; a body that is not JSON is somebody's bug.**
+
+    Both used to answer `None` in silence, so a peer sending a body this build
+    cannot read — a different profile, a different version — was dropped with
+    nothing anywhere saying which topic it came off.  The empty case stays
+    quiet, because a deleted card is exactly that and it is ordinary; the
+    corrupt one is a warning naming the topic.
+    """
+    topic = "a2a/v1/event/org/unit/broadcast"
+    with caplog.at_level(logging.WARNING, logger="slife2.a2a.mesh"):
+        assert _decode_payload(FakeMessage(topic, b"")) is None
+        assert _decode_payload(FakeMessage(topic, b"not json")) is None
+
+    named = [
+        record.getMessage()
+        for record in caplog.records
+        if "a2a_payload_undecodable" in record.getMessage()
+    ]
+    assert len(named) == 1, "an empty body is not evidence of anything"
+    assert topic in named[0], "the warning does not say where it came from"
 
 
 def test_presence_defaults_to_online_when_the_card_carries_none() -> None:
@@ -212,6 +246,45 @@ def test_a_terminal_reply_says_which_of_the_three_endings_it_was() -> None:
     assert _reply_state(wire("TASK_STATE_CANCELED")) == "cancelled"
     assert _reply_state(wire("TASK_STATE_FAILED")) == "failed"
     assert _reply_state({}) == "failed"
+
+
+def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
+    """**The store evicts; the peer answers anyway.**
+
+    The task store is process-local and drops the oldest *pending* record once
+    it is past its cap, so a peer slow enough to answer finishes a task this
+    process no longer holds.  The routing table still had the send, and with it
+    the agent the completion belongs to — the reply was dropped there in
+    silence, which loses a peer's result and leaves the conversation that asked
+    waiting for an answer that had already arrived.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT)
+    corr = "corr-pruned"
+    mesh._corr_to_task[corr] = TASK
+    mesh._sends[TASK] = _OutboundSend(TASK, PEER, "session", "{}")
+    assert get_store().get(TASK) is None, "the state this test is about"
+
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+
+    mesh._handle_reply(
+        FakeMessage(
+            "a2a/v1/agents/jack",
+            json.dumps(
+                {
+                    "result": {
+                        "statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED"}}
+                    }
+                }
+            ).encode(),
+            corr=corr,
+        )
+    )
+
+    assert done, "the reply reached nobody"
+    task_id, _result, cancelled, agent, kind = done[0]
+    assert (task_id, cancelled, agent, kind) == (TASK, False, PEER, "task")
+    assert TASK not in mesh._sends, "and the send is finished either way"
 
 
 def test_the_retry_ladder_is_the_profiles_own_numbers() -> None:
@@ -371,6 +444,92 @@ def _read_yaml(path: Path) -> dict:
     from slife2.a2a.inbound_store import _yaml
 
     return _yaml().load(path.read_text(encoding="utf-8"))
+
+
+def test_a_damaged_ledger_is_refused_rather_than_read_as_empty() -> None:
+    """**The write after the read is what makes the loss permanent.**
+
+    A corrupt file was logged and answered with an empty store, and the very
+    next save wrote that empty store over it — so the evidence was consumed
+    with the data.  What it held is the one thing the file exists for: the peers
+    a previous process died owing an answer, which then went neither answered
+    nor reported (DESIGN.md §10.1).  The read raises naming the file instead,
+    and because it runs before `open`'s write, nothing is overwritten.
+    """
+    path = a2a_inbound_path(AGENT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    damaged = "agent: jack\npending: {\n"  # a flow mapping that never closes
+    path.write_text(damaged, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="could not be read"):
+        InboundStore.open(AGENT)
+
+    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
+
+
+def test_a_ledger_section_that_is_not_a_mapping_is_refused_rather_than_read_as_empty() -> (
+    None
+):
+    """**The same loss as the file-level read, one level down** (DESIGN.md §10.1).
+
+    A section that was not a mapping read as `{}`, and the next `_save` wrote
+    that empty section back — so a peer a previous process died owing an answer
+    was dropped from a file whose whole purpose is to remember it.  The section
+    is refused instead, naming the section and the file.
+    """
+    path = a2a_inbound_path(AGENT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    damaged = "agent: jack\npending:\n  - not-a-mapping\nstale: {}\n"
+    path.write_text(damaged, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pending"):
+        InboundStore.open(AGENT)
+
+    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
+
+
+def test_a_ledger_entry_that_is_not_a_mapping_is_refused_rather_than_dropped() -> None:
+    """**An entry that cannot be read is damage, not an absent entry.**
+
+    A non-mapping row was dropped with no word, and the next `_save` wrote the
+    section without it (DESIGN.md §10.1) — the orphaned peer vanished from the
+    one record of the reply it is still owed.  The row is named instead.
+    """
+    path = a2a_inbound_path(AGENT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    damaged = f"agent: jack\npending:\n  {TASK}: not-a-mapping\nstale: {{}}\n"
+    path.write_text(damaged, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=TASK):
+        InboundStore.open(AGENT)
+
+    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
+
+
+def test_a_ledger_write_that_failed_is_findable_rather_than_whispered(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**This file is the only line between an orphaned task and one never seen**
+    (§1.8), so a write that does not land costs exactly the fact the next
+    process would have read.  It is still not the caller's failure — a turn must
+    not fail over a bookkeeping write — so what changes is where it goes: an
+    error naming the file, which is the only place an operator will see it.
+    """
+    store = InboundStore.open(AGENT)
+    path = a2a_inbound_path(AGENT)
+    before = path.read_text(encoding="utf-8")
+
+    def refuse(src: Any, dst: Any) -> None:
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.inbound_store")
+    store.add(TASK, PEER)
+
+    assert path.read_text(encoding="utf-8") == before, "the write did land"
+    assert any(str(path) in record.getMessage() for record in caplog.records), (
+        "the task that was never written down left nothing for an operator"
+    )
 
 
 # ── the outbound task store ─────────────────────────────────────────────────
@@ -795,6 +954,168 @@ async def test_an_outbound_result_is_pushed_back_wearing_its_task_id(
 
 
 @pytest.mark.asyncio
+async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
+    window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The promise `a2a_send_message` makes is the one this keeps.**
+
+    The tool answers "The result will arrive in this conversation", so a send
+    that dies on the retry ladder with one `warning` leaves the model waiting
+    for an arrival nothing will bring — and the task row `pending` for ever.
+    The ladder's last word now takes the completion callback a terminal reply
+    takes, wearing the failure's own words and marked `failed` so the envelope
+    does not call it an answer.  The record is left `pending` on purpose: no
+    reply arrived, so the peer's real ending is unknown, and a late terminal
+    still routes and records `completed` over it (DESIGN.md §10.1).
+    """
+    session = wired(window=window)
+    # An id of this test's own: the store is the process's singleton, and a row
+    # left behind under a shared id would be another test's surprise.
+    unacked = "task-nobody-acknowledged"
+    send = _OutboundSend(unacked, PEER, "session", "{}")
+    send.attempts = _MAX_ATTEMPTS  # the ladder is spent before it starts
+    get_store().record_send(unacked, PEER)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
+
+    await session.mesh._deliver(send)
+    await drain_until_idle(session, window=window)
+
+    text = window.handed[-1]["text"]
+    assert a2a_message_type(text) == "task_response"
+    assert f'"task_id": "{unacked}"' in text, "the id the model was given is here"
+    assert "never reached" in text
+    assert "never acknowledged" in text
+    assert "completed async task" not in text, "nothing may be read as an answer"
+    assert get_store().get(unacked).status == "pending", "a failure is not a verdict"
+
+
+@pytest.mark.asyncio
+async def test_a_name_probe_that_failed_is_not_a_free_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A probe that could not run is not a probe that found nothing**
+    (DESIGN.md §10.1).
+
+    `_probe_own_name` answers the one verdict nothing else on the wire can:
+    whether another agent already holds this name.  Answering `None` when its
+    own connection failed read as "the name is free", and a name held in
+    duplicate is exactly the case the check exists for — every task sent to it
+    would be executed twice.  The failure is the connect's now, named for the
+    broker the probe could not ask.
+    """
+
+    class Refusing:
+        def __init__(self, **kwargs: Any) -> None:
+            raise OSError("the broker refused the probe connection")
+
+    mesh = A2AMesh(default_config().a2a, AGENT)
+    monkeypatch.setattr("slife2.a2a.mesh.aiomqtt.Client", Refusing)
+
+    with pytest.raises(RuntimeError, match="name probe"):
+        await mesh.connect()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**An attempt that failed is not an attempt that has not run.**
+
+    Each failed rung of the retry ladder was a `debug` line with a `continue`,
+    so the attempt's failure was invisible until the whole budget ran out — and
+    the two failures tell an operator different things: one peer that never
+    hears, against a broker this process cannot publish to at all.  The warning
+    names the task and which rung it was on.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT)
+    send = _OutboundSend("task-a-retry-that-failed", PEER, "session", "{}")
+
+    async def refuse(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the broker refused the publish")
+
+    monkeypatch.setattr(mesh, "_publish_attempt", refuse)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
+    monkeypatch.setattr("slife2.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+
+    with caplog.at_level(logging.WARNING, logger="slife2.a2a.mesh"):
+        await mesh._deliver(send)
+
+    failed = [
+        record.getMessage()
+        for record in caplog.records
+        if "a2a_delivery_retry_failed" in record.getMessage()
+    ]
+    assert failed, "a failed retry left no trace beyond the exhausted ladder"
+    assert all(send.task_id in line for line in failed), "the task is not named"
+    assert any("attempt=2" in line for line in failed), "the rung is not named"
+
+
+class _OneMessageBroker:
+    """An `aiomqtt.Client` that hands over one message and then closes.
+
+    The outbound loop's reconnect cycle is not worth reproducing; what it needs
+    is a client whose reader ends for a reason the loop can answer, which is
+    `__aexit__` setting `_closing` on the mesh it belongs to.
+    """
+
+    def __init__(self, msg: Any, mesh: A2AMesh) -> None:
+        self._msg = msg
+        self._mesh = mesh
+        self.entries = 0
+
+    async def __aenter__(self) -> _OneMessageBroker:
+        self.entries += 1
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        self._mesh._closing = True
+        return False
+
+    async def subscribe(self, topic: str, qos: int = 0) -> None:
+        return None
+
+    @property
+    def messages(self) -> AsyncIterator[Any]:
+        async def reading() -> AsyncIterator[Any]:
+            yield self._msg
+
+        return reading()
+
+
+@pytest.mark.asyncio
+async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A bug in a reply handler used to look exactly like a dropped line.**
+
+    `AttributeError` and `ValueError` were caught beside `MqttError` and thrown
+    away as transport noise — which is what a handler reading a key a body no
+    longer carries raises.  So the client reconnected with nobody the wiser, and
+    the clause below, written to log exactly this class of failure, could never
+    see one.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT)
+
+    def bug(_msg: Any) -> None:
+        raise AttributeError("a body with no 'result' at all")
+
+    monkeypatch.setattr(mesh, "_handle_message", bug)
+    broker = _OneMessageBroker(
+        FakeMessage("a2a/v1/reply/org/unit/jack/s1", b"{}"), mesh
+    )
+    monkeypatch.setattr("slife2.a2a.mesh.aiomqtt.Client", lambda **kwargs: broker)
+
+    with caplog.at_level(logging.ERROR, logger="slife2.a2a.mesh"):
+        await mesh._run_outbound()
+
+    assert broker.entries == 1
+    assert any(
+        "a2a_outbound_loop_error" in record.getMessage() and record.exc_info is not None
+        for record in caplog.records
+    ), "the handler bug left no trace anywhere"
+
+
+@pytest.mark.asyncio
 async def test_a_presence_change_is_drawn_and_a_heartbeat_is_not(
     window: Window,
 ) -> None:
@@ -887,7 +1208,8 @@ async def test_a_refusing_window_is_a_failure_and_nothing_else_is_tried(
     assert refusing.handed == []
     assert session.queue.empty(), "a peer's message is not this plugin's to retry"
     assert any(
-        "a2a_delivery_unreachable" in record.getMessage() and PEER in record.getMessage()
+        "a2a_delivery_unreachable" in record.getMessage()
+        and PEER in record.getMessage()
         for record in caplog.records
     )
 
@@ -1352,6 +1674,93 @@ async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
 
     assert window.noted == [], "the agent's own arrival is not news to itself"
     assert window.handed == []
+
+
+@pytest.mark.asyncio
+async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A connect that failed is not a mesh that can be left half-up.**
+
+    A responder that advertised before the outbound connect timed out is still
+    on the broker, so the teardown after a failed `connect` is what retires it
+    (DESIGN.md §1.8).  `suppress(Exception)` made a teardown that raised
+    indistinguishable from one that worked: the agent stayed advertised with
+    nobody to retire it, and nothing said why.
+    """
+
+    async def connect(self: Any) -> None:
+        raise RuntimeError("the outbound connect timed out")
+
+    async def disconnect(self: Any) -> None:
+        raise RuntimeError("the responder would not let go")
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(config, source=lambda: config, connecting=False)
+
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="could not join the mesh"):
+            await client.call_tool(
+                A2A_BROADCAST, {"event": "the build is green"}, meta=client_meta(AGENT)
+            )
+
+    assert any(
+        AGENT in record.getMessage() and "would not be torn down" in record.getMessage()
+        for record in caplog.records
+    ), "the failed teardown left no trace naming the agent it left advertised"
+
+
+@pytest.mark.asyncio
+async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
+    monkeypatch: pytest.MonkeyPatch, window: Window, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A teardown that carries a protocol fact is not silent.**
+
+    The offline card is how a peer that watched an agent arrive watches it leave
+    (DESIGN.md §1.8), so a `disconnect` that raises as the window closes leaves
+    the agent advertised with nobody to retire it.  `suppress(Exception)` made
+    that failure indistinguishable from success — the roster said `online` and
+    nothing said why.
+    """
+    joined: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        joined.append(self.agent_name)
+
+    async def disconnect(self: Any) -> None:
+        raise RuntimeError("the broker went away mid-teardown")
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
+    async with Client(mcp) as client:
+        holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: joined == [AGENT], "the join never reached the mesh")
+        holding.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await holding
+        await until(
+            lambda: any(
+                "would not leave the broker as its window left" in record.getMessage()
+                for record in caplog.records
+            ),
+            "a teardown that could not retire the agent left no trace",
+        )
+
+    assert any(AGENT in record.getMessage() for record in caplog.records), (
+        "the failure does not name the agent it left advertised"
+    )
 
 
 @pytest.mark.asyncio

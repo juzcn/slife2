@@ -525,9 +525,15 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     async def tunnel_status() -> str:
         """The tunnel's live state as JSON facts: `state` (`active` /
         `starting` / `failed` / `idle`), the public `url`, `reachable`,
-        the `provider` in use, and — for a CLI tunnel — the `edge_ip` it is
-        dialing plus `edge_via_proxy`, which is true when a fake-ip proxy is
-        what a flapping tunnel should be blamed on.
+        the `provider` in use, and — for a CLI tunnel — the `binary` it
+        actually spawned, the `edge_ip` it is dialing plus `edge_via_proxy`,
+        which is true when a fake-ip proxy is what a flapping tunnel should be
+        blamed on.
+
+        `binary` is reported because the provider name does not say which
+        program is running: a CLI provider resolves its binary on PATH first and
+        then in guessed install locations (`_which`), and which of those won is
+        otherwise invisible.
         """
         state = tunnel.status()
         edge_ip = getattr(tunnel, "edge_ip", "")
@@ -535,6 +541,11 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             # A test double or a future transport: report "not observed"
             # rather than serialising something that is not an address.
             edge_ip = ""
+        binary = getattr(tunnel, "binary_path", "")
+        if not isinstance(binary, str):
+            # The same guard, for the same reason: an SDK transport has no
+            # binary, and a double may report none — never a non-path.
+            binary = ""
         return json.dumps(
             {
                 "state": state["state"],
@@ -542,6 +553,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "reason": state.get("reason", ""),
                 "reachable": tunnel.is_reachable(),
                 "provider": config.file_tunnel.active,
+                "binary": binary,
                 "edge_ip": edge_ip,
                 "edge_via_proxy": bool(getattr(tunnel, "edge_via_proxy", False)),
                 "exposed": len(exposed),

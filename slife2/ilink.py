@@ -210,6 +210,45 @@ def envelope_error(result: Mapping[str, Any]) -> str:
     return ""
 
 
+class UnreadableAnswer(RuntimeError):
+    """A call whose body was not the JSON object this protocol reads.
+
+    **The third way to fail, and the one that used to be read as success.**  The
+    module's docstring names two — "the bridge said no" (an envelope) and
+    "there is nothing here to read" — and a body that is not JSON is neither:
+    it is something answering that is *not the bridge*.  A proxy's error page
+    and a captive portal both arrive as a `200` carrying HTML, and decoding that
+    to `{}` made it the same answer as an empty poll: `error_envelope({})` is
+    false, so `last_error` was cleared, `validate_session` answered `True`, and
+    `wechat_check_status` told the model the link was connected over a bridge
+    that was not there.  It is raised rather than read, and every caller already
+    has somewhere to put it — `_getupdates` records it as the failure of the
+    call, and a task's `send` reports it to the model as text.
+    """
+
+
+def _decoded(answer: Answer, path: str) -> dict[str, Any]:
+    """One body, as the object this protocol reads — or the reason it is not.
+
+    A JSON *list*, string or number is as unreadable as HTML here: every
+    endpoint answers an object, and one that answers something else has changed
+    shape rather than said "no".
+    """
+    try:
+        decoded = json.loads(answer.text)
+    except ValueError as exc:
+        raise UnreadableAnswer(
+            f"{path} answered {answer.status} with a body that is not JSON "
+            f"({answer.text[:80]!r})"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise UnreadableAnswer(
+            f"{path} answered {answer.status} with a {type(decoded).__name__}, "
+            "not the object this protocol reads"
+        )
+    return decoded
+
+
 class IlinkClient:
     """One bot's session: the token, the cursor, and the calls made over them.
 
@@ -249,7 +288,10 @@ class IlinkClient:
         POST first and GET as a fallback: the documented call is the POST, and
         the GET is what v1 found answering when the POST came back without a
         `qrcode` — kept because a login that cannot start is a login that
-        cannot be retried.
+        cannot be retried.  **What reaches the GET is a POST that answered and
+        had no `qrcode`**: one whose body could not be read raises
+        (`UnreadableAnswer`), because taking a second run at a link that just
+        answered something unintelligible is how it gets to look healthy.
         """
         data = await self._post(
             "ilink/bot/get_bot_qrcode?bot_type=3",
@@ -577,11 +619,12 @@ class IlinkClient:
     ) -> dict[str, Any]:
         """One call: build the URL, hand it to the seam, decode what comes back.
 
-        A body that is not JSON decodes to `{}` rather than raising, which is
-        the same answer as an empty one and is what the callers already handle:
-        the two ways to fail are "the bridge said no" (an envelope, read by the
-        caller) and "there is nothing here to read", and neither is a reason to
-        take down a poll loop.
+        A body that is not JSON **raises** (`UnreadableAnswer`) rather than
+        decoding to `{}`, which is what it used to do.  The two ways to fail
+        named there — "the bridge said no" and "there is nothing here to read" —
+        missed the third, and the third is the one that matters: something that
+        is not the bridge answering `200` with HTML.  Read as `{}` it was a
+        healthy empty poll, so a dead link reported itself online.
         """
         url = f"{base_url or self._base_url}/{path}"
         answer = await self._http(
@@ -591,8 +634,4 @@ class IlinkClient:
             body=body,
             timeout=_T.timeouts.transport.wechat_request,
         )
-        try:
-            decoded = json.loads(answer.text)
-        except ValueError:
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
+        return _decoded(answer, path)

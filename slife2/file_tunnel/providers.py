@@ -182,6 +182,15 @@ def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
     ``resolve_command`` first: Python's resolver already honours ``PATHEXT``, so
     it finds ``cloudflared.exe`` and ``ssh.exe`` on its own and the wrapper had
     nothing left to do.
+
+    **The guessed install locations are a fallback a reader should be able to
+    see.**  OpenSSH and cloudflared are not on PATH in every shell on Windows,
+    so a copy under ``System32`` or ``Program Files`` is found and used — which
+    is what makes the feature work there, and also means PATH does not
+    necessarily win.  The order is therefore reported rather than trusted:
+    :attr:`_TunnelProviderBase.binary_path` carries the resolved path into
+    :meth:`_TunnelProviderBase.status`.  (Flagged for DESIGN.md §10.2: the
+    fallback narrows *which* binary runs to a guess when PATH is silent.)
     """
     found = shutil.which(binary)
     if found:
@@ -369,6 +378,12 @@ class _TunnelProviderBase:
         #: providers set it (see ``_note_edge_ip``); empty means "unknown", not
         #: "fine", so :attr:`edge_via_proxy` stays False rather than guessing.
         self._edge_ip: str = ""
+        #: The CLI binary a tunnel resolved, once it has found one.  Empty for an
+        #: SDK transport, and for a CLI provider that has not started.  A CLI
+        #: provider looks the binary up on PATH first and then in guessed install
+        #: locations (``_which``), so *which* binary ran is otherwise invisible —
+        #: reported through :attr:`binary_path` and in :meth:`status`.
+        self._binary_path: str = ""
 
     # ── Subclass hooks ─────────────────────────────────────────────
 
@@ -436,6 +451,17 @@ class _TunnelProviderBase:
         """
         return _is_fake_ip_answer(self._edge_ip)
 
+    @property
+    def binary_path(self) -> str:
+        """The CLI binary this tunnel resolved, or ``""`` when there is none.
+
+        A CLI provider discovers its binary on PATH first and then by guessed
+        install locations (see ``_which``), so the provider's name alone does
+        not say which program is running.  Empty means "an SDK transport, or a
+        CLI provider that has not started" — never "no binary".
+        """
+        return self._binary_path
+
     def is_reachable(self) -> bool:
         """Whether the published URL can actually be served right now.
 
@@ -466,14 +492,23 @@ class _TunnelProviderBase:
     # ── Status ─────────────────────────────────────────────────────
 
     def status(self) -> dict[str, str]:
-        """Report the tunnel's current state.  See the module docstring."""
+        """Report the tunnel's current state.  See the module docstring.
+
+        A CLI provider adds the resolved ``binary`` path once it has one, so a
+        reader can tell *which* program is running and not only its provider
+        name.  Absent for an SDK transport, and for a CLI provider still idle.
+        """
         if self._public_url is not None:
-            return {"state": "active", "url": self._public_url}
-        if self._starting:
-            return {"state": "starting", "url": ""}
-        if self._failed:
-            return {"state": "failed", "url": "", "reason": self._failure_reason}
-        return {"state": "idle", "url": ""}
+            state = {"state": "active", "url": self._public_url}
+        elif self._starting:
+            state = {"state": "starting", "url": ""}
+        elif self._failed:
+            state = {"state": "failed", "url": "", "reason": self._failure_reason}
+        else:
+            state = {"state": "idle", "url": ""}
+        if self._binary_path:
+            state["binary"] = self._binary_path
+        return state
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -875,6 +910,10 @@ class _CliTunnelProvider(_TunnelProviderBase):
         binary = self._find_binary()
         if binary is None:
             raise RuntimeError(self._missing_binary_error())
+        # Remembered so `status()` can report which program is running: the
+        # lookup is PATH first, then guessed install locations, so the name
+        # alone does not say.
+        self._binary_path = binary
         return self._run_attempts(lambda: self._spawn(binary, port))
 
     def _teardown(self) -> None:
@@ -971,10 +1010,12 @@ class _CliTunnelProvider(_TunnelProviderBase):
         the number of live edge connections — so it answers the question the
         scraped ``_registered`` set only approximates.
 
-        ``None`` (never ``False``) when the child announced no metrics server
-        or the probe could not be answered: an unanswered probe says nothing
-        about the tunnel, so the caller falls back to what it scraped rather
-        than reading a probe failure as an outage.
+        ``None`` means *there was no metrics server to ask* (the child announced
+        none), which is the one case that licenses the caller to fall back to
+        what it scraped.  A probe that was attempted and could not be answered is
+        a different case and reaches the caller the same way — ``None`` — so
+        :meth:`_transport_alive` tells the two apart by ``_metrics_base`` being
+        set, and neither answer is "alive".
         """
         base = self._metrics_base
         if not base:
@@ -985,7 +1026,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
             ) as http:
                 payload = http.get(f"{base}/ready").json()
             return int(payload.get("readyConnections") or 0) > 0
-        except Exception as e:  # noqa: BLE001 — a failed probe is not an outage
+        except Exception as e:  # noqa: BLE001 — a failed probe is not an answer
             logger.debug("tunnel_ready_probe_failed provider=%s err=%s", self.label, e)
             return None
 
@@ -1132,8 +1173,19 @@ class _CliTunnelProvider(_TunnelProviderBase):
                     )
                     self._public_url = url
                     os.environ[_TUNNEL_URL_ENV] = url
-        except Exception as e:  # noqa: BLE001 — never kill the reader silently
-            logger.debug("tunnel_reader_error provider=%s err=%s", self.label, e)
+        except Exception as e:  # noqa: BLE001 — see below; the reader must not die silently
+            # Once a tunnel is up this thread is what swaps in a rotated
+            # hostname, so a reader that dies stops that swap with nothing said
+            # — the published URL then goes stale and every later fetch answers
+            # 404 against the service, invisibly.  A debug line is not findable;
+            # this names the child so the failure can be traced to one spawn.
+            logger.warning(
+                "tunnel_reader_died provider=%s pid=%s err=%s — a rotated "
+                "hostname will no longer be swapped in",
+                self.label,
+                getattr(proc, "pid", "?"),
+                e,
+            )
         finally:
             self._eof_event.set()
 
@@ -1195,14 +1247,25 @@ class LocalhostRunTunnel(_CliTunnelProvider):
 
         self._host: str = str(opts.get("host") or "localhost.run")
         self._user: str = str(opts.get("user") or "nokey")
-        try:
-            self._remote_port: int = int(opts.get("remote_port") or 80)
-        except (TypeError, ValueError):
-            logger.warning(
-                "localhost_run_bad_remote_port value=%r fallback=80",
-                opts.get("remote_port"),
-            )
-            self._remote_port = 80
+        # An absent `remote_port` is the default; a *present but malformed* one
+        # is refused rather than read as 80.  §1.6 declares exactly one
+        # warn-instead-of-refuse in this section (an unknown provider *name*),
+        # and says a malformed *shape* is refused like every other section — a
+        # bad value in a known option is that same mistake, and silently
+        # forwarding a different remote port than the config wrote is the kind
+        # of deformation nobody can find (§10.1).
+        raw_port = opts.get("remote_port")
+        if raw_port is None or raw_port == "":
+            self._remote_port: int = 80
+        else:
+            try:
+                self._remote_port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"file-tunnel: localhost.run: remote_port {raw_port!r} is "
+                    f"not a number — write it as an integer, e.g. "
+                    f"`remote_port: 80`"
+                ) from exc
 
     def _find_binary(self) -> str | None:
         return _which(self._binary, _windows_ssh_fallbacks())
@@ -1329,12 +1392,18 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
         connection" line follows it — so a connector set scraped from stdout
         stays non-empty straight through an outage that answers every
         published link with HTTP 530, and the monitor watching it never sees
-        anything wrong.  The scraped set is still the fallback, for a build
-        that announces no metrics server.
+        anything wrong.  **The scraped set is read only when the child announced
+        no metrics server at all** (§1.6's boundary): a metrics server that was
+        announced and could not be asked leaves `_metrics_ready` answering
+        ``None`` while `_metrics_base` is set, and that is *unknown* — not
+        alive, because there is no probe answer for it and the scrape is
+        exactly the signal that stays full through the outage.
         """
         probed = self._metrics_ready()
         if probed is not None:
             return probed
+        if self._metrics_base is not None:
+            return False
         return bool(self._registered)
 
     def _find_binary(self) -> str | None:

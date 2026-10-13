@@ -19,6 +19,7 @@ scripted streamer makes no network call.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -43,6 +44,7 @@ from openai.types.responses import (
 )
 
 from slife2.config import ModelSettings
+from slife2.llm import openai_server
 from slife2.llm.anthropic_server import (
     DEFAULT_MAX_TOKENS,
     as_delta,
@@ -384,6 +386,42 @@ def test_system_messages_are_hoisted_out_of_the_list() -> None:
     assert messages == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 
+def test_a_system_turn_carrying_blocks_is_still_a_prompt(caplog) -> None:
+    """**Taken, and not dropped.**
+
+    The system prompt is a string parameter here, so a system turn carrying
+    content parts has to have its text taken out of them — and reading only
+    `str` content meant such a turn contributed nothing at all, with no word
+    anywhere: a prompt the caller wrote left the request (DESIGN.md §10.1).  A
+    block the API has no field for is left out, and said.
+    """
+    system, _ = to_anthropic_messages(
+        [
+            Message(role="system", content=[{"type": "text", "text": "be nice"}]),
+            Message(role="user", content="hi"),
+        ]
+    )
+    assert system == "be nice", "the caller's prompt is in the request"
+
+    with caplog.at_level("WARNING"):
+        system, _ = to_anthropic_messages(
+            [
+                Message(
+                    role="system",
+                    content=[
+                        {"type": "text", "text": "be nice"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                        },
+                    ],
+                ),
+            ]
+        )
+    assert system == "be nice", "the text beside it is kept"
+    assert "no field for" in caplog.text, "and the block it cannot carry is named"
+
+
 def test_tool_results_and_following_text_merge_into_one_user_turn() -> None:
     """Strict endpoints 400 on two same-role turns in a row."""
     _, messages = to_anthropic_messages(
@@ -422,7 +460,29 @@ def test_parallel_tool_results_merge_into_one_user_turn() -> None:
     assert len(messages[-1]["content"]) == 2
 
 
-def test_assistant_text_and_tool_calls_become_blocks() -> None:
+def test_a_non_string_tool_result_is_rendered_not_emptied() -> None:
+    """The defect: a result that was not a string became `""`.
+
+    Anthropic's `tool_result.content` is legitimately a block list, so this is a
+    shape a caller can really send — and replacing it with `""` dropped the
+    tool's whole output from the request with nothing said, under a comment that
+    called a non-string result a bug upstream and then guessed at it anyway.  It
+    is *rendered* now, so the model still sees what the tool answered.
+    """
+    _, messages = to_anthropic_messages(
+        [
+            Message(
+                role="tool",
+                content=[{"type": "text", "text": "two files matched"}],
+                tool_call_id="c1",
+            )
+        ]
+    )
+    (result,) = messages[0]["content"]
+    assert result["type"] == "tool_result"
+    assert result["content"] != ""
+    assert "two files matched" in result["content"]
+
     _, messages = to_anthropic_messages(
         [
             Message(
@@ -843,6 +903,62 @@ def test_responses_something_that_is_neither_inline_nor_a_url_is_dropped() -> No
     assert items[0]["content"] == [{"type": "input_text", "text": "hi"}]
 
 
+def test_responses_a_source_that_is_neither_data_nor_http_is_dropped_but_named(
+    caplog,
+) -> None:
+    """The same silent drop the *part type* one function up once was.
+
+    A source that is neither `data:` nor http(s) is no `input_image` this API
+    takes, so it is dropped rather than sent to 400 on every call carrying it —
+    but dropping it with no word loses the caller's attachment with nothing
+    anywhere saying so.  The scheme is logged; the drop stands.
+    """
+    part = {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}}
+    with caplog.at_level(logging.WARNING):
+        _, items = to_responses_input(
+            [Message(role="user", content=[part, {"type": "text", "text": "hi"}])]
+        )
+    assert items[0]["content"] == [{"type": "input_text", "text": "hi"}]
+    assert any("'file'" in r.getMessage() for r in caplog.records)
+
+
+def test_responses_a_part_that_is_not_a_mapping_is_dropped_but_named(caplog) -> None:
+    """A part the adapter cannot look inside is dropped, not passed on.
+
+    This API takes input items as mappings, so a bare string in the content
+    list is a 400 on every call — but a skip with no word loses the caller's
+    part with nothing saying so.  What arrived is named.
+    """
+    with caplog.at_level(logging.WARNING):
+        _, items = to_responses_input(
+            [Message(role="user", content=["oops", {"type": "text", "text": "hi"}])]
+        )
+    assert items[0]["content"] == [{"type": "input_text", "text": "hi"}]
+    assert any("'str'" in r.getMessage() for r in caplog.records)
+
+
+def test_responses_an_unrecognised_part_is_dropped_but_named(caplog) -> None:
+    """An unknown input item is a 400, so it is dropped — and named.
+
+    Dropping without a word loses the caller's part with nothing saying so; the
+    type is logged so a newer part kind or a stray attachment is findable.
+    """
+    with caplog.at_level(logging.WARNING):
+        _, items = to_responses_input(
+            [
+                Message(
+                    role="user",
+                    content=[
+                        {"type": "video", "video": {}},
+                        {"type": "text", "text": "hi"},
+                    ],
+                )
+            ]
+        )
+    assert items[0]["content"] == [{"type": "input_text", "text": "hi"}]
+    assert any("'video'" in r.getMessage() for r in caplog.records)
+
+
 def test_responses_tool_results_are_their_own_items() -> None:
     """The part with no analogue in either other backend.
 
@@ -853,6 +969,21 @@ def test_responses_tool_results_are_their_own_items() -> None:
         [Message(role="tool", content="4", tool_call_id="c1")]
     )
     assert items == [{"type": "function_call_output", "call_id": "c1", "output": "4"}]
+
+
+def test_responses_render_a_non_string_tool_result_rather_than_emptying_it() -> None:
+    """The same defect as the Anthropic adapter's, and the same fix.
+
+    A result that was not a string became `""`, so the tool's whole output left
+    the request with nothing saying it had.  It is rendered to JSON text now.
+    """
+    _, items = to_responses_input(
+        [Message(role="tool", content=[{"matches": 2}], tool_call_id="c1")]
+    )
+    (item,) = items
+    assert item["type"] == "function_call_output"
+    assert item["output"] != ""
+    assert "matches" in item["output"]
 
 
 def test_responses_an_assistant_turn_is_its_text_then_its_calls() -> None:
@@ -944,12 +1075,43 @@ def test_accumulator_synthesises_an_id_when_the_provider_sent_none() -> None:
     assert call.id == "call_0"
 
 
-def test_accumulator_degrades_unparseable_arguments_to_empty() -> None:
-    """The tool reports the problem to the model; the turn does not die."""
+def test_accumulator_refuses_arguments_that_never_parsed() -> None:
+    """Reading a truncated stream as `{}` re-attributes the fault to the model.
+
+    The provider cuts the JSON short or mangles it; an empty argument dict then
+    reaches the tool, which reports a validation error about a call the model
+    got right — and the model retries the call it never got wrong.  So the turn
+    fails, naming the call (§10.1: a value that cannot be read is not a value
+    that is absent).
+    """
     accumulator = ToolCallAccumulator()
     accumulator.add(
         ToolCallDelta(index=0, id="c1", name="calc", arguments_delta="{oops")
     )
+    with pytest.raises(ValueError, match="did not parse as JSON"):
+        accumulator.complete()
+
+
+def test_accumulator_refuses_arguments_that_are_not_an_object() -> None:
+    """Valid JSON that is not an object is as unreadable as JSON that never
+    parsed.  `[]`, `"x"` and `null` all parse, and a call's arguments are an
+    object by the protocol — so coercing one to `{}` hands the tool an empty
+    argument dict the model never sent, the very substitution the unparseable
+    case refuses (§10.1: a value that cannot be read is not a value that is
+    absent)."""
+    for raw in ("[]", '"x"', "null"):
+        accumulator = ToolCallAccumulator()
+        accumulator.add(
+            ToolCallDelta(index=0, id="c1", name="calc", arguments_delta=raw)
+        )
+        with pytest.raises(ValueError, match="not a JSON object"):
+            accumulator.complete()
+
+
+def test_accumulator_keeps_an_empty_argument_dict_as_empty() -> None:
+    """A call that genuinely took no arguments is a real absence, not damage."""
+    accumulator = ToolCallAccumulator()
+    accumulator.add(ToolCallDelta(index=0, id="c1", name="now", arguments_delta=""))
     (call,) = accumulator.complete()
     assert call.arguments == {}
 
@@ -1240,6 +1402,41 @@ def test_openai_thinking_is_opt_in() -> None:
     assert "extra_body" not in omitted_request, "nothing to carry, no hatch opened"
 
 
+def test_thinking_enabled_without_a_cap_is_refused() -> None:
+    """**The budget is a share of a number the config has to have said.**
+
+    An absent `max_tokens` used to become 8192 inside the adapter, which is this
+    module inventing an output budget for somebody else's model — and the
+    thinking budget is half of it, so the invented number decided how long the
+    model could think.  `thinking: enabled` with no cap is a configuration that
+    cannot be satisfied, and §10.1's rule is to name it where it is used.
+    """
+    asked = ModelSettings(model="m", reasoning=True, thinking="enabled")
+
+    with pytest.raises(ValueError) as raised:
+        openai_build_request([], [], asked, stream_usage=True)
+
+    assert "max_tokens" in str(raised.value)
+
+
+def test_an_unrecognised_thinking_value_is_refused_not_ignored() -> None:
+    """A typo in `compat.thinking` used to send nothing, silently.
+
+    The field has a closed set of spellings, so an unrecognised value fell
+    through the adapter's match to `case _` and read as "omit" — the operator's
+    intent to ask for thinking dropped with no word while the request went out
+    unchanged, the deformation §10.1 names.  The value is refused now, naming it
+    and the spellings this adapter knows.
+    """
+    settings = ModelSettings(model="m", reasoning=True, thinking="enabledd")
+    with pytest.raises(ValueError) as raised:
+        openai_build_request([], [], settings, stream_usage=True)
+
+    message = str(raised.value)
+    assert "enabledd" in message, "the value is named"
+    assert "omit" in message and "disabled" in message, "and the spellings it knows"
+
+
 def test_the_openai_request_only_names_arguments_the_sdk_has() -> None:
     """Every key this module builds is one `chat.completions.create` accepts.
 
@@ -1477,10 +1674,13 @@ def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     to be at least 1024 *and* strictly smaller than `max_tokens`, so the two
     together leave a window only when the cap is above the floor.  The clamp
     guarded the second alone — `max(1024, half)` then `min(…, cap - 1)` — and so
-    answered 1023 for a `max_tokens: 1024` model, which is a 400 on every call:
-    the very case this test is named for, asserted as correct.  A cap that
-    cannot hold a budget has no thinking to give, and the honest answer is to
-    send none.
+    answered 1023 for a `max_tokens: 1024` model, which is a 400 on every call.
+
+    **A cap that cannot hold a budget is a configuration fault, and is refused.**
+    It used to turn thinking off with a warning, so `reasoning: true` was
+    quietly not honoured and the caller was told nothing — a weaker path standing
+    in for the capability that was asked for (§10.1).  The refusal names the two
+    numbers.
     """
     request = anthropic_build_request(
         [], [], ModelSettings(model="m", reasoning=True, max_tokens=2000)
@@ -1493,14 +1693,14 @@ def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     )
     assert narrowest["thinking"]["budget_tokens"] == 1024
 
-    # 1024 and below: no budget is both >= 1024 and < the cap, so there is no
-    # thinking to ask for — declined rather than sent as a request the endpoint
-    # is certain to refuse.
+    # 1024 and below: no budget is both >= 1024 and < the cap, so no
+    # configuration satisfies `reasoning: true` — refused rather than silently
+    # dropped, and the message names max_tokens and the floor.
     for cap in (1024, 1):
-        at_the_floor = anthropic_build_request(
-            [], [], ModelSettings(model="m", reasoning=True, max_tokens=cap)
-        )
-        assert "thinking" not in at_the_floor, cap
+        with pytest.raises(ValueError, match=f"max_tokens={cap}.*1024"):
+            anthropic_build_request(
+                [], [], ModelSettings(model="m", reasoning=True, max_tokens=cap)
+            )
 
 
 def test_responses_sends_only_what_was_configured() -> None:
@@ -1644,6 +1844,30 @@ def test_an_empty_reasoning_field_is_not_an_event() -> None:
     assert openai_translate(event) == []
 
 
+def test_a_third_spelling_of_reasoning_is_reported_once(monkeypatch, caplog) -> None:
+    """A gateway using a spelling this adapter does not read is invisible.
+
+    Nothing errors, the answer is correct, and the only symptom is a line the
+    transcript should have carried.  So the unrecognised field is *named*, once
+    per process, and a busy stream pays one line rather than one per token.
+    """
+    monkeypatch.setattr(openai_server, "_reported_unknown_fields", set())
+    event = _oa(
+        choices=[
+            {"index": 0, "delta": {"reasoning_text": "why"}, "finish_reason": None}
+        ]
+    )
+    with caplog.at_level(logging.WARNING):
+        assert openai_translate(event) == []
+        assert openai_translate(event) == []
+
+    reported = [
+        r for r in caplog.records if "reasoning may be dropped" in r.getMessage()
+    ]
+    assert len(reported) == 1, "once per process, not once per token"
+    assert "reasoning_text" in reported[0].getMessage()
+
+
 # --- images ------------------------------------------------------------------
 #
 # The two APIs disagree about images the usual way: OpenAI nests a data URL
@@ -1707,12 +1931,65 @@ def test_something_that_is_neither_inline_nor_a_url_is_dropped() -> None:
     assert blocks == []
 
 
-def test_an_unrecognised_part_is_dropped() -> None:
-    """Passing an unknown block through is a 400 on every call containing one."""
-    blocks = to_anthropic_blocks(
-        [{"type": "video", "video": {}}, {"type": "text", "text": "hi"}]
-    )
+def test_a_source_that_is_neither_data_nor_http_is_dropped_but_named(caplog) -> None:
+    """The same silent drop the *part type* one function up once was.
+
+    A source the Messages API cannot read is a 400 on every call that carries
+    it, so the block cannot be built and the attachment is dropped — but
+    dropping it with no word loses the picture the caller sent with nothing
+    anywhere saying so.  The scheme is logged; the drop stands.
+    """
+    with caplog.at_level(logging.WARNING):
+        blocks = to_anthropic_blocks(
+            [{"type": "image_url", "image_url": {"url": "file:///etc/passwd"}}]
+        )
+    assert blocks == []
+    assert any("'file'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_data_url_with_no_payload_is_dropped_but_named(caplog) -> None:
+    """The same silent drop one branch below the unwritable-scheme one.
+
+    A `data:` URL that names a type and carries no bytes has nothing for the
+    Messages API to read as a base64 source, so it is dropped — but dropping it
+    with no word loses the caller's attachment with nothing anywhere saying so.
+    The type it claimed is logged; the drop stands.
+    """
+    with caplog.at_level(logging.WARNING):
+        blocks = to_anthropic_blocks(
+            [{"type": "image_url", "image_url": {"url": "data:image/png;base64,"}}]
+        )
+    assert blocks == []
+    assert any("image/png" in r.getMessage() for r in caplog.records)
+
+
+def test_a_part_that_is_not_a_mapping_is_dropped_but_named(caplog) -> None:
+    """A part the adapter cannot even look inside is dropped, not passed on.
+
+    The Messages API takes block mappings, so a bare string in the list is a
+    400 on every call — but a skip with no word loses the caller's part with
+    nothing saying so.  What arrived is named.
+    """
+    with caplog.at_level(logging.WARNING):
+        blocks = to_anthropic_blocks(["oops", {"type": "text", "text": "hi"}])
     assert blocks == [{"type": "text", "text": "hi"}]
+    assert any("'str'" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unrecognised_part_is_dropped_but_named(caplog) -> None:
+    """Passing an unknown block through is a 400 on every call containing one.
+
+    Dropping it is right; dropping it *silently* is not — an attachment or a
+    newer part type then disappears from the request with nothing anywhere
+    saying so, which is a failure nobody can see from inside this module.  The
+    type is logged.
+    """
+    with caplog.at_level(logging.WARNING):
+        blocks = to_anthropic_blocks(
+            [{"type": "video", "video": {}}, {"type": "text", "text": "hi"}]
+        )
+    assert blocks == [{"type": "text", "text": "hi"}]
+    assert any("'video'" in r.getMessage() for r in caplog.records)
 
 
 def test_a_user_message_with_an_image_survives_conversion() -> None:

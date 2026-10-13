@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,9 +31,9 @@ from fastmcp import Client, FastMCP
 
 import slife2.timeouts as _T
 from slife2 import handover, ilink, markers, wechat
-from slife2.handover import DeliveryFailed
 from slife2.audience import client_meta, for_the_model
 from slife2.config import TUI_SERVER_NAME, Config, load
+from slife2.handover import DeliveryFailed
 from slife2.paths import agent_dir
 from slife2.wechat import (
     Wechat,
@@ -74,6 +76,8 @@ class Bridge:
         }
         #: What `get_qrcode_status` says — `{}` is "still waiting".
         self.scan: dict[str, Any] = {}
+        #: And that one endpoint failing, which is the poll a watch is made of.
+        self.scan_fails = False
         #: Every path asked for, in order, so a test can count the polls.
         self.paths: list[str] = []
         self.sent: list[dict[str, Any]] = []
@@ -82,6 +86,9 @@ class Bridge:
         #: An unreachable bridge: every call raises, which is what a machine
         #: that has just booted and whose proxy is not up yet looks like.
         self.down = False
+        #: A `200` whose body is not this protocol's JSON — a proxy's error
+        #: page, a captive portal.  Something answered, and it is not the bridge.
+        self.raw: str | None = None
 
     async def __call__(
         self,
@@ -96,12 +103,16 @@ class Bridge:
         self.paths.append(path)
         if self.down:
             raise ConnectionError("the bridge is unreachable")
+        if self.raw is not None:
+            return ilink.Answer(status=200, text=self.raw)
         return ilink.Answer(status=200, text=json.dumps(self._answer(path, body or {})))
 
     def _answer(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
         if path == "ilink/bot/get_bot_qrcode":
             return self.qr
         if path == "ilink/bot/get_qrcode_status":
+            if self.scan_fails:
+                raise ConnectionError("the bridge dropped the connection")
             return self.scan
         if path == "ilink/bot/getupdates":
             if self.envelope:
@@ -333,6 +344,40 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_watch_that_cannot_poll_ends_the_login_rather_than_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Every exit from the watch is a state, and the raising one was not.**
+
+    A poll that failed killed the spawned task: `qr_state` stayed `waiting` and
+    `wechat_check_status` went on telling the model that a login QR was waiting
+    to be scanned — by a watch that had already died, so it could wait for ever
+    and the person would be told to scan again and again.  The login ends
+    instead, naming what happened.
+    """
+    bridge = Bridge()
+    bridge.scan_fails = True
+    made = rig(monkeypatch, bridge=bridge)
+    async with Client(
+        served(http=bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        await ask(client, "wechat_login")
+        # The watch fails on its first poll, and the wait is this loop rather
+        # than `until` because what is being waited for is the *tool's* answer
+        # and `until` takes a predicate that cannot await one.
+        after = ""
+        for _ in range(400):
+            after = await ask(client, "wechat_check_status")
+            if "did not work" in after:
+                break
+            await asyncio.sleep(0.005)
+
+    assert "The login did not work" in after
+    assert "could not be followed" in after
+    assert "waiting to be scanned" not in after
+
+
+@pytest.mark.asyncio
 async def test_a_login_that_exists_is_not_asked_to_scan_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,6 +406,39 @@ def test_the_qr_is_drawn_as_something_that_can_be_scanned() -> None:
     assert len(drawn.splitlines()) > 5
     assert set(drawn) & {"█", "▀", "▄"}
     assert render_qr("") == ""
+
+
+def test_a_missing_qr_renderer_refuses_rather_than_calling_a_url_a_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A URL cannot be scanned, so it must not be handed back as one.**
+
+    Without `qrcode` the payload was returned as it came — a link the login tool
+    then told the model to show "so it can be scanned", which is false
+    (DESIGN.md §10.1: a weaker path must not be selected silently).  The
+    renderer refuses now, and the caller says what actually happened.
+    """
+    monkeypatch.setitem(sys.modules, "qrcode", None)
+
+    with pytest.raises(ImportError):
+        render_qr("https://example.test/scan")
+
+
+@pytest.mark.asyncio
+async def test_a_login_without_the_qr_renderer_tells_the_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sentence the model reads matches what it is being handed."""
+    monkeypatch.setitem(sys.modules, "qrcode", None)
+    made = rig(monkeypatch)
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        answer = await ask(client, "wechat_login")
+
+    assert "so it can be scanned" not in answer, "a link is not scannable"
+    assert "`qrcode` package is missing" in answer
+    assert "https://example.test/scan" in answer, "the link is still handed over"
 
 
 # --- messages become turns ----------------------------------------------------
@@ -546,6 +624,79 @@ async def test_a_cursor_write_does_not_restamp_the_login(
 
     assert load_session("jack")["saved_at"] == before
     assert abs(started - before) < 1.0, "the session's age is the file's, not now"
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_that_could_not_be_written_is_said_out_loud(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A cursor that did not land is a replay window answered twice.**
+
+    The file is the only thing that tells a restart where the stream had got to,
+    so a write that failed leaves the bridge's whole replay window to be
+    re-ingested and answered as fresh turns.  That was a `debug` line — the one
+    level an operator never reads — and it is a warning naming the file now,
+    with `persisted` left where it was so the next poll tries again.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    made.bridge.cursor = "cursor-1"
+
+    def refuse(agent: str, session: Mapping[str, Any]) -> Path:
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(wechat, "save_session", refuse)
+    with caplog.at_level(logging.WARNING, logger="slife2.wechat"):
+        await made.plugin.start()
+        try:
+            session = made.plugin.session("jack")
+            await until(lambda: made.bridge.polls() >= 1)
+        finally:
+            await made.close()
+
+    assert session.persisted == "", "a cursor that did not land is not believed saved"
+    assert load_session("jack").get("get_updates_buf") == "", "the file kept its place"
+    assert any(
+        str(session_path("jack")) in record.getMessage() for record in caplog.records
+    ), "a cursor that could not be saved left nothing to find"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_poll_is_a_warning_naming_the_session(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A poll that failed is findable, not merely inferable.**
+
+    A poll failure was a `debug` line, so the only way to see that the loop had
+    stopped collecting was `last_error` inside a later `wechat_check_status` —
+    the fact was in the log all along, at the one level nobody reads.  The
+    warning names the session, and the loop still keeps going.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: session.polling)
+
+        async def refuse() -> list[dict[str, Any]]:
+            raise RuntimeError("the bridge answered with something unreadable")
+
+        monkeypatch.setattr(session.client, "poll_updates", refuse)
+        with caplog.at_level(logging.WARNING, logger="slife2.wechat"):
+            await until(
+                lambda: any(
+                    "poll failed" in record.getMessage() for record in caplog.records
+                )
+            )
+        assert session.polling, "the loop keeps going after a failure"
+    finally:
+        await made.close()
+
+    assert any(
+        "jack" in record.getMessage() and "poll failed" in record.getMessage()
+        for record in caplog.records
+    ), "the warning does not name the session it belongs to"
 
 
 @pytest.mark.asyncio
@@ -788,6 +939,41 @@ async def test_logging_out_forgets_the_login_and_the_scan(
     assert not session_path("jack").exists()
 
 
+@pytest.mark.asyncio
+async def test_a_login_that_could_not_be_removed_is_not_reported_as_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**"The saved login is gone" is a promise the next start keeps for you.**
+
+    `clear_session` suppressed the unlink failure and answered `False`, which
+    every caller threw away — so the tool said the login was gone over a file
+    still on disk, and the next start adopted the account the logout was asked
+    to end.  The answer now says what actually happened, with the path to remove.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    original = Path.unlink
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self == session_path("jack"):
+            raise PermissionError("the file is open in another program")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: session.polling)
+        answer = await made.plugin.logout(session)
+    finally:
+        await made.close()
+
+    assert session_path("jack").exists(), "the file this test is about"
+    assert "could not be removed" in answer
+    assert "saved login is gone" not in answer, "a file still there is not gone"
+    assert str(session_path("jack")) in answer, "the answer names what to remove"
+
+
 # --- the link, as a line in the window ----------------------------------------
 
 
@@ -817,6 +1003,34 @@ async def test_a_login_resumed_at_start_up_says_nothing(
     # Nothing, however many polls pass under it.
     assert made.notes.lines == []
     assert session.announced == wechat.LINK_ONLINE
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_could_not_run_at_all_is_said(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """**A boot that failed is not a boot that stopped.**
+
+    `_resume` swallows everything, and it runs from a spawned task whose only
+    reporter is `_spawn`'s callback — so a fourth failure, past the three
+    `_adopt` tells apart (too old, refused, unreachable), was invisible: no
+    note, no line, and a status read that says "not connected" about a login
+    nobody tried to take up.  The swallow stays (a boot must not take the
+    plugin down); the silence does not.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+
+    async def refuse(session) -> None:
+        raise RuntimeError("the session file has no bot token")
+
+    monkeypatch.setattr(made.plugin, "ready", refuse)
+    with caplog.at_level("WARNING"):
+        await made.plugin.start()
+        await until(lambda: "was not resumed" in caplog.text)
+    await made.close()
+
+    assert "the session file has no bot token" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1026,6 +1240,32 @@ def test_a_torn_session_file_is_a_cache_miss_rather_than_a_crash() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_damaged_login_file_is_named_rather_than_read_as_no_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A file that will not parse is damage, not the absence of a login.**
+
+    A torn cache answered `{}`, and the status sentence built from that said
+    "no login is saved" over a file that was right there — telling somebody who
+    had already scanned to scan a fresh code (DESIGN.md §10.1).  The outcome is
+    kept, because a login is still had by scanning, but the file and its damage
+    are named in what the model reads, through `restore_note`.
+    """
+    path = session_path("jack")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("bot_token: [unclosed\n", encoding="utf-8")
+    made = rig(monkeypatch)
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        answer = await ask(client, "wechat_check_status")
+
+    assert "no login is saved" not in answer, "the file is there, and it is damaged"
+    assert "could not be read" in answer
+    assert "wechat.yaml" in answer, "the file at fault is not named"
+
+
+@pytest.mark.asyncio
 async def test_a_bridge_that_is_unreachable_at_boot_is_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1220,3 +1460,27 @@ async def test_the_two_getupdates_readers_agree_about_a_rejection() -> None:
         assert rejected is bool(envelope)
         assert client.auth_failed is bool(envelope)
         assert messages == []
+
+
+@pytest.mark.asyncio
+async def test_a_body_that_is_not_json_is_a_broken_link_not_an_empty_poll() -> None:
+    """**The third way to fail**, which used to read as the second.
+
+    A proxy's error page and a captive portal arrive as a `200` carrying HTML.
+    Decoded to `{}` that was the same answer as an empty poll — no envelope, so
+    `last_error` was cleared and the session validated — and the model was told
+    about a connected bridge by whatever had answered instead of it.
+    """
+    bridge = Bridge()
+    bridge.raw = "<html><body>502 Bad Gateway</body></html>"
+    client = ilink.IlinkClient(http=bridge)
+
+    assert await client.validate_session() is False
+    assert client.auth_failed is False, "not the far end saying no — something else"
+    assert "not JSON" in (client.last_error or "")
+
+    # And the other reader of the same call agrees, rather than answering the
+    # empty list a healthy poll answers.
+    client.last_error = None
+    assert await client.poll_updates() == []
+    assert client.last_error, "a poll that read nothing did not read an empty inbox"

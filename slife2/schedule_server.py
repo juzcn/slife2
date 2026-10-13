@@ -237,19 +237,27 @@ def ledgers() -> list[ScheduleStore]:
     conversation that is not the one that asked — and it would look like it
     worked.
 
-    **A file that cannot be opened is a file skipped, not a clock stopped.**  A
-    stray or truncated `schedule.db` raises out of `adopt` — SQLite will not read
-    a file that is not a database — and the whole point of one loop over every
-    agent is that one agent's damage is not every agent's.  An operator sees the
-    warning and fixes the file; until then the clock serves the ledgers it can.
+    **A file that cannot be opened is a file skipped, not a clock stopped**, and
+    the skip is **loud**: a stray or truncated `schedule.db` raises out of
+    `adopt` — SQLite will not read a file that is not a database — and the whole
+    point of one loop over every agent is that one agent's damage is not every
+    agent's.  Skipping is what keeps the clock serving the ledgers it can, and
+    it is also the one failure the model cannot be shown: `schedule_list` reads
+    the caller's own ledger, so an operator asking about *another* agent's tasks
+    sees a healthy clock.  So the skip is an **error** naming the file, which is
+    the only place it can be seen, and it is why the ownerless-file warning
+    beside it is a different level: that file was never this build's and its
+    skip was designed (§1.7), where this one is a damaged ledger somebody has to
+    go and look at (DESIGN.md §10.2).
     """
     found: list[ScheduleStore] = []
     for path in schedule_dbs():
         try:
             store = ScheduleStore.adopt(path)
         except Exception:  # noqa: BLE001 - one unopenable file is not the clock's
-            logger.warning(
-                "%s could not be opened, so nothing in it will be fired",
+            logger.error(
+                "%s could not be opened, so nothing in it will be fired until "
+                "an operator fixes it",
                 path,
                 exc_info=True,
             )

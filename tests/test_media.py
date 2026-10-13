@@ -567,6 +567,23 @@ async def test_an_audio_format_the_adapter_does_not_know_is_refused(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_an_image_format_the_adapter_does_not_know_is_refused(tmp_path) -> None:
+    """The same rule `slife2.attachments` follows for the same question.
+
+    That module used to guess `image/png` for an unknown suffix while this one
+    refused it — two routes to a provider disagreeing about one thing.  Both
+    refuse now, and this pins the side that was already right.
+    """
+    picture = tmp_path / "diagram.svg"
+    picture.write_bytes(b"<svg/>")
+
+    with pytest.raises(MediaAdapterError, match="not an image format"):
+        await dashscope().generate_image(
+            model="img", prompt="edit this", image=picture, outputs_dir=tmp_path
+        )
+
+
+@pytest.mark.asyncio
 async def test_an_http_error_carries_its_status(monkeypatch) -> None:
     """`401` and `500` are the same sentence to a person only if the number is
     thrown away."""
