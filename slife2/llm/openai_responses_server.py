@@ -35,12 +35,13 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
-from slife2.config import ModelSettings, ProviderSettings
+from slife2.config import ModelSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
     Translate,
     build_backend_server,
     read_int,
+    sdk_client_factory,
     sdk_streamer,
     serve_backend,
 )
@@ -85,16 +86,22 @@ def to_responses_parts(content: Any) -> list[dict[str, Any]]:
 
 
 def to_input_image(raw: Any) -> dict[str, Any] | None:
-    """A `data:` URL as an `input_image` part, or None if it is not one.
+    """An image URL as an `input_image` part, or None if it is not one.
 
-    Only inline data is accepted, and the reason is the same as the Anthropic
-    adapter's: a remote URL would have to be fetched, and fetching an address a
-    model or a user named is a capability this plugin has no business having.
-    Dropping is safe here only because the agent server has already refused to
-    send one.
+    **Both forms go on, and neither is fetched here.**  An inline `data:` URL and
+    a remote `http(s)` one are both valid `input_image.image_url` values, and the
+    API downloads the remote one on its own side — so passing it through *is* what
+    "not fetching" looks like, and dropping it silently would lose the attachment
+    the caller sent with nothing anywhere reporting the loss.  That case is
+    exactly what the file tunnel exists to serve (`slife2.attachments` passes an
+    `http(s)` URL through untouched for the provider to fetch).  Anything else — a
+    `file:` URL, a bare word — is an image source in neither form, and is dropped
+    rather than sent to 400 on every call that carries one.
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url.startswith("data:"):
+    if not isinstance(url, str) or not url:
+        return None
+    if not url.startswith(("data:", "http://", "https://")):
         return None
     return {"type": "input_image", "image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
 
@@ -440,10 +447,25 @@ def _stop_reason(response: Any) -> str:
     return "stop"
 
 
+#: This protocol's reasons for stopping short, in the vocabulary the rest of the
+#: system speaks.  `max_output_tokens` is the one that overlaps the other two
+#: backends' `length`, and the whole point of the shared vocabulary is that the
+#: same config on any backend tells a caller the same story: chat-completions
+#: passes its raw finish reason through (`length`) and Anthropic maps its
+#: `max_tokens` to `length` (`normalised_stop`), so a caller asking "was this
+#: answer truncated?" with `stop_reason == "length"` must get the same answer
+#: here.  A reason this build has not heard of is passed through rather than
+#: folded into something familiar — it is a fact about the model.
+_INCOMPLETE_REASONS = {
+    "max_output_tokens": "length",
+}
+
+
 def _incomplete_reason(response: Any) -> str:
     """Why the response stopped short, as the stop reason."""
     details = getattr(response, "incomplete_details", None)
-    return str(getattr(details, "reason", "") or "incomplete")
+    reason = str(getattr(details, "reason", "") or "incomplete")
+    return _INCOMPLETE_REASONS.get(reason, reason)
 
 
 def _error_text(response: Any) -> str:
@@ -475,17 +497,6 @@ def _make_streamer() -> Streamer:
     constructing a client outside a running event loop is not always safe.
     """
 
-    def sdk_client(provider: ProviderSettings, key: str) -> Any:
-        """The one per-protocol fact: which SDK class, and with what.
-
-        Imported here rather than at the top of the file for the reason this
-        whole arrangement exists — the module is importable, and a process that
-        serves nothing from it never loads the SDK.
-        """
-        from openai import AsyncOpenAI
-
-        return AsyncOpenAI(base_url=provider.base_url, api_key=key)
-
     def make_translator() -> Translate:
         """One stream's translation, remembering which calls streamed."""
         # Which calls streamed their arguments.  Kept here and not in
@@ -509,7 +520,7 @@ def _make_streamer() -> Streamer:
     return sdk_streamer(
         api=API,
         server_name=SERVER_NAME,
-        sdk_client=sdk_client,
+        sdk_client=sdk_client_factory("openai", "AsyncOpenAI"),
         build_request=build_request,
         start=lambda client, request: client.responses.create(**request),
         translator=make_translator,

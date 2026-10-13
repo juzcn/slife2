@@ -36,12 +36,14 @@ Contract the base guarantees, and which ``server.py`` relies on:
   (an attempt is in flight) / ``failed`` (terminal — reported only once an
   attempt has concluded) / ``idle`` (no attempt made).
 
-**The timings are v1's, as module constants.**  v1 kept them in a shared
-``slife.timeouts`` table with a validator that asserted the invariants between
-them; v2 has no such table and states a timeout beside the code it bounds
-(``slife2.embedder.EMBEDDINGS_TIMEOUT_SECONDS``,
-``slife2.context_server.MODEL_TIMEOUT_SECONDS``).  The one invariant v1 checked
-still holds and is asserted at the bottom of this module.
+**The timings live in `slife2.timeouts`**, and every consumer reads them there
+at call time (``_T.timeouts.<role>.<key>``) rather than capturing them — the
+rule that module's own docstring states.  It is v1's shared ``slife.timeouts``
+table reborn as the build's single source of truth, so the one invariant v1
+checked here still holds and is still checked: a published tunnel gets at least
+the patience a fresh start gets before the monitor respawns it, now asserted by
+``slife2.timeouts.validate`` rather than by a hand-rolled check at the bottom of
+this module.
 """
 
 from __future__ import annotations
@@ -88,18 +90,6 @@ _MAX_RETRIES = 3
 
 #: Output lines kept for the failure message when a CLI child dies early.
 _TAIL_LINES = 20
-
-# ── Timings, v1's values ─────────────────────────────────────────────────────
-#: How long a start may be in flight before a newer attempt supersedes it.
-#: How long to wait for a spawned CLI to print a publishable URL.
-#: How long a published tunnel may stay unreachable before it is restarted.
-#: Deliberately far longer than the read timeout above: a CLI child that loses
-#: its edge re-registers on its own and KEEPS its hostname, while a respawn
-#: mints a new one and kills every link already handed out.
-#: Delay between retries, multiplied by the attempt number (linear backoff).
-#: Cancellation cadence of the health loop.
-#: How long a CLI child gets to die politely before it is killed.
-#: Timeout for the one HTTP probe this module makes (a child's own metrics API).
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -322,6 +312,16 @@ class TunnelProvider(Protocol):
 
     @property
     def is_active(self) -> bool: ...
+
+    @property
+    def is_starting(self) -> bool:
+        """Whether a start attempt is in flight (the single-flight guard).
+
+        Read by `_ensure` before it decides between waiting for an attempt and
+        beginning one, which is the only reason it belongs here rather than
+        staying an implementation detail of the base class.
+        """
+        ...
 
     def is_reachable(self) -> bool: ...
 

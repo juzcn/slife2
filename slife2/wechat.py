@@ -80,10 +80,11 @@ from ruamel.yaml import YAML
 
 import slife2.timeouts as _T
 from slife2 import ilink
-from slife2.audience import FOR_THE_MODEL, request_client
-from slife2.config import TUI_SERVER_NAME, Config
+from slife2.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.config import Config
+from slife2.handover import to_window
 from slife2.ilink import Http, IlinkClient
-from slife2.mcp_server import house_server, open_server, serve_plugin
+from slife2.mcp_server import house_server, serve_plugin
 from slife2.paths import agent_dir, agents_dir
 
 logger = logging.getLogger(__name__)
@@ -122,24 +123,22 @@ BACKOFF_FACTOR = 1.5
 #: until its turn is done, so these are turns, and twenty of them is somebody
 #: flooding a conversation rather than talking to it.
 MAX_INFLIGHT = 16
-#: How long to wait for the window when handing a message over.  The call it
-#: makes answers as soon as the words are written down the stream that window is
-#: holding (`slife2.tui.control`), so this bounds a window that is not answering
-#: at all rather than a slow terminal.
-#: A login's lifetime, in seconds — 23 hours, from v1, which measured it against
-#: the bridge's own ~24h expiry and left an hour of margin.  Past this a saved
-#: token is not offered to the far end at all.
 
 #: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
 #: the directory is the agent, and a filename repeating it is a name to keep in
 #: step with a rename.
 SESSION_NAME = "wechat.yaml"
+#: The key a saved login carries its **raw** agent name under.  The directory
+#: cannot: it holds the *sanitised* name (`a/b` lands in `a_b/`, `slife2.db`),
+#: which is not the name a call arrives under — so a session resumed from the
+#: directory would be a second key for one login, and a tool call from the raw
+#: name would adopt the same token and start a second poll loop.  This is the
+#: same row `slife2-schedule` keeps in its ledger's `meta` table, and for the
+#: same reason: the shared process has nothing but the file to go on.
+AGENT_KEY = "agent"
 #: The QR handshake: how often its status is asked, how long the whole thing may
 #: take, and how many times an expired code is replaced before giving up.
 QR_MAX_ATTEMPTS = 3
-#: The typing indicator expires at the far end after ~10-20s, so it is refreshed
-#: well inside that; `_T.timeouts.pacing.typing_max_lifetime` bounds the keep-alive so a turn that
-#: never ends cannot leave one refreshing forever.
 
 
 #: What the marker opens with.  A constant because the marker is *read* as well
@@ -302,11 +301,20 @@ class Session:
 
 
 # ── The session file ────────────────────────────────────────────────────
-# One `wechat_<agent>.yaml` per login, in the data directory — v1's name, v1's
-# keys and v1's short-lived-token reasoning, so a session saved by v1 is adopted
-# by this plugin without anybody scanning anything again.  The token lives in
-# plain text on purpose: it expires in about a day, and v1's note says why that
-# is not worth a credential store.
+# One `wechat.yaml` per login, inside the agent's own directory.  v1 kept
+# `wechat_<agent>.yaml` beside the data, and the *keys* and the short-lived-token
+# reasoning come over from it unchanged, so a session v1 saved is adopted here
+# without anybody scanning anything again; the path does not, because the
+# directory already names the agent and a filename repeating it is a second name
+# to keep in step with a rename.
+#
+# What the path cannot carry is the agent's **raw** name, which is why the file
+# states it under `AGENT_KEY`: the directory holds the *sanitised* one (`a/b`
+# lands in `a_b/`), and a session resumed under the directory name would be a
+# second key for one login — a tool call from the raw name would adopt the same
+# token and start a second poll loop.  The token itself lives in plain text on
+# purpose: it expires in about a day, and v1's note says why that is not worth a
+# credential store.
 
 
 def _yaml() -> YAML:
@@ -332,7 +340,16 @@ def load_session(agent: str) -> dict[str, Any]:
     login, the login can be had again by scanning, and a torn write must not be
     able to stop the plugin from starting.
     """
-    path = session_path(agent)
+    return _read_session(session_path(agent))
+
+
+def _read_session(path: Path) -> dict[str, Any]:
+    """One login file as a mapping, or `{}` — for a file missing or unreadable.
+
+    The path-shaped half of :func:`load_session`, because the startup scan has
+    the path already and must read the name out of the file rather than the
+    directory it sits in.
+    """
     try:
         raw = _yaml().load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -350,13 +367,18 @@ def save_session(agent: str, session: Mapping[str, Any]) -> Path:
     file or the new one and never half of either — the same guarantee
     `slife2.runtime` gives its records, for the same reason: the poll loop
     rewrites this file every time the cursor moves.
+
+    **The agent is stamped here**, beside the token, and the one writer is why
+    every file this build writes can say whose login it is — see :data:`AGENT_KEY`
+    for what the directory cannot carry.  Written rather than left to each caller
+    because there are two callers already and a third would be the one to forget.
     """
     path = session_path(agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as opened:
-            _yaml().dump(dict(session), opened)
+            _yaml().dump({**session, AGENT_KEY: agent}, opened)
             opened.flush()
             os.fsync(opened.fileno())
         os.replace(tmp, path)
@@ -426,14 +448,32 @@ class Wechat:
         from its harness calling `wechat_check_status` once at startup; the
         files are the better answer, because they survive the harness.
 
+        **Whose login a file is comes from the file, not the directory.**  The
+        directory holds the *sanitised* agent name (`a/b` lands in `a_b/`), so a
+        session keyed by it would be a second key for one login: a tool call from
+        `a/b` — which is the name every other entry point uses — would create a
+        session under the raw name, adopt the same saved token, and start a
+        *second* poll loop on it, delivering every message twice, one copy to a
+        window that is not showing.  The name is written into the file beside the
+        token (`AGENT_KEY`, :func:`save_session`) and read back here, exactly as
+        `slife2-schedule` reads its ledger's owner out of the ledger.
+
+        A file too old to carry one — v1's, or one written before this key — falls
+        back to the directory name, which is the best answer there is for a login
+        that predates the question and is exactly right whenever the raw name and
+        the sanitised one are the same, which is every name without a reserved
+        character in it.
+
         Never awaited in the path that serves: a bridge that cannot be reached
         must not stop the plugin from coming up, and every one of these is
         re-triggerable by any tool call.
         """
         for path in sorted(self._agents.glob(f"*/{SESSION_NAME}")):
-            # The agent is the directory's name, read off the path already in
-            # hand rather than parsed back out of a filename.
-            agent = path.parent.name
+            saved = _read_session(path)
+            # The raw name off the file, and the directory only as a fallback:
+            # the directory is a *sanitised* name and using it as the key is the
+            # second-session bug this key exists to prevent.
+            agent = str(saved.get(AGENT_KEY) or "") or path.parent.name
             if not agent:
                 continue
             self._spawn(self._resume(self.session(agent)))
@@ -779,53 +819,36 @@ class Wechat:
         keeps a session per agent and this says which one (`slife2.tui.control`).
 
         **The call returns when the words are on their way to that window, not
-        when the turn ends**, and that is what makes the retry below safe: a
-        connection that died *after* they were written cannot make them run twice.
+        when the turn ends** — a connection that died *after* they were written
+        cannot make them run twice — and that is the whole reason the retry below
+        is safe.
 
-        The connection is per delivery rather than held: this process polls for
-        hours and speaks only when somebody writes, so a handshake on the message
-        that needs it costs one loopback round trip and keeps nothing open in
-        between.
+        **A failure is classified before it is retried, and this is why the
+        hand-over goes through `slife2.handover`.**  The shared `to_window` answers
+        in three values: `True` (written), `False` (provably written nowhere), and
+        `None` (the call did not come back, so the words may already be down the
+        stream).  Only `False` is safe to try again; retrying `None` is how a
+        message a person sent once runs as *two* turns and draws two replies,
+        which §1.2/§1.3 call the one failure worse than a late answer.  A second
+        copy of that classification here would be the copy that loses it, so
+        there is none — the retry below is a retry of a proven refusal, and
+        `None` is raised rather than repeated.
         """
-        for attempt in (1, 2):
-            try:
-                await self._to_window(agent, prompt)
+        for _attempt in (1, 2):
+            handed = await to_window(self._config, agent, prompt, CONFIG_KEY)
+            if handed is True:
                 return
-            except Exception:
-                if attempt == 2:
-                    raise
-
-    async def _to_window(self, agent: str, prompt: str) -> None:
-        """One delivery: the window takes it, or this raises.
-
-        **Not `_hand_over`, which is already this class's word for something
-        else** — the poll loop's "give this message to the agent as a turn of its
-        own" (`_hand_over` above, which spawns the task).  One of these names came
-        first and the other is a call into another process, and having the second
-        silently replace the first is a mistake worth a sentence rather than a
-        memory.
-        """
-        window = await open_server(
-            # The plugin's address, and the same one every agent shares — what
-            # picks out *this* agent is the argument below, not the endpoint.
-            self._config.server("tui").url,
-            name=TUI_SERVER_NAME,
-            fallback_tool="submit",
-            timeout=_T.timeouts.transport.window,
-        )
-        try:
-            # **The call returning is the acknowledgement** — the words are on
-            # their way down the stream that agent's window is holding by then
-            # (`slife2.tui.control`), which is why a transport failure after this
-            # point must not be retried into a second turn.
-            await window.call_tool(
-                "submit",
-                {"agent": agent, "text": prompt, "channel": CONFIG_KEY},
-                timeout=_T.timeouts.transport.window,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await window.__aexit__(None, None, None)
+            if handed is None:
+                # The words may already be in the conversation, so this is not
+                # handed anywhere else — raised so `_answer` logs it, the way
+                # `slife2.handover` logs its own copy of the same fact.
+                raise ConnectionError(
+                    f"the hand-over to {agent} did not come back, so it was not "
+                    f"repeated"
+                )
+            # `False` proves nothing was written, so a second attempt cannot
+            # duplicate anything — the window may have attached in between.
+        raise ConnectionError(f"no window is showing {agent}'s conversation")
 
     # ── The QR login ─────────────────────────────────────────────────────
 
@@ -1001,11 +1024,7 @@ class Wechat:
 
     def unaddressed(self) -> str:
         """What a tool says when a call arrived without a conversation on it."""
-        return (
-            "This call did not say which conversation it is for, so there is no "
-            "WeChat login to act on — a plugin serves every agent, and the login "
-            "is the agent's."
-        )
+        return unaddressed("WeChat login to act on", "the login")
 
     async def status(self, session: Session) -> str:
         """`wechat_check_status`, as sentences.

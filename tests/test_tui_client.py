@@ -228,6 +228,44 @@ async def test_a_failed_turn_keeps_the_connection(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_management_call_drops_the_link_only_when_the_transport_does(
+    monkeypatch,
+) -> None:
+    """One statement of the rule `model_switch`, `transcript` and `answer_approval` share.
+
+    All three are ordinary asks of our own daemon, and each used to spell the
+    same `try`/`except` out for itself — three copies of one rule, each a place
+    the next caller could get it subtly wrong.  So the rule is pinned through one
+    of them (`_call_tool`): a `ToolError` is the server *answering* and the link
+    stays; anything else is the transport itself, and dropping the client is what
+    lets the app's lazy retry reconnect instead of believing it is connected to a
+    server nothing is talking to.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    async def refuse(name, arguments, **kwargs):
+        if name == "transcript":
+            raise ToolError("the store is busy")
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", refuse)
+    with pytest.raises(ToolError, match="busy"):
+        await client.transcript()
+    assert client.connected, "the server answered; the connection stays"
+
+    async def die(name, arguments, **kwargs):
+        raise ConnectionError("the socket went away")
+
+    monkeypatch.setattr(transport, "call_tool", die)
+    with pytest.raises(ConnectionError, match="socket"):
+        await client.transcript()
+    assert not client.connected, "the transport is gone; so is the client"
+
+
+@pytest.mark.asyncio
 async def test_a_server_that_is_not_ours_is_refused(monkeypatch) -> None:
     """The URL may point at some other MCP server, and saying so beats a turn
     that fails later with a message about an unknown tool.

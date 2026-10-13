@@ -140,17 +140,65 @@ async def test_a_skill_dropped_in_later_is_readable_at_once(
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_name_is_a_failure_the_model_reads(
+async def test_an_unknown_name_is_a_failure_the_model_can_see(
     isolated_runtime: Path,
 ) -> None:
-    """`ok` false used to travel to the caller as a value; over MCP the only way
-    to say "this call failed" is to fail, and the text has to survive the hop."""
+    """**A refusal is `ok` false, and raising is how a tool says so.**
+
+    `slife2.gateway` splits a peer's refusal from a transport fault on exactly
+    that flag, and `slife2.toolhub` reads a raised `ToolError` as a value with
+    `ok` false — the tool panel renders `ok` false as a failed call, which is
+    what a refusal is.  `skill_set` and `skill_remove` now answer the same way:
+    they used to return a `[refused]` sentence, which arrived with `ok` true and
+    reached the transcript as a success.
+    """
     skill(isolated_runtime, "one")
     async with Client(build_server(default_config())) as client:
         with pytest.raises(ToolError) as caught:
             await client.call_tool(USE_TOOL, {"name": "nothing"})
 
     assert "one" in str(caught.value), "the answer names what does exist"
+
+
+@pytest.mark.asyncio
+async def test_the_two_names_read_one_entry_and_agree(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**One predicate for one question: which `skills:` entry supplies a skill.**
+
+    A skill answers to its frontmatter name and to its directory, and `skills:`
+    may be keyed by either — so an operator who wrote both, with a different
+    value under each, used to see the skill's requirements reported as met by
+    `skill_list` and unmet by `skill_use`: the two read the entry with different
+    precedence.  Now both go through `skills.entry_for`, the declared name wins
+    (as it does in `find`), and the two answers cannot disagree.
+    """
+    monkeypatch.delenv("SOME_KEY", raising=False)
+    folder = isolated_runtime / "skills" / "the-folder"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\n"
+        "name: the-name\n"
+        "metadata: {h: {requires: {env: [SOME_KEY]}}}\n"
+        "---\n\nThe body.\n",
+        encoding="utf-8",
+    )
+    path = isolated_runtime / "slife2.yaml"
+    path.write_text(
+        "skills:\n"
+        "  the-name:\n"
+        "    env: {SOME_KEY: a-real-key}\n"
+        "  the-folder:\n"
+        "    env: {SOME_KEY: '${SOME_KEY}'}\n",
+        encoding="utf-8",
+    )
+
+    async with Client(build_server(load(path))) as client:
+        read = await client.call_tool(USE_TOOL, {"name": "the-name"})
+        listed = await client.call_tool("skill_list", {})
+
+    assert "are met" in read.data, "the declared name's entry wins"
+    assert "are met" in listed.data, "and the listing reads the same entry"
 
 
 @pytest.mark.asyncio

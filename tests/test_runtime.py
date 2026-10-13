@@ -8,6 +8,8 @@ pass while proving nothing at all.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -16,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from slife2 import runtime
+from slife2 import handover, runtime
 
 pytestmark = pytest.mark.unit
 
@@ -93,6 +95,35 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
     assert runtime.read_record(url) is None
+
+
+def test_a_record_that_is_not_a_record_reads_as_absent() -> None:
+    """The half `read_record` owns, now that the shared reader is `_read_json_dataclass`.
+
+    Parsing is the shared helper's; the *shape* is the record's, and a JSON
+    object that parses but is not a record is the `KeyError` the factory raises
+    — the arm a caller's own fields are the only way to reach.
+    """
+    url = "http://127.0.0.1:8000/mcp"
+    runtime.record_path(url).write_text('{"url": "x"}', encoding="utf-8")
+    assert runtime.read_record(url) is None
+
+
+def test_a_claim_round_trips_and_a_corrupt_one_reads_as_absent() -> None:
+    """The claim is where the shared reader and writer prove they serve both.
+
+    `read_record`/`write_record` and `read_claim`/`write_claim` are one
+    `_read_json_dataclass` and one `_write_json_atomic` now, so a claim is the
+    other call site of each: the same atomic write on the way in, the same
+    "absent, not an error" read on the way out.
+    """
+    claim = runtime.AgentClaim.now("alpha")
+    runtime.write_claim(claim)
+    assert runtime.read_claim("alpha") == claim
+    assert runtime.read_claim("nobody") is None
+
+    runtime.agent_claim_path("alpha").write_text("{ not json", encoding="utf-8")
+    assert runtime.read_claim("alpha") is None
 
 
 # --- pid liveness ------------------------------------------------------------
@@ -380,3 +411,101 @@ def test_a_spawned_server_outlives_its_spawner() -> None:
         if holder.poll() is None:
             holder.kill()
             holder.wait()
+
+
+# --- stopping a process that vanished mid-stop -------------------------------
+
+
+def test_terminate_reads_a_process_that_vanished_as_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plugin that exits between the liveness check and the signal.
+
+    `terminate` asks `pid_alive` once and then, on POSIX, calls `os.getpgid` —
+    and a process that exits in between makes that call raise
+    `ProcessLookupError`.  `os.getpgid` sits outside the `suppress` the signal
+    itself has, so the exception escaped `terminate`: `slife2 down` reported a
+    crash for a daemon that stopped exactly as asked.  The POSIX-only branch is
+    driven here by naming the platform, since a pid cannot be made to vanish on
+    cue on this machine.
+
+    With the lookup guarded, the vanished pid reads as gone — which is what the
+    return value is for — and nothing is signalled.
+    """
+    calls = {"n": 0}
+
+    def alive(pid: int) -> bool:
+        calls["n"] += 1
+        return calls["n"] == 1  # alive for the first look, gone by the next
+
+    def vanished(pid: int) -> int:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+    monkeypatch.setattr(runtime, "pid_alive", alive)
+    monkeypatch.setattr(runtime.os, "getpgid", vanished, raising=False)
+
+    assert runtime.terminate(4242, grace=0.05) is True
+
+
+# --- the close a cancellation cannot take away -------------------------------
+# `slife2.handover` hands a message to a window (or, as the fallback, to the
+# agent server) and closes the connection it opened on the way out.  That close
+# lives in one helper there, `_peer`, and has to finish even when the caller is
+# cancelled — which is the case the `finally` exists for.  Exercised from here
+# because it is a lifecycle primitive and the hand-over module has no test
+# module of its own.
+
+
+@pytest.mark.asyncio
+async def test_the_close_survives_the_cancellation_it_exists_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `CancelledError` is not an `Exception`, so the plain close let it through.
+
+    The `finally` runs on exactly the path where the caller was cancelled —
+    that is why a close belongs there — and a cancellation delivered while the
+    transport is shutting down passes straight through `contextlib.suppress`
+    and leaves the connection open, the one outcome the close exists to
+    prevent.  `_peer` shields the close, so it runs in a task of its own and
+    finishes whatever happens to the caller, and the cancellation still
+    propagates so the caller's task is cancelled as it expected.
+    """
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class SlowClient:
+        async def __aexit__(self, *exc: object) -> None:
+            entered.set()
+            await asyncio.sleep(0.05)
+            closed.set()
+
+    async def fake_open(
+        url: str,
+        *,
+        name: str = "",
+        fallback_tool: str = "",
+        timeout: float | None = None,
+    ) -> SlowClient:
+        return SlowClient()
+
+    monkeypatch.setattr(handover, "open_server", fake_open)
+
+    async def body() -> None:
+        async with handover._peer(
+            "http://127.0.0.1:9/mcp",
+            name="x",
+            fallback_tool="t",
+            timeout=1.0,
+            client=None,
+        ):
+            pass  # the body ends at once, so it is the close that is running
+
+    task = asyncio.create_task(body())
+    await entered.wait()  # we are now inside `__aexit__`
+    task.cancel()  # the cancellation lands on the close itself
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(closed.wait(), timeout=1)
+    assert closed.is_set()

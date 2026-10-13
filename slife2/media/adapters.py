@@ -52,14 +52,6 @@ logger = logging.getLogger(__name__)
 # the call it paces — and the values are v1's, measured against the same
 # providers: a render is slow, a connect is not, and an artifact is megabytes.
 
-#: One request, from connect to last byte.  Generous on purpose: a synchronous
-#: render is a long POST.
-#: Downloading the artifact the provider hands back.
-#: How long an asynchronous job (a video) may take before the wait gives up.
-#: **The job keeps running on the provider's side** — the message says so — so
-#: this bounds the *wait*, not the render.
-#: How often an asynchronous job is asked about.
-
 #: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
 
@@ -110,6 +102,36 @@ class MediaAdapterError(Exception):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def _json_object(response: Any, what: str) -> dict[str, Any]:
+    """A response body decoded to a JSON object, or a `MediaAdapterError`.
+
+    **Both adapters answered a `200` with `response.json()` and then indexed the
+    result**, which is a family of ways to raise something `slife2.media.server`
+    does not convert: a body that is not JSON (`ValueError`), a body that is JSON
+    but not an object (`AttributeError` on `.get`), and a key that is missing or
+    the wrong shape (`IndexError`, `TypeError`).  `_run` turns only
+    `MediaAdapterError` into the `[failed] …` sentence DESIGN §1.5 promises, so
+    anything else reached the model as a raw traceback instead — and the fix
+    belongs here, once, because both adapters have the same body to read and two
+    copies of this is how they come to differ.
+
+    `what` names the API in the message, so a person reading it knows which call
+    answered "something that is not JSON".
+    """
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise MediaAdapterError(
+            f"the {what} API answered with something that is not JSON: "
+            f"{response.text[:200]}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise MediaAdapterError(
+            f"the {what} API answered an unexpected shape: {str(data)[:300]}"
+        )
+    return data
 
 
 class _HttpClientMixin:
@@ -226,9 +248,20 @@ class ArtifactSaver:
         """A free path for one artifact — the time and a random suffix."""
         return outputs_dir / f"{stamp()}-{secrets.token_hex(3)}.{ext.lstrip('.')}"
 
-    def save_bytes(self, data: bytes, kind: str, ext: str, outputs_dir: Path) -> Path:
+    async def save_bytes(
+        self, data: bytes, kind: str, ext: str, outputs_dir: Path
+    ) -> Path:
+        """Write one artifact's bytes, off the event loop.
+
+        **The write goes through `to_thread`**, because the bytes are a generated
+        video or an audio file — megabytes — and writing one inline blocks every
+        other call this process is serving for as long as the disk takes.  The
+        *reads* on the send side already hop this way (`_data_uri`, `_reference`);
+        this is the same rule on the receiving side, and the one place an artifact
+        lands.
+        """
         path = self.path(ext, outputs_dir)
-        path.write_bytes(data)
+        await asyncio.to_thread(path.write_bytes, data)
         logger.info(
             "media_artifact_saved kind=%s path=%s bytes=%d", kind, path, len(data)
         )
@@ -261,7 +294,7 @@ class ArtifactSaver:
             raise MediaAdapterError(
                 f"could not download the generated {kind}: {exc}"
             ) from exc
-        return self.save_bytes(data, kind, ext, outputs_dir)
+        return await self.save_bytes(data, kind, ext, outputs_dir)
 
 
 # ── Bailian / DashScope's AIGC endpoints ────────────────────────────────────
@@ -358,14 +391,8 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                 f"{response.text[:ERROR_CHARS]}",
                 status_code=response.status_code,
             )
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise MediaAdapterError(
-                f"the media API answered with something that is not JSON: "
-                f"{response.text[:200]}"
-            ) from exc
-        if isinstance(data, dict) and data.get("code"):
+        data = _json_object(response, "media")
+        if data.get("code"):
             raise MediaAdapterError(
                 f"the media API returned an error: {data.get('code')} — "
                 f"{data.get('message', '')}"
@@ -603,7 +630,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         # base64'd.  Saving them as `.wav` is v1's choice and the vendor's
         # default format.
         if encoded := audio.get("data"):
-            path = self._saver.save_bytes(
+            path = await self._saver.save_bytes(
                 base64.b64decode(encoded), "audio", "wav", outputs_dir
             )
             return str(path)
@@ -700,13 +727,15 @@ class OpenAICompatAdapter(_HttpClientMixin):
                 f"{response.text[:ERROR_CHARS]}",
                 status_code=response.status_code,
             )
-        data = response.json()
-        items = data.get("data") or []
-        if not items:
+        data = _json_object(response, "image")
+        items = data.get("data")
+        if not isinstance(items, list) or not items:
             raise MediaAdapterError(f"no image in the answer: {str(data)[:300]}")
         item = items[0]
+        if not isinstance(item, dict):
+            raise MediaAdapterError(f"no image in the answer: {str(data)[:300]}")
         if encoded := item.get("b64_json"):
-            path = self._saver.save_bytes(
+            path = await self._saver.save_bytes(
                 base64.b64decode(encoded), "image", "png", outputs_dir
             )
             return str(path)

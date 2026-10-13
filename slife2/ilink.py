@@ -328,25 +328,44 @@ class IlinkClient:
         *valid*: this can only revoke on evidence, and an ambiguous answer is
         not evidence.
         """
+        result = await self._getupdates()
+        return result is not None and not error_envelope(result)
+
+    async def _getupdates(self) -> dict[str, Any] | None:
+        """One `getupdates` call, with the failure it can have already recorded.
+
+        **Both readers of this endpoint are one call**, and this is where the two
+        cannot drift apart: :meth:`validate_session` and :meth:`poll_updates` ask
+        the same question, advance the same cursor and read the same envelope —
+        an error wearing a `200` — and the only difference between them is what
+        they want back.  A copy of the envelope handling in each is a copy that
+        comes to disagree about what "rejected" is, which is the failure this
+        module's docstring was written about.
+
+        `None` means the call did not produce a body to read — a transport error
+        or a non-object envelope — and `last_error` says why.  A returned mapping
+        has had its envelope decided here: if it is an error, `auth_failed` and
+        `last_error` are set; otherwise `last_error` is cleared.  So a caller only
+        has to decide the answer that is *its own*, which is the one thing the
+        two readers do differently.
+        """
         try:
             result = await self._post(
                 "ilink/bot/getupdates",
                 {"get_updates_buf": self._get_updates_buf, "base_info": base_info()},
             )
-        except Exception as exc:  # noqa: BLE001 — reported as the session's error
+        except Exception as exc:  # noqa: BLE001 — recorded, and the loop retries
             self.last_error = str(exc)
-            return False
+            return None
         if not isinstance(result, dict):
             self.last_error = f"unexpected getupdates envelope: {result!r}"
-            return False
-        if "msgs" in result:
-            self.last_error = None
-            return True
+            return None
         if error_envelope(result):
             self.auth_failed = True
             self.last_error = envelope_error(result) or "session rejected"
-            return False
-        return True
+            return result
+        self.last_error = None
+        return result
 
     def get_session_dict(self) -> dict[str, Any]:
         """This session, as the plugin writes it down.
@@ -411,23 +430,16 @@ class IlinkClient:
         `last_error` is, so that the status tool can tell the model the link is
         down instead of reporting a healthy session that has been quietly
         collecting nothing for an hour.
+
+        The call itself and the envelope it can wear are :meth:`_getupdates`'s,
+        shared with :meth:`validate_session` so the two cannot disagree about
+        what a rejection is; what is left here is the cursor and the messages,
+        which only this reader wants.
         """
-        try:
-            result = await self._post(
-                "ilink/bot/getupdates",
-                {"get_updates_buf": self._get_updates_buf, "base_info": base_info()},
-            )
-        except Exception as exc:  # noqa: BLE001 — recorded, and the loop retries
-            self.last_error = str(exc)
-            return []
-        if not isinstance(result, dict):
+        result = await self._getupdates()
+        if result is None or error_envelope(result):
             return []
         self._get_updates_buf = result.get("get_updates_buf") or self._get_updates_buf
-        if error_envelope(result):
-            self.auth_failed = True
-            self.last_error = envelope_error(result) or "session rejected"
-            return []
-        self.last_error = None
         msgs = result.get("msgs")
         return (
             [m for m in msgs if isinstance(m, dict)] if isinstance(msgs, list) else []

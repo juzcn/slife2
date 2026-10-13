@@ -125,14 +125,16 @@ async def test_a_file_that_leaves_the_skill_directory_is_refused(
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
 
     async with Client(build_server(load())) as client:
-        answer = await ask(
-            client,
-            "skill_set",
-            name="sneaky",
-            files=files(manifest("sneaky"), **{"../escape.txt": "no"}),
-        )
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "skill_set",
+                {
+                    "name": "sneaky",
+                    "files": files(manifest("sneaky"), **{"../escape.txt": "no"}),
+                },
+            )
 
-    assert answer.startswith("[refused]") and "outside" in answer
+    assert "outside" in str(raised.value)
     assert not (isolated_runtime / "escape.txt").exists()
     assert not (isolated_runtime / "skills" / "sneaky").exists()
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
@@ -145,14 +147,47 @@ async def test_a_name_that_is_a_path_is_refused(isolated_runtime: Path) -> None:
     config_on_disk(isolated_runtime)
 
     async with Client(build_server(load())) as client:
-        answer = await ask(
-            client, "skill_set", name="../outside", files=files(manifest("x"))
-        )
-        removed = await ask(client, "skill_remove", name="../slife2.yaml")
+        with pytest.raises(ToolError) as set_raised:
+            await client.call_tool(
+                "skill_set", {"name": "../outside", "files": files(manifest("x"))}
+            )
+        with pytest.raises(ToolError):
+            await client.call_tool("skill_remove", {"name": "../slife2.yaml"})
 
-    assert answer.startswith("[refused]") and "outside" in answer
-    assert removed.startswith("[refused]")
+    assert "outside" in str(set_raised.value)
     assert (isolated_runtime / "slife2.yaml").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_dot_name_is_refused_because_nothing_would_list_it(
+    isolated_runtime: Path,
+) -> None:
+    """**The dot rule is the staging directory's, and it binds the operator too.**
+
+    `install` stages into `.{name}.installing` and `scan` skips every
+    dot-directory so that a `SIGKILL` in that window cannot become a catalogue
+    row.  A skill an operator names `.notes` would therefore install, report
+    success and be unfindable — no row, no `skill_list` line, and `skill_use`
+    answering that no such skill exists — so the name is refused before anything
+    is created, where the caller can still change it.
+    """
+    config_on_disk(isolated_runtime)
+
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "skill_set",
+                {
+                    "name": ".notes",
+                    "files": files(manifest("notes")),
+                },
+            )
+        with pytest.raises(ToolError) as unreadable:
+            await client.call_tool(USE_TOOL, {"name": ".notes"})
+
+    assert "dot" in str(raised.value)
+    assert not (isolated_runtime / "skills" / ".notes").exists()
+    assert "no skill called" in str(unreadable.value)
 
 
 @pytest.mark.asyncio
@@ -163,14 +198,16 @@ async def test_a_skill_with_no_manifest_is_refused(isolated_runtime: Path) -> No
     config_on_disk(isolated_runtime)
 
     async with Client(build_server(load())) as client:
-        answer = await ask(
-            client,
-            "skill_set",
-            name="incomplete",
-            files=[{"path": "notes.txt", "content": "not a skill"}],
-        )
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "skill_set",
+                {
+                    "name": "incomplete",
+                    "files": [{"path": "notes.txt", "content": "not a skill"}],
+                },
+            )
 
-    assert answer.startswith("[refused]") and "SKILL.md" in answer
+    assert "SKILL.md" in str(raised.value)
     assert not (isolated_runtime / "skills" / "incomplete").exists()
 
 

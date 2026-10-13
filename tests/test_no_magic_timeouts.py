@@ -17,10 +17,30 @@ Scans ``slife2/**/*.py`` and ``tests/**/*.py`` and fails on:
   * ``deadline — X = <expr> + <numeric literal>`` assignments,
   * a numeric default on a timeout/deadline-named *function argument* (the
     def-time-default pattern, which captures the registry's value at import and
-    ignores a patch).
+    ignores a patch),
+  * **a registry lookup as a function-argument default at all** — `timeout:
+    float = _T.timeouts.grace.lock`.  This is the same capture as the numeric
+    case and slips past it by being *spelled* as a lookup: the value is read
+    once, at import, so `monkeypatch.setattr(timeouts.grace, "lock", …)` — the
+    documented way to tune a value, and what the registry convention below
+    promises — has no effect on any call that took the default.  Three of these
+    were live (`runtime.exclusive`, `runtime.start_lock`, `a2a.broker.ensure`),
+    each next to a docstring stating the rule it broke.
 
 Anything that must stay literal is either covered by the allowlist below or
 carries a ``# timeouts: …`` comment on the same line saying why.
+
+**What it does not ask of a test, and one thing it does.**  The literal rules —
+1, 2, 3 and 7 — apply to ``slife2/`` only.  A *magnitude* in a test is a fixture:
+``await asyncio.wait_for(loop.stop(), timeout=1)`` and ``sleep(3600)`` mean "long
+enough to be a hang" and "until cancelled", and routing either through a
+registry keyed on the daemon's real budgets would be a number about nothing.  Two
+rules survive into ``tests/`` because they are about *names in a second seat*
+rather than magnitudes, and a second seat is a second seat wherever it sits:
+rule 4 (a module constant with a time-style name) and rule 8 (a registry read in
+a signature — see below).  A test helper's ``timeout: float = 5.0`` is a fixture;
+a test helper's ``timeout: float = _T.timeouts.ready.probe`` is the capture bug
+in a file that is about to assert the registry works.
 
 Model rules behind this gate (see ``slife2/timeouts.py`` and DESIGN.md §4.7):
   * values live in ``slife2/timeouts.py`` — consumers read them at call time
@@ -92,6 +112,23 @@ def _numeric(v: ast.expr | None) -> bool:
     )
 
 
+#: A read of the registry.  Matched on *source*, because the rule is about the
+#: shape of the expression rather than its value — and the shape is the whole
+#: problem: a lookup in a signature looks like the convention it breaks.
+_REGISTRY_READ = re.compile(
+    r"\btimeouts\s*\.\s*(work|ready|grace|transport|stream|storage|deliver|pacing)"
+    r"\s*\.\s*[a-z0-9_]+"
+)
+
+
+def _registry_default(value: ast.expr | None, src: str) -> str | None:
+    """The registry read in *value*, if that is what the default is."""
+    if value is None:
+        return None
+    segment = ast.get_source_segment(src, value)
+    return segment if segment and _REGISTRY_READ.search(segment) else None
+
+
 def _fold(v: ast.expr | None) -> float | None:
     """Constant-fold simple arithmetic — ``24 * 60`` is as hardcoded as 1440."""
     if _numeric(v):
@@ -130,7 +167,7 @@ def _collect(path: Path) -> list[str]:
             findings.append(f"{rel}:{node.lineno} {msg}")
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
+        if isinstance(node, ast.Call) and is_prod:
             # 1) a numeric literal on a time-style keyword argument of any call.
             for kw in node.keywords:
                 if not kw.arg or not _numeric(kw.value):
@@ -155,11 +192,8 @@ def _collect(path: Path) -> list[str]:
                 pos = node.args[1:]
             elif name == "sleep":
                 # 3) sleep(N) — a bare cadence.  `sleep(0)` is a scheduling
-                #    yield, not a duration.  Production only: in a test a sleep
-                #    is a synchronisation primitive (``sleep(3600)`` means
-                #    "until cancelled") whose magnitude is the fixture, not a
-                #    configured duration.
-                pos = node.args if is_prod else ()
+                #    yield, not a duration.
+                pos = node.args
                 if pos and _numeric(pos[0]) and pos[0].value == 0:
                     pos = ()
             else:
@@ -220,14 +254,32 @@ def _collect(path: Path) -> list[str]:
                 zip(args.kwonlyargs, args.kw_defaults, strict=False)
             )
             for arg, default in arg_defs:
-                if default is None or _fold(default) is None:
+                if default is None:
                     continue
-                if _ARG_BANNED.search(arg.arg.upper()):
+                if (
+                    is_prod
+                    and _fold(default) is not None
+                    and _ARG_BANNED.search(arg.arg.upper())
+                ):
                     note(
                         default,
                         f"def {node.name}(... {arg.arg}={_fold(default)!r}) — "
                         "numeric time default; use None + a call-time registry "
                         "lookup",
+                    )
+                # 8) a registry lookup captured at def time.  Same defect as the
+                #    numeric case and invisible to it, because the expression
+                #    reads as the convention rather than as a literal.  **Not
+                #    waived for tests**, unlike 7: a numeric default in a test is
+                #    a fixture's magnitude, but a registry read in one is the
+                #    capture bug wherever it lives — and a test that reaches into
+                #    the registry is a test about the registry.
+                elif (read := _registry_default(default, src)) is not None:
+                    note(
+                        default,
+                        f"def {node.name}(... {arg.arg}={read}) — a def-time "
+                        "default captures the registry at import, so patching it "
+                        "has no effect; use None + a call-time lookup",
                     )
     return findings
 
@@ -292,11 +344,11 @@ def _scan_source(src: str) -> bool:
                 zip(args.kwonlyargs, args.kw_defaults, strict=False)
             )
             for arg, default in arg_defs:
-                if (
-                    default is not None
-                    and _ARG_BANNED.search(arg.arg.upper())
-                    and _fold(default) is not None
-                ):
+                if default is None:
+                    continue
+                if _ARG_BANNED.search(arg.arg.upper()) and _fold(default) is not None:
+                    return True
+                if _registry_default(default, src) is not None:
                     return True
     return False
 
@@ -315,6 +367,12 @@ def test_planted_violation_is_caught():
     assert _scan_source("SESSION_MAX_AGE = 23 * 3600")
     assert _scan_source("MAX_WAIT_MINUTES = 24 * 60")
     assert _scan_source("def f(*, deadline_s: float = 1200.0) -> None: ...")
+    # A registry *lookup* is the same capture as a literal, and the one that got
+    # past this gate: it reads as the convention rather than as a number.
+    assert _scan_source(
+        "def f(*, timeout: float = _T.timeouts.grace.lock) -> None: ..."
+    )
+    assert _scan_source("def f(*, timeout: float = timeouts.ready.broker) -> None: ...")
     assert not _scan_source(
         "async def f():\n    await asyncio.wait_for(g(), timeout=_T.timeouts.ready.probe)"
     )

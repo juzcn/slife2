@@ -42,8 +42,10 @@ kind but `file` also lands as markdown under the cabinet directory — `notes/`,
 `diary/`, `reports/` — because a cabinet nobody can open in an editor is a
 database with a nicer name.  The two writes are one operation and they are this
 module's: a row without its mirror is a note that exists and cannot be read by
-the person it was written for, and the mirror path is stored in the row rather
-than derived, so two subjects that slugify alike cannot silently share one file.
+the person it was written for, and the mirror a row holds is a function of its
+*key* rather than of its key's slug, so two subjects that slugify alike cannot
+silently share one file (see `mirror_stem` — the readable name where it is
+unambiguous, and the readable name plus a digest of the key where it is not).
 
 **The cabinet is one directory per agent** — `agents/<agent>/cabinet/` — and it
 is one *directory* rather than a set of files, which is what makes copying or
@@ -75,19 +77,25 @@ from slife2 import textindex
 from slife2.clock import now
 from slife2.db import (
     MAX_PAGE,
+    MAX_SQL_VARS,
     NO_SIMILARITY,
     Embedder,
     as_similarity,
+    begin_rebuild,
     connect_to,
     embed_chunks,
+    filter_clause,
     fuse_ranked,
     index_meta,
+    meanings_by_cosine,
     page_limit,
+    rows_in_order,
     set_index_meta,
     storable,
     table_exists,
     vector_ddl,
     vector_identity,
+    where_clause,
 )
 from slife2.paths import agent_dir
 from slife2.timeutil import normalize_bound
@@ -276,13 +284,24 @@ _KEEP_RE = re.compile(r"[^\w-]+")
 #: own limit — the same compromise `skills`' directory names make.
 _SLUG_MAX = 60
 
+#: How much of a key's digest a *disambiguated* mirror stem carries, in
+#: characters of hex.  Ten is 40 bits, which is what has to hold for two keys
+#: whose slugs collided: the digest is what tells them apart, so it is longer
+#: than the sixteen bits a shortened *name* would need to be unlikely to repeat.
+_MIRROR_DIGEST_CHARS = 10
+
 
 def slug(text: str) -> str:
-    """One key, as a filename stem.
+    """One key, as a filename stem — readable, and **not** injective.
 
     Falls back to a short hash rather than to a name like `note`: a subject that
     is entirely punctuation is one a person wrote on purpose, and a directory of
     `untitled.md`, `untitled-2.md`, … tells them nothing about which is which.
+
+    What it is not is one-to-one, and that is why the *mirror* is not this
+    function: `a b` and `a/b` both reduce to `a-b`, `a--b` and `a-b` to one
+    stem, and anything past `_SLUG_MAX` keeps only its head.  A slug is what a
+    person reads in a directory listing; `mirror_stem` is what a file is called.
     """
     kept = _KEEP_RE.sub("-", text).strip("-")
     kept = re.sub(r"-{2,}", "-", kept)[:_SLUG_MAX].strip("-")
@@ -291,15 +310,56 @@ def slug(text: str) -> str:
     return f"doc-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]}"
 
 
+def mirror_stem(key: str) -> str:
+    """One key, as a filename stem **no other key can share**.
+
+    The readable slug when it is the key itself, and the slug plus a digest of
+    the key when the slug lost something — a character it replaced, a run of
+    dashes it collapsed, a tail it truncated.  Both halves are needed: a mirror
+    is browsed by a person, so `会议记录.md` is worth keeping, and two documents
+    that share one file is the failure this exists to prevent — with the second
+    write silently replacing the first's markdown while both rows stayed
+    correct, and a `note_remove` of either one deleting the other's file.
+
+    **Provably disjoint, which is why the separator is `~`.**  The readable half
+    is only used when `slug(key) == key`, and such a key can hold nothing but
+    word characters and dashes — `_KEEP_RE` would have replaced anything else,
+    and the strip and the collapse would have changed it.  `~` is not one of
+    them, so no digest-carrying name can equal a plain one; within the plain
+    names the identity is `key` itself, and within the digests a collision needs
+    two keys whose slugs *and* whose digests agree.
+
+    The digest is of the key and not of the row's id, because the mirror's
+    directory is the kind's (`notes/`, `reports/`) and a key is unique inside
+    it — `cabinet_doc`'s `UNIQUE (kind, key)` is the whole of the identity that
+    has to be told apart here.
+    """
+    slugged = slug(key)
+    if slugged == key:
+        return slugged
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:_MIRROR_DIGEST_CHARS]
+    return f"{slugged}~{digest}"
+
+
 def mirror_path(spec: Spec, key: str) -> str:
     """Where one document's markdown lives, relative to the cabinet.
 
-    `notes/<slug>.md`, `reports/<slug>.md`, `diary/2026-10-11.md` — and a
+    `notes/<stem>.md`, `reports/<stem>.md`, `diary/2026-10-11.md` — and a
     diary's needs no special case, because its key *is* its day and a slug of
     `2026-10-11` is `2026-10-11`: digits and dashes both survive, which is what
-    makes a directory of days read as a calendar.
+    makes a directory of days read as a calendar.  A digest-carrying stem
+    (`mirror_stem`) is the one thing a day's never is, because a date is a key
+    `slug` does not change.
+
+    **Of the key's identity, and not of its slug alone**, which is the whole
+    reason the row stores this string instead of deriving it from the key each
+    time: two keys that slugify alike would otherwise be two rows naming one
+    file, and the second write would overwrite the first's markdown — after
+    which a remove of either one unlinks the survivor.  Storing it is what makes
+    the row and the file agree even if this function changes; the function is
+    what makes them agree in the first place.
     """
-    return f"{spec.mirror}/{slug(key)}.md" if spec.mirror else ""
+    return f"{spec.mirror}/{mirror_stem(key)}.md" if spec.mirror else ""
 
 
 def _write_mirror(root: Path, relative: str, text: str, *, append: bool) -> None:
@@ -354,9 +414,13 @@ _SCHEMA = f"""
 -- **The rowid is the corpus id**, which is what lets a search fuse its two legs
 -- on it (`slife2.db.fuse_ranked`) exactly as the turns and the catalogue do.
 --
--- `mirror` is stored rather than derived: two subjects can slugify to one stem,
--- and a derived path would let the second silently overwrite the first's
--- markdown while both rows stayed correct.
+-- `mirror` is stored rather than derived, so that today's row keeps pointing at
+-- today's file whatever `mirror_path` decides later: the path a row was written
+-- with is the path a remove of it unlinks, and a change to the naming rule
+-- orphans nothing that already exists.  The rule itself (`mirror_stem`) is what
+-- keeps two keys from ever *needing* one file: two subjects can slugify to one
+-- stem, and a derived path would have let the second silently overwrite the
+-- first's markdown while both rows stayed correct.
 CREATE TABLE IF NOT EXISTS cabinet_doc (
     id           INTEGER PRIMARY KEY,
     kind         TEXT NOT NULL CHECK (kind IN ({",".join(f"'{k}'" for k in KINDS)})),
@@ -490,8 +554,16 @@ class CabinetStore:
             # the new ones: two models' vectors cannot be ranked against each
             # other, which is the same reason the embeddings server rebuilds
             # the turn index whole.
+            #
+            # **The `DROP` and the `CREATE` are inside one transaction**
+            # (`begin_rebuild`), because SQLite rolls a `CREATE` back and not a
+            # `DROP`: a rebuild that failed here used to leave `cabinet_vec`
+            # dropped and the `DELETE`s and the recorded identity rolled back —
+            # a file with chunk rows and no vectors, and a fingerprint asserting
+            # it was whole, which is a state nothing can detect or repair.
             logger.info("cabinet %s: rebuilding the vector index", self.path)
             with self._connect() as connection:
+                begin_rebuild(connection)
                 connection.execute("DROP TABLE IF EXISTS cabinet_vec")
                 connection.execute("DELETE FROM cabinet_chunk")
                 connection.execute("DELETE FROM cabinet_embedded")
@@ -516,21 +588,59 @@ class CabinetStore:
         # **And it terminates, which is the other half of the same rule.**  The
         # set `embed_missing` walks is "not yet tried" rather than "has no
         # chunk", because a document with nothing to embed never gets one — so
-        # a loop over chunks would hand back the same document for ever.  The
-        # pass therefore ends with every document tried; a document the model
-        # cannot embed raises out of `vectors` rather than being skipped, so
-        # there is nothing left for `problems` to say and `ready` is the
-        # success path's `True`.  The shape is `slife2.db`'s `index_status`'s.
+        # a loop over chunks would hand back the same document for ever.
         while True:
             _, done = await self.embed_missing(embedder)
             if not done:
                 break
+
+        # **And the pass is checked, because "tried" is not "has a vector".**
+        # This was declared and never filled, so `ready` was `True` whatever the
+        # index held: a document the vector pass had finished with and the index
+        # does not hold — the state a failed placement leaves, and one the pass
+        # cannot reach itself, since `cabinet_embedded` is exactly what stops it
+        # being selected again — was silently absent from the meaning leg while
+        # the store reported itself whole.  That is the report `cabinet.py` logs
+        # on startup, and the reason the docstring calls this the last thing the
+        # pass does.  A document with nothing to embed is not one of these; see
+        # `_documents_without_vectors`.
+        if missing := self._documents_without_vectors():
+            problems.append(
+                f"{len(missing)} of {self.count()} documents have no vector"
+            )
         return {
             "ready": not problems,
             "problems": problems,
             "identity": identity,
             "documents": self.count(),
         }
+
+    def _documents_without_vectors(self) -> list[int]:
+        """Documents the vector pass finished with and the index does not hold.
+
+        `TurnStore._turns_without_vectors` read against a table that remembers
+        what it has *tried*: the pass stops asking about a document the moment
+        `cabinet_embedded` names it, so a row there with no `cabinet_chunk` is
+        one nothing will ever embed again — a hole that is permanent, and the
+        one an index cannot notice on its own, because the identity it compares
+        is the identity it was written with.
+
+        **A document with nothing to embed is not one of these.**  `vector_text`
+        is empty for a note whose body is empty — a document whose whole text is
+        an empty string is one the keyword leg still finds — and no model can be
+        asked for a vector of nothing.  Counted here it would be a problem no
+        sync could ever clear, which is the bug `_turns_without_vectors`'
+        docstring describes on the turn side: the plugin refuses to serve an
+        index that is not ready, so one empty note would keep the cabinet down.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, kind, key, body, title, summary, tags, source, file_path"
+                " FROM cabinet_doc"
+                " WHERE id IN (SELECT doc_id FROM cabinet_embedded)"
+                " AND id NOT IN (SELECT doc_id FROM cabinet_chunk)"
+            ).fetchall()
+        return [int(row["id"]) for row in rows if vector_text(dict(row)).strip()]
 
     async def embed_missing(
         self, embedder: Embedder, *, limit: int | None = None
@@ -720,51 +830,80 @@ class CabinetStore:
         row, its keyword text and its vectors — so a write that cannot embed
         raises having stored nothing, which is what the plugin's `file_save`
         relies on when it takes back the bytes it copied.
+
+        **And an append is composed against the body that is in the row when it
+        is written.**  A read here and a write there with a model call between
+        them is the shape `append_context` exists to forbid: two writers that
+        both read the old day and both write `old + own` lose one of the two
+        entries, and the second writer is the ordinary case rather than a race —
+        the plugin hops to a thread between the halves, so a wechat turn and a
+        tui turn for one agent interleave.  So the row is written only if it
+        still holds the body this call composed from (`_replace`'s `expected`),
+        and a call that lost that race composes again against the body that won:
+        what re-runs is the read, the compose and the embedding, because the
+        vector has to be a vector *of* the text that ends up in the row and the
+        model is asked before the write rather than inside it.
         """
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
         stamp = now()
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
-            ).fetchone()
-        row: dict[str, Any] = dict(existing) if existing is not None else {}
         # **A log's every write is a section, its first included**, so a
         # day's file reads the same way from the top as it does after the
         # fiftieth entry — and so nothing downstream has to know which write
         # happened to be the one that created the row.
         added = _section(stamp, body) if spec.appends else body
-        if spec.appends and row:
-            row["body"] = f"{row.get('body') or ''}\n{added}".strip("\n")
-        else:
-            row["body"] = added
-        row.update(
-            kind=kind,
-            key=key,
-            title=title or row.get("title") or key,
-            tags=tags or row.get("tags") or "",
-            summary=summary or row.get("summary") or "",
-            source=source or row.get("source") or "",
-            file_path=file_path or row.get("file_path") or "",
-            mime=mime or row.get("mime") or "",
-            size=size or int(row.get("size") or 0),
-            period_start=period_start or row.get("period_start") or "",
-            period_end=period_end or row.get("period_end") or "",
-            created_at=row.get("created_at") or stamp,
-            updated_at=stamp,
-        )
-        if spec.mirror and not row.get("mirror"):
-            row["mirror"] = mirror_path(spec, key)
-        # **Embedded before anything is written**, so a write that cannot embed
-        # has written nothing — see `vectors`.  What the row *is* does not depend
-        # on the vectors, so this is a question asked of the model about the
-        # document rather than a step in storing it.
-        vectors = await self.vectors(row, embedder)
-        with self._connect() as connection:
-            row["id"] = self._replace(connection, row)
-            self._index(connection, row)
-            self.place(connection, int(row["id"]), vectors)
+        while True:
+            with self._connect() as connection:
+                found = connection.execute(
+                    "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
+                ).fetchone()
+            existing = dict(found) if found is not None else None
+            row: dict[str, Any] = dict(existing) if existing is not None else {}
+            if spec.appends and existing is not None:
+                row["body"] = f"{existing.get('body') or ''}\n{added}".strip("\n")
+            else:
+                row["body"] = added
+            row.update(
+                kind=kind,
+                key=key,
+                title=title or row.get("title") or key,
+                tags=tags or row.get("tags") or "",
+                summary=summary or row.get("summary") or "",
+                source=source or row.get("source") or "",
+                file_path=file_path or row.get("file_path") or "",
+                mime=mime or row.get("mime") or "",
+                size=size or int(row.get("size") or 0),
+                period_start=period_start or row.get("period_start") or "",
+                period_end=period_end or row.get("period_end") or "",
+                created_at=row.get("created_at") or stamp,
+                updated_at=stamp,
+            )
+            if spec.mirror and not row.get("mirror"):
+                row["mirror"] = mirror_path(spec, key)
+            # **Embedded before anything is written**, so a write that cannot
+            # embed has written nothing — see `vectors`.  What the row *is* does
+            # not depend on the vectors, so this is a question asked of the model
+            # about the document rather than a step in storing it.
+            vectors = await self.vectors(row, embedder)
+            with self._connect() as connection:
+                placed = self._replace(
+                    connection,
+                    row,
+                    expected=existing.get("body")
+                    if spec.appends and existing
+                    else None,
+                )
+                if placed is None:
+                    # Another writer got there between this call's read and its
+                    # write.  Recomposed rather than reported: both writes are
+                    # facts about the same day, and the caller asked for this one
+                    # to be in it.
+                    continue
+                row["id"] = placed
+                self._index(connection, row)
+                self.place(connection, placed, vectors)
+            break
         if spec.mirror:
             # Last, because a file cannot be inside the database's transaction.
             # A mirror that fails leaves a row whose markdown is missing, and the
@@ -778,8 +917,28 @@ class CabinetStore:
             )
         return row
 
-    def _replace(self, connection: sqlite3.Connection, row: Mapping[str, Any]) -> int:
-        """The row, written whole, and its id."""
+    def _replace(
+        self,
+        connection: sqlite3.Connection,
+        row: Mapping[str, Any],
+        *,
+        expected: str | None = None,
+    ) -> int | None:
+        """The row, written whole, and its id — or `None` if it lost a race.
+
+        *expected* is the body this call composed its own body from, and it is
+        what makes an append a compare-and-set: the `UPDATE` matches only while
+        the row still holds that text, so a second writer's entry cannot be
+        overwritten by a body composed before it arrived.  `None` means there is
+        nothing to compare — a kind that replaces is *meant* to overwrite
+        whatever is there, and a first write has no old body to lose.
+
+        An insert that collides answers `None` too, and for the same reason: the
+        row appeared under this key after this call read for it, which is the
+        race seen from the other side.  The collision is checked against the key
+        rather than trusted, so a constraint that fails for any *other* reason is
+        raised instead of retried for ever.
+        """
         columns = (
             "kind",
             "key",
@@ -804,17 +963,33 @@ class CabinetStore:
             for column in columns
         ]
         if row.get("id"):
-            connection.execute(
+            where = "WHERE id = ?"
+            guard: list[Any] = []
+            if expected is not None:
+                where += " AND body = ?"
+                guard.append(expected)
+            placed = connection.execute(
                 f"UPDATE cabinet_doc SET {', '.join(f'{c} = ?' for c in columns)}"
-                f" WHERE id = ?",
-                (*values, int(row["id"])),
+                f" {where}",
+                (*values, int(row["id"]), *guard),
             )
-            return int(row["id"])
-        placed = connection.execute(
-            f"INSERT INTO cabinet_doc ({', '.join(columns)})"
-            f" VALUES ({', '.join('?' * len(columns))})",
-            values,
-        )
+            return int(row["id"]) if placed.rowcount else None
+        try:
+            placed = connection.execute(
+                f"INSERT INTO cabinet_doc ({', '.join(columns)})"
+                f" VALUES ({', '.join('?' * len(columns))})",
+                values,
+            )
+        except sqlite3.IntegrityError:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM cabinet_doc WHERE kind = ? AND key = ?",
+                    (row.get("kind"), row.get("key")),
+                ).fetchone()
+                is None
+            ):
+                raise
+            return None
         return int(placed.lastrowid or 0)
 
     def _index(self, connection: sqlite3.Connection, row: Mapping[str, Any]) -> None:
@@ -882,6 +1057,18 @@ class CabinetStore:
         the wrong vector for its row and has to be replaced.  A note's vector is
         its body, which a summary does not change — and rebuilding it anyway
         would be spending an embedding call to store the same vector.
+
+        **The re-embedding happens before anything is written**, which is
+        `write`'s order and not a detail: the summary was committed first and
+        the vector second, so a `cabinet_summarize` that could not reach the
+        model left the row holding the new summary, its keyword text rewritten
+        and its vector still describing the text without it.  Nothing could
+        repair that — `cabinet_embedded` marks a document the vector pass has
+        *finished* with, and it has chunks, so `sync`/`embed_missing` never
+        select it again: the words were permanently unreachable by meaning and
+        the cabinet reported itself ready.  A failed re-embed now raises having
+        written nothing, the same contract every other write in this module
+        keeps.
         """
         spec = SPECS.get(kind)
         if spec is None:
@@ -890,12 +1077,18 @@ class CabinetStore:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
-            if found is None:
-                return None
-            row = dict(found)
-            row["summary"] = summary or row.get("summary") or ""
-            row["tags"] = tags or row.get("tags") or ""
-            row["updated_at"] = now()
+        if found is None:
+            return None
+        row = dict(found)
+        row["summary"] = summary or row.get("summary") or ""
+        row["tags"] = tags or row.get("tags") or ""
+        row["updated_at"] = now()
+        # A file's vector is of its identity *including* the summary
+        # (`vector_text`), so the model is asked about the row as it will be —
+        # and asked here, before the `UPDATE`, because a summary that cannot be
+        # embedded is a summary that is not written.
+        vectors = await self.vectors(row, embedder) if kind == FILE else None
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE cabinet_doc SET summary = ?, tags = ?, updated_at = ? WHERE id = ?",
                 (
@@ -906,9 +1099,7 @@ class CabinetStore:
                 ),
             )
             self._index(connection, row)
-        if kind == FILE:
-            vectors = await self.vectors(row, embedder)
-            with self._connect() as connection:
+            if vectors is not None:
                 self.place(connection, int(row["id"]), vectors)
         return row
 
@@ -948,9 +1139,15 @@ class CabinetStore:
             raise ValueError(_KIND_HINT)
         clauses, values = self._window(spec, since, until)
         if category:
-            clauses.append("file_path LIKE ?")
-            values.append(f"{category}/%")
-        where = f"WHERE kind = ?{_and_clause(clauses)}"
+            # **Escaped, or the filter is not the query it says it is.**  A
+            # category is a folder name and `LIKE` reads two of the characters a
+            # folder name may hold as wildcards: `my_notes` matched `myXnotes`
+            # (the underscore is any one character) and a `%` matched anything at
+            # all.  Bound rather than interpolated, so it was never injection —
+            # it was a listing that answered about a folder nobody named.
+            clauses.append(r"file_path LIKE ? ESCAPE '\'")
+            values.append(f"{_like_literal(category)}/%")
+        where = filter_clause(["kind = ?", *clauses])
         limit = page_limit(limit, MAX_PAGE)
         with self._connect() as connection:
             total = int(
@@ -1050,7 +1247,7 @@ class CabinetStore:
             window, bounds = self._window(spec, since, until)
             clauses.extend(window)
             values.extend(bounds)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = filter_clause(clauses)
 
         if not keywords and not any(sentence.strip() for sentence in sentences):
             with self._connect() as connection:
@@ -1073,6 +1270,13 @@ class CabinetStore:
         # other leg and is fused into that question — a row both legs found is
         # evidence *about that question*.  The questions are then unioned and the
         # page ordered once, by a rule the caller can read off it.
+        #
+        # **And the union is capped**, exactly as `ToolStore.search` caps its
+        # own: nothing the caller passes bounds it (each sentence brings up to
+        # `limit * 4` of its own ids, and the keyword leg as many again), while
+        # the query that reads the rows binds one value per id and SQLite
+        # refuses a statement with too many.  What is dropped is the tail of the
+        # union, and the page is `limit` rows.
         phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
         queries, lists = await self._semantic_lists(sentences, embedder, limit * 4)
         meaning: dict[int, float] = {}
@@ -1087,20 +1291,28 @@ class CabinetStore:
                     seen.add(rowid)
                     shortlist.append(rowid)
             for rowid, measured in hits:
-                meaning[rowid] = max(meaning.get(rowid, 0.0), measured)
+                meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
         if keyword_hits is not None and not shortlist:
             shortlist = list(dict.fromkeys(keyword_hits))
+        shortlist = shortlist[:MAX_SQL_VARS]
         for rowid, value in self._meaning_of(
             [rowid for rowid in shortlist if rowid not in meaning], queries
         ).items():
-            meaning[rowid] = max(meaning.get(rowid, 0.0), value)
+            meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), value)
 
         # Words first, then meaning — `ToolStore.search`'s rule, and the reason
         # the column a reader sees is the column that ordered the page: a cosine
         # cannot separate a cluster, and the word match knows which row was named.
+        # `NO_SIMILARITY` and not `0.0` for a row nothing measured, which is the
+        # same sentinel the catalogue uses: a cosine is a signed number, so a row
+        # measured at -0.4 would otherwise sort *above* one nobody looked at.
         worded = set(keyword_hits or ())
         ordered = sorted(
-            shortlist, key=lambda rowid: (rowid not in worded, -meaning.get(rowid, 0.0))
+            shortlist,
+            key=lambda rowid: (
+                rowid not in worded,
+                -meaning.get(rowid, NO_SIMILARITY),
+            ),
         )
         with self._connect() as connection:
             rows = self._rows_in_order(connection, ordered, clauses, values, limit)
@@ -1137,7 +1349,7 @@ class CabinetStore:
         cutting to the limit afterwards still returns the best rows *inside* the
         filter.
         """
-        extra = f"AND {' AND '.join(clauses)}" if clauses else ""
+        extra = where_clause(clauses)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT f.rowid AS rowid FROM cabinet_fts f"
@@ -1203,18 +1415,30 @@ class CabinetStore:
         and is not.  The rows the *words* found are the ones that matter here —
         they are certain evidence and were the only rows on the page with no
         number at all, which made the strongest evidence read as the weakest.
+
+        **The number is read from the stored vectors, not asked of the index
+        again** (`meanings_by_cosine`), which is what `ToolStore._meaning_of`
+        does and why this is one loop and not two implementations: the rows here
+        are exactly the ones the KNN has already said are not in its page, so a
+        second KNN — `k` = `MAX_PAGE`, the *nearest* rows — answered with the
+        rows the first page already had and the word-found rows went unmeasured
+        anyway.
         """
         if not ids or not queries:
             return {}
         with self._connect() as connection:
-            found: dict[int, float] = {}
-            for query in queries:
-                for doc_id, similarity in self._nearest(connection, query, MAX_PAGE):
-                    if doc_id in ids:
-                        found[doc_id] = max(
-                            found.get(doc_id, NO_SIMILARITY), similarity
-                        )
-            return found
+            # The table is absent on a cabinet nobody has written to under this
+            # embedder, which is an empty answer rather than a failure — the
+            # same question `_nearest` asks and for the reason it gives.
+            if not table_exists(connection, "cabinet_vec"):
+                return {}
+            rows = connection.execute(
+                "SELECT c.doc_id AS doc_id, v.embedding AS embedding"
+                " FROM cabinet_vec v JOIN cabinet_chunk c ON c.id = v.rowid"
+                f" WHERE c.doc_id IN ({','.join('?' * len(ids))})",
+                tuple(ids),
+            ).fetchall()
+        return meanings_by_cosine(rows, "doc_id", queries)
 
     def _rows_in_order(
         self,
@@ -1226,23 +1450,21 @@ class CabinetStore:
     ) -> list[sqlite3.Row]:
         """The fused order, as rows — **in that order**, and filtered.
 
-        Ordered in Python and fetched with an `IN`: SQLite would return them in
-        whatever order it liked, and the ids arrive as a ranking.  The filters
-        are re-applied because a leg may have brought back a row the caller
-        excluded, and a page that silently ignores its own window is worse than
-        a shorter page.
+        `slife2.db.rows_in_order`, which is where the ordering, the re-applied
+        filters and the cap on the bound list are argued; this store's own part
+        is the table's name and the `d` it is aliased to, because the filters it
+        passes are written against that alias.
         """
-        if not ordered:
-            return []
-        placeholders = ",".join("?" * len(ordered))
-        where = f"WHERE d.id IN ({placeholders})"
-        if clauses:
-            where += _and_clause(clauses)
-        rows = connection.execute(
-            f"SELECT d.* FROM cabinet_doc d {where}", (*ordered, *values)
-        ).fetchall()
-        by_id = {int(row["id"]): row for row in rows}
-        return [by_id[doc_id] for doc_id in ordered if doc_id in by_id][:limit]
+        return rows_in_order(
+            connection,
+            ordered,
+            select="SELECT d.* FROM cabinet_doc d",
+            column="d.id",
+            key="id",
+            clauses=clauses,
+            values=values,
+            limit=limit,
+        )
 
     def _matched_in_line(self, expression: str, page: list[int]) -> set[int]:
         """Which of the page's rows hold the caller's words in what is printed.
@@ -1311,15 +1533,16 @@ def _found(
     return found
 
 
-def _and_clause(clauses: list[str]) -> str:
-    """Those clauses as the tail of a query that already has a `WHERE`.
+def _like_literal(text: str) -> str:
+    """Text as a `LIKE` pattern that matches only itself.
 
-    One helper and not two: `slife2.db` has the same pair (`where_clause`,
-    `filter_clause`) and this module cannot use them, because its own queries
-    put the fragments in the middle of a `WHERE` that already names a column
-    — but the join itself is one idiom and had two spellings here.
+    Three characters have to be escaped, and the backslash first: it is the
+    escape character this module's `LIKE` declares, so a folder named with one
+    in it would otherwise escape the character after it — and `%` and `_` are
+    what a `LIKE` reads as "anything" and "any one thing", which is how a
+    `file_list(category="my_notes")` came to answer about `myXnotes`.
     """
-    return f" AND {' AND '.join(clauses)}" if clauses else ""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _section(stamp: str, body: str) -> str:

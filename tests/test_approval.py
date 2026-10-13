@@ -6,9 +6,18 @@ things to pin — that the row resolves that future **once** and in the right
 direction for each key, and that the window sends the answer back on the call
 that exists for it (`answer_approval`) rather than dropping it.
 
-v1's tests, ported: `y` approves, `n` and `Esc` deny, a second keypress is
-ignored, and losing focus without a decision denies — the last one because the
-loop is waiting, and a row nobody answers would hold the turn open.
+v1's tests, ported: `y` approves, `n` and `Esc` deny, and a second keypress is
+ignored.
+
+**The fourth one is no longer v1's.** v1 denied on losing focus, on the argument
+that the loop is waiting and a row nobody answers holds the turn open — and that
+argument is wrong here, because three things take focus away on purpose: every
+printable key other than `y`/`n` focuses the row (`redirect_printable`), `Ctrl+S`
+opens the model picker, and a click anywhere does it.  So a person starting their
+next thought refused the call the model was parked on, silently, and the row's
+own docstring could not be told from a deliberate `n`.  What is pinned now is the
+opposite: a blur leaves the row up and the answer owed, and only a decision
+resolves the future.
 """
 
 from __future__ import annotations
@@ -114,14 +123,21 @@ async def test_escape_denies() -> None:
         assert future.result() is False
 
 
-async def test_losing_focus_without_a_decision_denies() -> None:
-    """See the class docstring: the loop is waiting on this future."""
+async def test_losing_focus_without_a_decision_leaves_the_row_waiting() -> None:
+    """A blur is not an answer, and reading it as one refused calls by accident.
+
+    The row exists because the loop is waiting on this future — which is the
+    argument for treating a blur as "no" — but "nobody is looking at it right
+    now" and "no" are not close, and the paths that blur it are the ordinary ones
+    (any printable keystroke, `Ctrl+S`, a click).  So the answer stays owed.
+    """
     harness, future = make_row()
     async with harness.run_test() as pilot:
         harness.prompt.focus()
-        harness.prompt.on_blur()
+        harness.prompt.blur()
         await pilot.pause()
-        assert future.result() is False
+        assert harness.prompt.pending is True
+        assert not future.done(), "the answer is still owed, not given"
 
 
 async def test_the_decided_row_reads_as_its_decision() -> None:

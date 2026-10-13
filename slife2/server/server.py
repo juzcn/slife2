@@ -125,20 +125,6 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "slife2-agent"
 
-#: How long to wait on the context plugin.  Short for the `remember` it was
-#: written for — that write happens once the answer already exists, and a slow
-#: store is not worth holding the answer for — and long enough for the two calls
-#: that are not writes at all: `restore` replays a whole context, and `rebuild`
-#: makes a model call the plugin has already bounded by `context.timeout` plus a
-#: recall that may embed a query.  A peer that is *gone* is a different matter
-#: again — that fails the turn outright; see `slife2.mcp_server.open_server`.
-
-#: How long a conversation survives with nothing asked of it.  This is
-#: housekeeping, not a lifetime a caller can observe: the sweep only reclaims
-#: memory, and the next message under the same key starts the state again — the
-#: background tasks a turn started are not the loop's and are not swept with it
-#: (`slife2.async_tasks`).
-
 #: How many messages one loop may have waiting.  The client's per-call timeout
 #: starts when the call is made, not when its turn starts, so an unbounded queue
 #: is an unbounded wait — and a wait longer than the timeout closes the stream
@@ -1134,6 +1120,16 @@ def build_server(
         it buys is a transcript in which a tool the model lost is something it
         read in the turn that took it away, rather than a gap somebody has to
         explain.
+
+        **A cancellation that lands in that trim still finds the turn settled.**
+        The trim is post-turn work — it only runs once the turn has answered —
+        and it suspends on a real hub call, so a client whose stream closes
+        during it cancels something nothing is waiting for any more.  The commit
+        below therefore sits in a `finally` of its own, so it runs even as that
+        cancellation unwinds past it; otherwise the caller's handler would find
+        an empty `outcome.messages`, record nothing, and re-raise — a completed
+        turn with no row, and the loop's `covered`/`turn_ids` out of step with a
+        list the model is still sent.  The `finally` comments say the rest.
         """
 
         def auto_invoke() -> str | None:
@@ -1221,8 +1217,20 @@ def build_server(
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             loop.approvals[call.id] = future
             try:
-                await observer.on_event(
-                    ToolApprovalRequested(call.id, call.name, call.arguments)
+                # **Emitted through the loop's own fault tolerance, not straight
+                # to the observer.**  `AgentLoop._emit` exists so that a UI which
+                # throws cannot end a turn, and this event is raised from inside
+                # a turn: a client whose progress stream is broken throws from
+                # `on_event` (`ctx.report_progress` on a closed stream), and
+                # letting that escape would kill the very turn that is waiting for
+                # this answer — a tool call the model is entitled to make, refused
+                # because a *display* failed, where the same observer failing on a
+                # `TextDelta` would have been swallowed one layer down.  It is a
+                # staticmethod, so the class is asked rather than an instance: this
+                # closure is built before `agent_loop` and must not depend on it.
+                await AgentLoop._emit(
+                    observer,
+                    ToolApprovalRequested(call.id, call.name, call.arguments),
                 )
                 return await future
             finally:
@@ -1300,31 +1308,56 @@ def build_server(
             cancelled = True
             raise
         finally:
-            # Not on the cancelled path, and not merely to save a call: this is
-            # a `finally` running *during* a cancellation, where the next await
-            # is cancelled at its first checkpoint — so a pair could be started
-            # and never finished, which is the one history state that is a 400
-            # from every provider.  v1's `_auto_invoke` refuses to start for the
-            # same reason.  The turn is over; the budget can wait a turn.
-            if not cancelled:
-                await trim_tools(loop)
-            # **What a folded message is owed, settled where the turn ends.**
-            # A turn that produced a result has answered for everything it was
-            # handed, so each entry it took is given that answer and the caller
-            # waiting on it stops waiting.  A turn that produced *none* — the
-            # cancelled path above, or any failure — has answered nothing: the
-            # entries keep `result` as `None`, and their callers, who are already
-            # parked on the lock holding these same objects, run their own turns.
+            # **The trim is wrapped, and the wrapping is the fix rather than
+            # tidiness.**  It is a *post-turn* step, so it only runs when the
+            # turn answered — but it suspends on a real call to the hub
+            # (`unload_tools`), and a cancellation that lands in that suspension
+            # is a cancellation of something the caller is no longer waiting for;
+            # the turn is already done.  Left to unwind freely it would skip the
+            # commit below, and `send_message`'s handler would then find an empty
+            # `outcome.messages`, record nothing and re-raise — a completed turn
+            # with no row, which is the "conversation the database has never
+            # heard of" §3's rule exists to prevent.  So the commit is put in a
+            # `finally` of its own: it holds no `await`, so it completes even as a
+            # cancellation unwinds past it (the property
+            # `slife2.agent_task_server`'s cancelled path names), and the turn is
+            # settled however the trim ended.
             #
-            # The list is one turn's and is emptied either way.  A later turn
-            # answering for a message it never saw is the failure that would come
-            # of leaving it.
-            if outcome.result is not None:
-                for folded in loop.injected:
-                    folded.result = outcome.result
-            loop.injected.clear()
-            outcome.messages = list(loop.messages[snapshot:])
-            outcome.completed_at = now()
+            # Skipped entirely on the cancelled path above, and not merely to
+            # save a call: that `finally` is running *during* a cancellation,
+            # where the next await is cancelled at its first checkpoint — so a
+            # pair could be started and never finished, which is the one history
+            # state that is a 400 from every provider.  v1's `_auto_invoke`
+            # refuses to start for the same reason.  The turn is over; the budget
+            # can wait a turn.
+            try:
+                if not cancelled:
+                    await trim_tools(loop)
+            finally:
+                # **What a folded message is owed, settled where the turn
+                # ends.**  A turn that produced a result has answered for
+                # everything it was handed, so each entry it took is given that
+                # answer and the caller waiting on it stops waiting.  A turn that
+                # produced *none* — the cancelled path above, or any failure —
+                # has answered nothing: the entries keep `result` as `None`, and
+                # their callers, who are already parked on the lock holding these
+                # same objects, run their own turns.
+                #
+                # The list is one turn's and is emptied either way.  A later
+                # turn answering for a message it never saw is the failure that
+                # would come of leaving it.
+                if outcome.result is not None:
+                    for folded in loop.injected:
+                        folded.result = outcome.result
+                loop.injected.clear()
+                # **After the trim**, so its pair — written into the turn it
+                # followed — rides this turn's record.  It is a cancelled trim
+                # that reaches here too, when it appended nothing (its two
+                # appends have no await between them, so neither can be split
+                # from the other); then this snapshot is the whole completed
+                # turn, which is exactly what the record needs.
+                outcome.messages = list(loop.messages[snapshot:])
+                outcome.completed_at = now()
 
     def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
         """What a turn that died at the provider leaves behind, and what it says.
@@ -2061,9 +2094,12 @@ def build_server(
         Returns:
             `text` (the final answer), `usage`, `steps`, `stop_reason`, the
             `model` that answered — which a bare provider or an empty reference
-            does not otherwise reveal — and `injected`, true when this message
-            was folded into a turn that was already running rather than run as
-            its own.
+            does not otherwise reveal — `injected`, true when this message was
+            folded into a turn that was already running rather than run as its
+            own, and `refused` (empty on an ordinary turn), naming any source
+            this call passed that could not be attached.  The key set is the
+            same whichever path answered — `_reply` builds it in one place — so
+            a caller reads them without having to know which one it got.
         """
         # Asked before anything is spent.  A context plugin that is not there is
         # a broken system rather than a degraded one, and the moment to find that
@@ -2142,7 +2178,17 @@ def build_server(
                     # because the answer that follows is the thing it is about.
                     # The discriminator is one model call the caller never sees,
                     # so this is the only place its decision is visible at all.
-                    await observer.on_event(chosen)
+                    #
+                    # **Through the loop's own fault tolerance**, like every
+                    # other event this conversation raises.  A broken progress
+                    # stream throws from `on_event` (`ctx.report_progress` on a
+                    # closed stream), and a throw from *here* lands before the
+                    # prompt has been appended or recorded at all — so the
+                    # caller's message is lost outright, where the same observer
+                    # failing on a `TextDelta` is swallowed one layer down
+                    # (`AgentLoop._emit`).  Asked for by class rather than instance
+                    # because the `AgentLoop` is not built until the turn below.
+                    await AgentLoop._emit(observer, chosen)
                     # How long the list was when this turn began.  What the write
                     # below covers is what the turn *appends*, and the difference
                     # is the whole of it — see `covered` in the success branch.
@@ -2209,20 +2255,14 @@ def build_server(
             with contextlib.suppress(ValueError):
                 loop.inbox.remove(item)
 
-        result = outcome.result
-        return {
-            "text": result.text if result else "",
-            "usage": result.usage.to_wire() if result else None,
-            "steps": result.steps if result else 0,
-            "stop_reason": result.stop_reason if result else "cancelled",
-            "model": loop.model,
-            "injected": False,
-            # Empty on every ordinary turn.  A source the caller passed that could
-            # not be read is named here, because the alternative — an answer that
-            # silently had fewer pictures than the call asked for — is the one
-            # thing a caller cannot detect and a person cannot explain.
-            "refused": outcome.refused,
-        }
+        # **One answer, built by `_reply`.**  No `if result` here: every path
+        # that leaves a turn with no result has already left — `_injected_reply`
+        # for a folded message, and the re-raises in the handler above for a
+        # cancellation and a failure — so by this line the turn answered, and the
+        # assert says so to a reader and to the checker rather than leaving
+        # branches that can never be taken.
+        assert outcome.result is not None
+        return _reply(loop, outcome.result, injected=False, refused=outcome.refused)
 
     @mcp.tool
     async def transcript(agent: str, subagent: str = "") -> dict[str, Any]:
@@ -2312,6 +2352,48 @@ def build_server(
     return mcp
 
 
+def _reply(
+    loop: Loop,
+    result: TurnResult,
+    *,
+    injected: bool,
+    refused: list[str],
+) -> dict[str, Any]:
+    """One turn's answer, in the one key set a caller is promised.
+
+    **Built here rather than at each return, and that is the fix rather than a
+    tidy-up.**  The reply used to be written out twice — once at the end of
+    `send_message` and once in `_injected_reply` — and the two had already
+    drifted: the injected dict had no `refused`, so a caller that read
+    `reply["refused"]` got a `KeyError` on exactly the folded-in path, which is
+    the one path a caller cannot recognise by anything else in the answer.  A
+    stable key set is a promise, and one dict is the only way to keep it.
+
+    `result` is never None, which is why there is no `if result else` anywhere
+    below.  Every path that leaves a turn without a result has already gone —
+    `_injected_reply` for a folded message, and the re-raises in `send_message`
+    for a cancellation and a failure — so those branches were dead.
+
+    `injected` and `refused` are the only two things that differ between the two
+    callers, and both are facts about *the message being answered* rather than
+    about the turn that answered it: whether its own turn ran or it rode
+    another's, and which of its own sources could not be attached.  `refused` is
+    empty on every ordinary turn, and a source the caller passed that could not be
+    read is named there because the alternative — an answer that silently had
+    fewer pictures than the call asked for — is the one thing a caller cannot
+    detect and a person cannot explain.
+    """
+    return {
+        "text": result.text,
+        "usage": result.usage.to_wire(),
+        "steps": result.steps,
+        "stop_reason": result.stop_reason,
+        "model": loop.model,
+        "injected": injected,
+        "refused": refused,
+    }
+
+
 def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
     """What a caller is told when a running turn folded its message in.
 
@@ -2324,15 +2406,15 @@ def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
     `injected` is the one thing added, and it is not decoration: without it a
     caller cannot tell "my message rode in another turn" from "my turn happened
     to say the same thing", and the two call for different things to be shown.
+
+    **`refused` is empty, and empty for a reason rather than by omission.**  Only
+    a message carrying **no images** is ever folded in — both `auto_invoke` here
+    and `take_waiting` refuse an image-bearing head — so there is no source of
+    this caller's that could have been refused.  The key is present all the same:
+    `_reply` builds one dict, and a caller must not have to know which path
+    handed it the answer in order to read a field of it.
     """
-    return {
-        "text": result.text,
-        "usage": result.usage.to_wire(),
-        "steps": result.steps,
-        "stop_reason": result.stop_reason,
-        "model": loop.model,
-        "injected": True,
-    }
+    return _reply(loop, result, injected=True, refused=[])
 
 
 def main(argv: list[str] | None = None) -> int:

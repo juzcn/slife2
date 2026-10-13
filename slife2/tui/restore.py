@@ -31,6 +31,7 @@ has the reasoning block a live one had, expanded or folded by the same rule.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from slife2.context import turn_footnote
@@ -39,6 +40,8 @@ from slife2.messages import ToolCall
 from slife2.tools import is_harness
 from slife2.tui.widgets import ChatView
 
+logger = logging.getLogger(__name__)
+
 
 def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     """Draw *turns* — the exit-time context, oldest first — into *chat*.
@@ -46,6 +49,17 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     A conversation with nothing to restore draws nothing: not an empty note, and
     not a heading.  A name that is genuinely new has no history, and saying
     "restored 0 turns" would be inventing an event out of one.
+
+    **A row the screen cannot read is dropped, not fatal.**  `restore` is awaited
+    before a queued message is taken off its queue (`slife2.tui.app._drain`), so
+    an exception out of here does not merely lose the history — it kills the
+    worker that runs turns, leaves the window saying "working" with the message
+    still counted as queued, and never runs or shows it.  The record is not this
+    module's to trust: `_draw_turn` reads a stored row field by field (an id it
+    parses, a tool call it decodes), and a row written by an older build or a
+    half-finished one can carry a shape none of that expects.  So the failure is
+    contained to the one turn it came from and said in the log, where the store
+    it contradicts can be looked at.
     """
     if not turns:
         return
@@ -57,12 +71,18 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     chat._autoscroll = False
     with chat.app.batch_update():
         for turn in turns:
-            _draw_turn(chat, turn)
+            try:
+                _draw_turn(chat, turn)
+            except Exception:  # noqa: BLE001 - a stored row is not ours to trust
+                logger.warning(
+                    "a stored turn could not be drawn: %r", turn, exc_info=True
+                )
 
     # One scroll, at the end, and following live again.  `jump_to_tail` rather
     # than `scroll_end` for the reason it exists: the re-arm is stated now, so a
     # token streamed into the refresh the scroll waits on does not find
-    # following still off.
+    # following still off.  Both run however many rows were dropped: the history
+    # that *is* drawable has still come back.
     chat._autoscroll = True
     chat.add_note(f"[restored {as_turns(len(turns))}]")
     chat.jump_to_tail()

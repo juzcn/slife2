@@ -61,19 +61,6 @@ if TYPE_CHECKING:  # the agent never imports a server, and this is a client one
 LIST_TOOLS = "list_tools"
 CALL_TOOL = "call_tool"
 
-#: How long the agent waits on the hub for the things it asks it *itself* — the
-#: tool list, and the trim at a turn boundary.  v1's `ready.list_tools`, and
-#: `slife2.mcp_server.LIST_SETTLE_SECONDS` (5 s) sits well inside it, which is
-#: what makes this the right size: the hub briefly waits for tool servers that
-#: are still connecting, and a patience shorter than that wait would read a
-#: server that is starting as one that is down.
-#:
-#: **It is not a bound on a tool call**, and that is why it is written on the
-#: two calls rather than on the connection: a connection-level timeout applies to
-#: every request that travels over it, which is how a listing's patience came to
-#: be the deadline for whatever tool the model happened to call.  A tool call is
-#: bounded by the loop (`slife2.loop`), and by nobody else.
-
 #: The harness's own trim, and the one hub tool the *agent* calls on the hub's
 #: API rather than through `call_tool`.  Its leading underscore is the system's
 #: mark for a tool the machinery calls rather than one a model chooses, and the
@@ -139,6 +126,23 @@ class UpstreamTool:
         )
 
 
+def _unreadable(what: str, payload: Any) -> ConnectionError:
+    """The loud failure both halves of the hop raise, worded once.
+
+    `what` is what the hub was asked to do — "return a tool list", "answer a
+    call" — because the two are the same diagnosis reached from two sides, and a
+    reader who learns the sentence from one should recognise it in the other.
+    The likely cause is a hub daemon left over from a previous build (DESIGN.md
+    §5), and `slife2 down` is the answer; a payload that is *not* this shape is
+    the only evidence there is that the far end is a different build, so it is
+    quoted rather than summarised.
+    """
+    return ConnectionError(
+        f"the toolhub did not {what} (it said {payload!r}); a daemon from "
+        f"another build does this — try `slife2 down`"
+    )
+
+
 async def remote_tools(
     client: Client, client_id: tuple[str, str] | None = None
 ) -> list[Tool]:
@@ -161,11 +165,14 @@ async def remote_tools(
         await client.call_tool(LIST_TOOLS, {}, timeout=_T.timeouts.work.hub)
     )
     listed = payload.get("tools")
-    if not isinstance(listed, list):
-        raise ConnectionError(
-            f"the toolhub did not return a tool list (it said {payload!r}); a "
-            f"daemon from another build does this — try `slife2 down`"
-        )
+    # **The elements are checked and not only the list.**  A hub that answers
+    # `{"tools": ["fake__echo"]}` has the outer shape and none of the inner one,
+    # and letting it through would fail two frames down in `from_wire` with
+    # `AttributeError: 'str' object has no attribute 'get'` — a traceback about
+    # a dict where the deliberate message about a *build* belongs.  The check is
+    # the same one for both halves of the shape because the diagnosis is.
+    if not isinstance(listed, list) or not all(isinstance(raw, dict) for raw in listed):
+        raise _unreadable("return a tool list", payload)
     return [
         Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
         for entry in (UpstreamTool.from_wire(raw) for raw in listed)
@@ -228,6 +235,15 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
                 CALL_TOOL, {"name": name, "arguments": arguments}, meta=meta
             )
         )
+        # **An unreadable answer here is the same diagnosis the list path makes,
+        # and not a tool that refused.**  `tool_payload` hands back `{}` for a
+        # result it cannot read, and treating that as the `ok` false below would
+        # render a version mismatch as `ToolFailed` — "the tool said no" — which
+        # is the opposite of what this half of the hop deliberately says when the
+        # *list* comes back wrong.  The contract is `{"text": str, "ok": bool}`,
+        # so a payload missing either is a build this one cannot read.
+        if "text" not in payload or "ok" not in payload:
+            raise _unreadable("answer a call", payload)
         text = str(payload.get("text") or "")
         if not payload.get("ok"):
             # Raised rather than returned: the loop's contract is that a tool

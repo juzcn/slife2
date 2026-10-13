@@ -27,10 +27,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from slife2.config import ModelSettings, ProviderSettings
+from slife2.config import ModelSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
     build_backend_server,
+    sdk_client_factory,
     sdk_streamer,
     serve_backend,
 )
@@ -152,7 +153,17 @@ def build_request(
 
     thinking = thinking_parameter(settings)
     if thinking is not None:
-        request["thinking"] = thinking
+        # **`extra_body`, because the SDK's typed surface has no `thinking`.**
+        # `chat.completions.create` accepts no such keyword — measured against
+        # the installed `openai` — so passing it at the top level is a
+        # `TypeError` raised *here*, before anything is sent, on every call of
+        # every conversation, with a message about a keyword rather than about
+        # the model.  Through `extra_body` the configured value reaches the wire,
+        # which is all this promises: a gateway that accepts the field gets it,
+        # and one that does not answers in its own words naming the field.  The
+        # Anthropic adapter routes its own non-typed fields (`sampling`) exactly
+        # this way, for exactly this reason.
+        request["extra_body"] = {"thinking": thinking}
     return request
 
 
@@ -266,17 +277,6 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     always safe.
     """
 
-    def sdk_client(provider: ProviderSettings, key: str) -> Any:
-        """The one per-protocol fact: which SDK class, and with what.
-
-        Imported here rather than at the top of the file for the reason this
-        whole arrangement exists — the module is importable, and a process that
-        serves nothing from it never loads the SDK.
-        """
-        from openai import AsyncOpenAI
-
-        return AsyncOpenAI(base_url=provider.base_url, api_key=key)
-
     def build(
         messages: list[Message], tools: list[ToolSpec], settings: ModelSettings
     ) -> dict[str, Any]:
@@ -286,7 +286,7 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     return sdk_streamer(
         api=API,
         server_name=SERVER_NAME,
-        sdk_client=sdk_client,
+        sdk_client=sdk_client_factory("openai", "AsyncOpenAI"),
         build_request=build,
         start=lambda client, request: client.chat.completions.create(**request),
         # `translate` is a pure function of one event on this wire, so the

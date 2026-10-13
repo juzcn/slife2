@@ -36,6 +36,21 @@ def skill(
     return folder
 
 
+def bom_skill(root: Path) -> Path:
+    """One skill whose `SKILL.md` starts with a UTF-8 BOM, as a Windows editor or
+    an upstream download writes it: `EF BB BF` before the opening fence."""
+    folder = root / "bom-search"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(
+        "﻿---\n"
+        "name: real-name\ndescription: Real.\n"
+        "metadata: {h: {requires: {env: [SOME_KEY]}}}\n"
+        "---\n\nRun `scripts/go.py`.\n",
+        encoding="utf-8",
+    )
+    return folder
+
+
 @pytest.fixture
 def root(isolated_runtime: Path) -> Path:
     """The `skills/` a bare `scan()` looks in — the data directory's."""
@@ -85,6 +100,21 @@ def test_a_manifest_with_no_header_is_named_after_its_directory(root: Path) -> N
     (root / "plain" / "SKILL.md").write_text("# Plain\n\nJust words.", encoding="utf-8")
     assert scan()[0].name == "plain"
     assert scan()[0].description == ""
+
+
+def test_a_manifest_with_a_bom_still_has_its_frontmatter(root: Path) -> None:
+    """**A `SKILL.md` copied in from a Windows editor may begin with a BOM.**
+
+    The fence check is a `strip()`, and `'\\ufeff---'.strip()` is still
+    `'\\ufeff---'` (and `'\\ufeff'.isspace()` is false) — so without a
+    BOM-tolerant read the file reads as one with no frontmatter at all: the skill
+    is named after its directory, its description is empty, and its
+    `metadata: …requires.env` is never seen, which is what makes the miss silent.
+    """
+    bom_skill(root)
+    (found,) = scan()
+    assert (found.name, found.description) == ("real-name", "Real.")
+    assert found.requires.env == ("SOME_KEY",)
 
 
 def test_a_header_that_does_not_parse_leaves_the_skill_visible(root: Path) -> None:
@@ -257,6 +287,66 @@ def test_a_program_that_is_not_on_the_path_is_reported(root: Path) -> None:
     assert "no-such-program-xyz" in readiness(scan()[0])
 
 
+def test_a_missing_program_is_told_how_to_be_fixed_not_how_to_set_a_key(
+    root: Path,
+) -> None:
+    """**A program is not a credential, and the fix is not the same sentence.**
+
+    `skills:` carries `env:` and nothing that can put anything on `PATH`, so the
+    old hint — chosen by `primaryEnv` alone, whatever kind of need was unmet — sent
+    a reader whose only shortfall was `ffmpeg` to `credstore set` (or to
+    `skills:`), a fix that cannot install anything.
+    """
+    skill(
+        root,
+        "one",
+        header="name: one\nmetadata: {h: {requires: {bins: [no-such-program-xyz]}}}\n",
+    )
+    note = readiness(scan()[0])
+    assert "Install" in note and "no-such-program-xyz" in note
+    assert "credstore" not in note, "the key fix cannot install a program"
+    assert "skills:" not in note
+
+
+def test_a_configured_primary_is_not_blamed_for_a_missing_program(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of the same bug: a `primaryEnv` that *is* supplied while the
+    binary is missing must not be named as the thing to go and fix — it is
+    already fixed, and naming it sends the reader in a circle."""
+    monkeypatch.setenv("SOME_KEY", "a-real-key")
+    skill(
+        root,
+        "one",
+        header=(
+            "name: one\n"
+            "metadata: {h: {requires: {env: [SOME_KEY], "
+            "bins: [no-such-program-xyz]}, primaryEnv: SOME_KEY}}\n"
+        ),
+    )
+    note = readiness(scan()[0])
+    assert "no-such-program-xyz" in note and "Install" in note
+    assert "credstore set SOME_KEY" not in note
+
+
+def test_a_skill_that_needs_both_is_told_both_things(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One sentence per kind, emitted only for the kind that is actually short."""
+    monkeypatch.delenv("SOME_KEY", raising=False)
+    skill(
+        root,
+        "one",
+        header=(
+            "name: one\n"
+            "metadata: {h: {requires: {env: [SOME_KEY], "
+            "bins: [no-such-program-xyz]}, primaryEnv: SOME_KEY}}\n"
+        ),
+    )
+    note = readiness(scan()[0])
+    assert "credstore set SOME_KEY" in note and "Install" in note
+
+
 def test_a_skill_that_declares_nothing_says_nothing(root: Path) -> None:
     """A line on every read is a line the model learns to skip."""
     skill(root, "one", header="name: one\n")
@@ -297,6 +387,23 @@ async def test_use_reads_one(root: Path) -> None:
     text, ok = await use("one")
     assert ok
     assert text.endswith("Do it.")
+
+
+@pytest.mark.asyncio
+async def test_a_bom_does_not_reach_the_model_as_part_of_the_playbook(
+    root: Path,
+) -> None:
+    """The other half of reading a BOM-tolerant file: the mark itself is gone.
+
+    `document` hands over the whole `SKILL.md`, header and all — the description
+    lives there and a reader is meant to see it — so the one thing a BOM must not
+    do is sit invisible at the front of the playbook the model follows.
+    """
+    bom_skill(root)
+    text, ok = await use("real-name")
+    assert ok
+    assert "﻿" not in text
+    assert text.rstrip().endswith("Run `scripts/go.py`.")
 
 
 @pytest.mark.asyncio

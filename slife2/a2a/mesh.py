@@ -78,13 +78,6 @@ _MAX_INFLIGHT = 16
 #: our own card from a same-named twin's (see ``A2AMesh.__init__``).  The SDK's
 #: ``build_card`` nests extensions under ``capabilities.extensions``.
 _INSTANCE_EXT = "instance"
-#: Standard TASK_RESPONSE continuity for inbound tasks: the SDK emits the
-#: "submitted" ack, then a long harness turn (LLM thinking, often > 30 s) would
-#: otherwise leave the response stream silent past a standard requester's
-#: stream_idle_timeout (30 s) — the peer would time out the stream even though
-#: we are still working.  Emit a "working" status update every interval until
-#: the completion bridge resolves, short enough that any idle-keeping requester
-#: resets on each ping.
 
 # How long `connect()` waits for both connections to be live.  A broker probe
 # ran before this in v1; here the caller has already decided the machine is on
@@ -523,7 +516,12 @@ class A2AMesh:
         self._responder_ready = asyncio.Event()  # inbound responder subscribed
         self._tasks: list[asyncio.Task] = []
         self._peers: dict[str, _PresencePeer] = {}
-        self._pending: dict[str, str] = {}  # task_id → last artifact text
+        # task_id → last artifact text.  A FIFOCache like the ones below, and for
+        # the same reason: an artifact that never reaches a terminal must not
+        # accumulate strings for the session, and the oldest is the one least
+        # likely to ever be answered.  The bound used to be hand-rolled at the
+        # insertion site; it lives in the class now so the cap is stated once.
+        self._pending: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
         # task_id → the peer that withdrew it.  A note, not a recovery path:
         # the completion bridge died with the withdrawal, so this exists only
         # so a late ``task_response`` for that id gets the truthful answer
@@ -532,7 +530,12 @@ class A2AMesh:
         self._withdrawn: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
         # FIFO-capacity: evicts the oldest tracked send past _MAX_TRACKED_SENDS.
         self._sends: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
-        self._corr_to_task: dict[str, str] = {}  # correlation → task_id
+        # correlation → task_id.  Capped at twice ``_sends`` because every
+        # correlation a task was published under stays routed until its TERMINAL
+        # reply lands (see ``_deliver``), so a task's retries each cost a route.
+        # FIFOCache again: the bound used to be a hand-rolled ``pop`` in
+        # ``_publish_attempt``, which is the same one line the class already is.
+        self._corr_to_task: FIFOCache = FIFOCache(maxsize=_MAX_CORR_ENTRIES)
 
         # Agent-side callbacks — replaced by the plugin before connect().
         self.on_inbound_task = lambda source, content, task_id, kind="task": None
@@ -932,13 +935,8 @@ class A2AMesh:
         if kind == REPLY_ARTIFACT:
             # The final artifact precedes the terminal status event; hold its
             # text so the terminal (which carries no message) has a result.
+            # FIFOCache evicts the oldest past the cap (see `__init__`).
             self._pending[task_id] = content
-            if len(self._pending) > _MAX_TRACKED_SENDS:
-                # Bound the artifact hold like ``_sends``: a task that never
-                # reaches a terminal must not accumulate artifact strings for
-                # the session.  Oldest first — the artifact of a lost/evicted
-                # task is the least likely to ever be answered.
-                self._pending.pop(next(iter(self._pending)), None)
             return
         if kind not in TERMINAL_KINDS:
             return
@@ -1003,12 +1001,10 @@ class A2AMesh:
     async def _publish_attempt(self, send: _OutboundSend, corr: str) -> None:
         """One requester-profile attempt — fresh Correlation Data, same
         payload + session response topic."""
+        # FIFOCache evicts the oldest routing entry past the cap (see
+        # `__init__`) — a send whose reply may never come, or one already
+        # evicted from the capped `_sends` cache, no longer grows the table.
         self._corr_to_task[corr] = send.task_id
-        if len(self._corr_to_task) > _MAX_CORR_ENTRIES:
-            # FIFO bound: drop the oldest routing entry (a send whose reply
-            # may never come, or one already evicted from the capped _sends
-            # cache) instead of growing without limit.
-            self._corr_to_task.pop(next(iter(self._corr_to_task)), None)
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, send.session),
             correlation_data=corr,

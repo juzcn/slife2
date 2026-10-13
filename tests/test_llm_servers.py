@@ -640,11 +640,15 @@ def test_responses_fills_in_arguments_that_never_streamed() -> None:
     ]
 
 
-def test_responses_an_incomplete_response_keeps_its_reason() -> None:
+def test_responses_a_truncated_response_says_length() -> None:
     """Cut off at the output cap is an ordinary outcome, not an error.
 
-    The reason travels through as the stop reason, so the caller can tell a
-    truncated answer from a finished one.
+    The reason travels through as the stop reason, and it is **normalised for
+    the same reason the Anthropic one is**: the other two backends report
+    `length` for the same condition (chat-completions passes its raw `length`
+    through; Anthropic maps `max_tokens` to `length`), so a caller asking "was
+    this answer truncated?" with `stop_reason == "length"` must not be told a
+    different story by this backend of the three.
     """
     event = ResponseIncompleteEvent.model_validate(
         {
@@ -656,7 +660,23 @@ def test_responses_an_incomplete_response_keeps_its_reason() -> None:
             ),
         }
     )
-    assert responses_translate(event) == [Finish(stop_reason="max_output_tokens")]
+    assert responses_translate(event) == [Finish(stop_reason="length")]
+
+
+def test_responses_an_unknown_incomplete_reason_is_passed_through() -> None:
+    """A reason this build has not heard of is a fact about the model, not a gap
+    to fold into something familiar."""
+    event = ResponseIncompleteEvent.model_validate(
+        {
+            "type": "response.incomplete",
+            "sequence_number": 9,
+            "response": _resp(
+                status="incomplete",
+                incomplete_details={"reason": "content_filter"},
+            ),
+        }
+    )
+    assert responses_translate(event) == [Finish(stop_reason="content_filter")]
 
 
 def test_responses_a_failed_response_raises_with_the_providers_words() -> None:
@@ -774,10 +794,16 @@ def test_responses_content_parts_are_renamed_and_reshaped() -> None:
     ]
 
 
-def test_responses_a_remote_image_is_not_fetched() -> None:
-    """Fetching an address a prompt named is a request nobody made.
+def test_responses_a_remote_image_url_is_passed_on_and_not_fetched() -> None:
+    """The API fetches it, and **no request leaves this process**.
 
-    Dropping is safe because the agent server has already refused to send one.
+    A remote `http(s)` URL is a valid `input_image.image_url`, and the Responses
+    API downloads it on its own side — so passing it through is exactly what
+    "not fetching" looks like, and it is the third kind of attachment the file
+    tunnel exists to make work (DESIGN §1.6).  This used to be dropped, on the
+    same wrong premise the Anthropic adapter once had: dropping it silently lost
+    the image the caller sent, with nothing anywhere reporting the loss — an
+    attached picture reached the model on two backends and vanished on this one.
     """
     _, items = to_responses_input(
         [
@@ -785,6 +811,30 @@ def test_responses_a_remote_image_is_not_fetched() -> None:
                 role="user",
                 content=[
                     {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}},
+                    {"type": "text", "text": "hi"},
+                ],
+            )
+        ]
+    )
+    assert items[0]["content"] == [
+        {
+            "type": "input_image",
+            "image_url": "https://x.test/a.png",
+            "detail": "auto",
+        },
+        {"type": "input_text", "text": "hi"},
+    ]
+
+
+def test_responses_something_that_is_neither_inline_nor_a_url_is_dropped() -> None:
+    """A `file:` URL or a bare word is not an image source in either form, so it
+    is dropped rather than sent to 400 on every call that carries one."""
+    _, items = to_responses_input(
+        [
+            Message(
+                role="user",
+                content=[
+                    {"type": "image_url", "image_url": {"url": "file:///etc/passwd"}},
                     {"type": "text", "text": "hi"},
                 ],
             )
@@ -1165,7 +1215,9 @@ def test_openai_thinking_is_opt_in() -> None:
 
     So an absent `compat.thinking` sends nothing, however much the model likes
     to reason — the models that reason natively do it unasked and report it in
-    `reasoning_content`, which the adapter reads either way.
+    `reasoning_content`, which the adapter reads either way.  When one *is*
+    asked for it rides in `extra_body`, because the SDK's typed surface has no
+    `thinking` parameter to pass it as — the guard test below is what holds that.
     """
     native = ModelSettings(model="m", reasoning=True)
     assert "thinking" not in openai_build_request([], [], native, stream_usage=True)
@@ -1174,18 +1226,57 @@ def test_openai_thinking_is_opt_in() -> None:
         model="m", reasoning=True, thinking="enabled", max_tokens=1000
     )
     request = openai_build_request([], [], asked, stream_usage=True)
-    assert request["thinking"]["type"] == "enabled"
+    assert request["extra_body"]["thinking"]["type"] == "enabled"
     # Half the budget, because the other half is what the answer is made of.
-    assert request["thinking"]["budget_tokens"] == 500
+    assert request["extra_body"]["thinking"]["budget_tokens"] == 500
 
     refused = ModelSettings(model="m", reasoning=True, thinking="disabled")
-    assert (
-        openai_build_request([], [], refused, stream_usage=True)["thinking"]["type"]
-        == "disabled"
-    )
+    refused_request = openai_build_request([], [], refused, stream_usage=True)
+    assert refused_request["extra_body"]["thinking"]["type"] == "disabled"
 
     omitted = ModelSettings(model="m", thinking="omit")
-    assert "thinking" not in openai_build_request([], [], omitted, stream_usage=True)
+    omitted_request = openai_build_request([], [], omitted, stream_usage=True)
+    assert "thinking" not in omitted_request
+    assert "extra_body" not in omitted_request, "nothing to carry, no hatch opened"
+
+
+def test_the_openai_request_only_names_arguments_the_sdk_has() -> None:
+    """Every key this module builds is one `chat.completions.create` accepts.
+
+    The bug this pins is the one that shipped: the request body is assembled as
+    a dict and handed to the SDK as `**kwargs`, so a key the SDK does not have is
+    a `TypeError` at the call site — invisible to a test that only reads the dict,
+    and fatal on *every* call of *every* conversation.  `compat.thinking:
+    enabled` was exactly that: it is not part of the typed surface, so it has to
+    reach the wire through `extra_body`, and this is what makes the next such
+    field fail here instead of in a conversation.  Comparing the built request
+    against the *installed* signature is the whole fact, and it needs no endpoint.
+    """
+    import inspect
+
+    from openai.resources.chat.completions import AsyncCompletions
+
+    accepted = set(inspect.signature(AsyncCompletions.create).parameters)
+    settings = ModelSettings(
+        model="m",
+        temperature=0.7,
+        top_p=0.9,
+        max_tokens=8000,
+        reasoning=True,
+        thinking="enabled",
+    )
+    request = openai_build_request(
+        [
+            Message(role="system", content="be brief"),
+            Message(role="user", content="hi"),
+        ],
+        [ToolSpec(name="t", description="d", parameters={"type": "object"})],
+        settings,
+        stream_usage=True,
+    )
+
+    assert set(request) - accepted == set(), "a key the SDK would refuse"
+    assert {"extra_body", "stream_options", "tools"} <= set(request), "and not empty"
 
 
 def keys_in(value: Any) -> set[str]:
@@ -1428,6 +1519,43 @@ def test_responses_sends_only_what_was_configured() -> None:
     # This API calls the output cap something else, and does not require it —
     # unlike Anthropic, where an absent one has to become a real number.
     assert request["max_output_tokens"] == 100
+
+
+def test_the_responses_request_only_names_arguments_the_sdk_has() -> None:
+    """Every key this module builds is one `responses.create` accepts.
+
+    The same guard the other two adapters carry, and for the same reason: the
+    body is a dict splatted into a typed SDK method, so a key the SDK does not
+    have is a `TypeError` at the call site — on every call, invisible to a test
+    that only reads the dict.  This adapter has no non-typed field of its own
+    yet, so every key it emits is one the API types; the day one is not, it fails
+    here rather than in a conversation.  Comparing against the *installed*
+    signature is the whole fact, and it needs no endpoint.
+    """
+    import inspect
+
+    from openai.resources.responses import AsyncResponses
+
+    accepted = set(inspect.signature(AsyncResponses.create).parameters)
+    settings = ModelSettings(
+        model="m",
+        temperature=0.7,
+        top_p=0.9,
+        max_tokens=8000,
+        reasoning=True,
+        store=False,
+    )
+    request = responses_build_request(
+        [
+            Message(role="system", content="be brief"),
+            Message(role="user", content="hi"),
+        ],
+        [ToolSpec(name="t", description="d", parameters={"type": "object"})],
+        settings,
+    )
+
+    assert set(request) - accepted == set(), "a key the SDK would refuse"
+    assert {"instructions", "tools", "reasoning", "store"} <= set(request), "not empty"
 
 
 def test_responses_thinking_is_opt_in() -> None:

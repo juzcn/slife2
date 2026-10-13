@@ -33,24 +33,19 @@ hand-over it could not confirm, and that is a property of this return value.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+from collections.abc import AsyncIterator
 
 from fastmcp import Client
 
 import slife2.timeouts as _T
 from slife2.config import AGENT_SERVER_NAME, TUI_SERVER_NAME, Config
-from slife2.mcp_server import open_server
+from slife2.mcp_server import close_server, open_server
 from slife2.tui import control
 
 logger = logging.getLogger(__name__)
-
-#: How long to wait on a peer that is *handed* something rather than asked.  The
-#: window is quick — `submit` returns when the words are down the stream, not
-#: when the turn they started ends — and the agent server is not, because the
-#: fallback runs a whole turn before it answers.  **Two numbers for two different
-#: promises**, and using the window's for the fallback would cut off every
-#: hand-over that had to go the long way round.
 
 
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
@@ -75,6 +70,46 @@ async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool
     return True
 
 
+@contextlib.asynccontextmanager
+async def _peer(
+    url: str,
+    *,
+    name: str,
+    fallback_tool: str,
+    timeout: float,
+    client: Client | None,
+) -> AsyncIterator[Client]:
+    """Yield a client for one of our servers, closing it if we opened it.
+
+    **The close belongs to whoever opened the connection, and that is the whole
+    of what this decides.**  A client handed in is used as it is and left open —
+    it belongs to the caller, which is how a test drives a hand-over with no
+    network at all — so the close is conditional on `client is None`, and both
+    hand-over paths answer that one question here rather than each spelling out
+    the open, the `finally` and the close for itself.
+
+    **And the close survives the cancellation it exists for.**  This `finally`
+    runs on exactly the path where the caller was cancelled, which is why a
+    close belongs there — but `CancelledError` is not an `Exception`, so a
+    cancellation delivered while `close_server`'s `__aexit__` is awaiting would
+    pass straight through its `contextlib.suppress(Exception)` and leave the
+    connection open, the one outcome the close was there to prevent.  `shield`
+    runs the close in a task of its own, out of this frame's reach, so it
+    finishes either way; the cancellation still propagates from here once it
+    has, so the caller's task is cancelled as it expected.
+    """
+    if client is not None:
+        yield client
+        return
+    opened = await open_server(
+        url, name=name, fallback_tool=fallback_tool, timeout=timeout
+    )
+    try:
+        yield opened
+    finally:
+        await asyncio.shield(close_server(opened))
+
+
 async def to_window(
     config: Config, agent: str, text: str, channel: str, *, client: Client | None = None
 ) -> bool | None:
@@ -85,24 +120,22 @@ async def to_window(
     turn, and a long-lived connection to a plugin that may restart is a
     connection to re-establish.  An injected client is used as it is and left
     open — it belongs to whoever handed it in.
+
+    `_peer` owns the open and the close; what is here is the window's address and
+    the one answer a failure to reach it produces.
     """
-    if client is not None:
-        return await submit_to(client, agent, text, channel)
     try:
-        window = await open_server(
+        async with _peer(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
             fallback_tool="submit",
             timeout=_T.timeouts.transport.window,
-        )
+            client=client,
+        ) as window:
+            return await submit_to(window, agent, text, channel)
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.info("no window for %s could be reached: %s", agent, exc)
         return False
-    try:
-        return await submit_to(window, agent, text, channel)
-    finally:
-        with contextlib.suppress(Exception):
-            await window.__aexit__(None, None, None)
 
 
 async def to_agent(
@@ -120,27 +153,22 @@ async def to_agent(
     with a boolean: reaching the agent server and failing is the last thing the
     caller can try, and there is no third place to go — so the failure belongs to
     whoever knows what it was handing over.
+
+    `_peer` owns the open and the close; what is here is the call that runs the
+    turn.
     """
-    if client is not None:
-        await client.call_tool(
-            "send_message", {"agent": agent, "prompt": text, "channel": channel}
-        )
-        return
-    server = await open_server(
+    async with _peer(
         config.server("agent").url,
         name=AGENT_SERVER_NAME,
         fallback_tool="send_message",
         timeout=_T.timeouts.transport.agent,
-    )
-    try:
+        client=client,
+    ) as server:
         await server.call_tool(
             "send_message",
             {"agent": agent, "prompt": text, "channel": channel},
             timeout=_T.timeouts.transport.agent,
         )
-    finally:
-        with contextlib.suppress(Exception):
-            await server.__aexit__(None, None, None)
 
 
 async def hand_over(

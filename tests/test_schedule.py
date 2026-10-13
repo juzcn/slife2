@@ -21,7 +21,11 @@ template, and which of the two paths it took.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import socket
+import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -32,6 +36,8 @@ import pytest_asyncio
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.schedule_server as schedule_server
+import slife2.timeouts as _T
 from slife2 import paths
 from slife2.agent_task_server import (
     FAILED as TASK_FAILED,
@@ -43,7 +49,8 @@ from slife2.agent_task_server import (
     RUNNING as TASK_RUNNING,
 )
 from slife2.audience import client_meta, for_the_model, request_client
-from slife2.config import default_config
+from slife2.config import ServerSettings, default_config
+from slife2.schedule import latest_fire
 from slife2.schedule_server import (
     CHANNEL,
     SCHEDULE_LIST,
@@ -54,6 +61,7 @@ from slife2.schedule_server import (
     SCHEDULE_SET,
     build_server,
     due,
+    poll_forever,
     poll_once,
     reconcile,
     sweep_once,
@@ -63,6 +71,7 @@ from slife2.schedule_store import (
     MISSED,
     PENDING,
     RAN,
+    RUNS_LIMIT,
     SKIPPED,
     ScheduleStore,
 )
@@ -308,6 +317,29 @@ def later(seconds: float = 0, days: float = 0) -> datetime:
     distance is what decides whether a fire is fresh or missed.
     """
     return datetime.now() + timedelta(seconds=seconds, days=days)
+
+
+def free_port() -> int:
+    """A port nothing is listening on, so a peer addressed there is refused.
+
+    Bound and released rather than a magic number: the point of the test is that
+    `open_server` fails to reach it, and a port some other test's server happens
+    to hold would turn that into a hang.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def until(predicate: Any, *, timeout: float = 5.0) -> None:
+    """Wait for a background loop to get somewhere, or say it did not."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the background loop did not get there in time")
 
 
 # ── the surface ──────────────────────────────────────────────────────────────
@@ -906,3 +938,231 @@ async def test_a_task_whose_anchor_is_ahead_of_the_clock_has_nothing_to_do() -> 
     assert task is not None
 
     assert due(task, later(1)) is None
+
+
+# ── one bad ledger is not every agent's outage ───────────────────────────────
+
+
+async def test_the_clock_survives_a_pass_that_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A raise from a pass must not stop the loop for every agent.**
+
+    The guard used to wrap the whole `while True`, so an exception from
+    `poll_once` — a stray or truncated ledger, a row with an anchor that will not
+    parse — left the loop, was logged once, and the coroutine *returned*: the
+    clock never ran again until the process restarted, and every agent's tasks
+    went quiet.
+    """
+    real = schedule_server.poll_once
+    calls = 0
+
+    async def flaky(*args: Any, **kwargs: Any) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("a pass that cannot be read")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(schedule_server, "poll_once", flaky)
+    monkeypatch.setattr(_T.timeouts.pacing, "schedule_poll", 0.01)
+
+    clock = asyncio.create_task(poll_forever(lambda: default_config()))
+    try:
+        # The old code stopped after the first raise, so the second call is the
+        # whole assertion: the clock asked again.
+        await until(lambda: calls >= 2)
+    finally:
+        clock.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await clock
+
+    assert calls >= 2
+
+
+async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
+    window: Window,
+) -> None:
+    """A row with a hand-edited, non-ISO anchor makes `due` raise out of
+    `moment_of`, and one ledger's damage must not take the whole pass with it —
+    or every *other* agent's tasks would quietly stop firing."""
+    async with Client(build(window)) as client:
+        await write(client, name="theirs", agent=OTHER, cron=EVERY_MINUTE)
+        await write(client, name="mine", agent=AGENT, cron=EVERY_MINUTE)
+
+    # What a hand-edited ledger looks like: an anchor that is not a time.
+    connection = sqlite3.connect(paths.schedule_db(AGENT))
+    connection.execute("UPDATE scheduled_tasks SET last_due = 'not-a-time'")
+    connection.commit()
+    connection.close()
+
+    did = await poll_once(
+        default_config(), window_client=window.client, reference=later(90)
+    )
+
+    # The good ledger fired; the bad one was skipped rather than aborting the pass.
+    assert [entry["agent"] for entry in window.handed] == [OTHER]
+    assert any(OTHER in line for line in did)
+
+
+async def test_a_ledger_that_cannot_be_opened_is_skipped_not_fatal() -> None:
+    """A stray or truncated `schedule.db` raises out of `adopt` — SQLite will not
+    read a file that is not a database — and one agent's damage must not stop the
+    clock for every agent, so the walk skips it and serves the rest."""
+    broken = paths.schedule_db("jack")
+    broken.write_bytes(b"not a sqlite database")
+
+    async with Client(build()) as client:
+        await write(client, agent=OTHER)
+
+    # The walk neither raises nor loses the good ledger to the bad one.
+    assert [store.agent for store in schedule_server.ledgers()] == [OTHER]
+
+
+# ── a dispatch whose peer will not answer ────────────────────────────────────
+
+
+async def test_a_dispatch_whose_peer_cannot_be_reached_closes_the_run() -> None:
+    """**Opening the agent-task peer is part of the dispatch.**
+
+    `tasks_server` used to sit outside the `try`, so a port that is not listening
+    escaped as a raw non-`ToolError` *and* left the run `pending` with an empty
+    `agent_task_id` — the state `in_flight` skips and the sweep only reaches at
+    startup.  The failure has to leave a run something can resolve.
+    """
+    config = default_config()
+    config.servers["agent-task"] = ServerSettings(port=free_port())
+    async with Client(build_server(config, polling=False)) as client:
+        await write(client)
+        with pytest.raises(ToolError, match="could not be started"):
+            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == FAILED
+    assert run.error, "and the run says why it could not be started"
+
+
+# ── backfilling a run that failed after its task started ─────────────────────
+
+
+async def test_run_now_backfills_a_run_that_failed_after_its_task_started(
+    tasks: Tasks,
+) -> None:
+    """A run that failed *after* its background task started still names that
+    task, and a backfill must not read the stale id as "already in flight".
+
+    `reopen` used to leave `agent_task_id` in place, so the row came back
+    `pending` **with** a task: `schedule_run_now`'s in-flight guard saw exactly
+    that pair and answered without dispatching anything, so the backfill did
+    nothing and the next reconcile settled it `failed` again.
+    """
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    # The task started, then failed: the id stays on the failed row.
+    tasks.status = TASK_FAILED
+    await reconcile(default_config(), tasks_client=tasks.client)
+    failed = ledger().newest("daily")
+    assert failed is not None and failed.status == FAILED
+    assert failed.agent_task_id, "the failed row still names the task that died"
+
+    tasks.status = TASK_RUNNING
+    tasks.started.clear()
+    async with Client(build(tasks=tasks)) as client:
+        started = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": run["due_at"]}
+        )
+
+    assert started["status"] == PENDING
+    assert started["agent_task_id"] == "agent-task:daily"
+    assert len(tasks.started) == 1, "the backfill really started the work"
+
+
+async def test_a_run_still_in_flight_is_not_reopened_into_a_second_task(
+    tasks: Tasks,
+) -> None:
+    """The other half: a `pending` run *does* keep its id, so a second call for
+    its due time is not a second task."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        first = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        again = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": first["due_at"]}
+        )
+
+    assert again["agent_task_id"] == first["agent_task_id"]
+    assert len(tasks.started) == 1
+
+
+# ── an ending is not rewritten ───────────────────────────────────────────────
+
+
+async def test_skipping_a_run_that_already_ran_does_not_rewrite_the_ledger(
+    tasks: Tasks,
+) -> None:
+    """`ran` and `skipped` are the two endings, and the last tool call must not
+    be able to rewrite history: a skip on a finished run used to clear its
+    `ran_at` and file it as `skipped`."""
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+    tasks.status = TASK_FINISHED
+    await reconcile(default_config(), tasks_client=tasks.client)
+    ran = ledger().newest("daily")
+    assert ran is not None and ran.status == RAN and ran.ran_at
+
+    async with Client(build(tasks=tasks)) as client:
+        answered = await ask(
+            client,
+            SCHEDULE_RUN_SKIP,
+            {"name": "daily", "due_at": run["due_at"], "note": "too late"},
+        )
+
+    # The tool is told nothing happened by getting the row back unchanged.
+    assert answered["status"] == RAN
+    assert answered["ran_at"] == ran.ran_at
+    assert ledger().newest("daily").status == RAN
+
+
+# ── the ledger read is bounded ───────────────────────────────────────────────
+
+
+async def test_a_limit_that_is_not_positive_does_not_bypass_the_ceiling() -> None:
+    """SQLite reads `LIMIT -1` as **no limit at all**, so a negative limit passed
+    straight through made `schedule_runs(limit=-1)` answer with the whole ledger —
+    past the 200-row ceiling the tool exists to keep."""
+    async with Client(build()) as client:
+        await write(client)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        for minute in range(RUNS_LIMIT + 5):
+            store.record(task, f"2026-10-12T09:{minute:02d}:00+08:00")
+        listed = await ask(client, SCHEDULE_RUNS, {"name": "daily", "limit": -1})
+
+    assert len(listed["runs"]) == RUNS_LIMIT, "the default bound, not the whole table"
+
+
+# ── the fire, chosen by instant ──────────────────────────────────────────────
+
+
+async def test_the_newest_fire_is_chosen_by_instant_not_by_clock_reading() -> None:
+    """A fall-back hour names the same wall reading twice, an hour apart.
+
+    `found` and the anchor are restated in the task's zone, so they carry the
+    same `ZoneInfo` and Python compares their naive fields (PEP 495).  Inside the
+    repeated hour that is the wrong question: the fire at `01:12Z` is an hour
+    *newer* than an anchor at `00:20Z`, while its wall reading (`01:12`) is
+    *older* than the anchor's (`01:20`) — so a wall-clock comparison drops it, and
+    the fires inside the repeated hour are neither fired nor recorded as missed.
+    """
+    # Europe/London: the clocks go back on 2026-10-25, so 01:00-02:00 happens
+    # twice — once at +01:00 and again an hour later at +00:00.
+    anchor = datetime.fromisoformat("2026-10-25T01:20+01:00")  # 00:20Z
+    until = datetime.fromisoformat("2026-10-25T01:12+00:00")  # 01:12Z
+
+    found = latest_fire("* * * * *", anchor, until, "Europe/London")
+
+    assert found is not None, "the newest fire is an hour newer by the clock"
+    assert found.timestamp() > anchor.timestamp()
+    assert found.timestamp() <= until.timestamp()

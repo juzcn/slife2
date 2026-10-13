@@ -15,11 +15,13 @@ making is whether the program is actually on this machine.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from slife2.cli_server import CONFIG_KEY, SERVER_NAME, SOURCE, build_server, rows
 from slife2.config import default_config, load
@@ -211,6 +213,52 @@ async def test_a_command_that_is_not_installed_says_so(isolated_runtime: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A command may be more than one word, and a path may contain a space.**
+
+    The entry is `"C:\\Program Files\\tool\\tool.exe" --json`; a plain
+    `str.split()` makes the first word `"C:\\Program` — a program that cannot
+    exist — so the note claims a program is missing that is not, and `shutil.which`
+    is never asked about the one that is.  The line is split the way the argv
+    runner will (`DESIGN.md` §9: an argv rather than a shell), so quotes group a
+    word and come off, and a Windows path's backslashes stay literal.
+    """
+    asked: list[str] = []
+
+    def which(program: str) -> str | None:
+        asked.append(program)
+        return None
+
+    monkeypatch.setattr("slife2.cli_server.shutil.which", which)
+
+    command = r'"C:\Program Files\tool\tool.exe" --json'
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        answer = await ask(
+            client, "cli_set", name="quoted", command=command, description="d"
+        )
+
+    assert asked == [r"C:\Program Files\tool\tool.exe"], "the whole program, quotes off"
+    assert r"C:\Program Files\tool\tool.exe" in answer
+
+
+def test_the_dead_config_parameter_has_not_come_back() -> None:
+    """**The parameter's absence is the fix, so it is what this guards.**
+
+    The two connection families' `_prepare`s take a `Config` because they ask
+    `toolfamily.refusal` whether a name is one the hub already owns — a question
+    this family does not have, since a `cli:` row is `cli:{name}` and cannot
+    collide.  The argument sat here unreferenced while `cli_set` still paid a
+    `load()` on every call for a value nobody read; it is gone, and this is what
+    stops it growing back unnoticed.
+    """
+    from slife2.cli_server import _prepare
+
+    assert list(inspect.signature(_prepare).parameters) == ["name", "entry"]
+
+
+@pytest.mark.asyncio
 async def test_an_entry_with_no_command_is_refused_before_anything_is_written(
     isolated_runtime: Path,
 ) -> None:
@@ -218,17 +266,20 @@ async def test_an_entry_with_no_command_is_refused_before_anything_is_written(
 
     An entry naming no program is not a disabled entry — it is one that can never
     work — and the refusal has to come before the write, or the next start is
-    what finds out.
+    what finds out.  It is raised rather than returned, so the call is a failure
+    the caller can see (`ok` false), the contract `skill_use` keeps and the one
+    `slife2.gateway` and `slife2.toolhub` read.
     """
     config = config_for(isolated_runtime)
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
 
     async with Client(build_server(config)) as client:
-        answer = await ask(
-            client, "cli_set", name="nothing", command="", description="d"
-        )
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "cli_set", {"name": "nothing", "command": "", "description": "d"}
+            )
 
-    assert answer.startswith("[refused]") and "needs `command`" in answer
+    assert "needs `command`" in str(raised.value)
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
 
 

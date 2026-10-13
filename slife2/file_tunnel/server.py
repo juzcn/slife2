@@ -38,6 +38,7 @@ import mimetypes
 import os
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -47,6 +48,7 @@ from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+import slife2.timeouts as _T
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import Config
 from slife2.file_tunnel.providers import (
@@ -129,6 +131,9 @@ class Exposure:
     serve path re-checks it, so a path that is later replaced — or swapped for
     a symlink to something else — has a different inode or mtime and is refused
     rather than silently serving new content to everyone holding the old link.
+    An exposure that could not be pinned at all — the file was absent for the
+    moment ``register`` looked — has no baseline to compare against, so it is
+    refused too rather than serving whatever turns up at that path.
     """
 
     __slots__ = ("token", "path", "owner", "dev", "ino", "size", "mtime_ns")
@@ -144,10 +149,11 @@ class Exposure:
         try:
             stat = Path(path).stat()
         except OSError:
-            # Not present yet — the serve path will 404 and there is nothing
-            # to pin.  Registering anyway is the honest reading: the tool
-            # checked for the file a moment ago, and a race here is not worth
-            # refusing a call over.
+            # Not present yet.  Registering anyway is the honest reading of the
+            # tool's own existence check a moment ago, and a race here is not
+            # worth refusing a call over — but the exposure stays *unpinned*,
+            # and :meth:`matches` refuses an unpinned one rather than serving
+            # whatever later appears at the path (see the comment there).
             return
         self.dev = stat.st_dev
         self.ino = stat.st_ino
@@ -166,7 +172,15 @@ class Exposure:
         if stat is None:
             return False
         if self.ino is None:
-            return True  # nothing was pinned, so nothing can have changed
+            # Nothing was pinned: the file was absent when this link was minted
+            # (`__init__` swallowed the `OSError`).  "Nothing can have changed"
+            # is the tempting reading and it is the wrong one — with no baseline
+            # there is nothing to compare, so *whatever* sits at this path now
+            # is not provably the file the caller asked to publish.  A path that
+            # was empty at mint time and has bytes in it at serve time is
+            # exactly the "swapped underneath a link" swap this pin exists to
+            # refuse, so an unpinned exposure never serves.
+            return False
         return (
             stat.st_dev == self.dev
             and stat.st_ino == self.ino
@@ -434,9 +448,18 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             raise ToolError(f"[refused] there is no file at {path}.")
         if not target.is_file():
             raise ToolError(f"[refused] {path} is a directory, not a file.")
-        if is_credential_path(target):
+        # **Judge the file that will actually be served, not the name it was
+        # asked for.**  The registry stores `str(target.resolve())` and the
+        # route serves *that* path, so a symlink named `photo.png` pointing at
+        # `~/.ssh/id_rsa` would sail past a denylist check made on the name as
+        # given and then hand the private key out under a share URL — exactly
+        # the thing the list exists to refuse.  `resolve()` follows the whole
+        # chain (and the file is proven to exist just above), so what is judged
+        # here is the path the token will actually address.
+        served = target.resolve()
+        if is_credential_path(served):
             raise ToolError(
-                f"[refused] {target.name} looks like a private credential "
+                f"[refused] {served.name} looks like a private credential "
                 f"(a key, a `.env`, a saved password). A share URL is public "
                 f"while the tunnel is up, so this would publish it."
             )
@@ -459,7 +482,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "HTTP 530. `tunnel_status` has the detail; try again shortly."
             )
 
-        found = exposed.register(str(target.resolve()), request_client(ctx))
+        found = exposed.register(str(served), request_client(ctx))
         url = tunnel.share_url_for(found.token)
         if url is None:
             raise ToolError("[failed] the tunnel went away as the file was published.")
@@ -551,11 +574,34 @@ async def _ensure(tunnel: TunnelProvider, port: int) -> None:
     The eager start at load time is the usual path and the monitor is the
     retry; this exists so a first call does not fail during the seconds
     between the plugin being ready and the tunnel being established.
+
+    **Which is why an attempt already in flight is waited out rather than
+    returned from.**  The eager start is a task of its own (the lifespan in
+    `build_server`), so a first call routinely lands in the middle of it, and
+    returning there would hand the caller the very "not up" answer this
+    function exists to avoid: a tunnel that answers two seconds later is of no
+    use to a call that has already raised.  The wait is bounded by the same
+    budget a start attempt gets (`_T.timeouts.ready.tunnel_start`), so a start
+    that hangs still ends as an honest "not up" instead of a call that never
+    returns.
     """
     if tunnel.is_active:
         return
-    if getattr(tunnel, "is_starting", False):
-        return  # an attempt is already in flight; its outcome is the answer
+    if tunnel.is_starting:
+        deadline = time.monotonic() + _T.timeouts.ready.tunnel_start
+        while tunnel.is_starting and not tunnel.is_active:
+            if time.monotonic() >= deadline:
+                # The attempt outlived its own budget — do not start a second
+                # one on top of it (the provider would refuse it as "already in
+                # progress" and log a warning for a start that is not broken).
+                logger.warning(
+                    "file_tunnel_start_still_in_flight timeout=%.0fs",
+                    _T.timeouts.ready.tunnel_start,
+                )
+                return
+            await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)
+        if tunnel.is_active:
+            return  # the in-flight attempt was the answer
     await _start(tunnel, port, why="on-demand")
 
 

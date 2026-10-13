@@ -11,6 +11,7 @@ report anything).
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -186,3 +187,32 @@ async def test_a_server_we_recognise_is_handed_back_still_open(monkeypatch) -> N
 
     assert client is transport
     assert not transport.closed
+
+
+class CancellingTransport(StubTransport):
+    """A client whose connect is cancelled while it is still entering."""
+
+    async def __aenter__(self) -> CancellingTransport:
+        raise asyncio.CancelledError
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_connect_lets_go_of_the_half_entered_client(
+    monkeypatch,
+) -> None:
+    """**A cancellation is a `BaseException`, so it is not the `except Exception`
+    that closes on the way out.**
+
+    `open_server` is awaited inside tasks a person can cancel — Esc, a
+    `asyncio.wait_for`, a turn given up on — and a client that was mid-enter when
+    the cancel arrived would otherwise be dropped with its HTTP connection (or
+    spawned stdio child) still open, for the GC to find.  `slife2.gateway`'s
+    `Connection` closes on exactly this branch; this is the same one.
+    """
+    transport = CancellingTransport(name="slife2-context")
+    stub(monkeypatch, transport)
+
+    with pytest.raises(asyncio.CancelledError):
+        await open_server("http://test/mcp", name="slife2-context")
+
+    assert transport.closed, "a client that never finished entering is let go"

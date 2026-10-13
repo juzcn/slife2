@@ -22,6 +22,8 @@ from fakes import (
     text_turn,
 )
 
+import slife2.async_tasks as async_tasks
+from slife2.async_tasks import cancel_async
 from slife2.events import TextDelta, ToolCallFinished, ToolCallStarted, TurnFinished
 from slife2.llm.base import Chunk, ToolCallDelta
 from slife2.loop import AgentLoop
@@ -500,3 +502,46 @@ async def test_tool_call_started_precedes_finished() -> None:
     event = observer.events[started]
     assert isinstance(event, ToolCallStarted)
     assert (event.call_id, event.name) == ("c1", "now")
+
+
+async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
+    """`check_async` is not the only door onto a finished task's answer.
+
+    A background call the loop started keeps its result whenever the hand-back
+    did not provably land (`Task.delivered`/`result`), and `cancel_async` reaches
+    that very state whenever it is called *after* the work is over.  Answering
+    only "nothing to cancel" and popping the task would throw that result away —
+    the one copy of an answer nobody can ask for a second time — which is
+    `DESIGN.md` §8.8's "the alternative to returning it is losing it", and losing
+    it in silence is the worse of the two.  So the reply carries it, exactly as
+    `check_async` would have.
+    """
+    finished = asyncio.Event()
+
+    async def read_policy(_arguments: dict[str, Any]) -> str:
+        finished.set()
+        return "the retry policy is three tries"
+
+    # No `deliver`, so the hand-back never lands and the task keeps its answer —
+    # the state this is about, and the one a late `cancel_async` meets.
+    task_id = async_tasks.schedule(
+        read_policy({}), call_id="call-2", tool="read_policy"
+    )
+    await asyncio.wait_for(
+        finished.wait(),
+        timeout=1.0,  # timeouts: the value this test is built around, not a budget
+    )
+    # `finished` is set from *inside* the coroutine, so the task is only half
+    # done: `_runner` still has to record the result.  Wait for the registry's
+    # own task to stop, rather than racing it with a sleep.
+    for _ in range(100):
+        if async_tasks._tasks[task_id].handle.done():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the background call never finished")
+
+    reply = await cancel_async({"task_id": task_id})
+
+    assert "nothing to cancel" in reply
+    assert "three tries" in reply, "the undelivered result was dropped"

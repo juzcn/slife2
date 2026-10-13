@@ -115,9 +115,11 @@ def catalogue(entries: Mapping[str, SkillSettings]) -> list[dict[str, object]]:
     """
     documents: list[dict[str, object]] = []
     for skill in skills.scan():
-        # Both names, because a skill is addressed by either and the operator
-        # writing `skills:` has only one of them in front of them.
-        found = entries.get(skill.name) or entries.get(skill.directory.name)
+        # Which entry supplies this skill is one question with one answer
+        # (`skills.entry_for`), shared with `skill_use` and `skill_list`: read
+        # three ways, a skill could be declared enabled with its requirements met
+        # while `skill_use` refused it as switched off.
+        found = skills.entry_for(skill, entries)
         supplied = dict(found.env) if found is not None else None
         try:
             note = skills.readiness(skill, supplied)
@@ -198,7 +200,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
         # which, so this is the same both-names lookup `catalogue` makes.
         skill = skills.find(name.strip())
         if skill is not None:
-            found = entries.get(skill.name) or entries.get(skill.directory.name)
+            found = skills.entry_for(skill, entries)
             if found is not None and not found.enabled:
                 raise ToolError(
                     f"{name!r} is switched off, so it cannot be read — its "
@@ -208,11 +210,15 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
                 )
         text, ok = await skills.use(name, environments=supplied_for(name))
         if not ok:
-            # Raised rather than returned, so the call is a *failure* the caller
-            # can see: the loop's contract is that a tool produces text, and a
-            # refusal returned as text would reach the transcript as a success.
-            # It is still a value and not a crash — `slife2.toolhub` reads a
-            # peer's refusal as the model's answer, not as a broken server.
+            # **Raised, so the call is a failure the caller can see.**  `ok`
+            # false is this system's word for a refusal — `slife2.gateway`
+            # distinguishes a peer's refusal from a transport fault by exactly
+            # this flag, `slife2.toolhub` reads a raised `ToolError` as a value
+            # with `ok` false, and the tool panel renders `ok` false as a failed
+            # call.  A refusal *returned* as ordinary text would arrive with
+            # `ok` true and reach the transcript as a success.  It is still a
+            # value and not a crash: `slife2.toolhub` reads a peer's refusal as
+            # the model's answer rather than as a broken server.
             raise ToolError(text)
         return text
 
@@ -225,7 +231,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     def _settings(name: str, skill: skills.Skill | None) -> SkillSettings | None:
         """The `skills:` entry for a skill, under either of its two names."""
         if skill is not None:
-            found = entries.get(skill.name) or entries.get(skill.directory.name)
+            found = skills.entry_for(skill, entries)
             if found is not None:
                 return found
         return entries.get(name)
@@ -297,14 +303,19 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
                 "..."}`. Paths are relative to the skill's own directory, and
                 one that leaves it is refused.
         """
+        # **Refused by raising, like `skill_use`** — see that tool for why `ok`
+        # false and not a `[refused]` sentence: a refusal is a failure the caller
+        # can see.  The connection families still return the sentence
+        # (`toolfamily.prepare_entry`, which serves `mcp_set` and `rest_api_set`),
+        # and that is a second contract this one deliberately does not join.
         if not name.strip():
-            return "[refused] a skill needs a name"
+            raise ToolError("a skill needs a name")
         try:
             installed = skills.install(name.strip(), files)
         except ValueError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(f"{name!r} was not installed: {exc}") from exc
         except OSError as exc:
-            return f"[refused] could not write {name!r}: {exc}"
+            raise ToolError(f"could not write {name!r}: {exc}") from exc
         logger.info("skill_set name=%s dir=%s", name, installed)
         return (
             f"`{name}` is installed ({len(files)} file(s)). A search finds it "
@@ -324,7 +335,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
         try:
             removed = skills.remove(name.strip())
         except ValueError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(f"{name!r} was not removed: {exc}") from exc
         if not removed:
             return f"'{name}' is not installed — see `skill_list`."
         logger.info("skill_removed name=%s", name)

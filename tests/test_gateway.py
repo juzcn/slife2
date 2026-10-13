@@ -514,3 +514,58 @@ def test_the_gateway_holds_no_catalogue_and_no_database() -> None:
     assert "from slife2.db import" not in source
     assert "import slife2.db" not in source
     assert "Catalogue" not in source
+
+
+def test_the_gateway_names_no_time_value_that_does_not_exist() -> None:
+    """The docstring told a reader to look up a symbol defined nowhere.
+
+    A name in prose is read as a thing to go and find, so `LIST_SETTLE_SECONDS`
+    — which the prose claimed `list_tools` waited on — sent the reader on an
+    errand and hid what actually bounds the wait (the asker's brief patience for
+    the attempts it started, `_T.timeouts.ready.list_settle`).  The registry is
+    the one seat for a time value; a name that lives only in a sentence is a
+    second seat for a number nobody can find.
+    """
+
+    source = Path(gateway.__file__).read_text(encoding="utf-8")
+    assert "LIST_SETTLE_SECONDS" not in source
+    assert "CALL_TIMEOUT_SECONDS" not in source
+
+
+@pytest.mark.asyncio
+async def test_the_connect_budget_is_not_a_deadline_on_a_call(monkeypatch) -> None:
+    """**A connect budget is not a client's patience**, and it was read as one.
+
+    `Client(timeout=…)` is not this module's to set: FastMCP turns it into the
+    session's read timeout, which the SDK applies as a **total deadline on every
+    request made over that connection** — so pinning it to the 60 s connect
+    budget capped every call to somebody else's server at a minute, whatever the
+    caller had asked for.  A twenty-minute render called with the model's
+    `_timeout: 600` died at 60 s as an ordinary-looking `ok=False`, with the tool
+    still running at the far end, and the module's own prose ("no clock lives
+    here") was what it contradicted.
+
+    Asserted the way it was found: shrink the registry value — the documented way
+    to tune it, and the reason consumers read it at call time — and then make a
+    call that outlives it.  A client-wide deadline coming back would fail this
+    with a timeout naming a number nobody asked for.
+    """
+    slow = FastMCP("slow")
+
+    @slow.tool
+    def render(seconds: float = 0.0) -> str:
+        """Take longer than the budget below, the way a real render does."""
+        import time
+
+        time.sleep(seconds)
+        return "rendered"
+
+    monkeypatch.setattr(_T.timeouts.ready, "connect_tools", 0.2)
+
+    client = gateway.make_client(slow, lambda _message: None)
+    async with client:
+        result = await client.call_tool(
+            "render", {"seconds": 0.6}, raise_on_error=False
+        )
+
+    assert "rendered" in gateway.flatten(result.content)

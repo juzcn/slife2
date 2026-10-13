@@ -146,3 +146,35 @@ def request_meta(ctx: Any) -> Mapping[str, Any] | None:
 def request_client(ctx: Any) -> tuple[str, str] | None:
     """The `(agent, subagent)` a tool call is on behalf of."""
     return client_of(request_meta(ctx))
+
+
+#: The sentence a call that did not say whose it is is refused with.  **One
+#: sentence with two holes**, because five plugins say it — a task, a schedule, a
+#: cabinet, a login, a mesh — and the only words that change are the thing that is
+#: missing and the thing that is the agent's.  That is the same arrangement
+#: `slife2.toolfamily.FamilyWords` exists for, and for the same reason: two copies
+#: of a sentence are two chances for a model to be taught two vocabularies for
+#: one mechanism.
+#:
+#: `{why}` is a hole rather than the fixed tail the other four use, because the
+#: mesh's reason is genuinely different — a peer sees an *identity*, not a piece
+#: of somebody's state — and a template that could not say so would be a template
+#: the fifth plugin silently ignored.
+UNADDRESSED = (
+    "This call did not say which conversation it is for, so there is no {what} — {why}"
+)
+
+#: The tail four of the five use: the shared process cannot guess, and the thing
+#: asked for belongs to the agent the call did not name.
+AGENTS_OWN = "one process serves every agent, and {own} is the agent's"
+
+
+def unaddressed(what: str, own: str, *, why: str = "") -> str:
+    """The refusal, with this plugin's words in it.
+
+    `what` is the missing thing as a reader meets it — "agent whose task it could
+    be", "cabinet to act on" — and `own` is what is the agent's: "a task", "the
+    cabinet".  `why` overrides the shared tail for the one plugin whose reason is
+    its own.
+    """
+    return UNADDRESSED.format(what=what, why=why or AGENTS_OWN.format(own=own))

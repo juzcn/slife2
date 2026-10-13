@@ -23,7 +23,10 @@ broker this process cannot bring up — there is no listener to create on somebo
 else's host — so an absent remote broker is the hard failure with nothing
 attempted, and the message says which of the two situations it is.  Starting a
 *local* mosquitto for a remote address would put a broker on this machine's
-interfaces that nobody asked for and that the config does not describe.
+interfaces that nobody asked for and that the config does not describe.  **And a
+wildcard address is not "local" either**: `0.0.0.0` (or `::`, or ``""``) names
+every interface, so a broker started for one would be a world-reachable,
+unauthenticated one — refused by name rather than started (see :func:`ensure`).
 """
 
 from __future__ import annotations
@@ -46,21 +49,20 @@ logger = logging.getLogger(__name__)
 #: (`A2ASettings.provider` refuses anything else at config load).
 MOSQUITTO = "mosquitto"
 
-#: How long a broker we started has to start answering.  Generous for a binary
-#: that has to read a config and bind a port, short enough to be a deadline.
+#: The hosts `broker.host` may name and still be *this* machine at one address —
+#: the only ones a broker is started for.  **Deliberately without the wildcards**
+#: (`0.0.0.0`, `::`, ``""``): mosquitto takes `listener <port> <host>` verbatim,
+#: so a wildcard would be started with `allow_anonymous true` on every interface —
+#: a world-reachable, unauthenticated broker conjured by an edit that reads as
+#: "make it reachable".  A wildcard is refused by name instead (`WILDCARD_HOSTS`,
+#: and the refusal in :func:`ensure`).
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-#: The hosts `broker.host` may name and still be *this* machine.  A broker is
-#: started only for one of these; anything else is somebody else's host.
-LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::", ""})
-
-#: How long the probe waits, and **two numbers because the two answers cost
-#: different things.**  A local address refuses in microseconds when nothing is
-#: bound, so the budget is only a guard against a hung listener and
-#: `slife2.runtime`'s own default is right.  A remote one has a network in the
-#: way, and there the probe is deciding between "start a broker" and "fail the
-#: start" — neither of which a slow link is entitled to choose.  Getting it wrong
-#: in the tight direction is the worse mistake: a broker that is merely far away
-#: would be reported as absent, and absent-and-remote is fatal.
+#: Addresses that mean "every interface".  Kept apart from `LOCAL_HOSTS` because
+#: "may I start a broker here" and "does this name every interface" are two
+#: questions, and answering the second with the remote-host message would send
+#: the operator looking for a broker on the wrong machine.
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
 
 #: The config we hand mosquitto, and **it is not optional on mosquitto 2.x**.
 #: From 2.0 the broker listens on loopback only and refuses anonymous clients
@@ -68,7 +70,10 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::", ""})
 #: and then rejects every connection this plugin makes — a failure that would
 #: arrive as a connect timeout naming nothing.  An explicit `listener` also pins
 #: the bind address, which `-p` cannot: without it the broker would listen on
-#: every interface while the config says `127.0.0.1`.
+#: every interface while the config says `127.0.0.1`.  The address written here
+#: is therefore `broker.host` verbatim, which is safe *because* only a concrete
+#: loopback address ever reaches this point (`LOCAL_HOSTS`): a wildcard is
+#: refused before a config is written, so this line can never publish the mesh.
 _CONFIG = """\
 # Written by slife2-a2a.  Safe to delete: it is regenerated on the next start
 # that has to bring a broker up, and nothing else reads it.
@@ -86,12 +91,24 @@ def is_local(host: str) -> bool:
     return host.strip().lower() in LOCAL_HOSTS
 
 
+def is_wildcard(host: str) -> bool:
+    """Whether *host* names every interface rather than one address.
+
+    Not "local" and not "remote": starting a broker for it is what would make
+    the mesh world-readable, so it is its own answer.
+    """
+    return host.strip().lower() in WILDCARD_HOSTS
+
+
 def _probe(host: str, port: int) -> bool:
     """Whether something accepts a connection at this address.
 
-    The timeout is chosen by which kind of address it is — see the two constants
-    — so a caller never has to remember that one question costs different amounts
-    at different distances.
+    The timeout is chosen by which kind of address it is — a local one refuses
+    in microseconds and only needs a guard against a hung listener, a remote one
+    has a network in the way — so a caller never has to remember that one
+    question costs different amounts at different distances.  The two numbers
+    live in `slife2.timeouts` (`ready.probe_local` / `ready.probe_remote`),
+    which is the one place any of this module's clocks is written down.
     """
     timeout = (
         _T.timeouts.ready.probe_local
@@ -127,7 +144,7 @@ def ensure(
     listening: Callable[[str, int], bool] | None = None,
     which: Callable[[str], str | None] = shutil.which,
     start: Callable[..., subprocess.Popen] = spawn,
-    ready_seconds: float = _T.timeouts.ready.broker,
+    ready_seconds: float | None = None,
 ) -> str:
     """Make sure something is serving `settings.address`, and say what happened.
 
@@ -135,7 +152,8 @@ def ensure(
     and raises :class:`BrokerUnavailable` with a reason and the child's log tail
     when it cannot.  The seams are for a test, which must not need a broker
     installed to exercise the answers: there already, started, no binary,
-    started-and-never-answered, and **remote and absent**.
+    started-and-never-answered, **remote and absent**, and **wildcard and
+    absent**.
 
     **A probe, not a connection.**  What is asked is whether anything accepts a
     TCP connection at that address, which is deliberately weaker than "is this a
@@ -152,10 +170,29 @@ def ensure(
     started, and a remote one cannot be started from here at all, so an absent
     remote broker is the hard failure with no attempt made and a message saying
     which of the two it was.
+
+    **A wildcard is refused, because the alternative is an open broker.**  The
+    config we write is `allow_anonymous true` — this build has no way to
+    authenticate peers — so a broker started for `0.0.0.0` would publish every
+    `$a2a/v1/...` topic to the network and let any host on the LAN impersonate a
+    peer.  That is not a "harder" remote case and not a local one either: it is
+    the one edit that reads as "make it reachable" and silently makes the mesh
+    reachable by everybody, so it fails with the reason rather than being
+    started.  The operator who wants a reachable broker runs one, with
+    authentication, and points `a2a.broker.host` at it.
     """
     probe = listening or _probe
     if probe(settings.broker_host, settings.broker_port):
         return f"broker already listening on {settings.address}"
+
+    if is_wildcard(settings.broker_host):
+        raise BrokerUnavailable(
+            f"nothing is listening on {settings.address}, and "
+            f"{settings.broker_host!r} binds every interface — a broker started "
+            f"here would answer the whole network with `allow_anonymous true` "
+            f"and let any host impersonate a peer. Start a broker yourself on a "
+            f"concrete address, or point `a2a.broker.host` at `localhost`."
+        )
 
     if not is_local(settings.broker_host):
         raise BrokerUnavailable(
@@ -183,6 +220,13 @@ def ensure(
     )
     process = start([binary, "-c", str(config)], url=url)
 
+    # The registry is read *here*, not in the signature: a def-time default
+    # would capture the value at import and ignore a patch, which is the rule
+    # `slife2/timeouts.py` states and `tests/test_no_magic_timeouts.py`
+    # enforces.  `None` is the "nobody said" spelling, so an explicit value
+    # (a test's zero, say) still wins.
+    if ready_seconds is None:
+        ready_seconds = _T.timeouts.ready.broker
     deadline = time.monotonic() + ready_seconds
     while True:
         # The child is checked on every poll, not only at the deadline: a broker

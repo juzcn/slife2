@@ -58,6 +58,7 @@ DESIGN.md §3 for the argument and for what this costs.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import json
 import logging
@@ -71,12 +72,14 @@ from urllib.parse import urlsplit
 import httpx2
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports.base import ClientTransport, TransportOptions
+from fastmcp.exceptions import ToolError
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 import slife2.timeouts as _T
 from slife2 import __version__
+from slife2.audience import request_client, unaddressed
 from slife2.config import Config, ServerSettings, find_config_path, load
 from slife2.paths import add_data_dir_argument, apply_data_dir
 from slife2.runtime import ServerRecord, clear_record, tcp_listening, write_record
@@ -126,18 +129,6 @@ CALL_SOURCE = "call_source"
 SKILLS_SOURCE = "skills"
 CLI_SOURCE = "cli"
 
-#: How long to wait for a plugin to answer a `list_sources` attempt it has
-#: already begun.  Bounded on purpose: asking what a server offers must not be
-#: the thing that holds a turn open, and an answer that is late is the same
-#: answer as one that is absent — "not answering yet".
-
-#: How long one of *our own* hops may take to connect.  Not patience: both ends
-#: are this machine, and a daemon this system started answers a loopback port at
-#: once — so what this bounds is the case where the port listens and never
-#: replies, which would otherwise hold a turn open with nothing to show for it.
-#: Distinct from `slife2.gateway.CONNECT_TIMEOUT_SECONDS`, which is somebody
-#: else's server and may be an `npx` fetching itself first.
-
 
 def describe(client: ClientId) -> str:
     """A client id as one readable token, for a log line.
@@ -148,6 +139,38 @@ def describe(client: ClientId) -> str:
     """
     agent, subagent = client
     return f"{agent}/{subagent}" if subagent else agent
+
+
+def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
+    """The `agent_of(ctx)` a plugin binds its own refusal words to.
+
+    **A factory rather than a function, because every caller already had the
+    call shape it wants.**  Three plugins wrote the same four lines — read the
+    client id, refuse when it is absent, answer with it — and every one of them
+    called the result `agent_of(ctx)` from a dozen tool bodies.  Handing them a
+    helper that takes the words as arguments would have rewritten all of those
+    calls to repeat two strings; this hands back the same one-argument function
+    they had, so what each plugin declares is exactly the part that is its own:
+    the two words its refusal varies by (`slife2.audience.UNADDRESSED`), named
+    once, at the top of the plugin that says them.
+
+    That is `slife2.toolfamily.FamilyWords`'s arrangement one level down: the
+    sentence lives where the mechanism lives and the vocabulary lives with the
+    plugin, so a wording change is one edit rather than five.
+
+    A server that answers with a refusal *sentence* rather than an error — the
+    cabinet, the login — calls `slife2.audience.unaddressed` directly.  The
+    sentence is one place either way, which is the half that matters.
+    """
+
+    def agent_of(ctx: Any) -> str:
+        """The agent this call is on behalf of, refused rather than guessed."""
+        found = request_client(ctx)
+        if found is None or not found[0]:
+            raise ToolError(unaddressed(what, own, why=why))
+        return found[0]
+
+    return agent_of
 
 
 def house_server(
@@ -345,21 +368,40 @@ async def open_server(
         if name and not await identifies(client, name, fallback_tool=fallback_tool):
             names = sorted(tool.name for tool in await client.list_tools())
             raise ConnectionError(f"not {name} (tools: {names or 'none'})")
+    except asyncio.CancelledError:
+        # **A cancellation is a `BaseException`, so it walks straight past the
+        # `except Exception` below.**  This function is awaited inside tasks that
+        # a person cancels — Esc, `asyncio.wait_for`, a turn given up on — and a
+        # cancellation during `__aenter__` would otherwise skip the close
+        # entirely, leaving a half-entered client holding an open HTTP connection
+        # or a spawned stdio child for the GC.  `slife2.gateway.Connection` gets
+        # this right on its own connect path; this is the same branch.
+        await close_server(client)
+        raise
     except Exception as exc:
         # Closed on the way out because there is no client to hand back, and a
         # half-open one would hold a connection nobody owns.
-        with contextlib.suppress(Exception):
-            await client.__aexit__(None, None, None)
+        await close_server(client)
         raise ConnectionError(f"{url}: {exc}") from exc
     return client
 
 
 async def close_server(client: Client) -> None:
-    """Release a client opened by :func:`open_server`.
+    """Let go of a client nobody is keeping — the close that must not raise.
 
-    Suppressed, because this runs on the way out: a transport that is already
-    gone has nothing left to fail at, and a close that raises would replace
-    whatever the caller was actually doing with a message about the shutdown.
+    Two callers, and one copy of the three lines they share: a caller that has
+    finished with a client `open_server` handed back, and `open_server` itself
+    for a client it could not hand back — a connection that was not the server we
+    meant, or an enter a cancellation interrupted.  It used to be two copies, and
+    the one that *lacked* the cancellation branch is how a half-entered client
+    was leaked.
+
+    Suppressed, because every one of those is a way out: a shutdown, an error
+    path, a cancellation.  A transport that is already gone has nothing left to
+    fail at, and a close that raises would replace whatever the caller was
+    actually doing with a message about the shutdown.  `CancelledError` is a
+    `BaseException` and so is deliberately not suppressed here — a cancel that
+    arrives *during* the close must still win.
     """
     with contextlib.suppress(Exception):
         await client.__aexit__(None, None, None)

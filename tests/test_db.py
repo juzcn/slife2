@@ -19,6 +19,7 @@ from slife2 import attachments
 from slife2.clock import now
 from slife2.db import (
     TOOL_RESULT_CHARS,
+    ToolStore,
     TurnStore,
     compact_tool_results,
     message_text,
@@ -535,3 +536,60 @@ async def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
     found = store.turn(first)
     assert found is not None and found.messages[0]["content"] == "first"
     assert store.turn(999) is None
+
+
+# --- the catalogue, and the argument it must be given -------------------------
+
+
+def test_a_catalogue_nobody_told_the_config_keeps_its_rows(tmp_path) -> None:
+    """**The destructive default**, which is what `known` is not allowed to be.
+
+    `reset` withdraws the rows of a source the config no longer names — the
+    rows, their vectors and their keyword documents — and a store told nothing
+    cannot tell a stale row from one whose section it was never given.  That was
+    the *default*: `known=()` meant "the config names nothing", so constructing
+    a catalogue without the argument deleted every `plugin`/`mcp`/`rest` row in
+    the file as it opened, and a `tool_search` afterwards answered about a
+    catalogue nothing had gone wrong with.  A caller that has read the config
+    passes the set (`slife2.toolhub.configured_sources`); a caller that has not
+    passes nothing, and nothing is what the boot pass then does.
+    """
+    path = tmp_path / "tools.db"
+    ToolStore(path, threshold=10, known={"arxiv"})  # creates the schema
+    with sqlite3.connect(path) as connection:
+        # Raw, because the point is the *open* and not the merge: one row of a
+        # source the config does name.
+        connection.execute(
+            "INSERT INTO tool (name, category, source_id)"
+            " VALUES ('arxiv__search', 'mcp', 'arxiv')"
+        )
+
+    ToolStore(path, threshold=10)  # ← the store nobody told anything
+
+    with sqlite3.connect(path) as connection:
+        names = [row[0] for row in connection.execute("SELECT name FROM tool")]
+    assert names == ["arxiv__search"], "a store told nothing deleted its catalogue"
+
+
+def test_a_catalogue_that_is_told_forgets_what_the_config_dropped(tmp_path) -> None:
+    """The other half, so the fix is a distinction rather than a removal.
+
+    A caller that *has* read the config says so by passing the set, and the boot
+    pass keeps its meaning: a stored source the set does not name is one nothing
+    will ever declare again, so it is deleted rather than marked — an entry the
+    operator removed has to stop being a search hit at the next start as well as
+    during the run.
+    """
+    path = tmp_path / "tools.db"
+    ToolStore(path, threshold=10, known={"arxiv", "gone"})  # creates the schema
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO tool (name, category, source_id) VALUES"
+            " ('arxiv__search', 'mcp', 'arxiv'), ('gone__thing', 'mcp', 'gone')"
+        )
+
+    ToolStore(path, threshold=10, known={"arxiv"})  # a restart, after `gone` went
+
+    with sqlite3.connect(path) as connection:
+        names = [row[0] for row in connection.execute("SELECT name FROM tool")]
+    assert names == ["arxiv__search"]

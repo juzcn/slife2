@@ -58,13 +58,6 @@ from slife2.paths import data_dir
 
 logger = logging.getLogger(__name__)
 
-#: How long one `list_sources` waits for the connects it started, and it is the
-#: same compromise the hub makes about its own links.  Answering instantly means
-#: a source that is still starting reads as one that is down, and the first tool
-#: list of a session is missing every external tool; waiting without a bound
-#: means a cold `npx` holds a turn open for a minute.  So: wait, but briefly, and
-#: only for attempts that have already begun.
-
 #: How many of one server's tools a `*_list_tools` prints.  v1's number and v1's
 #: reason: a published server can carry four figures of tools (github: 1239),
 #: and printing them all spends the model's context on names it never asked for.
@@ -160,6 +153,34 @@ class Held:
             # No rows unless it is answering: see the module docstring.
             "rows": self.rows if up else None,
         }
+
+
+async def settle_attempts(attempts: Iterable[asyncio.Task[None] | None]) -> None:
+    """Let the connect attempts already in flight finish, briefly.
+
+    **Wait, never cancel.**  The obvious spelling of this at a call site is
+    `asyncio.gather(*pending)` under `asyncio.timeout`, and it is wrong in a way
+    that took a live run to see: on timeout the timeout cancels *this* task, the
+    cancellation propagates into the gather, and the connect being waited for
+    dies with it — leaving a source `idle` with no error and no tools, which is
+    the one state that describes nothing at all.  A caller's patience has nothing
+    to do with whether a connection should continue.
+
+    **Both processes that hold a pool of links settle this way**, and that is why
+    it is one function: `slife2.toolhub`'s `settle` over the plugins it is
+    connected to, and `Family.settle` over the entries of one config section
+    (`settled` is the single-entry case of the same wait).  The bound is the same
+    one — `slife2.timeouts.timeouts.ready.list_settle` — because the two answers
+    are the same answer: "not answering yet" and "absent" must read alike, so a
+    caller is told which of them it got instead of being held open.
+
+    Nothing is waited for when nothing is in flight, and a source nobody has asked
+    about yet has no attempt at all: it is `idle`, which is a state rather than a
+    delay.
+    """
+    pending = [attempt for attempt in attempts if attempt is not None]
+    if pending:
+        await asyncio.wait(pending, timeout=_T.timeouts.ready.list_settle)
 
 
 class Family:
@@ -270,17 +291,11 @@ class Family:
     async def settle(self) -> None:
         """Let attempts already in flight finish, briefly.
 
-        **Wait, never cancel** — the same rule the hub's own `settle` states, and
-        for the same reason: giving up on *waiting* for a connection is not a
-        reason to stop making it.
+        The bound, the "wait, never cancel" and the reason for both are
+        `settle_attempts`', which is the one place they are stated — the hub's
+        own settle over its plugin links is the same wait over a different pool.
         """
-        pending = [
-            attempt
-            for one in self._held.values()
-            if (attempt := one.connection.attempt) is not None
-        ]
-        if pending:
-            await asyncio.wait(pending, timeout=_T.timeouts.ready.list_settle)
+        await settle_attempts(one.connection.attempt for one in self._held.values())
 
     async def declare(self) -> dict[str, Any]:
         """The `list_sources` payload: everything this family holds.
@@ -337,7 +352,22 @@ class Family:
         self.connecting()
 
     async def close(self) -> None:
-        for one in self._held.values():
+        """Drop every link this family holds, once.
+
+        **The mapping is snapshotted, and not for tidiness.**  This awaits inside
+        the loop (`Connection.close` waits on a cancelled attempt and then on
+        `__aexit__`), so a management tool landing between two iterations —
+        `mcp_set`, `mcp_remove`, `*_set_enabled`, all reached through this same
+        server — would mutate `_held` underneath the iteration and raise
+        "dictionary changed size during iteration" out of the lifespan teardown,
+        leaving every link after the one that was being closed still open.  It is
+        the same precaution the two readers take: `settle` hands `settle_attempts`
+        a generator, which is drained into a list before anything is awaited, and
+        `connecting` never suspends at all.  The two writers (`put`, `remove`)
+        already swap the mapping synchronously before they await anything, for
+        the reason their own docstrings give.
+        """
+        for one in list(self._held.values()):
             await one.connection.close()
 
 
@@ -361,9 +391,7 @@ async def settled(one: Held) -> Held:
     if not one.settings.enabled:
         return one
     one.connection.connecting()
-    attempt = one.connection.attempt
-    if attempt is not None:
-        await asyncio.wait([attempt], timeout=_T.timeouts.ready.list_settle)
+    await settle_attempts([one.connection.attempt])
     return one
 
 
@@ -502,7 +530,7 @@ class FamilyWords:
     """
 
     section: str
-    """The config section this family owns: `tools` or `rest-api`."""
+    """The config section this family owns: `mcp` or `rest-api`."""
 
     plural: str
     """Its entries, plural, as the empty listing names them."""

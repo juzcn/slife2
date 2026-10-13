@@ -81,10 +81,6 @@ CONFIG_KEY = "tui"
 ATTACH = "attach"
 SUBMIT = "submit"
 
-#: How long one push may take before it is a broken window rather than a slow
-#: one.  Generous for a loopback write, short enough to be a deadline: this
-#: bounds the *write*, not the turn the window will run afterwards.
-
 #: What `submit` says when there is nothing to hand a message to.  A constant
 #: because a *caller* has to be able to recognise it: see `refused`.
 NO_WINDOW = "no window is showing"

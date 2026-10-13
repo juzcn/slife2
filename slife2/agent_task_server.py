@@ -69,7 +69,7 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.timeouts as _T
-from slife2.audience import FOR_THE_MODEL, request_client
+from slife2.audience import FOR_THE_MODEL
 from slife2.clock import now
 from slife2.config import (
     API_SERVER_NAMES,
@@ -84,6 +84,7 @@ from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult, harness_call
 from slife2.mcp_server import (
     ClientId,
+    agent_reader,
     close_server,
     house_server,
     open_server,
@@ -128,11 +129,6 @@ UNKNOWN = "unknown"
 #: (`slife2.tui.widgets.channel_prefix`).
 CHANNEL = "agent-task"
 
-#: How long to wait on the context plugin.  The agent server's number, for the
-#: agent server's reasons: `remember` happens once the answer already exists,
-#: `restore` replays a whole context, and `rebuild` makes a model call the
-#: plugin has already bounded by `context.timeout`.
-
 #: What the answer wears, so the model can read the task's id back out of the
 #: row.  It is **content**, not an annotation this build derives: it goes into
 #: the stored message verbatim, which by `DESIGN.md` §1.2's convention is what
@@ -144,11 +140,6 @@ MARKER_PREFIX = "[AsyncTaskResult:"
 #: is listening, rather than something an operator writes.
 OPENING_TEMPLATE = "agent_task.j2"
 
-#: How many tasks may be running at once for one agent.  A cap rather than a
-#: preference, and the one bound this feature has: a task may start a task, so
-#: without this a model can grow loops without limit.
-DEFAULT_MAX_RUNNING = 4
-
 #: How many *ended* tasks the registry keeps, so that asking about one that has
 #: finished still has an answer.  Bounded because a model can start tasks for as
 #: long as somebody keeps asking it to, and forgotten from the tail.
@@ -159,20 +150,9 @@ RETIRED = 32
 #: that a name it chose a while ago still means something.
 DESCRIPTION_CHARS = 120
 
-#: How long to wait on the toolhub.  The same number the agent server uses, for
-#: the same reason: `list_tools` may briefly wait for tool servers that are
-#: still connecting (`slife2.toolhub.LIST_SETTLE_SECONDS`), and a timeout
-#: shorter than that turns "waiting for a server that is starting" into a failed
-#: task.
-
 #: What a call that does not say which agent it is for is told.  A shared
 #: process cannot guess it: one `slife2-agent-task` serves every agent, and
 #: whose loop this is, is a fact only the caller has.
-UNADDRESSED = (
-    "This call did not say which conversation it is for, so there is no agent "
-    "whose task it could be — one process serves every agent, and a task is the "
-    "agent's."
-)
 
 
 @dataclass
@@ -784,16 +764,9 @@ def build_server(
 
     # ── whose task ───────────────────────────────────────────────────────
 
-    def agent_of(ctx: Context) -> str:
-        """The agent a call is on behalf of, refused rather than guessed.
-
-        A shared process cannot guess it — see `UNADDRESSED` — so a call that
-        does not say is refused rather than answered with somebody else's tasks.
-        """
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(UNADDRESSED)
-        return found[0]
+    #: The refusal this plugin says for a call that did not name a
+    #: conversation — its own two words in the one shared sentence.
+    agent_of = agent_reader("agent whose task it could be", "a task")
 
     def running(agent: str) -> int:
         return sum(

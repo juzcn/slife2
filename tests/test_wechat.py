@@ -28,9 +28,9 @@ import pytest
 from fastmcp import Client, FastMCP
 
 import slife2.timeouts as _T
-from slife2 import ilink, markers, wechat
+from slife2 import handover, ilink, markers, wechat
 from slife2.audience import client_meta, for_the_model
-from slife2.config import Config, load
+from slife2.config import TUI_SERVER_NAME, Config, load
 from slife2.paths import agent_dir
 from slife2.wechat import (
     Wechat,
@@ -655,7 +655,7 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
         seen.update({"url": url, "advertised": kwargs.get("name")})
         return Window()
 
-    monkeypatch.setattr(wechat, "open_server", open_window)
+    monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
     await made.plugin._ask_agent("jack", "hello")
 
@@ -663,7 +663,7 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
     # for every agent — and the name is what a caller proves before handing
     # anything over.
     assert seen.pop("url") == made.plugin._config.server("tui").url
-    assert seen.pop("advertised") == wechat.TUI_SERVER_NAME
+    assert seen.pop("advertised") == TUI_SERVER_NAME
     assert seen == {
         "name": "submit",
         # **Which agent**, and it is the whole reason the address can be shared:
@@ -693,10 +693,10 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
         attempts += 1
         raise ConnectionError(f"nothing is listening on {url}")
 
-    monkeypatch.setattr(wechat, "open_server", open_window)
+    monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(ConnectionError, match="nothing is listening"):
+    with pytest.raises(ConnectionError, match="no window is showing"):
         await made.plugin._ask_agent("jack", "hello")
 
     assert attempts == 2
@@ -869,7 +869,7 @@ async def test_a_message_off_the_wire_is_handed_to_the_window(
     async def open_window(url: str, **kwargs: Any):
         return Window()
 
-    monkeypatch.setattr(wechat, "open_server", open_window)
+    monkeypatch.setattr(handover, "open_server", open_window)
     signed_in("jack")
     # The real delivery — no `deliver=` seam — which is the point of the test.
     plugin = Wechat(load(), http=Bridge())
@@ -894,3 +894,101 @@ async def test_a_message_off_the_wire_is_handed_to_the_window(
             },
         )
     ]
+
+
+# --- a failure is classified before it is retried -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A lost reply must not become two turns.**
+
+    The window takes the message and the response is lost — a timeout inside
+    `submit`, which is what `transport.window` bounds — so the words may already
+    be down the stream.  Retrying on *any* exception is how one WeChat message
+    runs as two turns and draws two replies, the failure DESIGN §1.2/§1.3 call
+    worse than a late answer.  `slife2.handover.submit_to` classifies this as
+    *unknown* rather than a refusal, so no retry is taken.
+    """
+    attempts = 0
+
+    class Window:
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("the submit never came back")
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    async def open_window(url: str, **kwargs: Any) -> Window:
+        return Window()
+
+    monkeypatch.setattr(handover, "open_server", open_window)
+    made = rig(monkeypatch)
+
+    with pytest.raises(ConnectionError, match="did not come back"):
+        await made.plugin._ask_agent("jack", "hello")
+
+    assert attempts == 1, "an unclassified failure is not retried"
+
+
+# --- the login is keyed by the name the file states ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_login_is_keyed_by_the_name_the_file_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The directory holds the sanitised name, so a login keyed by it was a
+    second key for one login.**
+
+    `a/b` saves to `agents/a_b/wechat.yaml`, but every other entry point — the
+    tools, off the call's client id — uses `a/b`.  Keyed by the directory,
+    `start()` created `Session("a_b")` and the first tool call created a second
+    `Session("a/b")` on the same token: two poll loops on one login, so every
+    message was delivered twice, one copy to a window that was not showing.
+    """
+    signed_in("a/b")
+    assert session_path("a/b").parent.name != "a/b", "the directory is sanitised"
+    assert load_session("a/b")["agent"] == "a/b", "and the file states the real name"
+    made = rig(monkeypatch)
+
+    await made.plugin.start()
+    try:
+        assert list(made.plugin._sessions) == ["a/b"], (
+            "the session is keyed by the name in the file, not the directory"
+        )
+    finally:
+        await made.close()
+
+
+# --- the one endpoint both readers share --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_two_getupdates_readers_agree_about_a_rejection() -> None:
+    """**`validate_session` and `poll_updates` are one `getupdates` call read two
+    ways**, and the envelope handling is shared so the two cannot come to disagree
+    about what a rejection is — the failure this module's docstring was written
+    about."""
+    for envelope in ({}, {"errno": 11000, "error": "token revoked"}):
+        bridge = Bridge()
+        bridge.envelope = envelope
+        client = ilink.IlinkClient(http=bridge)
+
+        valid = await client.validate_session()
+        rejected = client.auth_failed
+
+        # The other reader, on the same body: same call, same verdict.
+        client.auth_failed = False
+        messages = await client.poll_updates()
+
+        assert valid is (not envelope)
+        assert rejected is bool(envelope)
+        assert client.auth_failed is bool(envelope)
+        assert messages == []

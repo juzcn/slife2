@@ -654,6 +654,55 @@ async def test_a_recall_adds_to_what_was_kept(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_context_list_that_cannot_be_written_does_not_fail_the_turn(
+    tmp_path, monkeypatch
+) -> None:
+    """The sentence beside that write promised a tolerance the code did not have.
+
+    "A failure here is not the turn's problem: the in-memory rebuild stands on
+    its own, and the next turn publishes the list again."  That is a deliberate
+    trade — a restart comes back one turn short — and it was written above an
+    unguarded `await`, so a busy or full disk raised out of `rebuild` and failed
+    a turn whose rebuilt messages the caller was already being handed.  The
+    answer is the rebuilt list either way; what changes is whether the caller
+    gets it.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    def refuse(self, turn_ids, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(TurnStore, "set_context_turns", refuse)
+
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"context": "clear"}'),
+        )
+    ) as client:
+        ids = await _seed(client, "jack", ("one", "1"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": ids,
+                "prompt": "hi",
+            },
+        )
+
+    # Reaching here at all is the assertion: the write above raised, and the turn
+    # came back with the rebuilt list rather than a `ToolError`.
+    assert answer.data["changed"] is True, "the rebuild is still the answer"
+    assert answer.data["messages"] == [SYSTEM], "and it is the rebuilt one"
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_reply_keeps_the_context(tmp_path, monkeypatch) -> None:
     """Degrading, not retrying: the fallback is perfectly good.
 
@@ -668,6 +717,38 @@ async def test_an_unreadable_reply_keeps_the_context(tmp_path, monkeypatch) -> N
         build_server(
             default_config(), embedder=EMBEDDER, ask=Replies("I could not decide.")
         )
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        answer = await client.call_tool(
+            "rebuild",
+            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+        )
+
+    assert answer.data["changed"] is False
+    assert answer.data["messages"] == hold
+
+
+@pytest.mark.asyncio
+async def test_a_recall_bound_the_grammar_does_not_know_is_dropped(
+    tmp_path, monkeypatch
+) -> None:
+    """The same fallback as an unreadable reply, and for the same reason.
+
+    A reply of the right *shape* whose `since` is in no grammar this build speaks
+    — `whenever`, `sometime last year` — is a boundary case the two halves of the
+    system answer differently: a bound the *model* passes to `turn_list` is a
+    `ToolError` it reads and corrects (the test above), and a bound the
+    *discriminator* writes is not, because nothing is left to read a refusal.
+    Handed to the store it would raise from inside a query and fail the turn, so
+    the reply is dropped where dropping is still something a caller can decide —
+    and the fallback is the same perfectly good one.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+    reply = '{"context": "clear", "recall": {"query": "one", "since": "whenever"}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(

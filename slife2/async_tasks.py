@@ -315,31 +315,21 @@ def _status_of(task: Task, task_id: str) -> str:
     return marker(task.status, call_id=task.call_id, tool=task.tool, task_id=task_id)
 
 
-async def check_async(arguments: dict[str, Any]) -> str:
-    """Answer where one background call stands.
+def _finished_reply(task: Task, task_id: str) -> str:
+    """What a *finished* task's answer says, wherever it is asked from.
 
-    **Status, not a result**, because the result is handed back on its own — and
-    that is the difference from v1, where this was the only way an answer ever
-    came back.  What is still carried here is the *undelivered* result: a call
-    whose hand-back did not provably reach a conversation stays readable until
-    somebody reads it, and then it goes.
+    **One function, because two tools now answer about the same finished task.**
+    `check_async` is the documented way to ask; `cancel_async` reaches the same
+    state whenever it is called *after* the work is over, and it must not drop
+    the answer the task is still holding.  Two copies of this were two chances
+    for one of them to stop reporting `task.result` — which is exactly the bug
+    this closes.
 
-    Reading is what removes a finished task from the registry, as it was in v1:
-    a task read twice would otherwise be a task kept for the whole session.
+    The marker names the task's final status for both readers (a screen and the
+    model); `delivered` decides whether there is an answer to hand over or only
+    the news that there is none.
     """
-    task_id = str(arguments.get("task_id") or "")
-    task = _get_task(task_id)
-    if task is None:
-        return _not_found(task_id)
     head = _status_of(task, task_id)
-    if task.status == RUNNING and not task.handle.done():
-        return (
-            f"{head}\n"
-            f"⏳ Task is still running…\n"
-            f"  task_id: {task_id}\n"
-            f"  Try {CHECK_ASYNC} again later."
-        )
-    _pop_task(task_id)
     if task.delivered:
         return (
             f"{head}\n"
@@ -358,6 +348,34 @@ async def check_async(arguments: dict[str, Any]) -> str:
     )
 
 
+async def check_async(arguments: dict[str, Any]) -> str:
+    """Answer where one background call stands.
+
+    **Status, not a result**, because the result is handed back on its own — and
+    that is the difference from v1, where this was the only way an answer ever
+    came back.  What is still carried here is the *undelivered* result: a call
+    whose hand-back did not provably reach a conversation stays readable until
+    somebody reads it, and then it goes.
+
+    Reading is what removes a finished task from the registry, as it was in v1:
+    a task read twice would otherwise be a task kept for the whole session.
+    """
+    task_id = str(arguments.get("task_id") or "")
+    task = _get_task(task_id)
+    if task is None:
+        return _not_found(task_id)
+    if task.status == RUNNING and not task.handle.done():
+        head = _status_of(task, task_id)
+        return (
+            f"{head}\n"
+            f"⏳ Task is still running…\n"
+            f"  task_id: {task_id}\n"
+            f"  Try {CHECK_ASYNC} again later."
+        )
+    _pop_task(task_id)
+    return _finished_reply(task, task_id)
+
+
 async def cancel_async(arguments: dict[str, Any]) -> str:
     """Abandon one running background call, and tell the conversation it is gone.
 
@@ -365,6 +383,15 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
     start, and a cancellation nobody hears about leaves a panel on screen that is
     running forever; the model, in a later turn, reads the same line and knows
     the id it holds is done with.
+
+    **A call that already finished is *not* cancelled, and its answer is not
+    thrown away.**  There is nothing to cancel — the work is over — but a task
+    whose hand-back never provably landed is still holding the one copy of its
+    result (`Task.delivered`/`result`), and popping it while answering only
+    "nothing to cancel" would lose that copy for good.  §8.8 says the
+    alternative to returning a result is losing it, and losing it in silence is
+    the worse of the two, so this case is answered with what `check_async` would
+    have said, under the sentence that says why nothing was cancelled.
 
     The hand-back is detached rather than awaited: this runs *inside* the turn
     that called it, and `slife2.handover` reaching the agent server for that same
@@ -377,7 +404,10 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
         return _not_found(task_id)
     if task.handle.done():
         _pop_task(task_id)
-        return f"Task {task_id!r} already completed — nothing to cancel."
+        return (
+            f"Task {task_id!r} already completed — nothing to cancel.\n\n"
+            + _finished_reply(task, task_id)
+        )
     task.handle.cancel()
     _pop_task(task_id)
     logger.info("async_task_cancelled id=%s", task_id)

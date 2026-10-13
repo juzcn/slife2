@@ -16,6 +16,7 @@ from slife2.paths import (
     in_checkout,
     runtime_dir,
     skills_dir,
+    turn_dbs,
 )
 
 pytestmark = pytest.mark.unit
@@ -95,3 +96,28 @@ def test_the_parts_live_under_the_root(
     assert runtime_dir().is_dir()
     assert agents_dir().is_dir()
     assert skills_dir().is_dir()
+
+
+def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A suffix is not a description**, and that is the whole of the test.
+
+    `slife2-context`'s startup pass used to enumerate `agents/*/*.db` and hand
+    every hit to `TurnStore`, which writes the turn schema into whatever it
+    opens.  `schedule.db` sits in the same directory and matches that pattern, so
+    the scheduler's ledger was being opened as a conversation store — two plugins
+    on one SQLite file, against the one-writer rule the layout exists to keep.
+    What is wanted is "a conversation", and only the middle of the name says so.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    jack = agents_dir() / "jack"
+    jack.mkdir(parents=True)
+    for name in ("turns.db", "worker.turns.db", "schedule.db"):
+        (jack / name).write_bytes(b"")
+    (jack / "wechat.yaml").write_text("token: x\n", encoding="utf-8")
+
+    found = {path.name for path in turn_dbs()}
+
+    assert found == {"turns.db", "worker.turns.db"}
+    assert "schedule.db" not in found, "the scheduler's ledger is not a conversation"

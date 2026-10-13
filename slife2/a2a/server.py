@@ -66,10 +66,10 @@ from slife2.a2a.mesh import (
     format_presence_line,
     safe_name,
 )
-from slife2.audience import FOR_THE_MODEL, request_client
+from slife2.audience import FOR_THE_MODEL
 from slife2.config import A2A_SERVER_NAME, Config, load_cached
 from slife2.handover import hand_over
-from slife2.mcp_server import house_server, serve_plugin
+from slife2.mcp_server import agent_reader, house_server, serve_plugin
 from slife2.paths import a2a_inbound_paths
 from slife2.prompt import render
 
@@ -145,11 +145,6 @@ ORPHAN_RETRIES = 30
 #: What a call that does not say which agent it is for is told.  A shared process
 #: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
 #: the agent's own name.
-UNADDRESSED = (
-    "This call did not say which conversation it is for, so there is no mesh "
-    "it could be sent from — one process serves every agent, and the agent name "
-    "is the identity a peer sees."
-)
 
 
 def marker(
@@ -383,10 +378,17 @@ async def _drain(
     notice has nobody behind it at all.  So the count rides the queue item, it
     is zero for everything a peer sent, and only `False` — never `None` — earns
     another try.
+
+    **A message that cannot be delivered must not take the writer with it.**
+    This task is one per agent for the life of the process and nothing watches
+    it until shutdown, so a raise escaping the loop is silent and permanent:
+    the mesh still reports connected, and every later arrival queues behind a
+    writer that no longer exists.  So each message is guarded on its own and a
+    failure is logged and dropped, and the loop goes on to the next.
     """
-    try:
-        while True:
-            text, peer, what, retries = await session.queue.get()
+    while True:
+        text, peer, what, retries = await session.queue.get()
+        try:
             handed = await hand_over(
                 config,
                 session.agent,
@@ -406,17 +408,35 @@ async def _drain(
             )
             if handed is False and retries > 0:
                 # The delay is what makes the retry worth having — without it
-                # the attempt is repeated before the peers it needs can possibly
-                # have arrived — and the notice then goes to the *back* of the
-                # queue, so everything that arrived meanwhile is handed over
-                # first, in arrival order, rather than behind it.  What the wait
-                # costs is this writer's own idleness, which is the queue's
-                # normal mode: one path, one delivery at a time, and a reader
-                # that never waits on it (`Session.post`).
+                # the attempt is repeated before the peers it needs can
+                # possibly have arrived — and the notice then goes to the
+                # *back* of the queue, so everything that arrived meanwhile
+                # is handed over first, in arrival order, rather than behind
+                # it.  What the wait costs is this writer's own idleness,
+                # which is the queue's normal mode: one path, one delivery at
+                # a time, and a reader that never waits on it
+                # (`Session.post`).
                 await asyncio.sleep(_T.timeouts.pacing.orphan_retry)
                 session.post(text, peer, what, retries=retries - 1)
-    except asyncio.CancelledError:
-        raise
+        except asyncio.CancelledError:
+            # `shutdown` cancels this writer; a cancellation is not a
+            # delivery failure and must reach the awaiting task as one.
+            raise
+        except Exception:  # noqa: BLE001 — one bad message must not end the writer
+            # **Not fatal, and the difference is this agent's whole mesh.**
+            # This task is never awaited until shutdown, so an exception
+            # escaping here used to kill the writer *silently*: every later
+            # inbound task, result, broadcast and presence event queued and
+            # was never handed over, for the life of the process, while the
+            # mesh still looked connected and the model simply never heard
+            # anything.  One message that could not be rendered or handed
+            # over is dropped — a peer re-sends its own task, and the notice
+            # has its retries — and the next one is read.
+            logger.exception(
+                "a2a_delivery_failed agent=%s peer=%s — that message dropped",
+                session.agent,
+                peer,
+            )
 
 
 def announce_orphans(session: Session) -> None:
@@ -435,11 +455,11 @@ def announce_orphans(session: Session) -> None:
     hub, and the hub waits for every plugin, so it is up *after* this one
     (DESIGN.md §4) — so a hand-over awaited here is lost by construction; and
     when it is not lost it is worse, because the turn it runs takes as long as a
-    model takes, and the deadline judging *this* plugin is 90 seconds
-    (`slife2.launcher.READY_TIMEOUT_SECONDS`).  Queued, the notice rides the one
-    writer every arrival already takes (`_drain`), which is this session's own
-    machinery, and the retries it carries are what let it outlast the launcher's
-    start-up instead of dying of it.
+    model takes, and the deadline judging *this* plugin is the launcher's
+    `_T.timeouts.ready.plugin_start` (90 s by default).  Queued, the notice
+    rides the one writer every arrival already takes (`_drain`), which is this
+    session's own machinery, and the retries it carries are what let it outlast
+    the launcher's start-up instead of dying of it.
 
     A `task_response` for any of these is refused by the mesh, so the notice
     names the one reply that still works.
@@ -531,12 +551,14 @@ def build_server(
             logger.info("a2a_mesh_connected agent=%s", agent)
         return session
 
-    def agent_of(ctx: Context) -> str:
-        """The agent a call is on behalf of, refused rather than guessed."""
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(UNADDRESSED)
-        return found[0]
+    #: The refusal this plugin says, with its own reason rather than the shared
+    #: one: a peer sees an *identity*, not a piece of somebody's state.
+    agent_of = agent_reader(
+        "mesh it could be sent from",
+        "",
+        why="one process serves every agent, and the agent name is the identity "
+        "a peer sees",
+    )
 
     async def resume(config_now: Config) -> None:
         """Join the mesh as every agent this plugin has a ledger for.
@@ -581,10 +603,18 @@ def build_server(
         is tolerated — it is logged, and the tools connect lazily on demand.  On
         shutdown every mesh disconnects, which is what publishes the offline card
         that retires this agent's name rather than leaving a card nobody holds.
+
+        **Resume is inside the guard, and that is the point of the guard.**  A
+        resume that fails halfway — the broker comes up, one agent's mesh
+        connects, and the next step raises (a template that will not render, a
+        ledger path that will not read) — leaves that mesh holding two MQTT
+        connections, a retained *online* card and a `_drain` writer.  The
+        `finally` is what hands those back, so it has to be entered *before* the
+        first connection is made rather than after the last one succeeded.
         """
-        if connecting and live().a2a.configured:
-            await resume(live())
         try:
+            if connecting and live().a2a.configured:
+                await resume(live())
             yield {}
         finally:
             for session in sessions.values():

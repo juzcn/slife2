@@ -34,11 +34,13 @@ business and turning it into rows is this file's.
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 from collections.abc import Mapping
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2 import configfile
 from slife2.audience import FOR_THE_MODEL
@@ -47,7 +49,6 @@ from slife2.config import (
     Config,
     ConfigError,
     _cli_tool,
-    load,
 )
 from slife2.mcp_server import CLI_SOURCE as _SOURCE
 from slife2.mcp_server import serve_plugin
@@ -136,20 +137,31 @@ def rows(entries: Mapping[str, CliToolSettings]) -> list[dict[str, Any]]:
 # actually on this machine.
 
 
-def _prepare(
-    config: Config, name: str, entry: dict[str, Any]
-) -> tuple[CliToolSettings | None, str]:
+def _prepare(name: str, entry: dict[str, Any]) -> tuple[CliToolSettings | None, str]:
     """Validate a `cli:` entry and write it, or say why not.
+
+    `(settings, "")` means it was written; `(None, why)` is a sentence for the
+    caller to raise as the refusal — the contract `skill_set` and `skill_use`
+    keep, and the one whose text a `[refused]` prefix used to mark while it was
+    returned as a success.
 
     Only one refusal, and it is not a name collision: a `cli:` row is called
     `cli:{name}`, so it cannot collide with anything — which is why this family
     needs no `toolfamily.refusal` and the other two do.
+
+    **No `Config`, unlike the two connection families' `_prepare`s.**  Theirs
+    take it because they ask `toolfamily.refusal` whether the name is one the hub
+    already owns, and that question needs the whole config; this family has no
+    such question, so the parameter used to sit here unreferenced while
+    `cli_set` still paid a `load()` for it on every call.  The parser below
+    (`_cli_tool`) needs only the entry and the name, and the write is
+    `slife2.configfile`'s own.
     """
     try:
         settings = _cli_tool(entry, name)
         configfile.upsert(SECTION, name, entry)
     except ConfigError as exc:
-        return None, f"[refused] {exc}"
+        return None, str(exc)
     return settings, ""
 
 
@@ -163,11 +175,24 @@ def _on_path(command: str) -> str:
     to be missing — and this says it at the moment the entry is written, which is
     the only moment anybody is looking.
 
-    The first word only: `python -m mytool` is a program plus its arguments, and
-    the program is what has to exist.
+    **The command line is split the way the argv runner will take it apart**
+    (`DESIGN.md` §9: an argv rather than a shell), so that quotes are honoured:
+    `"C:\\Program Files\\tool\\tool.exe" --json` names one program, not
+    `"C:\\Program`, and a Windows path's backslashes are literal rather than
+    escape sequences — which is why this is `posix=False` and why the quotes it
+    leaves on a word come off here.  The first word only, because
+    `python -m mytool` is a program plus its arguments and the program is what
+    has to exist.
     """
-    words = command.split()
-    program = words[0] if words else ""
+    try:
+        words = shlex.split(command, posix=False)
+    except ValueError:
+        # An unbalanced quote is a command line the argv runner will not be able
+        # to take apart either, and this runs *after* the entry has been written:
+        # raising would turn a note into a failed call.  There is nothing true to
+        # say about `PATH` here, so say nothing.
+        return ""
+    program = words[0].strip("\"'") if words else ""
     if not program or shutil.which(program):
         return ""
     return (
@@ -270,7 +295,6 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             enabled: False records it and keeps it out of the catalogue.
         """
         settings, why = _prepare(
-            load(),
             name,
             {
                 "command": command,
@@ -281,7 +305,14 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             },
         )
         if settings is None:
-            return why
+            # **Refused by raising, so the call is a failure the caller can see.**
+            # `ok` false is this system's word for a refusal — `slife2.gateway`
+            # splits a peer's refusal from a transport fault on exactly this flag,
+            # `slife2.toolhub` reads a raised `ToolError` as a value with `ok`
+            # false, and the tool panel renders `ok` false as a failed call.
+            # Returned as ordinary text the refusal would arrive with `ok` true
+            # and read as a success.
+            raise ToolError(why)
         entries[name] = settings
         logger.info("cli_set name=%s", name)
         return (

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -217,9 +218,8 @@ def build_server(
         provider, entry = media.resolve("image", model)
         params = merge_params(entry.params, {"size": wanted} if wanted else {})
         output = await _run(
-            media,
             "image",
-            media.adapter(provider).generate_image(
+            lambda: media.adapter(provider).generate_image(
                 model=entry.model,
                 prompt=prompt,
                 size=wanted,
@@ -273,9 +273,8 @@ def build_server(
             given["duration"] = duration
         params = merge_params(entry.params, given)
         output = await _run(
-            media,
             "video",
-            media.adapter(provider).generate_video(
+            lambda: media.adapter(provider).generate_video(
                 model=entry.model,
                 prompt=prompt,
                 image=image or None,
@@ -302,9 +301,8 @@ def build_server(
         """
         provider, entry = media.resolve("tts", model)
         output = await _run(
-            media,
             "speech",
-            media.adapter(provider).text_to_speech(
+            lambda: media.adapter(provider).text_to_speech(
                 model=entry.model,
                 text=text,
                 voice=voice or entry.voice,
@@ -327,9 +325,8 @@ def build_server(
             raise ToolError("[refused] no audio file was named.")
         provider, entry = media.resolve("asr", model)
         text = await _run(
-            media,
             "transcript",
-            media.adapter(provider).transcribe_audio(
+            lambda: media.adapter(provider).transcribe_audio(
                 model=entry.model,
                 # Not expanded here: every filesystem call belongs in the
                 # adapter, where it goes off the event loop.
@@ -342,8 +339,17 @@ def build_server(
     return mcp
 
 
-async def _run(media: Media, noun: str, call: Any) -> str:
+async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
     """One adapter call, with a provider's refusal turned into a sentence.
+
+    **`call` is a factory, not the coroutine it produces.**  `media.adapter` is
+    where `create_adapter`'s `MediaAdapterError` for an unknown `api:` is raised,
+    and evaluating `media.adapter(provider).generate_image(…)` as an argument to
+    this function ran the resolution *outside* the guard below.  A config with
+    `api: typo` loads cleanly — the loader only requires the key to be present —
+    and then failed at the first call as a raw exception instead of the
+    `[failed] …` sentence §1.5 promises.  A zero-argument factory is what moves
+    the resolution inside the `try`.
 
     **The three failures are told apart**, because a person does three different
     things about them: an adapter that cannot do this at all is a config choice
@@ -354,7 +360,7 @@ async def _run(media: Media, noun: str, call: Any) -> str:
     that convention has.
     """
     try:
-        return await call
+        return await call()
     except NotImplementedError as exc:
         raise ToolError(
             f"[refused] this provider cannot make a {noun}: {exc}. Another "

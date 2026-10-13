@@ -28,12 +28,13 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from slife2.config import ModelSettings, ProviderSettings
+from slife2.config import ModelSettings
 from slife2.llm.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.llm.server_common import (
     Translate,
     build_backend_server,
     read_int,
+    sdk_client_factory,
     sdk_streamer,
     serve_backend,
 )
@@ -438,17 +439,6 @@ def _make_streamer() -> Streamer:
     constructing a client outside a running event loop is not always safe.
     """
 
-    def sdk_client(provider: ProviderSettings, key: str) -> Any:
-        """The one per-protocol fact: which SDK class, and with what.
-
-        Imported here rather than at the top of the file for the reason this
-        whole arrangement exists — the module is importable, and a process that
-        serves nothing from it never loads the SDK.
-        """
-        from anthropic import AsyncAnthropic
-
-        return AsyncAnthropic(api_key=key, base_url=provider.base_url)
-
     def make_translator() -> Translate:
         """One stream's translation, carrying its running output total."""
         produced = 0
@@ -473,7 +463,7 @@ def _make_streamer() -> Streamer:
     return sdk_streamer(
         api=API,
         server_name=SERVER_NAME,
-        sdk_client=sdk_client,
+        sdk_client=sdk_client_factory("anthropic", "AsyncAnthropic"),
         build_request=build_request,
         start=lambda client, request: client.messages.create(**request),
         translator=make_translator,

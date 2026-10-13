@@ -259,8 +259,17 @@ class SlifeApp(App[None]):
         self._connection_text = "connecting"
         #: Whether the previous conversation is drawn, or being drawn.  Once
         #: per window: reading it again would append a second copy of a history
-        #: the transcript is already showing.
+        #: the transcript is already showing.  **Set when the draw is finished**,
+        #: not when it starts, so it answers "is the history on the screen" —
+        #: which is the question `_ensure_connected` and `_drain` have to ask.
         self._restored = False
+        #: Serialises the read that `_restored` reports on.  The flag alone is
+        #: not enough: it is set at the *end* of `_restore`, so two callers
+        #: arriving while a read is in flight both see it unset, and one of them
+        #: going on to mount a turn is the interleaving this lock prevents.  The
+        #: second caller waits for the first and then finds the flag set, which
+        #: is the ordering `_ensure_connected` promises — see `_restore`.
+        self._restoring = asyncio.Lock()
         #: Messages waiting for their turn, oldest first, each with the channel
         #: it came in on.  **Typing is not the only way in**: a message handed
         #: over by another channel lands here too (`deliver`), which is what makes
@@ -424,13 +433,23 @@ class SlifeApp(App[None]):
         return self._connected
 
     async def _ensure_connected(self) -> None:
-        """Connect if this window is not, and restore with it.
+        """Connect if this window is not, and restore before returning either way.
 
         **Called before a turn mounts anything, and that is the whole point.**
         `_restore` draws the conversation this name already had; a window that
         had already mounted the prompt would draw that history *underneath* it,
         so the transcript would read as though the old conversation had been
         pasted into the middle of the new one.
+
+        **Connected is not the same as restored, and this is where the difference
+        bites.**  `_connect` sets the connected flag *before* it reads the
+        history, so a caller that stopped at "connected" — which this used to —
+        would sail past a read that is still in flight and mount its turn under
+        history that lands afterwards.  The gap is not exotic: a large
+        conversation takes a moment to read, and a prompt typed (or a `deliver`
+        from another channel) in that moment is an ordinary thing to happen.  So
+        the restored half is awaited here too; `_restore` is single-flight, so a
+        window whose history is already up returns from it at once.
 
         The lazy retry, for the case the window opened before the servers were
         up.  Both halves of the condition matter: the window's own flag says
@@ -440,8 +459,25 @@ class SlifeApp(App[None]):
         flag would stay "connected" to a server nothing is talking to.
         """
         if self._connected and self._client is not None and self._client.connected:
+            await self._restore()
             return
         await self._connect()
+
+    async def _require_connected(self) -> None:
+        """Connect, restore, and raise when a server still cannot be reached.
+
+        `_ensure_connected` plus the check it leaves to its caller, written once:
+        `_send`, `_finish_switch` and `_finish_approval` each had the same two
+        statements, and the sentence the raise carries is a fact about this
+        window rather than about any one of them — so it is stated here once, with
+        the reason the caller wants it: a turn, a switch and an answer all need a
+        transport, and the failure reads the same to a person watching.
+        """
+        await self._ensure_connected()
+        if not self._connected:
+            raise ConnectionError(
+                f"not connected to the agent server ({self._connection_text})"
+            )
 
     async def _restore(self) -> None:
         """Show the conversation this name already had.  Once.
@@ -451,31 +487,41 @@ class SlifeApp(App[None]):
         would be the only part of the system acting as though the conversation
         were over — it would sit blank while the model answered from a history
         the user could not see.
+
+        **The read is single-flight, and a second caller waits rather than
+        returning.**  The flag is claimed at the *end*, under a lock, so it means
+        "the history is on the screen" — and a caller that arrives while the read
+        is in flight blocks until it is, then finds the flag set and returns.  A
+        claim made before the await would let that caller go on to mount a turn
+        the history then landed under; that is the ordering `_ensure_connected`
+        promises, and keeping it is the reason the lock is here and not a plain
+        check.  `connect` is guarded the same way and for the same reason — it is
+        the shape of anything with an await between its check and its use.
         """
-        # Claimed *before* the await, and given back if the read fails.  The
-        # flag means "somebody is drawing it", not "it has been drawn": the
-        # check and the claim are one statement, so a second caller arriving
-        # while the read is in flight returns instead of mounting a second copy
-        # of the whole conversation.  `connect` is guarded the same way and for
-        # the same reason — it is the shape of anything with an await in it.
         if self._restored:
             return
-        self._restored = True
-        assert self._client is not None
-        try:
-            turns = await self._client.transcript()
-        except Exception as exc:  # noqa: BLE001 - a window is not worth losing
-            self._restored = False
-            # Given back because this is the retry path: a read that failed
-            # because the servers were still coming up should be tried again
-            # when they are.  Nothing is lost by waiting — the history is the
-            # server's, and the conversation continues either way.
-            logger.warning("the previous conversation could not be read: %s", exc)
-            self._connected = False
-            self._connection_text = f"disconnected: {exc}"
-            self._refresh_status()
-            return
-        restore(self._transcript, turns)
+        async with self._restoring:
+            if self._restored:
+                return
+            assert self._client is not None
+            try:
+                turns = await self._client.transcript()
+            except Exception as exc:  # noqa: BLE001 - a window is not worth losing
+                # Given back (the flag stays unset) because this is the retry
+                # path: a read that failed because the servers were still coming
+                # up should be tried again when they are.  Nothing is lost by
+                # waiting — the history is the server's, and the conversation
+                # continues either way.
+                logger.warning("the previous conversation could not be read: %s", exc)
+                self._connected = False
+                self._connection_text = f"disconnected: {exc}"
+                self._refresh_status()
+                return
+            restore(self._transcript, turns)
+            # Set only now, so it reports what has actually happened.  `restore`
+            # cannot raise on its own data — it drops a row it cannot read — so
+            # the only failure left outside the `try` is the transport's, above.
+            self._restored = True
         # The bar was the one part of the window that did not know the
         # conversation had come back — see `context_of`.
         self._context_tokens = context_of(turns)
@@ -513,7 +559,10 @@ class SlifeApp(App[None]):
                 # mounted.**  On a cold start this is where the connect
                 # happens, and `_restore` draws the conversation this name
                 # already had; doing it after `add_user` would put the history
-                # between the prompt and its answer.
+                # between the prompt and its answer.  It waits, too, for a read
+                # another caller already has in flight — the mount-time connect
+                # sets "connected" before it reads, so this is the call that
+                # keeps a prompt typed in that gap below the whole history.
                 await self._ensure_connected()
                 # Taken off the queue *before* it runs, so the count in the
                 # status bar is what is still waiting rather than including the
@@ -550,7 +599,18 @@ class SlifeApp(App[None]):
                 except asyncio.CancelledError:
                     if not self._interrupting:
                         raise
-                    self._transcript.add_note("[cancelled]")
+                    # **The cancelled turn's ticket is retired here, not left for
+                    # the next turn to move past.**  Its events can still be in
+                    # the pump — a delta the client posted as it unwound — and
+                    # the ticket still matched, so they were accepted.
+                    # `append_text` is guarded by `_turn_open`, which the
+                    # `ends_turn` below clears, but `add_tool_start` is guarded
+                    # by neither: a late `ToolCallStarted` mounted a panel under
+                    # `[cancelled]`, as though the turn had gone on.  Retiring it
+                    # now is what the next turn's own bump does for the tail of
+                    # the turn before it — the cancel just does it early.
+                    self._ticket += 1
+                    self._transcript.add_note("[cancelled]", ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
                     self._transcript.add_error(str(exc))
@@ -580,11 +640,9 @@ class SlifeApp(App[None]):
         # Lazy retry, and the same call `_drain` makes before it mounts
         # anything — asking the client is what keeps one drop from costing a
         # restart, rather than a window that has to be closed and opened again.
-        await self._ensure_connected()
-        if not self._connected:
-            raise ConnectionError(
-                f"not connected to the agent server ({self._connection_text})"
-            )
+        # Restoring is part of it here too: this is the retry path a cold start
+        # takes, and the history has to be up before this turn's block opens.
+        await self._require_connected()
 
         return await self._client.run_turn(
             prompt,
@@ -759,9 +817,7 @@ class SlifeApp(App[None]):
 
         assert self._client is not None
         try:
-            await self._ensure_connected()
-            if not self._connected:
-                raise ConnectionError(self._connection_text)
+            await self._require_connected()
             answer = await self._client.switch_model(choice.ref)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
             self._transcript.add_error(f"the model was not switched: {exc}")
@@ -815,9 +871,7 @@ class SlifeApp(App[None]):
         self.query_one(HistoryInput).focus()
         assert self._client is not None
         try:
-            await self._ensure_connected()
-            if not self._connected:
-                raise ConnectionError(self._connection_text)
+            await self._require_connected()
             answer = await self._client.answer_approval(call_id, approved)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
             self._transcript.add_error(f"the answer was not delivered: {exc}")

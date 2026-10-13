@@ -99,6 +99,31 @@ ChatView {
     border: solid $slife-amber;
 }
 
+/* ── The approval row ───────────────────────────────────────────────────── */
+
+/* The second thing in the transcript that asks something, and it wears the
+   picker's clothes for the picker's reason: a drawn edge is how a question
+   reads as a question rather than as part of the conversation.  It is the more
+   consequential of the two — the loop is parked on the answer — so it is not
+   the row to leave looking like a message, which is what it did while the class
+   `add_approval` gives it was styled by nothing at all. */
+.approval-prompt {
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: solid $slife-border;
+    background: $slife-panel;
+    height: auto;
+    width: 1fr;
+}
+
+/* Lit while it has the keys.  Undecided and unfocused is the ordinary state
+   after a keystroke has gone to the prompt (`redirect_printable`), and the row
+   staying up past that blur is the point — so the dim edge is "answer me, but
+   the keyboard is elsewhere" rather than "finished" (`ApprovalPrompt`). */
+.approval-prompt:focus {
+    border: solid $slife-amber;
+}
+
 /* ── The prompt ─────────────────────────────────────────────────────────── */
 
 /* Three rows to start, twelve at most, growing upward with the draft.  The

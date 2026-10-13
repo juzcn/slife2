@@ -43,7 +43,7 @@ person debugging a missed fire deserves an answer:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -162,9 +162,24 @@ def latest_fire(
     The `+1s` is what makes the window inclusive of `until` itself, since
     `get_prev` is strictly before its reference.  Cron's granularity is a minute,
     so a second cannot step over a fire.
+
+    **Both halves of this are about instants rather than clock readings**, and
+    that is the subtlety of asking a calendar question across a daylight-saving
+    change.  Arithmetic on an aware datetime moves the naive fields and resets
+    `fold`, so `reference + timedelta(seconds=1)` inside a fall-back hour can land
+    an hour *away*; the nudge below is therefore one second of *instant*, made on
+    the timestamp and restated in the task's zone.  And the anchor suppression
+    compares `found` with `after` as instants: `found` and `after` carry the same
+    `ZoneInfo` instance, and Python compares two aware datetimes with identical
+    tzinfo by their naive fields (PEP 495) — the wrong question there, because a
+    reading that looks newer than the anchor can be an hour *older* by the clock
+    the fire happened on, so a wall-clock comparison silently drops every fire
+    inside the repeated hour.  Instants are what "the newest fire behind this
+    task" means, the same difference `due()` asks about when it measures lateness.
     """
     reference = _reference(until, timezone)
-    found = previous_run(expression, reference + timedelta(seconds=1), timezone)
-    if found <= _reference(after, timezone):
+    nudge = datetime.fromtimestamp(reference.timestamp() + 1, reference.tzinfo)
+    found = previous_run(expression, nudge, timezone)
+    if found.timestamp() <= _reference(after, timezone).timestamp():
         return None
     return found

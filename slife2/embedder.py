@@ -32,12 +32,6 @@ logger = logging.getLogger(__name__)
 #: The embeddings server's key in the config's `servers:` table.
 EMBEDDINGS_KEY = "embeddings"
 
-#: How long a hop to the embeddings server may take.  **Larger than that server's
-#: own request timeout on purpose** (`slife2.llm.embeddings_server.
-#: EMBED_TIMEOUT_SECONDS`): the inner deadline is the one that can name the
-#: endpoint that did not answer, and an outer one that fired first would replace
-#: that message with a timeout of its own.
-
 
 class RemoteEmbedder:
     """The near side's view of the embeddings server: three facts, one call.

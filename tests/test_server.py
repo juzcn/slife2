@@ -774,6 +774,14 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     assert one.data["injected"] is False
     assert two.data["text"] == one.data["text"]
     assert two.data["injected"] is True
+    # **The same key set, `refused` included.**  The folded-in reply used to be
+    # built by a second copy of the dict that had drifted and had no `refused`,
+    # so a caller that read `reply["refused"]` got a `KeyError` on exactly this
+    # path — the one path a caller cannot recognise by anything else in the
+    # answer.  A caller must not have to know which path answered it to read a
+    # field of the reply.
+    assert one.data.keys() == two.data.keys()
+    assert two.data["refused"] == []
 
     # Delivered at the boundary, as a call the model reads, not as its own input.
     assert "tool:two" in prompts_seen(backend, 1)
@@ -996,6 +1004,100 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     stored = json.loads(rows[0][0])
     assert [m["role"] for m in stored] == ["user"]
     assert stored[0]["content"] == "one"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """A cancellation *after the answer* is not a reason to lose the answer.
+
+    The trim runs once a turn has already answered — it is post-turn bookkeeping,
+    and it suspends on a real call to the hub (`unload_tools`) — so a client
+    whose stream closes during it cancels a turn that has *succeeded*.  Obeying
+    that cancellation abandons `run_turn_into`'s `finally` before the outcome is
+    assigned, and `send_message`'s handler then finds an empty `outcome.messages`:
+    it records nothing and re-raises, while the loop still holds the completed
+    turn's messages.  That is the row §3's rule ("every turn of a loop that
+    records is written") exists to guarantee, gone, and the loop's `covered`/
+    `turn_ids` left out of step with the list — a completed turn the model will
+    be sent again but the log has never heard of.
+
+    Asserted through the record, because that is the half that vanished: the
+    completed turn must have its row, and the row must be the turn the model
+    gave.  The trim is held open so the cancellation provably lands *after* the
+    turn and *inside* the trim rather than during the turn (a different path,
+    with tests of its own).  And the loop must come out of it whole — the very
+    next turn runs, and is sent the completed turn exactly once — since the other
+    face of the same bug is `covered`/`turn_ids` left out of step with the list.
+    """
+    from slife2.context_server import build_server as build_context
+    from slife2.paths import DATA_ENV_VAR, agent_dir
+    from slife2.server import server as server_module
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    backend = FakeBackend(text_turn("the answer"), text_turn("second answer"))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    held = 0
+
+    async def slow_unload(_client):
+        """The suspension window the cancellation needs, and nothing unloaded.
+
+        Only the *first* trim is held: the follow-up turn's trim must run to
+        completion, or the test would hang on the very thing it is not about.
+        """
+        nonlocal held
+        held += 1
+        if held == 1:
+            entered.set()
+            await release.wait()
+        return {"unloaded": [], "text": ""}
+
+    monkeypatch.setattr(server_module, "unload_tools", slow_unload)
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(), backend=backend, context_client=context_client, hub_client=hub
+        )
+        interrupted = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        # The model has answered and the turn is now in the trim.  Bounded by a
+        # real budget rather than a bare `wait`, so a trim that never started
+        # fails the test instead of hanging it.
+        await asyncio.wait_for(entered.wait(), timeout=_T.timeouts.work.hub)
+        interrupted.cancel()
+        with pytest.raises((asyncio.CancelledError, Exception)):
+            await interrupted
+        # No sleep to race: the fix settles the turn *before* the cancellation
+        # is re-raised, so the row is written by the time `await` above returns.
+
+        # **The loop is still whole.**  The completed turn is in the record *and*
+        # still in the conversation, so the next turn is sent it exactly once —
+        # the two halves §3 requires to agree, and the half a stale `covered`
+        # would have broken.
+        assert (await send(server, "two")).data["text"] == "second answer"
+        assert prompts_seen(backend, 1) == [
+            "user:one",
+            "assistant:the answer",
+            "user:two",
+        ]
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    # The interrupted-trim turn first, then the follow-up — and the first one is
+    # the whole completed turn rather than the user's message alone.
+    assert len(rows) == 2, "the completed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user", "assistant"]
+    assert stored[0]["content"] == "one"
+    assert stored[1]["content"] == "the answer"
 
 
 def test_two_identical_prompts_are_two_places_in_the_queue() -> None:
@@ -1689,6 +1791,108 @@ async def test_a_turn_works_without_a_progress_handler(context, hub) -> None:
     )
     result = await send(server, "x")
     assert result.data["text"] == "It is 42."
+
+
+@pytest.mark.asyncio
+async def test_a_broken_observer_does_not_lose_the_message(
+    context, hub, monkeypatch
+) -> None:
+    """A UI that throws must not end a turn — the server's own events included.
+
+    `ContextChosen` is reported *before* the turn runs, so an exception from the
+    observer there lands before the prompt has been appended or recorded: it
+    propagates out of `send_message`, the caller is told the turn failed, and the
+    message is gone — nowhere in the conversation and nowhere in the log.  The
+    same observer failing on a `TextDelta` is swallowed by `AgentLoop._emit`,
+    which is the whole reason that seam exists; the two events the *server* raises
+    were the ones not routed through it.
+    """
+    from slife2.server import server as server_module
+
+    class Broken:
+        """A context whose progress stream is closed: every report throws."""
+
+        def __init__(self, _ctx: Any) -> None: ...
+
+        async def on_event(self, _event: TurnEvent) -> None:
+            raise RuntimeError("the progress stream is closed")
+
+    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+
+    backend = FakeBackend(text_turn("the answer"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    result = await send(server, "one")
+
+    assert result.data["text"] == "the answer"
+    # The message survived with it: it reached the model, which is the half the
+    # old raise destroyed.
+    assert prompts_seen(backend) == ["user:one"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_observer_does_not_kill_an_approval_request(
+    context, hub, monkeypatch
+) -> None:
+    """The other server-side raise: the `_approve` request, from inside the turn.
+
+    The request is announced to whoever is watching before the turn waits for the
+    answer, and a broken stream throws from that announcement.  Left to
+    propagate it would kill the very turn that is waiting for the answer — a tool
+    call the model is entitled to make, refused because a *display* failed —
+    where the same observer failing on a `TextDelta` is swallowed.  Routed through
+    `AgentLoop._emit`, the request is still registered in `loop.approvals`, so an
+    answer arriving by the ordinary route (`answer_approval`) is taken and the
+    turn runs on.
+    """
+    from slife2.server import server as server_module
+
+    class Broken:
+        def __init__(self, _ctx: Any) -> None: ...
+
+        async def on_event(self, _event: TurnEvent) -> None:
+            raise RuntimeError("the progress stream is closed")
+
+    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(
+                    ToolCall(id="c1", name="skill_list", arguments={"_approve": True}),
+                ),
+                stop_reason="tool_calls",
+            ),
+            chunks=[Chunk(text="checking")],
+        ),
+        text_turn("done"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    turn = asyncio.create_task(send(server, "one", watched=True))
+    await wait_for_streams(backend)
+    # Answer the request the way a watching client does: a call of its own.  The
+    # announcement never reached anyone (the observer is broken), so the test
+    # polls for the future to exist — which is itself the claim, since it is the
+    # emit that threw before.
+    async with Client(server) as client:
+        for _ in range(500):
+            answer = await client.call_tool(
+                "answer_approval",
+                {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
+            )
+            if answer.data["answered"]:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the approval request never reached the loop")
+
+    assert (await turn).data["text"] == "done"
 
 
 @pytest.mark.asyncio

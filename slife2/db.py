@@ -103,9 +103,6 @@ logger = logging.getLogger(__name__)
 #: and a path is not something a command line should be able to reach.
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
-#: How long SQLite waits for a lock before giving up.  The database server is the
-#: only writer, but a read may be in flight while a turn is being written.
-
 #: Database files already reported as belonging to the previous schema.  See
 #: `TurnStore._report_legacy_file`, which is why this is not simply computed.
 _legacy_reported: set[Path] = set()
@@ -154,7 +151,13 @@ _OVERFETCH = 4
 #: the fused id list costs a bound value per *row*, so the cap belongs on the
 #: fused list — two over-fetched legs fuse to twice the length either one had,
 #: which is the number that has to stay under this.
-_MAX_SQL_VARS = 900
+#:
+#: **Public, because the cabinet is the third store to bind a fused list.**
+#: `slife2.cabinet_store` imports it for the same reason it imports `MAX_PAGE`:
+#: a second cap of its own would be a second number to keep under SQLite's, and
+#: the failure when one of them is wrong is an `OperationalError` about too many
+#: variables raised by whichever store nobody tested at that size.
+MAX_SQL_VARS = 900
 
 #: What a row carries before anything has measured it, while a page's
 #: similarities are being gathered.  Below every cosine there is, so a row
@@ -772,6 +775,58 @@ def filter_clause(clauses: list[str]) -> str:
     return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
 
+def rows_in_order(
+    connection: sqlite3.Connection,
+    ordered: Sequence[int],
+    *,
+    select: str,
+    column: str,
+    key: str = "",
+    clauses: Sequence[str] = (),
+    values: Sequence[Any] = (),
+    limit: int,
+) -> list[sqlite3.Row]:
+    """Those rows, in the order they were ranked, filtered and cut.
+
+    **One function, because three stores ask one question.**  A search's order
+    comes from a fusion in Python and its rows come from a table, so the ids
+    travel as an `IN` list and the order is put back here — SQLite would return
+    them in whatever order it liked.  The turn store, the catalogue and the
+    cabinet each had their own copy of that, differing in the table's name, the
+    column the id is called and which store opens the connection; the last of
+    those is why this takes a connection rather than opening one, because the
+    two stores that read on a thread hop and the one that reads inline disagree
+    about where a connection may be opened and nothing else.
+
+    `select` is the whole `SELECT … FROM …` head (it is the part that differs),
+    `column` the id's name *in SQL* — qualified where the query needs it — and
+    `key` the name to read the id out of the row that comes back, which is not
+    always the same: a turn selects `rowid AS turn_id`.
+
+    **The filters are re-applied here**, because a leg may have brought back a
+    row the caller excluded — the semantic leg cannot filter at all, a KNN has
+    no `WHERE` — and a page that silently ignores its own window is worse than a
+    shorter page.
+
+    **The list is capped at `MAX_SQL_VARS`, here, because this is the one place
+    that binds it.**  A search's shortlist is the union of a leg's ids per
+    question and is not bounded by anything the caller passed; a statement with
+    more values than SQLite accepts raises `OperationalError`, which is a search
+    that does not answer at all where a shortened candidate list answers with the
+    best of what it had.  The caller's list is already in its final order, so
+    what is kept is the top of it.
+    """
+    wanted = list(ordered)[:MAX_SQL_VARS]
+    if not wanted:
+        return []
+    where = f"WHERE {column} IN ({_marks(wanted)})"
+    if clauses:
+        where += f" {where_clause(list(clauses))}"
+    rows = connection.execute(f"{select} {where}", (*wanted, *values)).fetchall()
+    found = {int(row[key or column]): row for row in rows}
+    return [found[rowid] for rowid in wanted if rowid in found][:limit]
+
+
 class VectorIndexUnavailable(RuntimeError):
     """The vector extension could not be loaded, so nothing here can work.
 
@@ -877,6 +932,42 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / sizes if sizes else 0.0
 
 
+def meanings_by_cosine(
+    rows: Iterable[sqlite3.Row], id_key: str, queries: Sequence[Sequence[float]]
+) -> dict[int, float]:
+    """How close each of those rows' stored vectors is to the nearest query.
+
+    **Read from the index rather than asked of it**, and the two are the same
+    number: `1 - distance` on a `cosine` table *is* the cosine, and the two
+    agree to float32 rounding (measured, worst case 8e-7 over a catalogue).  A
+    KNN answers "which rows are *nearest*", and the rows this is for are the ones
+    it has already said are not: asking it again for everything, to find the
+    rows its own page omitted, would be a second scan whose `k` is capped at
+    4096 — so the way that scales is the way that reads what is already there.
+
+    A row may hold several vectors, one per chunk, and **the best of them stands
+    for the row** — the rule both KNN legs apply to their own page, and the
+    reason this is a `max` and not the first vector it meets.
+
+    One function for both stores: the catalogue and the cabinet ask exactly this
+    question of their own tables, and the cabinet used to answer it a third way
+    — a second KNN, `k` = `MAX_PAGE` — which is a page of the *nearest* rows
+    handed to a filter for the rows the first page did not hold, so it answered
+    with almost nothing and the rows the caller's own words found went without
+    the number that orders the page.
+    """
+    best: dict[int, float] = {}
+    for row in rows:
+        vector = array.array("f")
+        vector.frombytes(bytes(row["embedding"]))
+        rowid = int(row[id_key])
+        for query in queries:
+            value = _cosine(vector, query)
+            if value > best.get(rowid, NO_SIMILARITY):
+                best[rowid] = value
+    return best
+
+
 def _load_vector_index(connection: sqlite3.Connection) -> None:
     """Load the extension into one connection, or say why nothing can work.
 
@@ -956,6 +1047,29 @@ def connect_to(path: Path) -> sqlite3.Connection:
     )
     _load_vector_index(connection)
     return connection
+
+
+def begin_rebuild(connection: sqlite3.Connection) -> None:
+    """Open the transaction a rebuild's DDL has to be inside.
+
+    **`sqlite3` does not roll DDL back, and this module's connections are the
+    mode where that is reachable.**  `connect_to` leaves the interpreter's
+    legacy transaction control in place, which opens a transaction implicitly
+    before a `DELETE`/`INSERT`/`UPDATE` and never before a `CREATE`/`DROP` — so
+    a rebuild that leads with `DROP TABLE IF EXISTS <vec>` and then fails left
+    the vectors table dropped *in autocommit* while the `DELETE` and the
+    recorded identity after it were rolled back.  What that file is, is an
+    index with chunk rows and no vectors, and a fingerprint saying it is whole —
+    the one state the store cannot detect and cannot rebuild, since the identity
+    it compares is the one that was written.
+
+    An explicit `BEGIN` puts the DDL inside the transaction, so the caller's
+    `with` commits or rolls back the whole rebuild as one unit.  Four rebuilds
+    call it — a turn index, a catalogue, a cabinet and the catalogue's
+    stale-file rebuild — and each of them leads with a `DROP`, which is what
+    makes one helper worth having rather than a `BEGIN` line at each site.
+    """
+    connection.execute("BEGIN")
 
 
 class TurnStore:
@@ -1213,14 +1327,14 @@ class TurnStore:
         run over one absent id would turn a partial loss into a total one.
 
         Chunked, because the list can be longer than one statement may bind
-        (`_MAX_SQL_VARS`) and an unbounded `IN (…)` is a query that works in
+        (`MAX_SQL_VARS`) and an unbounded `IN (…)` is a query that works in
         testing and raises in a long session.
         """
         wanted = normalise_ids(turn_ids)
         found: dict[int, TurnRecord] = {}
         with self._connect() as connection:
-            for start in range(0, len(wanted), _MAX_SQL_VARS):
-                chunk = wanted[start : start + _MAX_SQL_VARS]
+            for start in range(0, len(wanted), MAX_SQL_VARS):
+                chunk = wanted[start : start + MAX_SQL_VARS]
                 marks = ",".join("?" * len(chunk))
                 rows = connection.execute(
                     f"SELECT rowid AS turn_id, * FROM turn WHERE rowid IN ({marks})",
@@ -1245,8 +1359,8 @@ class TurnStore:
             return set(turn_ids)
         allowed: set[int] = set()
         with self._connect() as connection:
-            for start in range(0, len(turn_ids), _MAX_SQL_VARS):
-                chunk = turn_ids[start : start + _MAX_SQL_VARS]
+            for start in range(0, len(turn_ids), MAX_SQL_VARS):
+                chunk = turn_ids[start : start + MAX_SQL_VARS]
                 marks = ",".join("?" * len(chunk))
                 rows = connection.execute(
                     f"SELECT rowid AS turn_id FROM turn WHERE rowid IN ({marks})"
@@ -1334,7 +1448,7 @@ class TurnStore:
             )
         expression = textindex.match_expression(query)
         clauses, params = time_window(since, until)
-        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
+        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
         # The keyword leg is windowed in SQL (its `rank` orders every match, so
         # limiting after the window is still the best inside it); the semantic
         # leg is not, and the fusion is filtered below.
@@ -1347,7 +1461,7 @@ class TurnStore:
             for turn_id, _ in fuse_ranked(
                 {"keyword": keyword, "semantic": list(semantic)}
             )
-        ][:_MAX_SQL_VARS]
+        ][:MAX_SQL_VARS]
         allowed = await self._off_loop(self._ids_in_window, fused, clauses, params)
         return [
             (turn_id, semantic.get(turn_id)) for turn_id in fused if turn_id in allowed
@@ -1372,16 +1486,64 @@ class TurnStore:
         Run at startup.  It is the only thing that re-embeds turns which lost
         their vectors, because a save embeds the turn it is saving and nothing
         else.
+
+        **A batch at a time, and the loop is what finishes the index.**  A
+        changed embedding model makes *every* turn missing, so a request per
+        turn was a startup that paid a round trip per turn of the log — the thing
+        `SYNC_BATCH` exists to bound, and the shape both other stores already
+        have (`ToolStore.sync_indexes`, `CabinetStore.sync`).  The store bounds a
+        call and the caller finishes the index, which is the division those two
+        state: a request carrying the whole log is the request that times out,
+        and one that answers having embedded the first sixty-four turns says
+        nothing about the rest.
+
+        It terminates because every turn selected here is one `_place_vectors`
+        then writes a chunk row for — `_turns_without_vectors` selects rows with
+        none, and a turn with nothing to embed is not selected at all.  The `not
+        vectors` arm is the guard on that: a model that answers with nothing for
+        a batch would otherwise be asked for the same batch for ever.
         """
         await self._off_loop(self._sync_text_index)
         await self._off_loop(self.ensure_indexes, embedder)
-        for turn_id, text in await self._off_loop(self._turns_without_vectors):
-            vectors = await embedder.embed(embed_chunks(text, limit=embedder.max_chars))
-            await self._off_loop(self._place_vectors, turn_id, vectors)
+        while True:
+            missing = await self._off_loop(self._turns_without_vectors, SYNC_BATCH)
+            if not missing:
+                break
+            vectors = await self._embed_turns(missing, embedder)
+            if not vectors:
+                break
+            await self._off_loop(self._place_vectors, vectors)
 
-    def _place_vectors(self, turn_id: int, vectors: list[list[float]]) -> None:
+    async def _embed_turns(
+        self, turns: Sequence[tuple[int, str]], embedder: Embedder
+    ) -> dict[int, list[list[float]]]:
+        """One request for every chunk of every turn that owes a vector.
+
+        The catalogue's `_embed` with turns in it, and for the same reasons: a
+        round trip per row is the cost this exists to avoid, and a short answer
+        is checked rather than tolerated — an answer with fewer vectors than it
+        was asked for would leave a turn with a *partial* index and nothing
+        anywhere able to see it.
+        """
+        chunks, spans = _chunk_documents(turns, embedder.max_chars)
+        if not chunks:
+            return {}
+        vectors = await embedder.embed(chunks)
+        if len(vectors) != len(chunks):
+            raise RuntimeError(
+                f"the embedding model answered {len(vectors)} vectors for "
+                f"{len(chunks)} chunks, so {len(spans)} turn(s) would be "
+                f"searchable only by keyword"
+            )
+        return {
+            turn_id: vectors[start : start + count] for turn_id, start, count in spans
+        }
+
+    def _place_vectors(self, vectors: Mapping[int, list[list[float]]]) -> None:
+        """Write a batch of vectors, in one transaction."""
         with self._connect() as connection:
-            _write_vectors(connection, turn_id, vectors)
+            for turn_id, rows in vectors.items():
+                _write_vectors(connection, turn_id, rows)
 
     def ensure_indexes(self, embedder: Embedder) -> None:
         """Create the vector index, or rebuild it if its identity has changed.
@@ -1390,11 +1552,17 @@ class TurnStore:
         here **drops the vectors** without re-embedding anything, because the
         caller is a save that is embedding one turn — putting the rest back is
         `sync_indexes`, which startup runs before anything is served.
+
+        **The `DROP` and the `CREATE` are inside one transaction** (`begin_rebuild`),
+        because SQLite does not roll DDL back: without it a `CREATE` that failed
+        left `turn_vec` dropped and the `DELETE` rolled back, which is an index
+        with chunks and no vectors and a fingerprint claiming to describe it.
         """
         identity = vector_identity(embedder)
         with self._connect() as connection:
             if self.index_meta(connection).get("vector_identity", "") == identity:
                 return
+            begin_rebuild(connection)
             connection.execute("DROP TABLE IF EXISTS turn_vec")
             connection.execute("DELETE FROM turn_chunk")
             connection.execute(vector_ddl(embedder.dimension))
@@ -1440,7 +1608,7 @@ class TurnStore:
             )
             self.set_index_meta(connection, text_version=textindex.RULES_VERSION)
 
-    def _turns_without_vectors(self) -> list[tuple[int, str]]:
+    def _turns_without_vectors(self, limit: int = 0) -> list[tuple[int, str]]:
         """Every turn with a vector still owed, oldest first.
 
         The index is derived, so "has no vector" is the whole of the state a
@@ -1455,6 +1623,14 @@ class TurnStore:
         ever place a vector for it, so `index_status` would never be clean and
         the context plugin, which refuses to serve an index that is not, would
         never come up.
+
+        `limit` bounds one call, `0` meaning all of them — the caller that loops
+        passes `SYNC_BATCH`, because "every turn" on a log written by a different
+        embedding model is every turn there is.  **The bound is applied after the
+        filter and not in SQL**, unlike the catalogue's: what a turn is about is
+        composed in Python (`embed_text`), so a `LIMIT` in the query would count
+        rows the filter is about to drop and a batch of turns with nothing to say
+        would end the caller's loop with rows still owed behind it.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -1462,11 +1638,12 @@ class TurnStore:
                 "WHERE rowid NOT IN (SELECT DISTINCT turn_id FROM turn_chunk) "
                 "ORDER BY rowid"
             ).fetchall()
-        return [
+        found = [
             (int(row["rowid"]), text)
             for row in rows
             if (text := embed_text(_loads(row["messages"], []))).strip()
         ]
+        return found[:limit] if limit else found
 
     def index_status(self, embedder: Embedder) -> dict[str, Any]:
         """Whether a search can actually run on both legs, and what is missing.
@@ -1577,7 +1754,7 @@ class TurnStore:
         expression = textindex.match_expression(query)
         clauses, params = time_window(since, until)
         limit = page_limit(limit)
-        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
+        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
 
         ranked = {
             "keyword": await self._off_loop(
@@ -1591,7 +1768,7 @@ class TurnStore:
         # Capped here and not on the legs: fusing takes the *union* of two lists
         # that are each already `over` long, and the next query binds one value
         # per id.  A cap applied to each leg would leave the union at twice it.
-        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)][:_MAX_SQL_VARS]
+        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)][:MAX_SQL_VARS]
         return await self._off_loop(
             self._records_in_order, fused, clauses, params, limit
         )
@@ -1695,19 +1872,22 @@ class TurnStore:
 
         One query rather than one per turn, because the order comes from the
         fusion and the rows come from the table; a window can only remove turns
-        from the answer, never reorder it.
+        from the answer, never reorder it.  The query itself is `rows_in_order`,
+        which is the same one the catalogue's search makes with its own table's
+        name in it.
         """
-        if not turn_ids:
-            return []
-        marks = ",".join("?" * len(turn_ids))
         with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT rowid AS turn_id, * FROM turn WHERE rowid IN ({marks})"
-                f" {where_clause(clauses)}",
-                (*turn_ids, *params),
-            ).fetchall()
-        found = {int(row["turn_id"]): _row_to_record(row) for row in rows}
-        return [found[turn_id] for turn_id in turn_ids if turn_id in found][:limit]
+            rows = rows_in_order(
+                connection,
+                turn_ids,
+                select="SELECT rowid AS turn_id, * FROM turn",
+                column="rowid",
+                key="turn_id",
+                clauses=clauses,
+                values=params,
+                limit=limit,
+            )
+        return [_row_to_record(row) for row in rows]
 
 
 def vector_identity(embedder: Embedder) -> str:
@@ -2246,7 +2426,7 @@ class ToolStore:
         path: Path,
         *,
         threshold: int,
-        known: Iterable[str] = (),
+        known: Iterable[str] | None = None,
     ) -> None:
         #: The most function tools the model may hold — see
         #: `slife2.config.ToolLoadSettings`.  Held here rather than passed per
@@ -2263,13 +2443,33 @@ class ToolStore:
         #: module has none — and it is *names*, not a list of connections: this
         #: file is still told nothing about liveness (`merge`'s `autoload` and
         #: `evict`'s are where the other facts the config used to supply arrive).
-        self.known = frozenset(str(name) for name in known)
+        #:
+        #: **`None` is not the empty set, and the difference is destructive.**
+        #: `None` is a caller that has not said which sources the config carries,
+        #: which is a different fact from a set that happens to be empty — and
+        #: the boot pass below is the thing that can tell them apart.  It was a
+        #: default of `()`, so omitting the argument *was* the destructive case:
+        #: every `plugin`/`mcp`/`rest` row in this file was deleted as the store
+        #: opened, with its vectors and its keyword rows, and `tool_search` then
+        #: answered about a catalogue nothing had gone wrong with.
+        self.known: frozenset[str] | None = (
+            None if known is None else frozenset(str(name) for name in known)
+        )
+        # The **set** is what the boot pass filters with, so an empty one means
+        # "the config names no sources" — that is the case `reset` exists for,
+        # and it is reachable only from a caller that has read the config
+        # (`slife2.toolhub.configured_sources`).  A caller that has not read it
+        # passes nothing, and nothing is what the pass then does.
         self.path = path
         self._ensure_schema()
         # Built means a process has just started, and a verdict this file
         # carries from an older run may be one nothing can justify any more —
-        # `reset` is what withdraws the ones the config can speak to.
-        self.reset()
+        # `reset` is what withdraws the ones the config can speak to, and it
+        # runs **only for a caller that named the config's sources**: a store
+        # nobody told cannot tell a stale row from one whose section it was
+        # never given, and every answer it could give is a deletion.
+        if self.known is not None:
+            self.reset()
 
     def _connect(self) -> sqlite3.Connection:
         return connect_to(self.path)
@@ -2330,6 +2530,12 @@ class ToolStore:
                 ]
             ),
         )
+        # **One transaction, because SQLite does not roll DDL back** — a `DROP`
+        # issued with no transaction open runs in autocommit, so a rebuild that
+        # failed halfway through its list of five left some tables gone and the
+        # rest standing, which is a catalogue with no keyword index and rows
+        # nothing can read.  The `executescript` that follows commits this.
+        begin_rebuild(connection)
         for table in ("tool_fts", "tool", "tool_chunk", "tool_vec", "meta"):
             connection.execute(f"DROP TABLE IF EXISTS {table}")
 
@@ -2800,15 +3006,27 @@ class ToolStore:
         of those tools.  `slife2.toolhub.configured_sources` is the set; what
         this must not be given is a source the config has *dropped*, because
         that is precisely the stale row this exists to forget.
+
+        **A store nobody told which sources the config carries forgets
+        nothing.**  `known` of `None` is that caller, and it gets the answer a
+        process that has not read the config deserves: `{"forgotten": 0}`.  The
+        alternative — treating "not told" as "the config carries none" — is a
+        boot pass that deletes every `plugin`, `mcp` and `rest` row in the file
+        and their vectors, which is the one thing here that cannot be undone by
+        asking a server again (it re-embeds them).  A store that was told
+        nothing does not run this on the way up at all — `ToolStore.__init__`
+        has the argument — but a *caller* naming this method has asked for the
+        pass, so it keeps the meaning an empty set has always had.
         """
+        known = self.known or frozenset()
         with self._connect() as connection:
             where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
-            if self.known:
-                where += f" AND source_id NOT IN ({_marks(self.known)})"
+            if known:
+                where += f" AND source_id NOT IN ({_marks(known)})"
             names = [
                 str(row["name"])
                 for row in connection.execute(
-                    f"SELECT name FROM tool WHERE {where}", sorted(self.known)
+                    f"SELECT name FROM tool WHERE {where}", sorted(known)
                 )
             ]
             self._delete(connection, names)
@@ -3141,7 +3359,7 @@ class ToolStore:
         if keywords and not any(s.strip() for s in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
-        over = min(limit * _OVERFETCH, _MAX_SQL_VARS)
+        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
@@ -3176,6 +3394,14 @@ class ToolStore:
         if keyword_hits is not None and not shortlist:
             # Words with no sentence are one question with one view.
             shortlist = list(dict.fromkeys(keyword_hits))
+        # **The union is capped, and each question may bring `over` ids of its
+        # own.**  Nothing a caller passes bounds this list: every sentence
+        # contributes its meaning leg's ids plus the keyword leg's, so forty
+        # sentences is forty times a page, and the query that reads the rows
+        # binds one value per id.  What is dropped is the tail of the *union*,
+        # which is the weakest evidence there is — a page is at most `limit`
+        # rows and every question's own list is already ranked.
+        shortlist = shortlist[:MAX_SQL_VARS]
 
         # **Every row of the shortlist gets its number**, not only the rows the
         # meaning leg returned — those are exactly the rows the words found, and
@@ -3276,40 +3502,22 @@ class ToolStore:
         """How close those rows are, by meaning, to the nearest thing asked.
 
         The cosine, computed from the vectors the index already holds — which is
-        the same number and not a second derivation of it: `1 - distance` on a
-        `cosine` table *is* the cosine, and the two agree to float32 rounding
-        (measured, worst case 8e-7 over a catalogue).
-
-        Read rather than asked for, because a KNN answers "which rows are
-        nearest" and these rows are the ones it has already said are not.  Asking
-        it again for everything to find them would be a second full scan of the
-        index, and its `k` is capped at 4096 — so the efficient way is also the
-        way that keeps working as the catalogue grows.
-
-        A tool may have several vectors, one per chunk, and **the best of them
-        stands for the tool** — the same rule `_nearest` applies to its own page.
+        the same number and not a second derivation of it, and `meanings_by_cosine`
+        is where that is argued.  The query is the store's own: a `tool_vec` row
+        is a chunk, so which tool it belongs to is one join away, and the max
+        over a tool's chunks is what stands for the tool.
         """
         if not rowids or not queries:
             return {}
-        marks = _marks(rowids)
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, v.embedding AS embedding"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
                 " JOIN tool t ON t.name = c.name"
-                f" WHERE t.rowid IN ({marks})",
+                f" WHERE t.rowid IN ({_marks(rowids)})",
                 tuple(rowids),
             ).fetchall()
-        best: dict[int, float] = {}
-        for row in rows:
-            vector = array.array("f")
-            vector.frombytes(bytes(row["embedding"]))
-            for query in queries:
-                value = _cosine(vector, query)
-                rowid = int(row["rowid"])
-                if value > best.get(rowid, NO_SIMILARITY):
-                    best[rowid] = value
-        return best
+        return meanings_by_cosine(rows, "rowid", queries)
 
     def _browse(
         self, limit: int, clauses: list[str], values: list[Any]
@@ -3432,22 +3640,21 @@ class ToolStore:
     ) -> list[sqlite3.Row]:
         """Those rows, in the order they were ranked, filtered and cut.
 
-        One query rather than one per row, because the order comes from the
-        fusion and the rows come from the table.  The semantic leg cannot apply
-        a filter — a KNN has no `WHERE` — so it is applied here, which is why a
-        filtered search can return fewer than it was asked for.
+        The query is `rows_in_order`, which is where the ordering, the
+        re-applied filters and the cap on the bound list are argued; what is
+        this store's own is the connection, because this is the call that runs
+        on a thread hop.
         """
-        if not rowids:
-            return []
-        where = where_clause(clauses)
         with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT rowid AS rowid, * FROM tool"
-                f" WHERE rowid IN ({_marks(rowids)}) {where}",
-                (*rowids, *values),
-            ).fetchall()
-        found = {int(row["rowid"]): row for row in rows}
-        return [found[rowid] for rowid in rowids if rowid in found][:limit]
+            return rows_in_order(
+                connection,
+                rowids,
+                select="SELECT rowid AS rowid, * FROM tool",
+                column="rowid",
+                clauses=clauses,
+                values=values,
+                limit=limit,
+            )
 
     # --- the derived indexes --------------------------------------------------
 
@@ -3510,11 +3717,17 @@ class ToolStore:
         reconcile that is embedding the rows it just wrote — putting the rest
         back is `sync_indexes`, and the two are separate for the same reason
         they are in the turn store.
+
+        **The `DROP` and the `CREATE` are inside one transaction**
+        (`begin_rebuild`), for the reason the turn store's is: SQLite rolls a
+        `CREATE` back and not a `DROP`, so a rebuild that failed here left the
+        vectors table gone and the `DELETE` and the recorded identity undone.
         """
         identity = vector_identity(embedder)
         with self._connect() as connection:
             if index_meta(connection, "meta").get("vector_identity", "") == identity:
                 return
+            begin_rebuild(connection)
             connection.execute("DROP TABLE IF EXISTS tool_vec")
             connection.execute("DELETE FROM tool_chunk")
             connection.execute(vector_ddl(embedder.dimension, "tool_vec"))
@@ -3593,19 +3806,21 @@ class ToolStore:
 
 
 def _chunk_documents(
-    rows: Sequence[tuple[str, str]], max_chars: int
-) -> tuple[list[str], list[tuple[str, int, int]]]:
+    rows: Sequence[tuple[Any, str]], max_chars: int
+) -> tuple[list[str], list[tuple[Any, int, int]]]:
     """`(every chunk in order, where each row's chunks are)`.
 
     Split out so the one request that carries the whole batch can be built
-    before anything is sent: an embedding call per tool is a round trip per
-    tool, and a first run has every tool of every server to embed.
+    before anything is sent: an embedding call per row is a round trip per row,
+    and a first run has every tool of every server — or every turn of a log — to
+    embed.  The key is `Any` because the two callers key their batches
+    differently: a tool by its name, a turn by its rowid.
     """
     chunks: list[str] = []
-    spans: list[tuple[str, int, int]] = []
-    for name, document in rows:
+    spans: list[tuple[Any, int, int]] = []
+    for key, document in rows:
         pieces = embed_chunks(document, limit=max_chars)
-        spans.append((name, len(chunks), len(pieces)))
+        spans.append((key, len(chunks), len(pieces)))
         chunks.extend(pieces)
     return chunks, spans
 

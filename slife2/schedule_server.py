@@ -94,11 +94,12 @@ from slife2.agent_task_server import (
 from slife2.agent_task_server import (
     RUNNING as TASK_RUNNING,
 )
-from slife2.audience import FOR_THE_MODEL, client_meta, request_client
+from slife2.audience import FOR_THE_MODEL, client_meta
 from slife2.clock import at, now
 from slife2.config import AGENT_TASK_SERVER_NAME, Config, load_cached
 from slife2.handover import hand_over
 from slife2.mcp_server import (
+    agent_reader,
     close_server,
     house_server,
     open_server,
@@ -144,28 +145,11 @@ SCHEDULE_RUNS = "schedule_runs"
 SCHEDULE_RUN_NOW = "schedule_run_now"
 SCHEDULE_RUN_SKIP = "schedule_run_skip"
 
-#: How long to wait on the agent-task plugin.  The agent server's number for the
-#: agent server's reason: a listing may wait briefly for a peer that is still
-#: connecting, and a timeout shorter than that turns "starting" into "failed".
-#: The two tools themselves and the states they answer with are **imported**
-#: rather than re-spelled — `slife2.agent_task_server` is the module that writes
-#: them, and a second copy here is the copy that drifts.
-
 #: The channel a trigger arrives on, and the first half of what it is keyed by:
 #: `schedule:daily_diary`.  The window draws a bubble from the channel alone
 #: (`slife2.tui.widgets.channel_prefix`), so the name has to be *in* it for a
 #: person to see which task spoke.
 CHANNEL = "schedule"
-
-#: How often the clock is asked.  Cron's unit is a minute, so this fires within
-#: half a minute of the due time and no expression can tell the difference —
-#: v1's number, and the reason it chose it.
-
-#: How late a fire may be and still count as *now* rather than as *missed*.  A
-#: fire whose due time is within this of the moment the clock looked is one that
-#: came due while slife2 was running; older than this, slife2 was not running,
-#: and the right answer is to say so rather than to run yesterday's work at
-#: today's prices.  v1's number.
 
 #: What a task name may be.  Safe as a filename is not the requirement — nothing
 #: is named after it — but safe as *a word a model says back* is, and the two
@@ -191,15 +175,6 @@ RUNS_MAX = 200
 #: and a run that never settled are recorded and findable with `schedule_runs`,
 #: and nothing announces them (DESIGN.md §9).
 TRIGGER_TEMPLATE = "schedule.j2"
-
-#: What a call that does not say which agent it is for is told.  A shared process
-#: cannot guess it: one `slife2-schedule` serves every agent, and whose clock this
-#: is, is a fact only the caller has.
-UNADDRESSED = (
-    "This call did not say which conversation it is for, so there is no agent "
-    "whose schedule it could be — one process serves every agent, and a schedule "
-    "is the agent's."
-)
 
 
 # ── the clock's decision ─────────────────────────────────────────────────────
@@ -259,10 +234,24 @@ def ledgers() -> list[ScheduleStore]:
     sanitised agent name, so a trigger sent to that name would go to a
     conversation that is not the one that asked — and it would look like it
     worked.
+
+    **A file that cannot be opened is a file skipped, not a clock stopped.**  A
+    stray or truncated `schedule.db` raises out of `adopt` — SQLite will not read
+    a file that is not a database — and the whole point of one loop over every
+    agent is that one agent's damage is not every agent's.  An operator sees the
+    warning and fixes the file; until then the clock serves the ledgers it can.
     """
     found: list[ScheduleStore] = []
     for path in schedule_dbs():
-        store = ScheduleStore.adopt(path)
+        try:
+            store = ScheduleStore.adopt(path)
+        except Exception:  # noqa: BLE001 - one unopenable file is not the clock's
+            logger.warning(
+                "%s could not be opened, so nothing in it will be fired",
+                path,
+                exc_info=True,
+            )
+            continue
         if store is None:
             logger.warning(
                 "%s does not say whose ledger it is, so nothing in it will be "
@@ -395,14 +384,25 @@ async def dispatch(
     # something to record the failure against — and so that the anchor moves
     # whether or not the work ever starts.
     store.record(task, due_at)
-    client, owned = await tasks_server(config, tasks_client)
+    # **Opening the peer is part of the dispatch.**  A `tasks_server` call sits
+    # outside the `try` at the caller's peril: a failure to reach the agent-task
+    # plugin — a port that is not listening, a peer that answers as somebody else
+    # — would escape as a raw non-`ToolError` and leave the run `pending` with an
+    # empty `agent_task_id`.  That is the one state nothing can resolve: the poll
+    # cannot ask about a task that was never started, and the sweep only runs at
+    # startup.  So the open is inside the same guard as the call, and both have
+    # the same ending: the run is `failed`, and the turn that asked is told.
+    client: Client | None = None
+    owned = False
     try:
+        client, owned = await tasks_server(config, tasks_client)
         answer = await client.call_tool(
             AGENT_TASK_START,
             {"name": task.name, "description": task.description},
             # The identity rides in `_meta` because a task is *an agent's*, and
             # this process serves every agent: without it the peer would have to
-            # guess whose loop to start, and would refuse (its `UNADDRESSED`).
+            # guess whose loop to start, and would refuse with its own
+            # unaddressed answer (`slife2.audience.UNADDRESSED`).
             meta=client_meta(store.agent),
             timeout=_T.timeouts.transport.tasks,
         )
@@ -412,7 +412,7 @@ async def dispatch(
             f"the run of {task.name!r} due at {due_at} could not be started: {exc}"
         ) from exc
     finally:
-        if owned:
+        if owned and client is not None:
             await close_server(client)
     payload = tool_payload(answer)
     started = str(payload.get("task_id") or "")
@@ -445,7 +445,11 @@ async def reconcile(config: Config, *, tasks_client: Client | None = None) -> li
     """
     did: list[str] = []
     for store in ledgers():
-        waiting = store.in_flight()
+        try:
+            waiting = store.in_flight()
+        except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
+            logger.exception("%s: this ledger was skipped for this pass", store.path)
+            continue
         if not waiting:
             continue
         try:
@@ -540,34 +544,45 @@ async def poll_once(
     """
     did: list[str] = []
     for store in ledgers():
-        for task in store.tasks(enabled_only=True):
-            verdict = due(task, reference)
-            if verdict is None:
-                continue
-            kind, due_at = verdict
-            if kind == "missed":
-                run = store.record(task, due_at)
-                if run.status == PENDING:
-                    # Recorded and immediately closed: the moment is kept because
-                    # the *gap* is the fact worth keeping, and "missed" is what
-                    # says slife2 was not running rather than that it failed.
-                    store.settle(
-                        task.name,
-                        due_at,
-                        MISSED,
-                        error="slife2 was not running when this was due",
-                    )
-                did.append(f"{store.agent}: {task.name} missed {due_at}")
-                continue
-            run = await fire(
-                config,
-                store,
-                task,
-                due_at,
-                window_client=window_client,
-                agent_client=agent_client,
-            )
-            did.append(f"{store.agent}: {task.name} due {due_at} -> {run.status}")
+        # **One bad ledger is one ledger skipped, not a pass abandoned.**  A row
+        # with a hand-edited, non-ISO anchor makes `due` raise out of `moment_of`;
+        # without this guard that raise would take the whole pass with it, and
+        # the next pass would hit the same row — so every *other* agent's tasks
+        # would quietly stop firing while the clock looked healthy.  The ledger is
+        # named and skipped; the rest of this pass carries on.
+        try:
+            for task in store.tasks(enabled_only=True):
+                verdict = due(task, reference)
+                if verdict is None:
+                    continue
+                kind, due_at = verdict
+                if kind == "missed":
+                    run = store.record(task, due_at)
+                    if run.status == PENDING:
+                        # Recorded and immediately closed: the moment is kept
+                        # because the *gap* is the fact worth keeping, and
+                        # "missed" is what says slife2 was not running rather
+                        # than that it failed.
+                        store.settle(
+                            task.name,
+                            due_at,
+                            MISSED,
+                            error="slife2 was not running when this was due",
+                        )
+                    did.append(f"{store.agent}: {task.name} missed {due_at}")
+                    continue
+                run = await fire(
+                    config,
+                    store,
+                    task,
+                    due_at,
+                    window_client=window_client,
+                    agent_client=agent_client,
+                )
+                did.append(f"{store.agent}: {task.name} due {due_at} -> {run.status}")
+        except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
+            logger.exception("%s: this ledger was skipped for this pass", store.path)
+            continue
     # After the fires rather than before them, so that a run started by this pass
     # is asked about on the next one: a task that has just been started is
     # `running`, and asking immediately would only add a call per fire.
@@ -595,7 +610,11 @@ async def sweep_once() -> list[str]:
     """
     did: list[str] = []
     for store in ledgers():
-        failed = store.sweep()
+        try:
+            failed = store.sweep()
+        except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
+            logger.exception("%s: this ledger was skipped for this sweep", store.path)
+            continue
         if failed:
             did.append(f"{store.agent}: {failed} run(s) never settled")
     return did
@@ -615,12 +634,30 @@ async def poll_forever(
     must not both fire its tasks.  The config is read through `config()` on every
     pass rather than captured, so an address that moved is picked up by the next
     fire — the same rule the agent server and the task server follow.
+
+    **A failing pass is a failing pass, and the clock goes on.**  The guards are
+    *inside* the loop, around the sweep and around each ask, because the failure
+    that matters is a local one — a stray or truncated ledger, a row with an
+    anchor that will not parse — and a guard outside the loop would turn one bad
+    row on one agent into every agent's tasks going quiet until the process
+    restarted, which is the opposite of what one shared clock is for.  Only a
+    cancellation ends the loop.
     """
     try:
         for line in await sweep_once():
             logger.info("%s", line)
-        while True:
-            await asyncio.sleep(_T.timeouts.pacing.schedule_poll)
+    except asyncio.CancelledError:
+        # The ordinary way this ends.  Re-raised because the sweep of a
+        # cancelled task is what tells `asyncio` the cancellation was taken —
+        # and there is nothing here to unwind: a fire is a record and a
+        # hand-over, both of which either happened or did not.
+        raise
+    except Exception:  # noqa: BLE001 - one bad ledger must not stop the clock
+        logger.exception("the startup sweep failed; the clock goes on")
+
+    while True:
+        await asyncio.sleep(_T.timeouts.pacing.schedule_poll)
+        try:
             for line in await poll_once(
                 config(),
                 window_client=window_client,
@@ -628,14 +665,10 @@ async def poll_forever(
                 tasks_client=tasks_client,
             ):
                 logger.info("%s", line)
-    except asyncio.CancelledError:
-        # The ordinary way this ends.  Re-raised because the sweep of a
-        # cancelled task is what tells `asyncio` the cancellation was taken —
-        # and there is nothing here to unwind: a fire is a record and a
-        # hand-over, both of which either happened or did not.
-        raise
-    except Exception:  # noqa: BLE001 - the clock must not die of one bad ledger
-        logger.exception("the schedule clock stopped")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - one bad ledger must not stop the clock
+            logger.exception("a pass of the schedule clock failed; it goes on")
 
 
 # ── the plugin ───────────────────────────────────────────────────────────────
@@ -670,12 +703,7 @@ def build_server(
     def store_for(agent: str) -> ScheduleStore:
         return ScheduleStore.open(agent)
 
-    def agent_of(ctx: Context) -> str:
-        """The agent a call is on behalf of, refused rather than guessed."""
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(UNADDRESSED)
-        return found[0]
+    agent_of = agent_reader("agent whose schedule it could be", "a schedule")
 
     def task_of(agent: str, name: str) -> Task:
         """One task, or a refusal naming what is missing."""
@@ -843,7 +871,12 @@ def build_server(
             raise ToolError(
                 f"{wanted!r} is not a run state; they are {', '.join(STATUSES)}."
             )
-        bounded = min(limit or RUNS_LIMIT, RUNS_MAX)
+        # A limit that is not a positive number is "unset", the way zero already
+        # is: `or` folds zero into the default, and a *negative* must not reach
+        # SQLite, where `LIMIT -1` means **no limit at all** — so a model passing
+        # `-1` would walk past the ceiling this tool exists to keep.  The default
+        # is itself under the ceiling, so either branch is bounded.
+        bounded = min(limit, RUNS_MAX) if limit > 0 else RUNS_LIMIT
         rows = [run.row() for run in store.runs(name.strip(), wanted, bounded)]
         return {"runs": rows}
 

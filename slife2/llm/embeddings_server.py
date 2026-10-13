@@ -52,17 +52,6 @@ SERVER_NAME = "slife2-llm-embeddings"
 #: This server's key in the config's `servers:` table.
 CONFIG_KEY = "embeddings"
 
-#: How long one embeddings request may take.  Generous, because a local
-#: embedding service loads its weights on the first call and that is not a
-#: failure — but a deadline all the same, because the db awaits this call on its
-#: save path and an endpoint that never answers must not become a turn that
-#: never finishes.
-
-#: Retries are off.  The SDK's default is a long exponential backoff, which
-#: turns an endpoint that is simply down into a call that hangs for minutes —
-#: measured on v1, where the fix was this line.  The db's startup sync is what
-#: retries, by running again, and it can say which provider it could not reach.
-
 #: Widths and input limits of models whose answers are known, so the common case
 #: costs no probe request.  Both numbers are per model, not per provider: the
 #: same weights served by a local daemon and by a hosted API embed identically,

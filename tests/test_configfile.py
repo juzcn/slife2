@@ -262,6 +262,61 @@ def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     assert "rest-api: {}" not in path.read_text(encoding="utf-8")
 
 
+def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
+    """**A comment belongs to the entry under it, and a deletion moves two.**
+
+    ruamel keeps "the comment above an entry" as the *trailing* comment of the
+    entry before it (for the first entry, as the mapping's pending comment), so
+    deleting an entry from the middle of a section moves two comment blocks and
+    only one of the moves is right: the survivor's comment is destroyed along
+    with the deleted entry, and the deleted entry's own comment slides up over
+    the survivor.  Left alone, the file ends up with a comment describing
+    something that no longer exists attached to the one entry it is least true
+    of — the failure the test above names for a section's *last* entry, here for
+    a middle one.
+
+    Both positions are exercised, because they are two different ruamel slots —
+    the first key's comment lives on the mapping, every later one on its
+    predecessor — and a fix for one leaves the other wrong.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        "mcp:\n"
+        "  # Describes slow-one, and slow-one is going.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n"
+        "  # Describes tail, which stays.\n"
+        "  tail:\n"
+        "    command: tail\n",
+        encoding="utf-8",
+    )
+
+    # The first key: its comment rides on the mapping, the survivor's on it.
+    assert remove("mcp", "slow-one", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "slow-one" not in after
+    assert "Describes slow-one" not in after, "its comment goes with it"
+    assert "Describes filesystem" in after, "the survivor keeps its own"
+    assert after.index("Describes filesystem") < after.index("filesystem:"), (
+        "and it is still above the entry it describes, not stranded"
+    )
+    assert list(load(path).mcp) == ["filesystem", "tail"]
+
+    # A middle key: the same two moves, in ruamel's other slot.
+    assert remove("mcp", "filesystem", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "filesystem" not in after
+    assert "Describes filesystem" not in after
+    assert "Describes tail" in after
+    assert after.index("Describes tail") < after.index("tail:")
+    assert list(load(path).mcp) == ["tail"]
+
+
 def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:
     """`slife2.config` reads `enabled` off the entry, so that is where it goes."""
     path = write(tmp_path)

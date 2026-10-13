@@ -83,7 +83,7 @@ from slife2.mcp_server import (
     serve_plugin,
 )
 from slife2.messages import StreamChatResult
-from slife2.paths import agents_dir
+from slife2.paths import agents_dir, turn_dbs
 from slife2.textindex import terms
 from slife2.tokens import estimate_turn_tokens
 
@@ -104,12 +104,6 @@ INSTRUCTIONS = (
     "are the harness's: they decide which turns a conversation is made of, and "
     "no model calls them."
 )
-
-#: How long a hop to a model server may take.  Well under the agent loop's own
-#: bound on a turn, and only the *transport's* deadline: what actually bounds the
-#: discriminator is `context.timeout`, which is a knob because how long a model
-#: deserves to think about a decision is a property of the deployment rather than
-#: of this code.
 
 #: The discriminator call, as a seam: the conversation and the input in, whatever
 #: the model said out.  A test injects one; production uses the model server
@@ -244,9 +238,12 @@ def build_server(
         schema, and a startup pass is part of owning one.
         """
         model = await embedding.get()
-        # Every per-agent store, the agent's own and its workers': two
-        # levels down is what keeps the cabinet's own index out of it.
-        for path in sorted(agents_dir().glob("*/*.db")):
+        # Every per-agent store, the agent's own and its workers'.  Named by
+        # `slife2.paths` rather than globbed here: a `*/*.db` in this directory
+        # is not a description of a conversation store — `schedule.db` lives
+        # beside each `turns.db` and matched it — so this pass would open the
+        # scheduler's ledger as a `TurnStore` and write the turn schema into it.
+        for path in turn_dbs():
             await indexed(await _on_thread(TurnStore, path), model)
         try:
             yield {}
@@ -740,8 +737,15 @@ def build_server(
         # Published before the caller is told, and a failure here is not the
         # turn's problem: the in-memory rebuild stands on its own, and the next
         # turn publishes the list again.  What it costs is a restart that comes
-        # back one turn short — v1's trade, in the same place.
-        await _on_thread(store.set_context_turns, target)
+        # back one turn short — v1's trade, in the same place.  **Which is why
+        # this is guarded and not merely commented about**: as it was, the
+        # sentence described a tolerance the code did not have, so a busy or
+        # full disk raised out of `rebuild` and failed a turn whose answer the
+        # caller had already been handed.
+        try:
+            await _on_thread(store.set_context_turns, target)
+        except Exception as exc:  # noqa: BLE001 — the rebuild stands without it
+            logger.warning("context_list_not_published error=%s", exc)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d",
             len(target),

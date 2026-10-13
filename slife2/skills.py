@@ -157,6 +157,23 @@ class Skill:
         return self.directory / MANIFEST
 
 
+def _read(manifest: Path) -> str:
+    """A skill file's text, with a UTF-8 BOM tolerated.
+
+    **A `SKILL.md` from a Windows editor or an upstream download may begin with a
+    byte-order mark, and the fence check is a `strip()`** — `'\\ufeff---'.strip()`
+    is still `'\\ufeff---'`, and `'\\ufeff'.isspace()` is false — so a file that
+    plainly has frontmatter would read as one that has none.  The skill loses
+    its declared name, its description and every requirement it stated, and the
+    raw `---`/`name:`/`metadata:` header is handed to the model as the top of the
+    playbook.  `utf-8-sig` drops the mark when it is there and is plain UTF-8
+    when it is not, which is why every read of a skill file goes through here:
+    `scan` and `document` are the two, and a third reader would be a third place
+    where the mark silently wins.
+    """
+    return manifest.read_text(encoding="utf-8-sig")
+
+
 def split_frontmatter(content: str) -> tuple[str, str]:
     """A `SKILL.md` split into its header and its body.
 
@@ -273,7 +290,7 @@ def scan(directory: Path | None = None) -> list[Skill]:
         if not manifest.is_file():
             continue
         try:
-            content = manifest.read_text(encoding="utf-8")
+            content = _read(manifest)
         except OSError as exc:
             # Reported and *kept*: see the module docstring.  Empty content
             # takes the same path as a manifest with no header.
@@ -309,6 +326,38 @@ def find(name: str, directory: Path | None = None) -> Skill | None:
     return fallback
 
 
+def entry_for(skill: Skill, entries: Mapping[str, Any] | None) -> Any | None:
+    """The `skills:` entry that supplies *skill*, or `None`.
+
+    **A skill answers to two names and `skills:` may be keyed by either**, so
+    "which entry is this one given" is a single question — and it had two
+    answers.  The reader merged both entries with the directory winning per key,
+    while the catalogue row and the switch check took the frontmatter name
+    first; an operator who wrote both, with a different value under each, then
+    read that the same skill's requirements were met in one place and unmet in
+    another.  This is that question, asked once and answered the same way
+    everywhere — `use`, `catalogue` and `_settings` all go through it.
+
+    **The skill's own name wins when the two disagree**, exactly as it does in
+    :func:`find`: `name:` is the skill's declaration about itself where the
+    directory is only where somebody happened to put it, and the declaration is
+    the more deliberate of the two.  It is also the name the rest of the family
+    already treats as the skill's own — `skill_list` prints it, and
+    `skills_server._key_for` files a new entry under it — so a `skills:` entry
+    under the declared name is the operator answering the skill rather than the
+    folder it landed in.
+
+    `None` for an entry that is not there, and for *any* entry whose value is
+    `None`; an entry that is present but empty is returned as it is, because an
+    empty entry is a decision the operator wrote down and not an absence to
+    second-guess.
+    """
+    if not entries:
+        return None
+    found = entries.get(skill.name)
+    return found if found is not None else entries.get(skill.directory.name)
+
+
 def readiness(skill: Skill, supplied: Mapping[str, str] | None = None) -> str:
     """What the reader is told about a skill's declared needs, or `""`.
 
@@ -331,21 +380,41 @@ def readiness(skill: Skill, supplied: Mapping[str, str] | None = None) -> str:
     if not needs.declared:
         return ""
 
+    missing_env = [name for name in needs.env if not _present(name, supplied)]
+    missing_bins = [name for name in needs.bins if shutil.which(name) is None]
     missing = [
-        *(f"${name}" for name in needs.env if not _present(name, supplied)),
-        *(f"`{name}` on PATH" for name in needs.bins if shutil.which(name) is None),
+        *(f"${name}" for name in missing_env),
+        *(f"`{name}` on PATH" for name in missing_bins),
     ]
     if not missing:
         return f"This skill's requirements are met ({_declared(needs)})."
 
-    hint = (
-        f" Set it with `credstore set {needs.primary}`"
-        if needs.primary
-        else " Supply it under `skills:` in slife2.yaml"
-    )
+    # **One sentence per kind of need, because the two have different fixes.**
+    # A missing name and a missing program are not the same problem: `skills:`
+    # carries `env:` and nothing that can put anything on `PATH`, so telling a
+    # reader to supply a missing `ffmpeg` there sends it to a fix that cannot
+    # work — and telling it to `credstore set` a key while the thing it lacks is
+    # a binary is the same mistake from the other side.  Each sentence is
+    # emitted only for the kind that is actually short, so the advice names the
+    # thing the reader has to do and nothing it has already done.
+    hints: list[str] = []
+    if missing_env:
+        # The publisher's `primaryEnv` is the name to point at when it is one of
+        # the missing ones — the operator's `skills:` entry is expected to
+        # reference exactly that name, so `credstore set` is the whole fix.
+        # Otherwise the entry itself is what has to be written, which is what
+        # the second sentence says; naming a *satisfied* primary here would send
+        # the reader to a key it already has.
+        if needs.primary in missing_env:
+            hints.append(f"Set ${needs.primary} with `credstore set {needs.primary}`")
+        else:
+            hints.append("Supply it under `skills:` in slife2.yaml")
+    if missing_bins:
+        programs = ", ".join(f"`{name}`" for name in missing_bins)
+        hints.append(f"Install {programs} so it is on PATH")
     return (
         f"**This skill needs {' and '.join(missing)}, which is not configured — "
-        f"the commands below will fail until it is.**{hint}."
+        f"the commands below will fail until it is.** {' '.join(hints)}."
     )
 
 
@@ -383,7 +452,7 @@ def document(skill: Skill, note: str = "") -> str:
             has, and the caller's to report, because only the caller knows
             whether it is answering a model or a person.
     """
-    text = skill.manifest.read_text(encoding="utf-8")
+    text = _read(skill.manifest)
     root = skill.directory.parent.resolve()
     preamble = [
         f"> **Skills root:** `{root}`",
@@ -431,6 +500,21 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
     anything can find.
     """
     root = skills_dir()
+    if name.startswith("."):
+        # **A dot-name is the shape of the staging directory, and `scan` skips
+        # it.**  `install` stages into `.{name}.installing` and moves the old
+        # copy to `.{name}.replacing`, so the leading dot is reserved for the
+        # swap's own directories — and `scan` refuses to list one so that a
+        # `SIGKILL` in that window cannot become a catalogue row for a name
+        # nobody installed.  A skill an operator names `.notes` would therefore
+        # install, report success and be unfindable: no row, no `skill_list`
+        # line, and `skill_use` answering that no such skill exists.  Refused
+        # here, where the name is still the caller's to change.
+        raise ValueError(
+            f"{name!r} starts with a dot, and a dot-directory is reserved for "
+            f"the staging an install swaps through — `scan` never lists one, so "
+            f"this would be a skill nothing could find. Drop the leading dot."
+        )
     final = _within(root, name)
     if final == root.resolve():
         raise ValueError("a skill needs a name")
@@ -511,10 +595,12 @@ async def use(
         installed = ", ".join(one.name for one in scan()) or "(none installed)"
         return f"no skill called {name!r}. Installed: {installed}", False
 
-    # Both names, because a skill is addressed by either and the operator
-    # writing `skills:` has only one of them in front of them.
-    given = environments or {}
-    supplied = {**given.get(skill.name, {}), **given.get(skill.directory.name, {})}
+    # Which `skills:` entry supplies this skill is a single question with a
+    # single answer (`entry_for`), shared with the catalogue row and the switch
+    # check: asked three ways, one skill could be told its requirements were met
+    # by one caller and unmet by another, which is the disagreement that function
+    # exists to end.
+    supplied = entry_for(skill, environments)
 
     try:
         return document(skill, readiness(skill, supplied)), True
@@ -528,6 +614,7 @@ __all__ = [
     "Requirements",
     "Skill",
     "document",
+    "entry_for",
     "find",
     "frontmatter",
     "install",

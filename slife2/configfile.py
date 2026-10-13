@@ -48,17 +48,13 @@ from typing import Any, cast
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.tokens import CommentToken
 
 import slife2.timeouts as _T
 from slife2.config import Config, ConfigError, find_config_path, load
 from slife2.runtime import config_key, exclusive
 
 logger = logging.getLogger(__name__)
-
-#: How long a section edit waits for another process's edit to land.  A config
-#: write is a lock, a read, a rewrite and a validating parse — milliseconds —
-#: so anything near this bound means a writer that died holding the lock, and
-#: `exclusive` releases that in the kernel rather than after a timeout.
 
 
 def _yaml() -> YAML:
@@ -349,6 +345,124 @@ def _empty_section(document: CommentedMap, section: str) -> None:
         comments[3] = None
 
 
+def _tail_of(container: CommentedMap, name: str) -> tuple[Any, str]:
+    """The `(mapping, key)` *trailing* slot that carries the block introducing
+    the entry after `name`.
+
+    **ruamel does not store "the comment above `k2`" on `k2`.**  It stores it as
+    the comment that follows the last value of `k1` — or, when the commented
+    entry is the mapping's first key, as the mapping's own pending comment
+    (`ca.comment[1]`).  So a block a person reads as *introducing* an entry is,
+    to the parser, trailing whatever came before it, and the slot it lives in is
+    the deepest last position of that entry's value: a nested mapping's last
+    key, not the mapping itself.  Everything below is the consequence of that
+    one fact, which is not documented anywhere ruamel points a reader at.
+    """
+    holder: Any = container
+    key = name
+    node = container[name]
+    while isinstance(node, dict) and node:
+        inner = list(node)[-1]
+        holder, key, node = node, inner, node[inner]
+    return holder, key
+
+
+def _take_intro(container: CommentedMap, name: str) -> Any:
+    """Lift off the comment block that introduces the entry after `name`."""
+    holder, key = _tail_of(container, name)
+    slot = holder.ca.items.get(key)
+    if slot is None or len(slot) < 3 or slot[2] is None:
+        return None
+    taken = slot[2]
+    slot[2] = None
+    return taken
+
+
+def _put_intro(container: CommentedMap, name: str, block: Any) -> None:
+    """Hang *block* off `name`, where the entry that follows it will read it."""
+    holder, key = _tail_of(container, name)
+    slot = holder.ca.items.setdefault(key, [None, None, None, None])
+    while len(slot) < 4:
+        slot.append(None)
+    slot[2] = block
+
+
+def _as_pending(block: Any) -> Any:
+    """*block*, in the shape a mapping's pending slot holds.
+
+    **The two slots do not hold the same shape**, and the difference is
+    invisible until it is wrong.  What ruamel keeps *after* an entry's value
+    begins with the newline and indentation that put the comment on its own line
+    (`"\\n  # a\\n  # b\\n"`); what it keeps *above the first key* does not
+    (`"# a\\n  # b\\n"`) — there the renderer supplies the first line's indent
+    itself and writes every later line verbatim.  Moved across unchanged, a
+    comment renders as a blank line or lands at column zero.
+    """
+    value = str(block.value)
+    if value.startswith("\n"):
+        value = value[1:]
+        indent = len(value) - len(value.lstrip(" "))
+        value = value[indent:]
+    return CommentToken(value, block.start_mark, block.end_mark, block.column)
+
+
+def _put_first(
+    document: CommentedMap, section: str, current: CommentedMap, block: Any
+) -> None:
+    """Hang *block* above the first key of `section`, where ruamel reads it.
+
+    **Two slots, and both have to be written.**  A comment above a mapping's
+    first key is held twice — as the mapping's own pending comment
+    (`ca.comment[1]`) and as the parent's entry for that key
+    (`ca.items[section][3]`) — and the renderer prefers the parent's.
+    `_empty_section` found the same slot from the other direction, clearing it
+    so a deleted entry's comment would not print inside an emptied section; this
+    one writes it.  Setting only one leaves the comment that was already there,
+    which is the bug this is here to fix.
+    """
+    token = None if block is None else _as_pending(block)
+    current.ca.comment = [None, [token] if token is not None else None]
+    slot = document.ca.items.setdefault(section, [None, None, None, None])
+    while len(slot) < 4:
+        slot.append(None)
+    slot[3] = [token] if token is not None else None
+
+
+def _drop_entry(
+    current: CommentedMap, document: CommentedMap, section: str, name: str
+) -> None:
+    """Delete `section → name`, and leave every *other* entry's comment on it.
+
+    **The half of a removal that is about the file rather than the entry**, and
+    the reason it is more than `del`.  Deleting a key from a `CommentedMap`
+    moves two comment blocks, and the second move is wrong:
+
+    * the block that *introduced* the entry goes with it, which is right;
+    * the block that introduces the entry *after* it does too, because that is
+      where ruamel was keeping it (see `_tail_of`) — so a comment describing the
+      survivor is destroyed, and the deleted entry's own comment slides up over
+      the survivor in its place.
+
+    What is left is a comment about something that no longer exists, attached to
+    the one entry it is least true of: the failure `_empty_section` names for a
+    section's last entry, here for a middle one.  So the survivor's block is
+    lifted off the doomed entry *first* and re-hung where its entry now begins —
+    above the first key when the deleted entry was first, and otherwise off the
+    entry that is now before it.
+    """
+    names = list(current)
+    index = names.index(name)
+    survivor = _take_intro(current, name)
+    del current[name]
+    if not current:
+        _empty_section(document, section)
+        return
+    if index == 0:
+        _put_first(document, section, current, survivor)
+    else:
+        _put_intro(current, names[index - 1], survivor)
+
+
 def remove(section: str, name: str, *, path: Path | None = None) -> bool:
     """Delete *section* → *name*; True if it was there.
 
@@ -364,10 +478,8 @@ def remove(section: str, name: str, *, path: Path | None = None) -> bool:
         current = _section(document, section, create=False)
         if current is None or name not in current:
             return
-        del current[name]
+        _drop_entry(current, document, section, name)
         found = True
-        if not current:
-            _empty_section(document, section)
 
     _edit(target, mutate)
     logger.info("config_remove section=%s name=%s found=%s", section, name, found)
@@ -440,9 +552,11 @@ def update_entry(
         current = dict(raw) if isinstance(raw, dict) else {}
         result = change(current)
         if result is None:
-            values.pop(name, None)
-            if not values:
-                _empty_section(document, section)
+            if name in values:
+                # Through `_drop_entry`, not `pop`: a plain deletion takes the
+                # survivor's comment with it and leaves the deleted entry's own
+                # comment above a stranger (`configfile._drop_entry`).
+                _drop_entry(values, document, section, name)
         else:
             values[name] = CommentedMap(_without_empties(result))
 

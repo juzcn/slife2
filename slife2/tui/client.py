@@ -28,19 +28,6 @@ from slife2.tui.control import ATTACH, Handover
 from slife2.tui.control import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
-#: How long one of this client's *management* calls may take — `model_switch`,
-#: `reset`, `transcript`: a question to our own daemon that it answers from
-#: memory or from the store.
-#:
-#: **There is deliberately no number for the turn itself.**  A turn is several
-#: model calls plus tool runs, and one of those runs may legitimately take
-#: twenty minutes (a render); a clock here would be the thing that cut it off,
-#: and it would report the cut as a failure of the *loop* rather than as a
-#: limit somebody chose.  What bounds a turn is the turn: every step inside it
-#: is bounded where it is run, and the person watching has Esc — a deadline and
-#: a keyboard are two answers to one question, and the keyboard is the one that
-#: knows whether the thing being waited on is work or a hang.
-
 #: How every tool in this system says no: a sentence beginning with this, which
 #: a model reads as an answer and a person reads as a refusal.  Spelled once
 #: here because two callers now ask the same question of one answer — the app,
@@ -262,23 +249,36 @@ class MCPAgentClient:
         if client is not None:
             await close_server(client)
 
-    async def switch_model(self, ref: str) -> str:
+    async def _call_tool(self, name: str, payload: dict[str, Any]) -> Any:
+        """Call one management tool, stating the transport rule in one place.
+
+        **A transport failure drops the connection; a `ToolError` does not.**
+        That is the whole of what `model_switch`, `transcript` and
+        `answer_approval` have in common, and each of them spelled it out — three
+        copies of one `try`/`except`, differing only in a tool name and a payload,
+        which is exactly the shape a fourth caller copies *wrongly*.  Written once
+        here, the sentence the class docstring repeats three times is a statement
+        about this method rather than a rule the next one has to remember.
+
+        `ToolError` is re-raised untouched because it is the server *answering* —
+        a refusal it wrote for a person to read — and the connection is fine, so
+        dropping it would turn a bad request into a reconnect storm on every
+        retry.  Anything else is the transport itself, and dropping the client is
+        what lets the app's lazy retry reconnect instead of believing it is
+        connected to a server nothing is talking to (see `run_turn`).
+        """
         if self._client is None:
             raise ConnectionError("not connected")
         try:
-            result = await self._client.call_tool(
-                "model_switch", {"ref": ref}, timeout=self._timeout
-            )
+            return await self._client.call_tool(name, payload, timeout=self._timeout)
         except ToolError:
-            # The server answered and refused the *call* — the connection is
-            # fine, so it stays.
             raise
         except Exception:
-            # The transport itself is gone; dropping the client is what lets the
-            # app's lazy retry reconnect instead of believing it is connected to
-            # a server nothing is talking to.  See `run_turn`.
             await self.close()
             raise
+
+    async def switch_model(self, ref: str) -> str:
+        result = await self._call_tool("model_switch", {"ref": ref})
         answer = answer_of(result)
         # Adopted only when the server said it happened.  A refused switch wrote
         # nothing, so carrying the reference here would pin the next conversation
@@ -290,47 +290,28 @@ class MCPAgentClient:
     async def transcript(self) -> list[dict[str, Any]]:
         """Read the conversation back, for the window that has just opened.
 
-        The transport rule is `run_turn`'s, for `run_turn`'s reason: a failure
-        that is not the server *answering* means the connection is gone, and a
-        client that kept it would look connected to a server nothing is talking
-        to for the rest of the session.
+        The transport rule is `_call_tool`'s, for `_call_tool`'s reason: a
+        failure that is not the server *answering* means the connection is gone,
+        and a client that kept it would look connected to a server nothing is
+        talking to for the rest of the session.
         """
-        if self._client is None:
-            raise ConnectionError("not connected")
-        try:
-            result = await self._client.call_tool(
-                "transcript",
-                {"agent": self._agent, "subagent": self._subagent},
-                timeout=self._timeout,
-            )
-        except ToolError:
-            raise
-        except Exception:
-            await self.close()
-            raise
+        result = await self._call_tool(
+            "transcript", {"agent": self._agent, "subagent": self._subagent}
+        )
         turns = (result.data or {}).get("turns")
         return list(turns) if isinstance(turns, list) else []
 
     async def answer_approval(self, call_id: str, approved: bool) -> str:
         """Answer one `_approve` request.  See `AgentClient.answer_approval`."""
-        if self._client is None:
-            raise ConnectionError("not connected")
-        try:
-            result = await self._client.call_tool(
-                "answer_approval",
-                {
-                    "agent": self._agent,
-                    "subagent": self._subagent,
-                    "call_id": call_id,
-                    "approved": approved,
-                },
-                timeout=self._timeout,
-            )
-        except ToolError:
-            raise
-        except Exception:
-            await self.close()
-            raise
+        result = await self._call_tool(
+            "answer_approval",
+            {
+                "agent": self._agent,
+                "subagent": self._subagent,
+                "call_id": call_id,
+                "approved": approved,
+            },
+        )
         return str((result.data or {}).get("text") or "")
 
     async def run_turn(

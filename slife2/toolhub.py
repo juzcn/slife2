@@ -211,6 +211,7 @@ from slife2.mcp_server import (
 from slife2.paths import catalogue_db, data_dir
 from slife2.textindex import terms
 from slife2.toolclient import UpstreamTool
+from slife2.toolfamily import settle_attempts
 from slife2.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 
 logger = logging.getLogger(__name__)
@@ -377,16 +378,6 @@ INSTRUCTIONS = (
     "tools it lists are what the agent offers onwards."
 )
 
-#: How long the *first* ask for a tool list waits for connects already in
-#: flight, and it is a compromise between two silences.
-#:
-#: Answering instantly means a tool is missing from the first turn of a session
-#: whenever an upstream is still starting — and "the model did not have the tool
-#: yet" is invisible from the outside.  Waiting without a bound means a cold
-#: `npx` that has to download itself holds a turn open for a minute.  So: wait,
-#: but briefly and only for attempts that have already begun.  This is a cost
-#: paid once per daemon, not once per turn.
-
 #: How many names one `func_tool_load` may carry.  Each name is its own
 #: catalogue write and its own embedding call — the loop is a `for` over a hop
 #: rather than a batch — and the model's list is trimmed to the budget at every
@@ -457,6 +448,41 @@ class Catalogue:
         self._embedder = embedder
         self._store: ToolStore | None = None
         self._opening = asyncio.Lock()
+        #: Why the catalogue could not take each source's listing, keyed by
+        #: source — see `failure`, which is the only reader, and `merge`, which
+        #: is where it is written.
+        self._failed: dict[str, str] = {}
+
+    @property
+    def failure(self) -> str:
+        """Why the catalogue could not take a source's listing, or `""`.
+
+        **A catalogue that did not work is a broken system, and this is where
+        that fact is kept.**  Everything this process answers about the tool set
+        is a call to the catalogue, so the one thing that must not happen is the
+        failure being reported against the *source* that happened to be listed at
+        the time — "that tool server is broken" would send the operator to the
+        wrong place, which is the module docstring's third failure rule.
+
+        A *state* rather than a raised exception, because one of the callers runs
+        inside a connect attempt nothing awaits (`Upstream._listed`): an
+        exception raised there is retrieved by nobody and arrives, minutes later,
+        as asyncio's "Task exception was never retrieved" — a message naming no
+        server and no reason, which is worse than either.  Kept here, the reason
+        reaches `list_tools`, which fails the whole list with it, and `servers`,
+        which reports it (`build_server`).
+
+        **Keyed by source, because one source's success is not another's health.**
+        A single slot would be cleared by the next merge that worked — a plugin
+        whose rows are all unchanged, or one that offers no tool at all, embeds
+        nothing and so writes nothing — and the hub would be back to reporting a
+        listing it could not record as a source that is merely "connecting".  An
+        entry goes when a merge for *that* source works, which is exactly when
+        the fact stops being true.
+        """
+        return "; ".join(
+            f"{source}: {reason}" for source, reason in self._failed.items()
+        )
 
     async def store(self) -> ToolStore:
         if self._store is None:
@@ -490,15 +516,35 @@ class Catalogue:
         is the operator's `autoload: true`, which lives in the section the plugin
         that holds the source owns — so the plugin says it and the hub passes it
         on, exactly as liveness is passed on.
+
+        **A merge is where the catalogue's own health is learned**, which is why
+        the failure is recorded here rather than at each call site: every merge
+        goes through this one, whether it came from a plugin's `tools/list`, from
+        a declaration, or from this process's own rows at start-up.  A *refusal*
+        is the record answering and saying no, which is the catalogue working —
+        the data is not its — and only anything else is kept (`failure`).
         """
         store = await self.store()
-        return await store.merge(
-            source,
-            category,
-            list(tools),
-            embedder=await self._embedder(),
-            autoload=autoload,
-        )
+        try:
+            found = await store.merge(
+                source,
+                category,
+                list(tools),
+                embedder=await self._embedder(),
+                autoload=autoload,
+            )
+        except Exception as exc:  # noqa: BLE001 - `_refused` is the split, below
+            if _refused(exc):
+                # The record answered and said no, which is the catalogue
+                # working: this source is well again as far as it is concerned,
+                # whatever it was told.
+                self._failed.pop(source, None)
+            else:
+                self._failed[source] = f"{type(exc).__name__}: {exc}"
+                logger.warning("the tool catalogue did not take %s: %s", source, exc)
+            raise
+        self._failed.pop(source, None)
+        return found
 
     async def source_state(self, source: str, state: str) -> None:
         """Record the verdict on one source: `enabled` or `error`."""
@@ -515,7 +561,12 @@ class Catalogue:
         `slife2.db.ToolStore.forget_source` for why this deletes where an
         unreachable server's rows are only marked, and
         `ToolStore.reset` for the other moment the same thing has to happen.
+
+        Its failure is forgotten here with its rows, because this is the one
+        write after which no merge can clear it: nothing will declare the source
+        again, so `failure` would carry it for the life of the process.
         """
+        self._failed.pop(source, None)
         return [
             str(name)
             for name in await self._off_loop((await self.store()).forget_source, source)
@@ -851,12 +902,14 @@ class Upstream:
         which is what makes the row the one place a tool is described.
 
         Both failures here end the same way for this source and differently for
-        the system.  A *catalogue* that is not answering is a plugin gone, and it
-        is raised: it must not be reported as "that tool server is broken",
-        because the next ask would then look in the wrong place.  A db that
-        answered and *refused* — a name another source owns, say — is this
-        source's list that cannot be recorded, so it is this source that is
-        unusable until it is fixed.
+        the system.  A *catalogue* that did not work is a broken system too, and
+        it is neither filed against this source nor raised: `Catalogue.merge` has
+        recorded it, the next `list_tools` fails the whole list with the real
+        reason, and `servers` reports it — see the `except` below for why raising
+        here would be the same as saying nothing.  A db that answered and
+        *refused* — a name another source owns, say — is this source's list that
+        cannot be recorded, so it is this source that is unusable until it is
+        fixed.
         """
         #: Read off the *raw* listing and not off `offered`: this is the one tool
         #: a source has that the model must never be given, so the audience gate
@@ -885,9 +938,15 @@ class Upstream:
             await self._connection.disconnect()
             if not _refused(exc):
                 # The catalogue itself did not work, which is not this source's
-                # problem and must not be filed as one: `list_tools` fails the
-                # whole list rather than quietly losing a server's tools.
-                raise
+                # problem and must not be filed as one.  It is **not re-raised**,
+                # and that is not a swallowed failure: this runs inside the
+                # connect attempt `Connection.connecting` started, which nothing
+                # awaits (`settle` uses `asyncio.wait`, which does not re-raise a
+                # child), so an exception raised here is retrieved by nobody and
+                # arrives later as asyncio's "Task exception was never
+                # retrieved" — naming no server and no reason.  The reason is the
+                # one thing worth keeping, and `Catalogue.merge` has kept it.
+                return
             self._connection.fail(exc)
             return
         # Both counts, because the interesting number when a tool is missing is
@@ -1013,7 +1072,23 @@ class Upstream:
         """
         if not self._connection.usable or not self._declares:
             return []
-        text, ok = await self.call(LIST_SOURCES, {})
+        # **The one call in this process that no caller bounds.**  Every other
+        # `call` here runs inside a turn, where the loop holds the model's own
+        # `_timeout`; this one runs from `refresh_declared`, which `start()` and
+        # the first `list_tools` reach before any turn exists — and
+        # `gateway.make_client` deliberately sets no client-wide deadline, so
+        # without this a plugin that accepted the connection and then never
+        # answered would hold the hub's first listing open for good.  The bound is
+        # the connect budget, which is what this await has always effectively had.
+        try:
+            async with asyncio.timeout(_T.timeouts.ready.connect_tools):
+                text, ok = await self.call(LIST_SOURCES, {})
+        except TimeoutError:
+            raise ConnectionError(
+                f"{self.settings.name} took too long to say what it holds "
+                f"({_T.timeouts.ready.connect_tools:.0f}s); it is running but not "
+                f"answering `{LIST_SOURCES}`"
+            ) from None
         if not ok:
             raise ConnectionError(
                 f"{self.settings.name} is not answering ({text or 'no answer'})"
@@ -1106,6 +1181,13 @@ class Upstream:
                 )
             except Exception as exc:  # noqa: BLE001 - split by _refused, below
                 if not _refused(exc):
+                    # The catalogue itself did not work, and it has recorded the
+                    # reason (`Catalogue.merge`).  The raise stays here where it
+                    # does not in `_listed`, because this one is awaited by the
+                    # caller that asked: aborting the declaration is what keeps a
+                    # source whose rows failed to merge from being read as one
+                    # the plugin has stopped holding — which would delete its
+                    # rows (`declare`, at the end of its own loop).
                     raise
                 # Refused rows are this *source's* problem: it is the thing that
                 # offered a name somebody else already owns, and the rest of the
@@ -1518,11 +1600,7 @@ async def unload_tools(
             refused.append(name)
             continue
         outcome = str((await catalogue.set_load(name, "unloaded")).get("outcome") or "")
-        if outcome == "unloaded":
-            unloaded.append(name)
-        elif outcome == "already":
-            not_loaded.append(name)
-        elif outcome == "unknown":
+        if outcome == "unknown":
             # A name nothing holds.  Not a refusal, and saying so as one would
             # be the opposite of true: "refused, the system needs them" tells a
             # caller that a tool it invented is a tool this process protects.
@@ -1533,8 +1611,20 @@ async def unload_tools(
             # sibling `_load_as_text` splits this outcome out for the same
             # reason, and the fallback below used to answer for both of them.
             no_load_state.append(name)
+        elif outcome == "already":
+            not_loaded.append(name)
         else:
-            refused.append(name)
+            # **There is no fifth outcome to fall through to, and that is a
+            # property of the store rather than a hope**: asking for `unloaded`
+            # can only answer `unknown`, `no_load_state`, `already` or the move
+            # itself, because `_load_outcome` reaches `disabled`/`error` for a
+            # *load* alone (`slife2.db._load_outcome`).  So this arm is the
+            # `unloaded` one, and the `else` that used to sit here — sending
+            # whatever was left to `refused` — described an outcome nothing can
+            # produce.  It is how a reader came to believe a fifth existed, and
+            # that a *row* could be "refused (the system needs them)"; `refused`
+            # is only ever the names above it.
+            unloaded.append(name)
     return {
         "unloaded": unloaded,
         "refused": refused,
@@ -2101,6 +2191,19 @@ def build_server(
     held: dict[str, DeclaredSource] = {}
     #: And who holds each one, which is the route a call takes.
     holders: dict[str, Upstream] = {}
+    #: **One refresh at a time**, and this process is the one that has to say so:
+    #: the hub answers every conversation in the system, so two asks arriving
+    #: together — two turns, or a turn and a search — would otherwise declare the
+    #: same plugin twice at once.  Two things break when that happens, and the
+    #: second is why a lock and not a repair: `ToolStore.merge` *plans* its writes
+    #: and applies them in a second pass with an embed in between
+    #: (`slife2.db`), so two overlapping merges of one source are a check-then-act
+    #: race on the tool table's primary key — and the two swaps of `held` and
+    #: `holders` can interleave, leaving a source held with the route to another
+    #: plugin's connection.  It is a small critical section: `refresh_declared`'s
+    #: body is plugin round trips and catalogues, and nothing a reader of
+    #: `live_sources` can see (the swap at the end has no await in it).
+    refresh_lock = asyncio.Lock()
 
     def by_source(name: str) -> Upstream | None:
         """Who to ask for one source: the connection we hold, or the plugin.
@@ -2168,37 +2271,57 @@ def build_server(
         the function between an emptying and a filling would see no declared
         source at all and hand its model a list missing every external tool; the
         swap has no await in it, so no reader can see a half-built set.
+
+        **And one refresh at a time** (`refresh_lock`), for the same fact seen
+        from the other side: two asks arriving at once would each run this, and
+        two overlapping merges of one source are a race on the tool table's
+        primary key (`slife2.db.ToolStore.merge` plans and applies in two halves).
+        An ask that arrives during one waits for it; what it waits for is one
+        round trip to a plugin, and what it buys is not merging a source twice.
         """
-        begin_connecting()
-        known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
-        found: dict[str, DeclaredSource] = {}
-        owners: dict[str, Upstream] = {}
-        for upstream in upstreams:
-            if not upstream.usable:
-                continue
-            for one in await upstream.declare():
-                if one.name in known:
-                    logger.warning(
-                        "%s: %r is a name this hub is already connected under",
-                        upstream.settings.name,
-                        one.name,
-                    )
+        async with refresh_lock:
+            begin_connecting()
+            known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
+            found: dict[str, DeclaredSource] = {}
+            owners: dict[str, Upstream] = {}
+            for upstream in upstreams:
+                if not upstream.usable:
                     continue
-                if one.name in owners:
-                    logger.warning(
-                        "%s: %r is already declared by %s",
-                        upstream.settings.name,
-                        one.name,
-                        owners[one.name].settings.name,
-                    )
-                    continue
-                known.add(one.name)
-                found[one.name] = one
-                owners[one.name] = upstream
-        held.clear()
-        held.update(found)
-        holders.clear()
-        holders.update(owners)
+                for one in await upstream.declare():
+                    if one.name in known:
+                        logger.warning(
+                            "%s: %r is a name this hub is already connected under",
+                            upstream.settings.name,
+                            one.name,
+                        )
+                        continue
+                    if one.name in owners:
+                        logger.warning(
+                            "%s: %r is already declared by %s",
+                            upstream.settings.name,
+                            one.name,
+                            owners[one.name].settings.name,
+                        )
+                        continue
+                    known.add(one.name)
+                    found[one.name] = one
+                    owners[one.name] = upstream
+            held.clear()
+            held.update(found)
+            holders.clear()
+            holders.update(owners)
+
+    def autoload_sources() -> list[str]:
+        """The declared sources the budget may never take back.
+
+        The operator's `autoload: true`, which the hub has to supply because the
+        store cannot read the sections these sources were configured in
+        (`slife2.db.ToolStore.evict`).  **One callable for its two readers** —
+        `local_tools`' `_func_tool_unload` body and this process's own
+        `_func_tool_unload` tool — because a set rebuilt by hand in the second
+        place is a set the first one can stop agreeing with.
+        """
+        return [one.name for one in held.values() if one.autoload]
 
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
@@ -2210,7 +2333,7 @@ def build_server(
         catalogue,
         live_sources,
         refresh_declared,
-        lambda: [one.name for one in held.values() if one.autoload],
+        autoload_sources,
     )
 
     def local_route(name: str) -> LocalTool | None:
@@ -2234,25 +2357,41 @@ def build_server(
             upstream.connecting()
 
     async def settle() -> None:
-        """Let attempts already in flight finish, briefly.  See
-        `ready.list_settle`.
+        """Let the attempts this process started finish, briefly.
 
-        **Wait, never cancel.**  The obvious spelling of this is
-        `asyncio.gather(*pending)` under `asyncio.timeout`, and it is wrong in a
-        way that took a live run to see: on timeout the timeout cancels *this*
-        task, the cancellation propagates into the gather, and the connect being
-        waited for dies with it — leaving the upstream `idle` with no error and
-        no tools, which is the one state that describes nothing.  A caller's
-        patience has nothing to do with whether a connection should continue.
+        `slife2.toolfamily.settle_attempts` is the wait and the rule behind it
+        ("wait, never cancel") — this half is only *which* attempts: the links to
+        the plugins, where the family's is the entries of one config section.
 
         Measured against the real `arxiv` endpoint, the first connect takes
         longer than this window: the first call now answers `connecting` and
         leaves the attempt alone, and the second finds it ready.
         """
-        pending = [attempt for upstream in upstreams if (attempt := upstream.attempt)]
-        if not pending:
-            return
-        await asyncio.wait(pending, timeout=_T.timeouts.ready.list_settle)
+        await settle_attempts(upstream.attempt for upstream in upstreams)
+
+    async def refresh() -> None:
+        """Bring the links and the declarations up to date, briefly.
+
+        **The three steps are one thing, and it is the ask's.**  Everything the
+        hub answers about the tool set is read off the catalogue and off
+        `live_sources`, and both are only as fresh as the last time the links were
+        asked: a plugin that has just come up is a source with no rows yet, and a
+        plugin that has just gone down is one whose rows the gate would still hand
+        over.  So an ask starts the attempts that are not running
+        (`begin_connecting`), gives the ones that are a moment (`settle`), and
+        re-reads what every plugin *holds* (`refresh_declared`).
+
+        **Three calls and not one because the middle one is the only one that
+        waits**, and it is deliberately bounded: a plugin that is still starting
+        is left out of this answer rather than waited for, because waiting on it
+        properly would hold a turn open for as long as an `npx` takes to install
+        itself.  A search asks for the declarations alone — `local_tools`'
+        `search` calls `refresh_declared` directly — because a search must not
+        wait at all.
+        """
+        begin_connecting()
+        await settle()
+        await refresh_declared()
 
     async def start() -> None:
         """What the hub does before it serves anything.
@@ -2272,13 +2411,10 @@ def build_server(
         plugin that is still starting be one of them, and one that is not is
         asked again by the next ask (`refresh_declared`).
         """
-        category = PLUGIN
         await catalogue.merge(
-            CONFIG_KEY, category, [_row_of(CONFIG_KEY, one.tool) for one in local]
+            CONFIG_KEY, PLUGIN, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
-        begin_connecting()
-        await settle()
-        await refresh_declared()
+        await refresh()
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -2350,9 +2486,19 @@ def build_server(
         # now comes from what a plugin last said rather than from a connection
         # this process holds.  Without this, a source that had just gone down
         # would keep its tools in the model's list for one more call.
-        begin_connecting()
-        await settle()
-        await refresh_declared()
+        await refresh()
+
+        # **The catalogue's own failure comes first, and it is first because it
+        # is what made a plugin look broken.**  A listing the catalogue could not
+        # record drops that source's link (`Upstream._listed`), so `missing`
+        # below would name the source as one that is "connecting" — about a
+        # plugin that answered, and for a reason the operator could never see.
+        # The module's third failure rule is the argument: a broken catalogue
+        # fails the list rather than being filed as somebody's server.
+        if catalogue.failure:
+            raise ConnectionError(
+                f"the tool catalogue is not working — {catalogue.failure}"
+            )
 
         missing = [
             row
@@ -2441,9 +2587,7 @@ def build_server(
             # since would otherwise fall through to "not a server this hub is
             # configured with any more" — a false statement about a tool the
             # operator wrote down.
-            begin_connecting()
-            await settle()
-            await refresh_declared()
+            await refresh()
             row = await catalogue.route(name)
         if row is None:
             return {"text": await unknown_tool(name), "ok": False}
@@ -2571,7 +2715,7 @@ def build_server(
             catalogue,
             live_sources(),
             list(names or []),
-            [one.name for one in held.values() if one.autoload],
+            autoload_sources(),
         )
         return {**found, "text": _unload_as_text(found)}
 
@@ -2585,6 +2729,12 @@ def build_server(
         different problems that look identical from the tool list.
 
         Returns:
+            `catalogue` — `""`, or why the catalogue last failed to record a
+            source's tools.  Every row below is read off it, so a catalogue that
+            is not working is the reason the counts are stale or a source reads
+            as one that is not answering; it has no name to be a row under,
+            because it is not a source of tools but the file they live in.
+
             `servers`: one row per source of tools — `name`, `kind` (`mcp`,
             `rest` or `plugin`), `transport`, `state` (`ready`, `connecting`,
             `failed`, `idle` or `off`), how many `tools` it last offered, how
@@ -2614,11 +2764,19 @@ def build_server(
         # what a source offers is a row, and what the model *holds* is a row this
         # process would hand over — so a server that is down must not be reported
         # as one whose tools are loaded (`slife2.db.ToolStore.source_counts`).
-        begin_connecting()
-        await settle()
-        await refresh_declared()
+        await refresh()
+
+        # **And the catalogue's own health is a field of this answer rather than
+        # a row**, because it is not a source: it is the file every row below
+        # comes from, so a catalogue that could not record a listing is the
+        # reason a source reads as one that is not answering — and it has no name
+        # of its own to be a row under.  `""` is the ordinary answer, and this is
+        # deliberately not a raise: this is the tool that is supposed to tell the
+        # three problems apart, and failing it would leave the operator with
+        # nothing to read at all.
         counts = await catalogue.sources(live_sources())
         return {
+            "catalogue": catalogue.failure,
             "servers": [
                 *(
                     upstream.snapshot(counts.get(upstream.settings.name))
@@ -2636,7 +2794,7 @@ def build_server(
                     for one in held.values()
                     if one.transport
                 ),
-            ]
+            ],
         }
 
     return mcp

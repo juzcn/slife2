@@ -35,6 +35,7 @@ from datetime import datetime
 from typing import Any
 
 from slife2.prompt import render
+from slife2.timeutil import can_place
 
 #: The discriminator's instruction, shipped as a template for the reason the
 #: system prompt is: it is text with holes in it, and a template says where they
@@ -215,6 +216,11 @@ def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
     its own has still answered the question that was asked.  A *value* of the
     wrong type is different — that is a reply whose condition cannot be read, and
     acting on half of it would be worse than keeping the context.
+
+    A value of the right type in a grammar this build does not speak is the same
+    thing as a wrong type, and refused the same way.  `anchor` has always been
+    checked that way; `since` and `until` were not, and were handed to the store
+    to raise on (see the note at the check below).
     """
     if raw is None:
         return None
@@ -227,6 +233,18 @@ def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
     anchor = raw.get("anchor")
     if anchor is not None and anchor not in ANCHORS:
         return REJECTED
+    # **A bound the store cannot place is the third kind of unreadable value.**
+    # `since` and `until` are checked as *strings* above and for grammar here,
+    # because the two are different questions: `2026-13-99` is the right type
+    # and in no grammar this build speaks.  Left to the store it would raise
+    # `InvalidTimeBound` from inside a query, and the exception would fail the
+    # whole turn — the discriminator's answer is not a caller the harness can
+    # hand a refusal back to.  `slife2.timeutil.can_place` is the store's own
+    # question asked while the answer is still "drop this reply".
+    for key in ("since", "until"):
+        bound = raw.get(key)
+        if bound and not can_place(bound, role=key):
+            return REJECTED
     condition = {key: raw.get(key) for key in RECALL_KEYS}
     # Nothing filled in is the same answer as no `recall` field at all, and it
     # has to be normalised here: a store asked for nothing at all cannot answer,
@@ -363,10 +381,17 @@ def fit_window(
 
 
 def _format_moment(value: str) -> str:
-    """An ISO timestamp as `YYYY-MM-DD HH:MM`, or `""` if it will not parse.
+    """An ISO timestamp as `YYYY-MM-DD HH:MM`; anything else, unchanged.
 
     Truncated to the minute because the footnote is read by a model deciding
     whether a turn is the one it wants, and seconds are noise at that decision.
+
+    **A stamp that will not parse comes back as it was written**, not as `""`.
+    The two are different claims — an empty field says "there is no time here",
+    and the raw text says what the column actually holds, which is the answer
+    somebody looking at a hand-edited or restored file needs.  It is safe to
+    pass on because the footnote is a `json.dumps` of its payload: whatever the
+    stamp turns out to be, it is escaped before a model ever reads it.
     """
     if not value:
         return ""

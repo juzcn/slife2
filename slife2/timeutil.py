@@ -224,3 +224,28 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             resolved = at(moment)
 
     return resolved
+
+
+def can_place(value: str, *, role: str = "since") -> bool:
+    """Whether :func:`normalize_bound` can place *value* — the question a caller
+    asks while a bad bound is still something it can decide about.
+
+    **The same knowledge, asked before the raise instead of after it.**  A
+    caller that hands a model-written bound straight to the store finds out it
+    is unreadable as an `InvalidTimeBound` out of the middle of a query — which
+    is the right thing for a caller with no answer, and the wrong thing for one
+    that has a better answer available.  `slife2.context`'s discriminator reply
+    is the second kind: a bound it cannot place is a reply it should drop, and
+    an exception out of there fails a whole turn that had a perfectly good
+    fallback.
+
+    A predicate rather than a second parser: `"now"`, a period word, a relative
+    phrase and an ISO spelling are four grammars this module speaks, and a
+    caller that reimplemented "is this one of them" would be the second place a
+    grammar is written down.
+    """
+    try:
+        normalize_bound(value, role=role)
+    except InvalidTimeBound:
+        return False
+    return True

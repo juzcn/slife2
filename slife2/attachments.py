@@ -183,13 +183,26 @@ def inject(messages: MutableSequence[Any], images: Sequence[str]) -> bool:
             if isinstance(content, str)
             else list(content or [])
         )
-        built += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+        built += [_image_part(url) for url in images]
         if isinstance(message, dict):
             message["content"] = built
         else:
             message.content = built
         return True
     return False
+
+
+def _image_part(url: str) -> dict[str, Any]:
+    """One image, as the wire spells it.
+
+    **One site, because the module's whole argument is that the two routes must
+    not come to different conclusions.**  `inject` and `parts` are the two ways
+    a picture reaches a conversation — a tool adding one mid-turn and a caller
+    naming one up front — and between them this literal was written twice.  It
+    is a wire shape rather than a policy, so the two would not have disagreed
+    about anything yet; the next field that joins it is where they would.
+    """
+    return {"type": "image_url", "image_url": {"url": url}}
 
 
 def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
@@ -202,7 +215,7 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
     """
     return [
         {"type": "text", "text": prompt},
-        *({"type": "image_url", "image_url": {"url": url}} for url in urls),
+        *(_image_part(url) for url in urls),
     ]
 
 

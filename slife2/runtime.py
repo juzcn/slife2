@@ -25,16 +25,15 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import slife2.timeouts as _T
 from slife2.clock import now
 from slife2.paths import runtime_dir
-
-#: How long to wait for another launcher to finish starting a server.
 
 #: How large a daemon's log may grow before the next start truncates it.  Logs
 #: here are diagnostics nobody is expected to read in full, so the ceiling is a
@@ -164,16 +163,60 @@ class ServerRecord:
         )
 
 
-def read_record(url: str) -> ServerRecord | None:
-    """Read a record, or None when it is missing or unreadable.
+def _read_json_dataclass[RecordT](
+    path: Path, factory: Callable[[dict[str, Any]], RecordT]
+) -> RecordT | None:
+    """Read the JSON object at `path` and hand it to `factory`, or None.
 
-    A corrupt record is treated as absent rather than raised on: it is
-    bookkeeping, and refusing to start because a crash truncated a bookkeeping
-    file would be a worse failure than losing a pid.
+    **A file that is missing, truncated or malformed reads as absent, not as an
+    error.**  Both files this reads are bookkeeping — a record names a pid, a
+    claim names a holder — and refusing to start because a crash truncated one
+    would be a worse failure than losing the number it held.  `factory` is the
+    half each caller answers for itself: which fields it needs, and which a
+    release older than this one may have written without.
+
+    The broad `except` is the point rather than a shortcut, and each arm is a
+    different way the file fails to be one: `read_text` raises `OSError` when it
+    is not there, `json` raises `ValueError` when the text is not JSON, and
+    `factory` raises `KeyError`/`TypeError`/`ValueError` when the object is not
+    the shape it expects.  All four mean the same thing to a reader here.
     """
     try:
-        raw = json.loads(record_path(url).read_text(encoding="utf-8"))
-        return ServerRecord(
+        return factory(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_json_atomic(path: Path, obj: Any) -> None:
+    """Serialise `obj`'s dataclass fields to `path`, atomically and quietly.
+
+    **Written to a temporary file and renamed**, so a reader running
+    concurrently — every `status`, or another instance's claim check — can never
+    catch a half-written file.  The rename is atomic on both platforms this runs
+    on, so a reader sees the whole of the old file or the whole of the new one;
+    `write_claim` argues what catching the middle would cost, and it is why that
+    file of all of them has to come through here.
+
+    Suppressed on the way out, because this is bookkeeping at a moment the
+    caller is not prepared to fail over: raising would turn a full disk into a
+    `status` that crashes and a start that refuses to run.
+    """
+    tmp = path.with_suffix(".tmp")
+    with contextlib.suppress(OSError):
+        tmp.write_text(json.dumps(asdict(obj), indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+
+
+def read_record(url: str) -> ServerRecord | None:
+    """Read a record, or None when it is missing, unreadable or corrupt.
+
+    The reading rules are `_read_json_dataclass`'s; what belongs to a record is
+    its shape — which fields it must carry, and which an older release may have
+    left out.
+    """
+    return _read_json_dataclass(
+        record_path(url),
+        lambda raw: ServerRecord(
             name=str(raw["name"]),
             url=str(raw["url"]),
             pid=int(raw["pid"]),
@@ -181,22 +224,13 @@ def read_record(url: str) -> ServerRecord | None:
             config=str(raw.get("config") or ""),
             version=str(raw.get("version") or ""),
             started_at=str(raw.get("started_at") or ""),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        ),
+    )
 
 
 def write_record(record: ServerRecord) -> None:
-    """Record a running server, atomically.
-
-    Written to a temporary file and renamed, so a `status` running concurrently
-    can never read a half-written record.
-    """
-    path = record_path(record.url)
-    tmp = path.with_suffix(".tmp")
-    with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(asdict(record), indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+    """Record a running server, atomically — `_write_json_atomic` is the how."""
+    _write_json_atomic(record_path(record.url), record)
 
 
 def clear_record(url: str) -> None:
@@ -231,33 +265,29 @@ class AgentClaim:
 
 def read_claim(name: str) -> AgentClaim | None:
     """Read an agent's claim, or None when there is not a readable one."""
-    try:
-        raw = json.loads(agent_claim_path(name).read_text(encoding="utf-8"))
-        return AgentClaim(
+    return _read_json_dataclass(
+        agent_claim_path(name),
+        lambda raw: AgentClaim(
             name=str(raw["name"]),
             pid=int(raw["pid"]),
             start_token=str(raw.get("start_token") or ""),
             started_at=str(raw.get("started_at") or ""),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        ),
+    )
 
 
 def write_claim(claim: AgentClaim) -> None:
     """Claim an agent name, atomically.
 
-    Temporary-and-rename like `write_record`, and for the same reason: this is
-    the file two instances race over — `--agent` is exclusive, and the loser is
-    decided by what it reads here — so a reader that catches a half-written
-    claim does not compare against a name, it fails to parse one and takes the
-    name for free.  The window is small and the failure is exactly the one this
-    file exists to prevent.
+    `_write_json_atomic` is the mechanic; what has to stay said here is *why
+    this file of all of them* needs it.  This is the one two instances race
+    over — `--agent` is exclusive, and the loser is decided by what it reads
+    here — so a reader that catches a half-written claim does not compare
+    against a name, it fails to parse one and takes the name for free.  The
+    window is small and the failure is exactly the one this file exists to
+    prevent.
     """
-    path = agent_claim_path(claim.name)
-    tmp = path.with_suffix(".tmp")
-    with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(asdict(claim), indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+    _write_json_atomic(agent_claim_path(claim.name), claim)
 
 
 def clear_claim(name: str) -> None:
@@ -540,7 +570,7 @@ def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool
 
 
 @contextlib.contextmanager
-def exclusive(key: str, *, timeout: float = _T.timeouts.grace.lock) -> Generator[None]:
+def exclusive(key: str, *, timeout: float | None = None) -> Generator[None]:
     """Hold a named lock, released by the OS if the holder dies.
 
     The primitive behind both the per-server start lock and the per-agent name
@@ -565,7 +595,7 @@ def exclusive(key: str, *, timeout: float = _T.timeouts.grace.lock) -> Generator
 
 
 @contextlib.contextmanager
-def start_lock(url: str, *, timeout: float = _T.timeouts.grace.lock) -> Generator[None]:
+def start_lock(url: str, *, timeout: float | None = None) -> Generator[None]:
     """Hold the exclusive right to start the server at `url`.
 
     Probe, spawn and wait-for-ready all happen inside this, so two launchers
@@ -712,6 +742,44 @@ def _truncate_if_huge(path: Path) -> None:
             path.unlink()
 
 
+def _signal_tree(pid: int, sig: int) -> None:
+    """Send `sig` to a process, and to what it spawned, as far as allowed.
+
+    **The group, not only the process**, so that what a server spawned in turn
+    goes with it — `spawn` sets `start_new_session=True`, which is what makes the
+    child a group leader.  Checked rather than assumed: a server started by hand
+    writes its own record, and a pid that is not a group leader makes `killpg`
+    raise ESRCH (suppressed, so `down` would report a failure while the daemon
+    kept running) — or, worse, signal whatever unrelated group happens to own
+    that number.
+
+    **A pid that vanished between the caller's last check and here is not an
+    error.**  `os.getpgid` raises `ProcessLookupError` for a process that is
+    already gone, which is the state the caller was aiming for, so it is read as
+    "there is nothing left to signal" rather than allowed to escape.  That is
+    why the lookup is inside a function and guarded rather than inlined: a
+    plugin that exits during the grace poll — or between the deadline and the
+    force — would otherwise turn a successful stop into a `ProcessLookupError`
+    out of `terminate`, and `slife2 down` would report a crash for a daemon that
+    stopped exactly as asked.
+    """
+    if sys.platform == "win32":
+        # Windows stops a tree with `taskkill /T` inside `terminate` and never
+        # reaches here.  The branch is named so the two POSIX-only calls below
+        # are provably POSIX-only to a type checker — `os.killpg` is absent from
+        # `os` on Windows, which is where this project is developed.
+        return
+    try:
+        leader = os.getpgid(pid) == pid
+    except ProcessLookupError:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if leader:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+
+
 def terminate(pid: int, *, grace: float | None = None) -> bool:
     """Stop a process and its children, returning whether it is gone.
 
@@ -736,19 +804,7 @@ def terminate(pid: int, *, grace: float | None = None) -> bool:
     else:
         import signal
 
-        # The group, not only the process, so that what a server spawned in
-        # turn goes with it — `spawn` sets `start_new_session=True`, which is
-        # what makes the child a group leader.  Checked rather than assumed: a
-        # server started by hand writes its own record, and a pid that is not
-        # a group leader makes `killpg` raise ESRCH (suppressed, so `down`
-        # would report a failure while the daemon kept running) — or, worse,
-        # signal whatever unrelated group happens to own that number.
-        if os.getpgid(pid) == pid:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pid, signal.SIGTERM)
-        else:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGTERM)
+        _signal_tree(pid, signal.SIGTERM)
 
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
@@ -760,17 +816,12 @@ def terminate(pid: int, *, grace: float | None = None) -> bool:
         import signal
 
         # **The same branch the polite signal takes, and it has to be.**  A pid
-        # that is not a group leader — a server started by hand, which the
-        # comment above names — has no group to signal, so an unconditional
+        # that is not a group leader — a server started by hand, which
+        # `_signal_tree` names — has no group to signal, so an unconditional
         # `killpg` is suppressed ESRCH and this returns False with the daemon
         # still running: the one case where the force is needed is the one where
         # it was never sent.
-        if os.getpgid(pid) == pid:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pid, signal.SIGKILL)
-        else:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
+        _signal_tree(pid, signal.SIGKILL)
         time.sleep(_T.timeouts.pacing.lock_poll)
 
     return not pid_alive(pid)

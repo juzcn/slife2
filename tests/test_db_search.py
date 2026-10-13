@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from slife2 import textindex
+from slife2 import db, textindex
 from slife2.db import (
     EMBED_CHUNK_CHARS,
     TurnStore,
@@ -25,6 +25,7 @@ from slife2.db import (
     embed_chunks,
     embed_text,
     fuse_ranked,
+    rows_in_order,
     searchable_text,
 )
 from slife2.textindex import EmptyQuery
@@ -439,6 +440,57 @@ async def test_changing_the_model_reindexes_every_turn(tmp_path) -> None:
     assert store._turns_without_vectors() == []
     status = store.index_status(second)
     assert status["ready"] and status["vectors"] == len(CORPUS)
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_embeds_the_turns_in_batches(tmp_path, monkeypatch) -> None:
+    """**A changed model makes every turn missing**, so one request per turn is a
+    round trip per turn of the log.
+
+    `SYNC_BATCH`'s own docstring reads as if it bounds this path, and both other
+    stores keep it (`ToolStore.sync_indexes`, `CabinetStore.sync`); this loop was
+    the one that awaited `embed` once per missing turn.  The division stays what
+    the other two state — the store bounds a call and the caller finishes the
+    index — but the call carries a batch rather than one turn.
+    """
+    monkeypatch.setattr(db, "SYNC_BATCH", 2)
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _corpus(store, StubEmbedder())
+    second = StubEmbedder(identity="stub:two")
+
+    await store.sync_indexes(second)
+
+    assert [len(call) for call in second.calls] == [2, 1], "three turns, two requests"
+    assert store.index_status(second)["ready"]
+
+
+@pytest.mark.asyncio
+async def test_a_bound_list_is_capped_before_sqlite_sees_it(tmp_path) -> None:
+    """**The cap belongs on the fused list**, and this is the query that binds it.
+
+    Nothing the caller passes bounds a search's shortlist: every question brings
+    up to `limit * 4` ids of its own and the keyword leg as many again, so about
+    forty sentences reach SQLite's ceiling for bound variables (32766, measured)
+    and raise `OperationalError: too many SQL variables` — a search that does not
+    answer at all, where the best of a truncated candidate list still answers.
+    All three stores read their page through this one query, which is where the
+    cap therefore is.  Forty thousand ids is under no SQLite's limit unless
+    something truncates.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())
+
+    with store._connect() as connection:
+        rows = rows_in_order(
+            connection,
+            [1, *range(2, 40_000)],
+            select="SELECT rowid AS turn_id, * FROM turn",
+            column="rowid",
+            key="turn_id",
+            limit=5,
+        )
+
+    assert [int(row["turn_id"]) for row in rows] == [1], "the top of the order"
 
 
 @pytest.mark.asyncio

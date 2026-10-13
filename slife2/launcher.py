@@ -69,7 +69,6 @@ from slife2.runtime import (
     read_claim,
     read_record,
     register_client,
-    same_client,
     same_process,
     spawn,
     start_lock,
@@ -195,28 +194,6 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
 #: protocol it speaks — adding one changes a dict in the config, not this file.
 MODEL_TOOL = "stream_chat"
 BACKEND_PREFIX = "llm:"
-
-#: How long a server may take to answer after being spawned.  Generous enough
-#: for a cold import of a provider SDK, short enough to be a deadline.
-#:
-#: **Ninety, and the number was raised from thirty by measurement.**  Every
-#: server here imports the MCP stack before it can serve anything, and that
-#: import is most of the budget: `import slife2.toolhub` costs 5.8s in a process
-#: of its own and 15-17s each when nine of them are started at once, on a
-#: four-core machine with nothing else running.  Thirty was below that floor, so
-#: the deadline was being decided by how busy the launcher had made the machine
-#: rather than by whether a server was coming up — and the one that lost was
-#: `toolhub`, which starts last (it waits on seven plugins; see `NEEDS`) and does
-#: the most before it serves (a catalogue index, then ten plugin asks): starved
-#: past 26s before it logged its first line, killed about a second short.  A
-#: deadline has to clear the floor before it means anything.
-
-#: How long to wait for one `tools/list`.  Long enough that a slow but real
-#: server is not misread as absent.
-
-#: How long to wait for another instance to release an agent name.  Short on
-#: purpose: unlike starting a server, there is nothing to wait for — a name is
-#: either free or it is not — so a long wait would only delay a refusal.
 
 
 class Status(enum.Enum):
@@ -632,14 +609,17 @@ def others_running() -> list[ClientRecord]:
 
     Read from pid liveness rather than any counter, so a client that was killed
     — and therefore never got to deregister — does not keep the servers alive
-    forever.  The start token guards against a recycled pid counting as a live
-    client.
+    forever.
+
+    **The pid is the whole of the test, and the start token is not needed here.**
+    A record that reached this far already came through `live_clients`, which
+    admits one only when the pid is alive *and* the token matches (or is absent)
+    — the same predicate `same_client` applies — so a record bearing our pid has
+    necessarily proved itself to be this process, and one bearing any other pid
+    is somebody else by definition.  The token still does its work: it is what
+    stops a recycled pid counting as a live *other* client inside `live_clients`.
     """
-    return [
-        record
-        for record in live_clients()
-        if record.pid != os.getpid() or not same_client(record)
-    ]
+    return [record for record in live_clients() if record.pid != os.getpid()]
 
 
 #: The plugins the hub cannot be made to wait for, because each of them waits on

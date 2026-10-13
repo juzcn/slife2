@@ -15,6 +15,7 @@ one was a bug before it was a test.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.timeouts as _T
 from slife2.audience import client_meta, for_the_model
 from slife2.config import FileTunnelSettings, load
 from slife2.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
@@ -30,6 +32,7 @@ from slife2.file_tunnel.server import (
     Exposed,
     Exposure,
     Revoked,
+    _ensure,
     build_server,
     content_disposition,
     is_credential_path,
@@ -117,6 +120,29 @@ class FakeTunnel:
 
     def stop_monitor(self) -> None:
         return None
+
+
+class SlowStartTunnel(FakeTunnel):
+    """A tunnel whose eager start is still in flight when the first call lands.
+
+    That is the ordinary case rather than a corner: the eager start is a task of
+    its own (`build_server`'s lifespan), so a first tool call routinely arrives
+    while it is running — and that window is the whole reason `_ensure` exists.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("active", False)
+        super().__init__(**kwargs)
+        self._in_flight = True
+
+    @property
+    def is_starting(self) -> bool:
+        return self._in_flight
+
+    def finish(self) -> None:
+        """The eager start concludes: a URL published, no attempt in flight."""
+        self._in_flight = False
+        self.active = True
 
 
 def server_for(tunnel: FakeTunnel | None = None) -> FastMCP:
@@ -257,6 +283,39 @@ async def test_a_dotenv_is_refused(tmp_path: Path) -> None:
         with pytest.raises(ToolError, match="private credential"):
             await client.call_tool(
                 "expose_local_image", {"path": str(env)}, meta=client_meta("jack")
+            )
+
+
+@pytest.mark.asyncio
+async def test_the_credential_guard_reads_the_path_that_will_be_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A harmless name must not launder the file it points at.
+
+    `expose_local_image` registers and serves `str(target.resolve())`, so a
+    symlink (`photo.png` → `~/.ssh/id_rsa`) sailed past a denylist check made
+    on the name as given and handed the private key out under a share URL —
+    exactly what the guard promises cannot happen.  The symlink is simulated by
+    making `resolve()` answer with the credential (the files themselves are
+    real) because creating one needs a privilege Windows does not grant by
+    default, and *which path the guard reads* is the thing that was wrong.
+    """
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+    decoy = tmp_path / "photo.png"
+    decoy.write_bytes(b"png-bytes")
+
+    real_resolve = Path.resolve
+
+    def resolve(inner: Path, *args: Any, **kwargs: Any) -> Path:
+        return real_resolve(secret) if inner == decoy else real_resolve(inner)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    async with Client(server_for()) as client:
+        with pytest.raises(ToolError, match="private credential"):
+            await client.call_tool(
+                "expose_local_image", {"path": str(decoy)}, meta=client_meta("jack")
             )
 
 
@@ -417,6 +476,56 @@ async def test_status_counts_what_is_exposed(tmp_path: Path) -> None:
         assert '"exposed": 1' in await ask(client, "tunnel_status")
 
 
+# --- the start the first call depends on ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_call_during_an_in_flight_start_waits_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_ensure` exists for the seconds between the plugin being ready and the
+    tunnel being established — which is exactly an in-flight eager start.
+
+    Returning early there (its old shape) made the function contradict its own
+    docstring: the first call was told "the tunnel is not up" for an attempt
+    that was two seconds from answering.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_retry_delay", 0.01)
+    tunnel = SlowStartTunnel()
+
+    async def finish_soon() -> None:
+        await asyncio.sleep(0.05)
+        tunnel.finish()
+
+    finisher = asyncio.create_task(finish_soon())
+    await _ensure(tunnel, 8038)
+
+    # The wait is the fix: with the old early return, `_ensure` comes back
+    # before the finisher runs and this is still False.
+    assert tunnel.is_active is True
+    # The in-flight attempt was the answer: no second start was attempted on
+    # top of it (the provider would have refused one as "already in progress").
+    assert tunnel.started == []
+    await finisher
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_outlives_its_budget_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start that never concludes must end as an honest "not up" rather than
+    a call that never returns, and must not race a second attempt at the
+    provider — which the single-flight guard would refuse anyway."""
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_retry_delay", 0.01)
+    monkeypatch.setattr(_T.timeouts.ready, "tunnel_start", 0.05)
+    tunnel = SlowStartTunnel()  # never finishes
+
+    await _ensure(tunnel, 8038)  # must return, not hang
+
+    assert tunnel.is_active is False
+    assert tunnel.started == []
+
+
 # --- the route, through the real app ------------------------------------------
 
 
@@ -575,6 +684,28 @@ def test_a_file_deleted_between_the_check_and_the_register(tmp_path: Path) -> No
     again = exposed.register(str(picture), None)  # must not raise
     assert again.token
     assert Exposure("t" * 30, str(picture), None).matches(None) is False
+
+
+@pytest.mark.asyncio
+async def test_a_link_minted_while_the_file_was_absent_never_serves(
+    tmp_path: Path,
+) -> None:
+    """The pin is what makes a link safe, so a link with no pin must refuse.
+
+    `Exposure.__init__` swallows the `OSError` when the file is missing for the
+    moment `register` looks, and `expose_local_image` checked a moment before —
+    so registering anyway is the honest reading.  What that used to leave was an
+    exposure whose `matches()` answered True to *anything* ("nothing was
+    pinned, so nothing can have changed"), so bytes written at the path
+    afterwards were served under a token already handed out.  With no baseline
+    there is nothing to compare, so the unpinned link is refused instead.
+    """
+    ghost = tmp_path / "ghost.bin"
+    exposure = Exposed().register(str(ghost), None)  # absent → nothing to pin
+    assert exposure.ino is None
+
+    ghost.write_bytes(b"bytes that appeared after the link was made")
+    assert (await serve_exposed(exposure)).status_code == 403
 
 
 def test_the_config_the_shipped_file_names_is_one_this_build_builds() -> None:

@@ -27,6 +27,7 @@ from mcp import MCPError
 import slife2.timeouts as _T
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
+from slife2.db import ToolStore
 from slife2.gateway import (
     LINK_DOWN_CODE,
     flatten,
@@ -36,7 +37,7 @@ from slife2.gateway import (
     sanitise,
 )
 from slife2.mcp_server import LIST_SOURCES
-from slife2.toolfamily import Held
+from slife2.toolfamily import Family, Held
 from slife2.toolhub import (
     MAX_LOAD_NAMES,
     PLUGIN,
@@ -1581,6 +1582,42 @@ async def test_unloading_a_document_row_is_not_a_refusal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_four_trim_outcomes_are_four_different_words() -> None:
+    """**Four outcomes and no fifth, and `refused` means exactly one of them.**
+
+    `set_load` answers one of four when it is asked for `unloaded` — the move,
+    `already`, `unknown` and `no_load_state` — because `disabled`/`error` are
+    answers to a *load* (`slife2.db._load_outcome`).  The trim's last arm sent
+    everything it did not recognise to `refused`, which made a fifth outcome look
+    reachable: it put "refused (the system needs them)" — a sentence about what
+    this process protects — one branch away from being said about a row.  The
+    three arms a row can land in are asserted together here, because it is their
+    *separation* that was wrong: any two of them collapsed would pass a test of
+    one.  The fourth, `no_load_state`, is the document families' and is the
+    sibling test above.
+    """
+    entries = {
+        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    }
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as client:
+        # A listing first, so the rows exist: a tool server's are on demand
+        # (`autoload` is off), and the one loaded here is the one that moves.
+        await client.call_tool("list_tools", {})
+        await call(client, "func_tool_load", {"names": ["fake__echo"]})
+        answer = await client.call_tool(
+            "_func_tool_unload",
+            {"names": ["fake__echo", "fake__boom", "nowhere", "tool_search"]},
+        )
+
+    assert answer.data["unloaded"] == ["fake__echo"], "the one that moved"
+    assert answer.data["not_loaded"] == ["fake__boom"], "a row with the state asked for"
+    assert answer.data["unknown"] == ["nowhere"], "a name nothing holds"
+    assert answer.data["refused"] == ["tool_search"], "and only a name the system needs"
+
+
+@pytest.mark.asyncio
 async def test_a_call_reaches_the_upstream() -> None:
     async with Client(
         hub_for(connected={"fake": lambda settings: upstream_server()})
@@ -1943,6 +1980,74 @@ async def test_an_entry_the_client_refuses_is_a_failed_server() -> None:
     assert "not a URL" in row["error"]
 
 
+class GatedClient:
+    """A client whose teardown waits for the test to let it go.
+
+    The window `Family.close` is exposed to is *inside* its loop, and the only
+    way to hold it open on purpose is to make the thing it awaits — a client's
+    `__aexit__` — block until the test says otherwise.
+    """
+
+    def __init__(self, gate: asyncio.Event, entered: asyncio.Event) -> None:
+        self._gate = gate
+        self._entered = entered
+
+    async def __aenter__(self) -> GatedClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._entered.set()
+        await self._gate.wait()
+
+    async def list_tools(self) -> list[Any]:
+        return [
+            types.SimpleNamespace(
+                name="echo", description="Echo.", input_schema={"type": "object"}
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_the_family_teardown_survives_a_management_call() -> None:
+    """**`Family.close` mutates nothing, but it does suspend.**
+
+    It awaits inside its loop — a cancelled attempt, then the client's own
+    `__aexit__` — and a management tool landing between two iterations
+    (`mcp_set`, `mcp_remove`, `*_set_enabled`, all reached through the family's
+    own server) changed `_held` underneath the iteration, so the lifespan's
+    teardown died with "dictionary changed size during iteration" and left every
+    link after the one being closed still open.  It is the last moment the
+    process has to drop them, so it is the worst one to lose.
+    """
+    gate, entered = asyncio.Event(), asyncio.Event()
+    family = Family(
+        default_config(),
+        category="mcp",
+        entries=[
+            ToolServerSettings(name="one", command="in-memory"),
+            ToolServerSettings(name="two", command="in-memory"),
+        ],
+        client_factory=lambda transport, handler: GatedClient(gate, entered),
+    )
+    await family.held("one").connection.ready()
+    await family.held("two").connection.ready()
+
+    closing = asyncio.create_task(family.close())
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+
+    # A management call arriving mid-teardown.  Switched off, so it starts no
+    # attempt of its own: what is under test is the mapping growing, not a link.
+    await family.put(
+        ToolServerSettings(name="three", command="in-memory", enabled=False)
+    )
+    gate.set()
+    await closing
+
+    assert family.held("three") is not None, "the management call did land"
+    assert not family.held("one").connection.usable
+    assert not family.held("two").connection.usable, "the rest of the loop ran"
+
+
 # Two tests lived here — "the catalogue reconnects when the db goes away" and
 # "a refusal is not a catalogue that is gone" — plus the `FlakyCatalogue` they
 # shared, and all three were about a *link*: a kept MCP client, a transport
@@ -1953,7 +2058,132 @@ async def test_an_entry_the_client_refuses_is_a_failed_server() -> None:
 # is a `ValueError` out of `ToolStore` and anything else is this process come
 # apart.  `slife2.toolhub._refused` is where that line is drawn, and what it
 # decides — one source's bad rows do not fail the tool list, a broken store does
-# — is covered by the tests about a source that offers a name somebody owns.
+# — is covered by the tests about a source that offers a name somebody owns and
+# by the three below.
+
+
+class YieldingEmbedder(StubEmbedder):
+    """`StubEmbedder` with a suspension point in it, as a real embed call is.
+
+    The catalogue's merge is three awaited steps — plan, embed, write — and the
+    window a second merge can slip into is between the first and the last, so
+    the embed has to be one of them.  The stub's own `embed` never yields, which
+    is exactly why a test that wants the interleave cannot use it.
+    """
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        await asyncio.sleep(0)
+        return await super().embed(texts)
+
+
+def a_catalogue_that_cannot_record(source: str) -> tuple[Any, dict[str, bool]]:
+    """One source's listing, and a catalogue that cannot take it.
+
+    Returns `(merge, state)`: monkeypatch the first over `ToolStore.merge`, and
+    flip `state["broken"]` to let the catalogue work again.  The seam exists
+    because a *store* raising is not something a config can express, and what is
+    under test is what the hub does about it rather than how it happens.
+    """
+    working = ToolStore.merge
+    state = {"broken": True}
+
+    async def merge(self, source_id, category, rows, **kwargs):
+        if source_id == source and state["broken"]:
+            raise RuntimeError("the embedding model is down")
+        return await working(self, source_id, category, rows, **kwargs)
+
+    return merge, state
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_that_cannot_record_fails_the_list_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The third failure rule, and the one that used to reach nobody at all.**
+
+    A catalogue that cannot take a listing is a broken system too, and it must
+    not be filed as the *source's* problem: `context` answered perfectly well, so
+    a row saying it is "connecting" would send the operator to the wrong place.
+    What the old code did was worse than a wrong word — it raised inside the
+    connect attempt that nothing awaits, so the reason arrived only as
+    asyncio's GC-time "Task exception was never retrieved", naming neither the
+    server nor the cause, and every ask after it failed identically forever.
+    """
+    merge, _state = a_catalogue_that_cannot_record("context")
+    monkeypatch.setattr(ToolStore, "merge", merge)
+
+    async with Client(hub_for()) as hub:
+        with pytest.raises(ToolError, match="the embedding model is down"):
+            await hub.call_tool("list_tools", {})
+
+        # The report still works, which is the whole job of `servers` — and the
+        # catalogue is not a source, so it is a field rather than a row.
+        reported = await hub.call_tool("servers", {})
+
+    assert "the embedding model is down" in reported.data["catalogue"]
+    rows = {row["name"]: row for row in reported.data["servers"]}
+    assert rows["context"]["error"] == "", "it answered; it is not the broken one"
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_that_works_again_is_not_still_reported_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record is cleared by the merge that works, or the hub stays broken.
+
+    A failure that outlived its cause would be a hub refusing to list anything
+    long after the embedding endpoint came back — the same "connecting, forever"
+    shape, reached from the other side.
+    """
+    merge, state = a_catalogue_that_cannot_record("context")
+    monkeypatch.setattr(ToolStore, "merge", merge)
+
+    async with Client(hub_for()) as hub:
+        with pytest.raises(ToolError, match="the embedding model is down"):
+            await hub.call_tool("list_tools", {})
+
+        # The failed listing dropped the link, so this ask re-lists the plugin
+        # and the merge is tried again — and this time it works.
+        state["broken"] = False
+        listed = await hub.call_tool("list_tools", {})
+        reported = await hub.call_tool("servers", {})
+
+    assert "turn_read" in names(listed.data)
+    assert reported.data["catalogue"] == ""
+
+
+@pytest.mark.asyncio
+async def test_two_asks_at_once_do_not_race_the_catalogue() -> None:
+    """**One hub answers every conversation, so two asks really do overlap.**
+
+    `ToolStore.merge` plans its writes and applies them in a second pass with an
+    embed in between, so two overlapping merges of one source are a
+    check-then-act race on the tool table's primary key: both plan an insert for
+    a name neither has stored, and the second one is an `IntegrityError` — a
+    conversation failing over what is a scheduling accident.
+
+    Two details make the window real rather than theoretical.  The source is
+    **declared for the first time at the ask**, not at startup: a row already
+    stored plans an update and there is nothing to race for.  And the embed
+    **yields** (`YieldingEmbedder`), because a merge over a wire does and the
+    stub's does not — which is the whole of the window.
+    """
+    declaring = ReDeclaring({"sources": []})
+    async with Client(
+        hub_for(
+            connected={"cli-server": lambda settings: declaring.server()},
+            embedder=YieldingEmbedder(),
+        )
+    ) as hub:
+        # Nothing is held yet, so every one of these asks plans the same inserts.
+        declaring.answer = one_source()
+        listed = await asyncio.gather(
+            *(hub.call_tool("list_tools", {}) for _ in range(3))
+        )
+        rows = await found(hub, "cli:thing")
+
+    assert all("tools" in one.data for one in listed)
+    assert "cli:thing" in rows
 
 
 # --- how an entry becomes a connection ----------------------------------------

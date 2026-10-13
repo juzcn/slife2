@@ -268,8 +268,8 @@ A2A_SERVER_NAME = "slife2-a2a"
 #: who is not on this machine, and it is a plugin for the reason the first table
 #: in DESIGN.md §1.1 gives — it holds a credential, and a library would put the
 #: token in every importer.  The only thing written down about it is an address,
-#: here; a login is scanned rather than configured, and lives in a
-#: `wechat_<agent>.yaml` beside the data.
+#: here; a login is scanned rather than configured, and lives inside the agent's
+#: own directory as `<agent>/wechat.yaml` (`slife2.wechat.SESSION_NAME`).
 #:
 #: `tui` is the last one with no section of its own, and it is here for a
 #: narrower reason than the rule above: the *window* is the person's process and
@@ -575,6 +575,11 @@ class AgentTaskSettings:
     #: it does not bound is how much work happens over *time*; DESIGN.md §9
     #: holds that one open, and `agent_task_list` with `agent_task_cancel` is
     #: what makes it visible and stoppable in the meantime.
+    #:
+    #: **The number lives here and nowhere else**, and `slife2-agent-task` reads
+    #: it off the config at the call that enforces it rather than keeping a
+    #: constant of its own — there *was* one, nothing read it, and it was free
+    #: to disagree with the file an operator edits.
     max_running: int = 4
 
 
@@ -648,12 +653,15 @@ class ToolServerSettings:
     name: str
     #: Which kind of entry this is: `"mcp"` or `"rest"` for one somebody wrote
     #: under `mcp:`, and `"plugin"` for one of ours, which has no section of
-    #: its own — `slife2.toolhub.plugin_settings` builds it from `servers:`.  A
-    #: label, not a behaviour: a REST API entry has already been expanded into
-    #: the stdio command it describes by the time one of these exists (see
-    #: `_rest_api`), so nothing downstream branches on this.  It is kept because
-    #: it is the answer to the first question anyone debugging asks, which is why
-    #: a server they never wrote a `command:` for is running `uvx`.
+    #: its own — `slife2.toolhub.plugin_settings` builds it from `servers:`.
+    #:
+    #: **It is load-bearing, and saying otherwise cost a reader a wrong answer.**
+    #: A REST API entry has already been expanded into the stdio command it
+    #: describes by the time one of these exists (see `_rest_api`), so it decides
+    #: nothing about *running* — but a plugin's tools are the model's under their
+    #: own names while everybody else's are prefixed by the entry's, and that
+    #: branch is `slife2.toolhub.model_name` reading exactly this field.  Dropping
+    #: it would rename every plugin tool (`turn_read` → `toolhub__turn_read`).
     kind: str = "mcp"
     #: What the server is for, in the operator's words.  Not the model's: the
     #: descriptions the model reads come from the server itself, tool by tool.
@@ -1040,8 +1048,12 @@ class A2ASettings:
     #: decide whether this machine is on the mesh (`a2a_dbs` is the other half,
     #: and it says which *agents* are).
     configured: bool = False
-    #: Where the broker is.  The broker is the operator's to run — v1's rule and
-    #: still this build's: slife2 never spawns one, it dials one.
+    #: Where the broker is.  **The operator's to run, unless it is this
+    #: machine's own and nothing is there**: `slife2.a2a.broker` probes the
+    #: address and, for a *local* one that is absent, starts and supervises a
+    #: `mosquitto` — v1's rule was to dial and never spawn, and this build
+    #: starts one because a mesh with no broker is a feature that silently does
+    #: nothing.  A remote address is still only ever dialled.
     broker_host: str = "localhost"
     broker_port: int = 1883
     #: The first two segments of the topic namespace,
@@ -1731,6 +1743,29 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     return FileTunnelSettings(active=active, providers=providers)
 
 
+def _needs_base_url(where: str, *, also: str = "") -> ConfigError:
+    """The refusal for a provider that has a key and nowhere to send it.
+
+    **One sentence, because it is one mistake.**  Every provider here — chat,
+    embedding, media — is a base URL and a key, and a key with no URL makes the
+    SDK fall back to its **own** default host: the key goes to somebody else's
+    server, and for a chat provider the whole conversation goes with it.  The
+    reason is identical in the three places, so the sentence is written once;
+    what varies is only the prefix naming the entry, and whether the
+    conversation travels alongside the key.
+
+    It was three copies, and they had already drifted — two said "client" and
+    one "SDK" for the same fallback, and the third was added *after* a review
+    noticed the check was missing entirely from the chat providers, which is
+    what a sentence in two places that a third caller cannot reach looks like.
+    """
+    extra = f" {also}" if also else ""
+    return ConfigError(
+        f"{where}: needs `base_url` — without one the SDK sends this provider's "
+        f"key{extra} to its own default host"
+    )
+
+
 def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
     """One `media.providers:` entry: an endpoint, a key and what it can do.
 
@@ -1750,10 +1785,7 @@ def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
             f"speaks to this endpoint"
         )
     if not base_url:
-        raise ConfigError(
-            f"media.providers.{name}: needs `base_url` — without one the "
-            f"client would send this provider's key to its own default host"
-        )
+        raise _needs_base_url(f"media.providers.{name}")
     models_raw = raw.get("models")
     if not isinstance(models_raw, list) or not models_raw:
         raise ConfigError(
@@ -1786,8 +1818,11 @@ def _media_model(raw: Any, where: str) -> MediaModelSettings:
     if not model:
         raise ConfigError(f"{where}: an entry needs `model`")
     if kind not in MEDIA_KINDS:
+        # `{model}` rather than `{model or '?'}`: the check above has already
+        # refused an entry with no model, so the `or` could never fire — and a
+        # name that cannot be empty reads as a name that might be.
         raise ConfigError(
-            f"{where}.{model or '?'}: `kind` must be one of "
+            f"{where}.{model}: `kind` must be one of "
             f"{', '.join(MEDIA_KINDS)} — not {kind!r}"
         )
     params = _mapping(raw.get("params"), f"{where}.{model}.params")
@@ -1905,10 +1940,7 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
     base_url = str(raw.get("base_url") or "")
     model = str(raw.get("model") or "")
     if not base_url:
-        raise ConfigError(
-            f"embeddings.providers.{name}: needs `base_url` — without one the "
-            f"client would send this provider's key to its own default host"
-        )
+        raise _needs_base_url(f"embeddings.providers.{name}")
     if not model:
         raise ConfigError(
             f"embeddings.providers.{name}: needs `model` — the id sent as "
@@ -2219,14 +2251,10 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
 
     base_url = str(raw.get("base_url") or "")
     if not base_url:
-        # The same hole `_embedding_provider` guards, and the same reason: a
-        # key with nowhere to go makes the SDK fall back to its **own** default
-        # host, so the key and the whole conversation are posted to somebody
-        # else's server.  Chat providers had no equivalent check.
-        raise ConfigError(
-            f"providers.{name}: needs `base_url` — without one the SDK sends "
-            f"this provider's key and the conversation to its own default host"
-        )
+        # The same hole the other two guard, and the same reason — and this is
+        # the one the check was *missing* on for the longest, because the
+        # sentence existed twice and neither copy was in reach of this function.
+        raise _needs_base_url(f"providers.{name}", also="and the conversation")
 
     return ProviderSettings(
         api=api,

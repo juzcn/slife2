@@ -34,16 +34,6 @@ logger = logging.getLogger(__name__)
 #: indistinguishable.
 _DONE = object()
 
-#: How long a streamed answer may *say nothing* before it is declared stalled.
-#:
-#: **Inactivity, not a total, and the difference is the whole of this number.**
-#: A slow-but-live generation must never be cut — a model that thinks for ten
-#: minutes and streams the answer afterwards is working, not hung — while a
-#: provider that accepted the request and went silent must not park the loop
-#: forever: Bailian served a turn exactly like that (200 OK, zero bytes for
-#: about seven minutes, then the connection dropped).  So this is v1's
-#: `work.stall`, the deadline is reset by every chunk, and no total replaces it.
-
 
 class StreamStallError(TimeoutError):
     """A model call produced no chunk for `_T.timeouts.work.stall`.
@@ -156,10 +146,10 @@ class MCPBackend:
 
         The deadline sits on the *wait for one chunk* and is restarted by every
         chunk that arrives, which is what makes it a stall detector rather than
-        a clock: a model that streams for an hour is fine, and one that stops
-        talking for `_T.timeouts.work.stall` is not `_T.timeouts.work.stall` from being done, it
-        is indistinguishable from a provider that has given up (see
-        `StreamStallError`).
+        a clock: a model that streams for an hour is fine, and a provider that
+        goes quiet for `_T.timeouts.work.stall` is indistinguishable from one
+        that has hung — a silent provider and a dead one look exactly alike, and
+        the silence is the only symptom either shows (see `StreamStallError`).
         """
         try:
             while True:

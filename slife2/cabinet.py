@@ -63,13 +63,14 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from slife2 import textindex
-from slife2.audience import FOR_THE_MODEL, request_client
+from slife2.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.cabinet_store import (
     DIARY,
     FILE,
     KINDS,
     NOTE,
     REPORT,
+    SPECS,
     CabinetStore,
     discard_file,
     index_path,
@@ -96,9 +97,11 @@ INSTRUCTIONS = (
     "copies a file that is already on this machine — nothing here fetches a URL."
 )
 
-#: The most of a file `file_read` will read, and the most of a URL it would
-#: fetch.  A cap rather than a preference: a tool that returns a gigabyte of text
-#: to a model has spent a context window to say "this is not a document".
+#: The most of a file `file_read` will read.  A cap rather than a preference: a
+#: tool that returns a gigabyte of text to a model has spent a context window to
+#: say "this is not a document".  (It used to read "and the most of a URL it
+#: would fetch" — nothing here fetches a URL, which the instructions above say
+#: and which was v1's `file_save` half that was deliberately not ported.)
 MAX_READ_BYTES = 2 * 1024 * 1024
 
 #: How much of a file is sniffed for the two things that settle its encoding
@@ -306,11 +309,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         found = request_client(ctx)
         return found[0] if found else ""
 
-    UNADDRESSED = (
-        "This call did not say which conversation it is for, so there is no "
-        "cabinet to act on — one process serves every agent, and the cabinet is "
-        "the agent's."
-    )
+    UNADDRESSED = unaddressed("cabinet to act on", "the cabinet")
 
     async def cabinet(ctx: Context) -> tuple[CabinetStore, str]:
         """`(the store, "")`, or `(nothing, refusal)` — so a tool reads as one line."""
@@ -412,7 +411,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit=limit,
             offset=offset,
         )
-        return _listing("notes", page, lambda row: str(row["key"]))
+        return _listing(NOTE, "notes", page, lambda row: str(row["key"]))
 
     # ── The diary ────────────────────────────────────────────────────────
 
@@ -490,7 +489,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit=limit,
             offset=offset,
         )
-        return _listing("diary entries", page, lambda row: str(row["key"]))
+        return _listing(DIARY, "diary entries", page, lambda row: str(row["key"]))
 
     # ── Files ────────────────────────────────────────────────────────────
 
@@ -668,6 +667,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             category=category.strip(),
         )
         return _listing(
+            FILE,
             "files",
             page,
             lambda row: f"{row['file_path']}  ({row['size']} bytes)",
@@ -754,7 +754,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit=limit,
             offset=offset,
         )
-        return _listing("reports", page, lambda row: str(row["key"]))
+        return _listing(REPORT, "reports", page, lambda row: str(row["key"]))
 
     # ── Finding, and describing ──────────────────────────────────────────
 
@@ -870,20 +870,31 @@ def _document(kind: str, row: dict[str, Any]) -> str:
 
 
 def _listing(
+    kind: str,
     noun: str,
     page: dict[str, Any],
     describe: Any,
     *,
     summaries: bool = False,
 ) -> str:
-    """A page of documents, with the count and the window it is a page of."""
+    """A page of documents, with the count and the window it is a page of.
+
+    *kind* is here for the date on each line and nothing else: each kind is
+    ordered by its own time axis (`cabinet_store.SPECS`), and the bracketed date
+    a reader compares against the order they are reading is that axis.  Reading
+    `updated_at` for all four printed a column that ran *against* the list — a
+    report created in June and appended to today sorted first and showed today's
+    date, and a diary entry showed the day it was written rather than the day it
+    is about.
+    """
     entries = page["entries"]
     if not entries:
         return f"No {noun} matched. `cabinet_search` looks across all four kinds."
     head = f"{page['total']} {noun}, showing {len(entries)} from {page['offset'] + 1}."
+    axis = SPECS[kind].time
     lines = [head]
     for row in entries:
-        line = f"- {describe(row)}  [{_when(row)}]"
+        line = f"- {describe(row)}  [{_when(row, axis)}]"
         if summaries and row.get("summary"):
             line += f"\n    {row['summary']}"
         lines.append(line)
@@ -895,14 +906,16 @@ def _listing(
     return "\n".join(lines)
 
 
-def _when(row: dict[str, Any]) -> str:
-    """A row's time, short: the date is what a reader is comparing.
+def _when(row: dict[str, Any], axis: str) -> str:
+    """A row's time, short, read off *axis* — the column that orders its kind.
 
-    Two spellings because there are two readers: a stored row has the columns,
-    and a *search result* carries the one time it was given, under `time`.  A
-    renderer that knew only one of them printed `?` for every hit.
+    Two spellings because there are two readers: a stored row has the columns
+    and is ordered by its kind's own axis (`cabinet_store.SPECS`), and a *search
+    result* carries the one time it was given, under `time`.  A renderer that
+    knew only one of them printed `?` for every hit; one that read one fixed
+    column for both printed a date that did not match the order on screen.
     """
-    stamp = str(row.get("time") or row.get("updated_at") or row.get("created_at") or "")
+    stamp = str(row.get(axis) or row.get("updated_at") or row.get("created_at") or "")
     return stamp[:10] or "?"
 
 
@@ -936,7 +949,9 @@ def _found_text(found: dict[str, Any]) -> str:
     )
     lines = [head, ""]
     for index, row in enumerate(rows, start=1):
-        state = [str(row.get("kind") or ""), _when(row)]
+        # A search result is not a listing row: it carries the one time it was
+        # given, under `time`, whichever kind it came from (`cabinet_store`).
+        state = [str(row.get("kind") or ""), _when(row, "time")]
         if row.get("matched_in") == "line":
             state.append("matched your words")
         elif row.get("matched_in") == "rest":

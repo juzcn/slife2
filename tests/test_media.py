@@ -10,6 +10,7 @@ body, the poll, and the four ways a call can fail.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import replace
 from pathlib import Path
@@ -268,6 +269,32 @@ async def test_no_media_section_is_a_sentence_not_a_crash() -> None:
     assert "[refused]" in answer
     assert "No image model configured" in answer
     assert "`media:`" in answer
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_api_is_a_sentence_not_a_raw_error() -> None:
+    """**A config with `api: typo` loads cleanly** — the loader only requires the
+    key to be there — and then fails at the first call, where `create_adapter`
+    raises.  Resolving the adapter *outside* `_run` let that failure escape as a
+    raw exception instead of the `[failed] …` sentence §1.5 promises, so the
+    resolution is inside the guard and this checks the sentence is what arrives.
+    """
+    section = {
+        "defaults": {"image": "typo/img"},
+        "providers": {
+            "typo": {
+                "api": "not-an-adapter",
+                "base_url": "https://example.test/api/v1/",
+                "models": [{"model": "img", "kind": "image"}],
+            }
+        },
+    }
+    config = replace(load(), media=settings(section))
+    async with Client(build_server(config)) as client:
+        answer = await ask(client, "generate_image", prompt="x")
+
+    assert "[failed]" in answer
+    assert "unknown media api" in answer
 
 
 def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
@@ -567,6 +594,30 @@ def _client_returning(client: Any):
     return ensure
 
 
+def _posting(body: Any, status_code: int = 200, text: str = "{}"):
+    """A client whose one POST answers with *body* as JSON.
+
+    The shapes a provider can answer with that are *not* the one the adapter
+    expects — which is the whole of what the guard under test is about — so the
+    body is the parameter rather than a whole client spelled out per test.
+    """
+
+    class Response:
+        def __init__(self) -> None:
+            self.status_code = status_code
+            self.text = text
+
+        @staticmethod
+        def json() -> Any:
+            return body
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            return Response()
+
+    return _client_returning(Client())
+
+
 @pytest.mark.asyncio
 async def test_the_images_only_adapter_refuses_the_other_three(
     monkeypatch, tmp_path
@@ -606,3 +657,84 @@ async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> 
     answer = await adapter.generate_image(model="img", prompt="x", outputs_dir=tmp_path)
 
     assert Path(answer).read_bytes() == b"\x89PNG"
+
+
+@pytest.mark.asyncio
+async def test_an_images_answer_that_is_not_json_is_a_failure_not_a_traceback(
+    monkeypatch, tmp_path
+) -> None:
+    """A `200` whose body will not parse is a `MediaAdapterError` — the one thing
+    `_run` turns into a sentence — not a `ValueError` escaping the tool."""
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+
+    class Response:
+        status_code = 200
+        text = "<html>gateway timeout</html>"
+
+        @staticmethod
+        def json() -> Any:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    with pytest.raises(MediaAdapterError, match="not JSON"):
+        await adapter.generate_image(model="img", prompt="x", outputs_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_an_images_answer_of_an_unexpected_shape_is_a_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """A body that is JSON but not an object must not `.get` its way to an
+    `AttributeError` out of the tool."""
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    monkeypatch.setattr(adapter, "_ensure_client", _posting([{"b64_json": "eA=="}]))
+
+    with pytest.raises(MediaAdapterError, match="unexpected shape"):
+        await adapter.generate_image(model="img", prompt="x", outputs_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_an_images_answer_with_no_usable_item_is_a_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """A `data` that is not a list of objects must not index its way to an
+    `IndexError` or a `TypeError` out of the tool."""
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    monkeypatch.setattr(adapter, "_ensure_client", _posting({"data": ["nope"]}))
+
+    with pytest.raises(MediaAdapterError, match="no image in the answer"):
+        await adapter.generate_image(model="img", prompt="x", outputs_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_saving_an_artifact_goes_off_the_event_loop(
+    monkeypatch, tmp_path
+) -> None:
+    """A generated artifact is megabytes — a video, an audio file — so
+    `save_bytes` writes it through `asyncio.to_thread`, the way the reads on the
+    send side already hop (`_data_uri`, `_reference`)."""
+    adapter = dashscope()
+    hopped: list[Any] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func: Any, *args: Any) -> Any:
+        hopped.append(func)
+        return await real_to_thread(func, *args)
+
+    monkeypatch.setattr(adapters.asyncio, "to_thread", spy)
+    encoded = base64.b64encode(b"RIFF").decode()
+
+    async def fake_request(method, url, *, extra_headers=None, json_body=None):
+        return {"output": {"audio": {"data": encoded}}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    answer = await adapter.text_to_speech(model="say", text="hi", outputs_dir=tmp_path)
+
+    assert Path(answer).read_bytes() == b"RIFF"
+    assert any(getattr(func, "__name__", "") == "write_bytes" for func in hopped)

@@ -36,11 +36,12 @@ the SDK's own `mcp.client.subscriptions.listen` has nothing to talk to.  So
 `_T.timeouts.pacing.relist_after` is what keeps a listing true: an ask that finds one older
 than that re-reads it.  **The age costs a round trip and never a tool** — a
 stale listing is still `usable` and still in the model's list while it is being
-replaced, and it is replaced inside the same ask that noticed, because
-`list_tools` already waits briefly (`LIST_SETTLE_SECONDS`) for work it started.
-A peer that *does* send the notification is believed at once (`invalidate`),
-which is the whole of what a legacy server gets: the event is the fast path, and
-the age is the floor under it.
+replaced, and it is replaced inside the same ask that noticed, because that ask
+— the hub's `list_tools` — waits briefly for the attempts it started
+(`_T.timeouts.ready.list_settle`, in `slife2.toolhub`'s `settle`).  A peer that
+*does* send the notification is believed at once (`invalidate`), which is the
+whole of what a legacy server gets: the event is the fast path, and the age is
+the floor under it.
 
 **Two failures that look alike and are not.**  A *transport* failure and a peer's
 *refusal* are opposites here.  A refusal — an unknown tool, bad arguments, a
@@ -55,11 +56,10 @@ is a few hundred lines where v1's gateway was three thousand.
 **And the retry is the one thing this module decides about failure.**  It holds
 no clock of its own: how long a tool may take is the *caller's* to say — the
 loop's `_timeout`, or the tool's own declared deadline — and a caller that gives
-up cancels the call rather than being answered by a timer down here (v1's
-argument, and the reason `CALL_TIMEOUT_SECONDS` no longer exists: a bound here
-would cut off calls whose callers had said they were willing to wait, and the
-retry that follows a timer is a second render, a second file write, a second
-message sent).
+up cancels the call rather than being answered by a timer down here.  A bound
+here would cut off calls whose callers had said they were willing to wait, and
+the retry that follows a timer is a second render, a second file write, a second
+message sent.
 
 **A credential is held by the process that needs it.**  `env` and `headers` are
 the two places a tool server is handed one, they are resolved by the config's own
@@ -87,11 +87,6 @@ from slife2.toolclient import SEPARATOR
 
 logger = logging.getLogger(__name__)
 
-#: How long to wait for one upstream to answer `tools/list` after connecting.
-#: Generous, because a stdio server may be an `npx` invocation that has to fetch
-#: itself the first time, and a deadline that fires during that leaves a tool
-#: server permanently absent when it was only slow.
-
 #: The SDK's JSON-RPC `CONNECTION_CLOSED` code, spelled rather than imported:
 #: `mcp_types` has the constant and `mcp` does not re-export it, and this build
 #: does not depend on `mcp_types` by name.  What it means is the whole of the
@@ -112,18 +107,6 @@ def _link_was_down(exc: BaseException) -> bool:
     """
     return isinstance(exc, MCPError) and getattr(exc, "code", None) == LINK_DOWN_CODE
 
-
-#: How long a tool list is trusted without being read again.
-#:
-#: **A policy number, not a measurement**, and it buys the one thing the
-#: notification can no longer promise (see the module docstring): a listing that
-#: is not merely un-invalidated but *current*.  What sets the size is who pays —
-#: the list is asked for at the top of every step of every turn, so a bound of
-#: zero would put one `tools/list` per source inside every step, and the point of
-#: a bound at all is that a session is hours long while a server's tool set
-#: changes about as often as it is restarted.  Five minutes is that trade,
-#: deliberately far above the loopback round trip it costs and far below the age
-#: at which "the tool is not there" would read as a bug rather than as staleness.
 
 #: How a client is built from a transport.  A seam rather than a direct call,
 #: because the rebuild-once rule below is about a link that dies *during a call*,
@@ -211,12 +194,34 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
 
 
 def make_client(transport: Any, handler: MessageHandler) -> Client:
-    """The real client: both timeouts pinned to the ones this module chose."""
+    """The real client: a bound on connecting, and **none on a call**.
+
+    `init_timeout` is the connect's, and it belongs here: it bounds the
+    initialize handshake, which is this module's own await rather than anybody's
+    call.
+
+    `timeout` is deliberately *not* set, and setting it was a bug with a long
+    reach.  FastMCP turns it into the session's `read_timeout_seconds`, which the
+    SDK applies as a **total deadline on every request made over that
+    connection** — so the 60 s connect budget became a 60 s cap on every tool
+    call to somebody else's server, whatever the caller had asked for.  A twenty-
+    minute render called with the model's `_timeout: 600` died at 60 s as an
+    ordinary-looking `ok=False`, with the tool still running at the far end, and
+    the module's own prose above ("no clock lives here") was the thing it
+    contradicted.  The rule the registry states is the one that was broken: the
+    layer that awaits owns the bound, and a client library must not set a total
+    for every caller that borrows it.
+
+    What bounds a call now is the caller's own: the loop wraps the dispatch in
+    the `_timeout` the model stated or the tool declared (and, with neither, in
+    nothing, which is what `DESIGN.md` §8.8 says a foreground call gets).  The
+    two awaits here that *no* caller bounds — a listing, and the hub's ask for a
+    plugin's sources — carry their own, at the call site.
+    """
     return Client(
         transport,
         message_handler=handler,
         init_timeout=_T.timeouts.ready.connect_tools,
-        timeout=_T.timeouts.ready.connect_tools,
     )
 
 
@@ -474,12 +479,20 @@ class Connection:
         and that is the same rule as the flag above: what ages is the listing, so
         a slow answer is a *new* listing for as long as it takes to arrive and
         the next ask is not already overdue for the one after it.
+
+        **The listing carries its own bound**, because no caller gives it one:
+        `client.list_tools` takes no per-call timeout (only `call_tool` does), and
+        `make_client` no longer sets a client-wide one.  Without this a server
+        that accepts the connection and then never answers the listing would hold
+        the hub's own ask open forever — the failure the removed client timeout
+        was accidentally covering for, here stated where it belongs.
         """
         client = self._client
         if client is None:  # pragma: no cover - only reachable after `fail`
             return
         try:
-            listed = await client.list_tools()
+            async with asyncio.timeout(_T.timeouts.ready.connect_tools):
+                listed = await client.list_tools()
         except Exception as exc:  # noqa: BLE001 - a listing that threw is this source being unusable
             await self.disconnect()
             self.fail(exc)

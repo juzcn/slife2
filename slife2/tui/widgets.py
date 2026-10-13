@@ -103,6 +103,29 @@ THINKING_PREVIEW_CHARS = 500
 WINDOW_CHANNEL = "tui"
 
 
+def is_own_channel(channel: str) -> bool:
+    """Whether a turn came in on this window's own channel.
+
+    **The one predicate for "these are the person's words", asked by both things
+    the screen does with a channel**, because a second answer to that question
+    disagrees with this one somewhere nobody can see which is right: the bubble
+    (:func:`channel_prefix`) and the marker that comes back off the text
+    (:meth:`ChatView.add_user`) are the same claim about the same turn, and they
+    were written as `channel in ("", WINDOW_CHANNEL)` and `channel != WINDOW_CHANNEL`
+    — so an *absent* channel was the person's own to the prefix and somebody
+    else's to the strip.  A row can be absent-channel for real: it is what every
+    turn stored before the column existed reads as (`DEFAULT ''`), and what
+    `Client.run_turn` sends when its caller names none, so the disagreement ate
+    the front of a person's own message the moment it happened to begin with a
+    marker.
+
+    Absent is this window's own, and that is deliberate rather than a default:
+    the only rows without a channel are rows this window wrote or ran, so there
+    is nobody else the bubble could belong to.
+    """
+    return channel in ("", WINDOW_CHANNEL)
+
+
 def channel_prefix(channel: str) -> str:
     """What a turn's channel is called on screen.
 
@@ -110,7 +133,8 @@ def channel_prefix(channel: str) -> str:
     the rebuild both go through :meth:`ChatView.add_user` — which is v1's
     arrangement (`Channel.display_prefix`): a prefix decided in two places is two
     answers to "who said this", and the disagreement surfaces on the screen,
-    where nobody can tell which one is wrong.
+    where nobody can tell which one is wrong.  Which channels are the person's
+    own is :func:`is_own_channel`, asked here rather than spelled again.
 
     `tui` is this window, so its turns are the person's own and read `You> `.
     An absent channel is read the same way, because the only rows without one are
@@ -123,7 +147,7 @@ def channel_prefix(channel: str) -> str:
     and the footnote beside the message still carries the key it really came in
     on.
     """
-    if channel in ("", WINDOW_CHANNEL):
+    if is_own_channel(channel):
         return "You> "
     if channel == WECHAT_CHANNEL:
         return "Wechat> "
@@ -195,6 +219,24 @@ def plain(text: str, style: str = "") -> Text:
     return Text(text, style=style)
 
 
+def content_text(content: object) -> str:
+    """A rendered widget's content as the plain string it shows.
+
+    `Static.content` is whatever `update` was handed: a `Text`, a `Content`
+    (which is a `Text` too), or a bare string.  Four readers want the same string
+    out of it — the three widgets' own `plain_text` and the transcript's, for
+    every class it does not know by name — and the fourth copy is the one that
+    gets forgotten: a new widget class whose `plain_text` was written by hand is
+    the one that quietly stops appearing in what tests read.
+
+    `str(content)` rather than a cast for the last case, because a plain string
+    is already the answer and repr-ing a `Text` would put its markup on screen.
+    """
+    if isinstance(content, Text):
+        return content.plain
+    return str(content)
+
+
 async def redirect_printable(widget: Widget, event: events.Key) -> bool:
     """Forward a printable key to the prompt; `True` when it was taken.
 
@@ -249,10 +291,19 @@ class ChatView(VerticalScroll):
         #: `You> ...` / `jack> ...` rather than only marking one side of it.
         self._agent = agent
         self._streaming: AssistantMessage | None = None
-        self._last_assistant: AssistantMessage | None = None
         self._streaming_text = ""
+        #: What this turn's bill turned out to be, held until there is a block to
+        #: print it under.  `set_usage` is called by `TurnFinished`, which arrives
+        #: *before* the turn's answer does, so a turn that has streamed no text
+        #: yet has nowhere to put the number — see :meth:`set_usage`.
+        self._pending_usage = 0
         self._turn_open = False
-        #: Tool panels by call id, so a result can find the row it belongs to.
+        #: Tool panels by call id, for a result that is still coming.  **Scoped
+        #: to the turn in progress** — :meth:`add_user` clears it as a turn opens
+        #: — because a call id is only unique within its turn: keeping every id a
+        #: window had ever drawn grew without bound (a day of agent work is
+        #: thousands of widget handles) and let a later turn's result for a
+        #: reused id complete the previous turn's panel.
         self._tools: dict[str, ToolCallWidget] = {}
         #: Whether the view is pinned to the bottom.  Cleared when the user
         #: scrolls up, so streaming does not yank the page out from under
@@ -403,11 +454,19 @@ class ChatView(VerticalScroll):
         cannot come apart: the bubble it wears (`channel_prefix`) and the marker
         it must not show (`strip_marker`).  Both are for a message that arrived
         over *another* channel — what the person typed is `You> ` and is theirs,
-        which is also why their own text is never unwrapped.
+        which is also why their own text is never unwrapped.  Which channels are
+        the person's own is `is_own_channel`, asked here and by `channel_prefix`
+        so the two cannot answer differently.
         """
         self._turn_open = False
         self._close_block()
-        if channel != WINDOW_CHANNEL:
+        # **A new turn, so the previous turn's panels are no longer addressable.**
+        # This is the one place a turn begins on this view — live and rebuilt go
+        # through here — and it is where the tool map is bounded: a call id is
+        # scoped to the turn that used it, so an id reused later cannot reach the
+        # earlier panel and the map cannot outlive the turn it belongs to.
+        self._tools.clear()
+        if not is_own_channel(channel):
             text = strip_marker(text, *MARKERS)
         line = Text.assemble(
             (f"[{_timestamp(moment)}] ", f"dim {PALETTE['dim']}"),
@@ -421,8 +480,24 @@ class ChatView(VerticalScroll):
             line.append(f" {footnote}", f"italic {PALETTE['dim']}")
         self._add(Static(line), "user-message")
 
-    def add_note(self, text: str) -> None:
-        """A line from the harness rather than from anyone in the conversation."""
+    def add_note(self, text: str, *, ends_turn: bool = False) -> None:
+        """A line from the harness rather than from anyone in the conversation.
+
+        **The turn stays open by default, and that is load-bearing.**  A note
+        lands *inside* a turn that is still going: the discriminator's `[kept …]`
+        arrives before the first delta, and everything the model then streams has
+        to flow into the block under it — closing the turn here would make
+        `append_text` drop the rest of the answer as though it belonged to
+        nobody.  So ending a turn is something a caller asks for.
+
+        `ends_turn` is for the one note that *is* the end of a turn:
+        `[cancelled]`.  A cancelled turn has no rest to stream, and leaving it
+        open is what let a delta already in the pump for it be drawn under this
+        line as though the turn had gone on — the trigger the module docstring
+        names for the finish boundary, arriving from the other side.
+        """
+        if ends_turn:
+            self._turn_open = False
         self._close_block()
         self._add(Static(plain(text, PALETTE["dim"])), "system-message")
 
@@ -474,11 +549,13 @@ class ChatView(VerticalScroll):
         """
         self._close_block()
         self._turn_open = True
+        # A turn opens with no bill of its own.  `set_usage` fills this in, and
+        # a count left over from a turn that never closed (a cancel, an error)
+        # would otherwise print under this one's answer.
+        self._pending_usage = 0
 
     def _open_block(self) -> AssistantMessage:
-        widget = self._add(AssistantMessage(self._agent), "assistant-message")
-        self._last_assistant = widget
-        return widget
+        return self._add(AssistantMessage(self._agent), "assistant-message")
 
     def append_text(self, delta: str) -> None:
         """Add a delta to the current block, if a turn is still open.
@@ -518,12 +595,31 @@ class ChatView(VerticalScroll):
         Not an optimisation — a correction.  The deltas are a display channel
         and may be incomplete or late; the return value of the tool call is the
         answer, and this is where the two are reconciled.
+
+        **A turn with nothing to say leaves nothing behind**, which
+        `begin_assistant` promises and which it takes this method to keep: the
+        block is opened here for a turn that streamed nothing, and an *empty*
+        answer used to open an empty one — a lone dim `…`, which is the widget's
+        "still working" affordance, left under a turn that had finished.  The
+        bill goes with it: a turn that drew no answer has no line to print a
+        token count under, so the count is dropped rather than hung on the
+        previous turn's block (see :meth:`set_usage`).
         """
         self._turn_open = False
+        if self._streaming is None and not text:
+            self._pending_usage = 0
+            self._close_block()
+            return
         if self._streaming is None:
             self._streaming = self._open_block()
         self._streaming_text = text
         self._streaming.set_text(text)
+        # The bill, for the block that was not open yet when `set_usage` ran.
+        # Re-applying an already-placed count is idempotent, which is cheaper to
+        # reason about than a flag that says which of the two paths got here.
+        if self._pending_usage:
+            self._streaming.set_usage(self._pending_usage)
+        self._pending_usage = 0
         self._close_block()
         # `follow_tail`, not `jump_to_tail`: ending a turn is not a reason to
         # yank the viewport off somebody who scrolled up to read — which is the
@@ -534,13 +630,19 @@ class ChatView(VerticalScroll):
     def set_usage(self, tokens: int) -> None:
         """Put a token count under the answer it belongs to.
 
-        Aimed at the *last* block rather than the streaming one: by the time
-        usage arrives the turn has usually been closed, and the count belongs
-        to the message the user is looking at either way.
+        **Aimed at this turn's block, and held when it does not exist yet.**
+        `TurnFinished` arrives on the progress stream, *before* the turn's answer
+        comes back on the awaited call (`slife2.tui.app`), so a turn that has
+        streamed no text yet has no block to print the number under.  Holding it
+        is what stops the fallback this used to have — `_last_assistant`, the
+        *previous* turn's block — from printing this turn's bill under the last
+        answer on the screen: a turn that ended with nothing to say (a
+        `max_steps` stop) reported its own tokens beneath somebody else's words.
+        :meth:`finish_assistant` places what was held.
         """
-        target = self._streaming or self._last_assistant
-        if target is not None:
-            target.set_usage(tokens)
+        self._pending_usage = tokens
+        if self._streaming is not None:
+            self._streaming.set_usage(tokens)
 
     # --- tools ---------------------------------------------------------------
 
@@ -568,6 +670,10 @@ class ChatView(VerticalScroll):
         result_chars: int,
         elapsed_ms: int,
     ) -> None:
+        # A miss is a result with no panel of *this* turn to complete: an id this
+        # turn never started, or the same id twice.  The map is cleared as each
+        # turn opens (`add_user`), so a call id reused by a later turn can never
+        # find the earlier turn's panel here.
         widget = self._tools.get(call_id)
         if widget is None:  # pragma: no cover - a result without a start
             return
@@ -589,21 +695,24 @@ class ChatView(VerticalScroll):
 
         Reads the widgets rather than a private mirror of what was appended, so
         a test asserting on this is asserting on what the user sees.
+
+        **The selector is every class the transcript draws, and an approval row
+        is one of them** — it went without one, so the most consequential thing
+        on the screen was the one thing this could not see.  A class added here
+        and not there is a row that is visibly present and textually absent;
+        `content_text` is what the fallback branch reads it through.
         """
         lines = []
         for widget in self.query(
             ".user-message, .assistant-message, .system-message, .tool-call, "
-            ".model-picker"
+            ".model-picker, .approval-prompt"
         ):
             if isinstance(widget, ToolCallWidget):
                 lines.append(widget.plain_text())
             elif isinstance(widget, ModelPicker):
                 lines.append(widget.plain_text())
             elif isinstance(widget, Static):
-                content = widget.content
-                lines.append(
-                    content.plain if isinstance(content, Text) else str(content)
-                )
+                lines.append(content_text(widget.content))
         return "\n".join(lines)
 
 
@@ -887,8 +996,7 @@ class ToolCallWidget(VerticalScroll):
             self._refresh_display()
 
     def plain_text(self) -> str:
-        content = self._body.content
-        return content.plain if isinstance(content, Text) else str(content)
+        return content_text(self._body.content)
 
 
 class HistoryInput(TextArea):
@@ -1228,8 +1336,7 @@ class ModelPicker(Static):
 
     def plain_text(self) -> str:
         """What this row shows, for the transcript's own `plain_text`."""
-        content = self.content
-        return content.plain if isinstance(content, Text) else str(content)
+        return content_text(self.content)
 
 
 class ApprovalPrompt(Static):
@@ -1252,9 +1359,18 @@ class ApprovalPrompt(Static):
     only place a refused call is ever seen — which is v1's arrangement and the
     reason the denial is drawn here rather than as a tool result.
 
-    **Losing focus without a decision refuses.**  A prompt left undecided is
-    worse than a wasted keystroke: the loop is waiting on this future, and it
-    would wait until somebody cancelled the turn.
+    **Losing focus does not answer, and that is where this parts from the
+    picker.**  A picker that loses focus is a question abandoned and resolves
+    itself (see `ModelPicker`), but this row is blurred by the two things that
+    take focus on purpose: every printable key, which `redirect_printable` lands
+    in the prompt, and `Ctrl+S`, which opens the picker over it.  v1's rule read
+    that blur as "no", so a person who merely began their next thought — an `a`,
+    a paste, the `s` of `Ctrl+S` — silently refused the call the model was parked
+    on, and then watched the picker `Ctrl+S` had opened cancel itself off the
+    refocus that answer set off.  So there is deliberately **no `on_blur`
+    override here**: the row stays up and `pending`, and the answers are the keys
+    (`y`, `n`, `Esc`) or a cancel of the turn, which denies the call it holds
+    (`slife2.tui.app._cancel_turn`) rather than leaving a future nobody will set.
     """
 
     can_focus = True
@@ -1283,10 +1399,6 @@ class ApprovalPrompt(Static):
 
     def action_deny(self) -> None:
         """Refuse it — `n` and `Esc` are the same answer, as they were in v1."""
-        self._decide(False)
-
-    def on_blur(self) -> None:
-        """Focus went elsewhere: nothing was granted.  See the docstring."""
         self._decide(False)
 
     @property
@@ -1355,8 +1467,7 @@ class ApprovalPrompt(Static):
 
     def plain_text(self) -> str:
         """What this row shows, for the transcript's own `plain_text`."""
-        content = self.content
-        return content.plain if isinstance(content, Text) else str(content)
+        return content_text(self.content)
 
 
 def _model_meta(choice: ModelChoice) -> str:

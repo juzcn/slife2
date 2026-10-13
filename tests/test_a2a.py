@@ -39,12 +39,14 @@ from slife2.a2a import broker
 from slife2.a2a import server as a2a_server
 from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
+    A2AMesh,
     AgentCard,
     AgentName,
     FIFOCache,
     _backoff_delay,
     _card_instance,
     _decode_payload,
+    _OutboundSend,
     _presence_status,
     _reply_state,
     format_presence_line,
@@ -212,6 +214,35 @@ def test_a_fifo_cache_forgets_the_oldest_past_its_cap() -> None:
     cache["a"], cache["b"], cache["c"] = 1, 2, 3
     assert dict(cache) == {"b": 2, "c": 3}
     assert cache.get("a") is None
+
+
+@pytest.mark.asyncio
+async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both attributes grew a hand-rolled `pop(next(iter(...)))` a few lines from
+    the `FIFOCache` that already does exactly that — and that `_sends` and
+    `_withdrawn` beside them use.  The class is where the cap is stated now, so
+    the assertion is on the class: a plain dict here is the drift coming back.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT)
+    assert isinstance(mesh._pending, FIFOCache)
+    assert isinstance(mesh._corr_to_task, FIFOCache)
+
+    monkeypatch.setattr(mesh._pending, "maxsize", 2)
+    for index in range(3):
+        mesh._pending[f"task{index}"] = str(index)
+    assert list(mesh._pending) == ["task1", "task2"]  # the oldest went
+
+    async def no_publish(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        return None
+
+    monkeypatch.setattr(mesh, "_publish_props", no_publish)
+    monkeypatch.setattr(mesh._corr_to_task, "maxsize", 2)
+    send = _OutboundSend(TASK, PEER, "session", "{}")
+    for corr in ("c1", "c2", "c3"):
+        await mesh._publish_attempt(send, corr)
+    assert list(mesh._corr_to_task) == ["c2", "c3"]
 
 
 # ── the ledger, and the restart it exists for ───────────────────────────────
@@ -418,6 +449,36 @@ def test_a_remote_broker_is_never_started_locally() -> None:
         broker.ensure(
             settings(broker_host="mq.example.test"),
             listening=lambda host, port: False,
+            which=lambda name: "/usr/bin/mosquitto",
+            start=lambda argv, url: started.append(argv),
+        )
+    assert started == []
+
+
+@pytest.mark.parametrize("host", sorted(broker.WILDCARD_HOSTS))
+def test_a_wildcard_is_not_a_local_host(host: str) -> None:
+    """`0.0.0.0` is *this* machine's every interface, which is not the same
+    question as "may I start an anonymous broker here" — so it is neither local
+    nor remote, and it gets its own answer."""
+    assert broker.is_wildcard(host) is True
+    assert broker.is_local(host) is False
+
+
+@pytest.mark.parametrize("host", sorted(broker.WILDCARD_HOSTS))
+def test_a_wildcard_host_is_refused_rather_than_started_open(host: str) -> None:
+    """A broker started for a wildcard binds every interface with
+    `allow_anonymous true`, so every `$a2a/v1/...` topic would be published to
+    the LAN and any host could impersonate a peer.
+
+    That is the one edit that reads as "make it reachable" and silently makes
+    the mesh reachable by everybody, so nothing is spawned: the start fails
+    with the reason instead.
+    """
+    started: list[list[str]] = []
+    with pytest.raises(broker.BrokerUnavailable, match="every interface"):
+        broker.ensure(
+            settings(broker_host=host),
+            listening=lambda h, p: False,
             which=lambda name: "/usr/bin/mosquitto",
             start=lambda argv, url: started.append(argv),
         )
@@ -706,6 +767,44 @@ async def test_a_refusing_window_falls_back_to_the_agent_server() -> None:
     assert a2a_message_type(conversation.handed[-1]["prompt"]) == "task_request"
 
 
+@pytest.mark.asyncio
+async def test_one_bad_message_does_not_end_the_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    window: Window,
+) -> None:
+    """The writer is one task per agent and nothing watches it until shutdown,
+    so a raise escaping the loop used to kill it *silently*: the mesh still
+    looked connected, and every later arrival queued behind a writer that no
+    longer existed.  One undeliverable message is dropped, logged, and the loop
+    goes on to the next."""
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
+    real_hand_over = a2a_server.hand_over
+    calls = {"n": 0}
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the mesh callback blew up")
+        return await real_hand_over(*args, **kwargs)
+
+    monkeypatch.setattr(a2a_server, "hand_over", flaky)
+
+    session = wired()
+    session.post("first", PEER, "a message from jill")
+    session.post("second", PEER, "a message from jill")
+    # `drain_until_idle` cancels the writer at the end, so a writer that died on
+    # the first message would fail this call rather than reaching the asserts.
+    await drain_until_idle(session, window=window)
+
+    assert window.handed == [
+        {"agent": AGENT, "text": "second", "channel": f"a2a:{PEER}"}
+    ]
+    assert any(
+        "a2a_delivery_failed" in record.getMessage() for record in caplog.records
+    )
+
+
 # ── the orphan notice, which is nobody's but this plugin's ──────────────────
 #
 #  The one message here that no peer will ever re-send, and the one the plugin
@@ -879,6 +978,52 @@ async def test_the_queue_is_bounded_so_a_peer_cannot_grow_this_process() -> None
     # The oldest went, which is the one whose moment has most likely passed.
     first = session.queue.get_nowait()
     assert first[0] != f"{marker(PEER, None, 'message')}message 0"
+
+
+# ── the start, and what it must not leak ────────────────────────────────────
+#
+#  The eager resume runs inside the guarded region, so a start that fails
+#  *after* one agent's mesh is joined still hands that mesh back.  This is the
+#  one place a shared process can leak a retained *online* card and a pair of
+#  MQTT connections on a machine somebody then restarts.
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_fails_after_connecting_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `finally` used to guard only the `yield`, so a `resume` that raised
+    on its way to it left every connected mesh holding its connections, its
+    retained online card and its `_drain` writer.  Now `resume` is inside: the
+    teardown runs even though the start never reached `yield`."""
+    InboundStore.open(AGENT).add(TASK, PEER)  # a ledger, and an orphan in it
+    left: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def disconnect(self: Any) -> None:
+        left.append(self.agent_name)
+
+    def boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("the orphan template will not render")
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
+    # The failure the defect names: an orphan notice whose template will not
+    # render, reached after the mesh joined.
+    monkeypatch.setattr(a2a_server, "render", boom)
+
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(config, source=lambda: config, connecting=True)
+
+    with pytest.raises(RuntimeError, match="will not render"):
+        async with Client(mcp):
+            pass
+
+    assert left == [AGENT]
 
 
 # ── the plugin: four tools, and who may call them ───────────────────────────

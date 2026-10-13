@@ -18,13 +18,14 @@ from slife2.events import (
     ContextChosen,
     TextDelta,
     ThinkingDelta,
+    ToolApprovalRequested,
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
 )
 from slife2.messages import Message, ToolCall, Usage
 from slife2.toolclient import FUNC_TOOL_UNLOAD
-from slife2.tui.app import SlifeApp
+from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient
 from slife2.tui.theme import GLYPHS, PALETTE
 from slife2.tui.widgets import (
@@ -234,6 +235,63 @@ async def test_the_answer_carries_its_token_count() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         assert "830 tokens" in shown(app)
+
+
+async def test_a_turn_with_nothing_to_say_leaves_nothing_behind() -> None:
+    """No empty block, and no bill hung on the previous turn's answer.
+
+    `begin_assistant` promises a turn that says nothing leaves nothing behind,
+    and the block is opened by the *answer* — so an empty one has to open
+    nothing.  It used to open an `AssistantMessage` regardless, whose dim `…` is
+    the widget's "still working" affordance: a turn that had finished, saying it
+    was working, forever.
+
+    The bill is the other half of the same turn.  `TurnFinished` arrives before
+    the answer does, so the count was aimed at a block that did not exist and
+    fell back to `_last_assistant` — the *previous* turn's — printing the silent
+    turn's tokens under somebody else's words.
+    """
+
+    def respond(prompt: str, on_event):
+        if prompt == "first":
+            on_event(TextDelta("hello"))
+            on_event(
+                TurnFinished(
+                    text="hello",
+                    usage=Usage(completion_tokens=3),
+                    last_usage=Usage(completion_tokens=3),
+                    steps=1,
+                    stop_reason="stop",
+                )
+            )
+            return "hello"
+        # A turn that hit the step cap having said nothing: no deltas, no text.
+        on_event(
+            TurnFinished(
+                text="",
+                usage=Usage(completion_tokens=99),
+                last_usage=Usage(completion_tokens=99),
+                steps=8,
+                stop_reason="max_steps",
+            )
+        )
+        return ""
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "first")
+        await settle(pilot, app)
+        await submit(pilot, "second")
+        await settle(pilot, app)
+        text = shown(app)
+        blocks = list(app.query(AssistantMessage))
+
+    assert len(blocks) == 1, "the silent turn opened a block of its own"
+    assert text.count("3 tokens") == 1, "the first turn still has its own count"
+    assert "99 tokens" not in text, "the silent turn's bill landed somewhere"
+    assert [row for row in text.splitlines() if row.strip() == "…"] == [], (
+        "a finished turn left the working ellipsis behind"
+    )
 
 
 def reasoning_turn():
@@ -552,6 +610,49 @@ async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
         assert "it is 42" in shown(app)
         blocks = app.query_one(ChatView).query(".assistant-message")
         assert len(list(blocks)) == 2, "text after a tool panel is its own block"
+
+
+async def test_tool_panels_do_not_pile_up_across_turns() -> None:
+    """Every panel stays on screen; only the current turn's calls stay addressable.
+
+    The map the transcript keeps is what a result finds its panel through, and it
+    was never pruned: one widget handle per call, for the life of the window, so
+    a day of agent work — thousands of calls, each with its own id — retained
+    thousands of handles that nothing would ever look up again.  It is bounded by
+    the turn now, which is also what settles what a reused id means: a call id is
+    unique only within the turn that used it (`add_user` clears the map as each
+    turn opens), so a later turn registering `c1` cannot complete the earlier
+    turn's panel of the same name.
+
+    Distinct ids per turn are the point of the count — one id reused five times
+    overwrites itself and would read as bounded even while leaking.
+    """
+
+    def respond(prompt: str, on_event):
+        call = f"call-{prompt}"
+        on_event(ToolCallStarted(call_id=call, name="calc", arguments={"e": "1"}))
+        on_event(
+            ToolCallFinished(
+                call_id=call,
+                name="calc",
+                ok=True,
+                result_preview="1",
+                result_chars=1,
+                elapsed_ms=1,
+            )
+        )
+        return "1"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        for index in range(5):
+            await submit(pilot, f"q{index}")
+            await settle(pilot, app)
+        chat = app.query_one(ChatView)
+        panels = list(app.query(ToolCallWidget))
+
+    assert len(panels) == 5, "the transcript is still the whole conversation"
+    assert len(chat._tools) == 1, "but only the last turn's call is still addressable"
 
 
 # --- scrolling the transcript -------------------------------------------------
@@ -1046,6 +1147,26 @@ async def test_the_persons_own_words_are_never_unwrapped() -> None:
         assert f"You> {typed}" in shown(app)
 
 
+async def test_a_row_with_no_channel_keeps_the_persons_words_whole() -> None:
+    """An absent channel is this window's own, and the strip must agree.
+
+    The bubble is decided by `channel_prefix`, which reads `""` as `You> ` —
+    the only rows without a channel are rows this window wrote before there was
+    a column for one (`DEFAULT ''`), and it is also what a caller that names no
+    channel sends.  The marker-strip guard had its own test for the same
+    question (`channel != "tui"`), so an absent channel *was* unwrapped: a
+    person's own message that happened to start with a marker lost its front on
+    the way back — the one outcome the guard beside this one exists to prevent.
+    """
+    typed = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+    client = answering_with(stored(Message(role="user", content=typed), channel=""))
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert f"You> {typed}" in shown(app)
+        assert "peer-1" in shown(app), "their own words, marker and all"
+
+
 async def test_a_restored_message_says_which_turn_it_opened() -> None:
     """The id the model addresses turns by, shown to the person watching.
 
@@ -1300,6 +1421,37 @@ async def test_a_history_that_cannot_be_read_does_not_close_the_window() -> None
     assert "disconnected" in bar
 
 
+async def test_one_unreadable_stored_row_does_not_kill_the_drain() -> None:
+    """A row the screen cannot parse costs that row, not the turn behind it.
+
+    `_restore` is awaited at the top of `_drain`, before the queue is popped
+    from — so an exception out of the rebuild does not merely lose the history.
+    It escapes the loop, the worker dies, `_draining` goes False, and the
+    message the person is waiting on is never run and never shown: the window
+    sits there saying "working" with `1 queued` in the bar.  A record written by
+    an older build can carry a shape a field-by-field read does not expect — a
+    `turn_id` that is not a number is one, and a tool call that is not a mapping
+    is another — and neither is this module's to trust.
+    """
+    bad = stored(
+        Message(role="user", content="a question nobody can read"),
+        Message(role="assistant", content="an answer"),
+    )
+    bad["turn_id"] = "not-a-number"
+    client = answering_with(bad)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        # The row was dropped, so the count is still honest — the rebuild ran.
+        assert "[restored 1 turn]" in shown(app)
+        await submit(pilot, "hi")
+        await settle(pilot, app)
+        text = shown(app)
+
+    assert "You> hi" in text, "the queued message never ran"
+    assert "not-a-number" not in text
+
+
 async def test_the_history_is_read_once() -> None:
     """Not once per turn: a second read would draw a second copy of it."""
     client = answering_with(*CONVERSATION)
@@ -1312,6 +1464,50 @@ async def test_the_history_is_read_once() -> None:
 
     assert client.reads == 1
     assert text.count("You> what is 6*7?") == 1
+
+
+async def test_a_turn_that_begins_during_the_rebuild_waits_for_it() -> None:
+    """The history cannot land under a turn that started while it was read.
+
+    `_drain` asks `_ensure_connected` before it mounts anything, and that call
+    used to stop at "connected" — but the connect sets the connected flag
+    *before* it reads the history, so a prompt typed in that window mounted its
+    line and its answer first and the whole restored conversation arrived
+    underneath them.  The read is held open here the way a large one really
+    takes a moment, and the prompt is typed into it: the transcript may not show
+    a single line of the new turn until the history is up.
+    """
+    client = answering_with(*CONVERSATION, text="new answer")
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    original = client.transcript
+
+    async def held_open() -> list[dict]:
+        reading.set()
+        await release.wait()
+        return await original()
+
+    client.transcript = held_open  # type: ignore[method-assign]
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await asyncio.wait_for(
+            reading.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await submit(pilot, "hi")
+        # The drain is parked on the read that is still in flight, so nothing of
+        # the new turn may be on screen yet.
+        assert "You> hi" not in shown(app)
+
+        release.set()
+        await settle(pilot, app)
+        text = shown(app)
+
+    assert text.index("You> what is 6*7?") < text.index("You> hi"), (
+        "the restored history landed under a turn that started during the read"
+    )
+    assert text.index("[restored 2 turns]") < text.index("You> hi")
+    assert "jack> new answer" in text
 
 
 async def test_a_prompt_typed_before_the_servers_were_up_still_restores() -> None:
@@ -1646,6 +1842,55 @@ async def test_ctrl_c_quits_when_no_turn_is_running() -> None:
         assert not app.is_running
 
 
+async def test_a_cancelled_turn_accepts_nothing_more() -> None:
+    """The tail of a cancelled turn is dropped, ticket and turn alike.
+
+    A delta can be handled after the turn it belongs to is over — the module
+    docstring says so about `finish_assistant`, and the cancel is the same seam
+    from the other side: an event already in Textual's pump, or one the client's
+    reader task posted as it unwound.  Leaving the ticket on the cancelled turn
+    accepted them, and `[cancelled]` is drawn by `add_note`, which does not close
+    a turn — so a late delta opened a fresh block under the cancel line and a late
+    tool call mounted a panel there, a transcript reading as though the turn had
+    gone on after the person stopped it.
+    """
+    started = asyncio.Event()
+
+    async def streams_then_hangs(prompt, on_event, *, channel="tui", images=None):
+        on_event(TextDelta("partial"))
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = streams_then_hangs  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
+        ticket = app._ticket
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "[cancelled]" in shown(app)
+        assert app.query_one(ChatView)._turn_open is False
+
+        # Both halves of the seam, on the ticket the turn really used.
+        app.post_message(TurnEventMessage(ticket, TextDelta("LATE-FRAGMENT")))
+        app.post_message(TurnEventMessage(ticket, ToolCallStarted("late", "sneak", {})))
+        await pilot.pause()
+        text = shown(app)
+        names = [panel.tool_name for panel in app.query(ToolCallWidget)]
+
+    assert "LATE-FRAGMENT" not in text, "a late delta reopened the cancelled turn"
+    assert names == [], "a late tool call mounted a panel under the cancel"
+    assert text.index("partial") < text.index("[cancelled]")
+
+
 async def test_escape_cancels_and_stops_there() -> None:
     """The cancel key, and the only thing it does.
 
@@ -1661,6 +1906,58 @@ async def test_escape_cancels_and_stops_there() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert app.is_running
+
+
+# --- the approval row ---------------------------------------------------------
+
+
+def asking(call_id: str = "call-1", name: str = "sensitive"):
+    """A scripted turn that puts one tool call to the person, then answers.
+
+    The request arrives as a progress event and the answer cannot travel back on
+    it, so the window draws a row and answers it on its own call.  What is under
+    test here is the row, not the handshake — `tests/test_approval.py` holds that
+    half.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolApprovalRequested(call_id, name, {"path": "/tmp/notes.md"}))
+        return "done"
+
+    return respond
+
+
+async def test_a_keystroke_while_a_call_awaits_an_answer_does_not_refuse_it() -> None:
+    """Typing your next thought is not an answer, and must not be read as one.
+
+    `ApprovalPrompt` treated losing focus as a denial, and two things take focus
+    on purpose: every printable key (`redirect_printable` lands it in the
+    prompt) and `Ctrl+S`.  So an `a`, or a paste, silently refused the call the
+    model was parked on — the person's next keystroke deciding a question they
+    had not been asked to answer.  A blur now leaves the row up and pending; the
+    keys `y`/`n`/`Esc` and a cancelled turn are the answers.
+
+    The row is also the one thing the transcript's own `plain_text` used not to
+    read — its class was drawn by nothing and selected by nothing — so the last
+    assertion is that the question is part of what the screen reports.
+    """
+    client = FakeAgentClient(asking())
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        assert app._approval is not None, "the row was drawn"
+        assert "requests approval" in shown(app), "and the transcript reads it"
+
+        await pilot.press("a")
+        await pilot.pause()
+
+        assert app._approval is not None, "a keystroke refused the call"
+        assert app._approval.pending is True
+        typed = app.query_one(HistoryInput).text
+
+    assert client.answers == [], "an answer was sent for a call nobody decided"
+    assert typed == "a", "the keystroke went to the draft, which is where it was aimed"
 
 
 # --- the model switch ---------------------------------------------------------
@@ -1808,6 +2105,43 @@ async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert app._switching, "and a later Ctrl+S opens one again"
+
+
+async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
+    """The other focus-stealer: the switch, opened while a call waits.
+
+    `action_switch_model` focuses the picker it mounts, and that blur used to
+    deny the call — which sent a refocus back to the prompt, which blurred *the
+    picker*, which cancelled the question ctrl+s had just opened.  So the one
+    key refused a call the model was parked on and then threw away its own
+    question; both are read as nothing here.
+    """
+    client = FakeAgentClient(asking())
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        assert app._approval is not None, "the row was drawn"
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert len(app.query(ModelPicker)) == 1, "the picker survives its own key"
+        assert app._approval is not None, "and the call is still being asked about"
+        assert app._approval.pending is True
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+    assert client.answers == [], "ctrl+s refused a call nobody decided"
+    assert client.switches == [], "and nothing was switched either"
 
 
 async def test_a_refused_switch_moves_nothing_and_says_why() -> None:

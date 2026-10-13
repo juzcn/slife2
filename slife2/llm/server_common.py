@@ -22,6 +22,7 @@ receives complete `ToolCall` objects and needs no accumulator of its own.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
@@ -340,6 +341,33 @@ Translate = Callable[[Any], Iterable[ProviderEvent]]
 #: A fresh translation for one stream.  A factory and not a function, because a
 #: translation carries state across the stream it is for.
 Translator = Callable[[], Translate]
+
+
+def sdk_client_factory(
+    module: str, attribute: str
+) -> Callable[[ProviderSettings, str], Any]:
+    """The one per-protocol fact of client construction: which SDK class.
+
+    **Three adapters wrote this closure out, and the two OpenAI ones were
+    byte-identical.**  Everything around the class is the same — a client built
+    from the provider's `base_url` and the key resolved for it — and the class is
+    the only thing a protocol decides, which is why it is named here as two
+    strings rather than spelled out by each adapter.  A change that belongs to
+    every backend (a timeout, a retry policy) then has one site, the way
+    `sdk_streamer` gives the rest of the frame one.
+
+    **The import is at call time on purpose.**  `import_module` here is what an
+    in-function `from openai import AsyncOpenAI` did in each adapter: the module
+    stays importable, and a process that serves nothing from it never loads the
+    SDK.  It also leaves the class named once, in the `sdk_streamer` call that
+    uses it.
+    """
+
+    def make_client(provider: ProviderSettings, key: str) -> Any:
+        client_class = getattr(importlib.import_module(module), attribute)
+        return client_class(api_key=key, base_url=provider.base_url)
+
+    return make_client
 
 
 def sdk_streamer(

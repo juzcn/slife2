@@ -188,6 +188,38 @@ def catalogue_db() -> Path:
     return agents_dir() / "tools.db"
 
 
+#: The conversation store's own file name, spelt once.  Public where the other
+#: two per-agent names below are private, because `slife2.db.database_path`
+#: *builds* this one while `slife2-context` *finds* them — the name is used on
+#: both sides of that split, so a second spelling is a second thing to change.
+TURNS_DB = "turns.db"
+
+
+def turn_dbs() -> list[Path]:
+    """Every conversation store on this machine: an agent's own, and its workers'.
+
+    **The pattern, named — and the name is the whole point.**  This replaces a
+    `glob("*/*.db")` in `slife2-context`'s startup pass, which is not a
+    description of the turn files at all: `schedule.db` sits in the same
+    directory and matches it, so the pass opened the *scheduler's* ledger as a
+    `TurnStore` and wrote the turn schema into it — two plugins sharing one
+    SQLite file, which is the one thing `DESIGN.md` §5 says the file layout is
+    for.  A suffix `*.db` means "a database"; what is wanted here is "a
+    conversation", and only the middle of the name says which.
+
+    A worker's store is `<worker>.turns.db` beside its parent's
+    (`slife2.db.database_path`), so both spellings are enumerated rather than
+    one pattern that would also catch `myturns.db`.
+    """
+    found: list[Path] = []
+    for directory in sorted(agents_dir().iterdir()):
+        if not directory.is_dir():
+            continue
+        for pattern in (TURNS_DB, f"*.{TURNS_DB}"):
+            found.extend(sorted(directory.glob(pattern)))
+    return found
+
+
 #: The ledger's own file name, spelt once: `schedule_db` builds a path from it
 #: and `schedule_dbs` finds every one of them with it.
 _SCHEDULE_DB = "schedule.db"

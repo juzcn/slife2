@@ -43,11 +43,6 @@ from typing import Any
 import slife2.timeouts as _T
 from slife2.clock import now
 
-#: How long SQLite waits for a lock before giving up.  The same number
-#: `slife2.db` uses, and for the same reason: one writer, but a read may be in
-#: flight while a run is being recorded — the poll and a model's tool call are
-#: two callers of one file.
-
 #: Every state a run can be in, in the order they can be reached.
 #:
 #: `pending` is written **before** the hand-over rather than after it, which is
@@ -477,23 +472,31 @@ class ScheduleStore:
         for the caller that knows it better than this process does — the harness
         closing a run reads it off the background task, which finished before
         anybody noticed.
+
+        **A run that has already ended is not settled again.**  `ran` and
+        `skipped` are the two endings — `UNSETTLED` names the ones still open —
+        and an UPDATE that did not ask would let the last thing anybody said
+        rewrite the ledger: `schedule_run_skip` on a run that already `ran` would
+        clear its `ran_at` and file it as skipped, which is the same "history is
+        a function of the last thing anybody said" that `reopen` refuses to do.
+        The caller is told nothing happened by getting the row back unchanged,
+        exactly as it is when a reopen is refused.
         """
         if status not in STATUSES:
             raise ValueError(f"{status!r} is not a run state")
-        task = self.task(name)
-        if task is None:
-            return None
+        found = self.run(name, due_at)
+        if found is None or found.status not in UNSETTLED:
+            return found
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = ?, note = ?, "
-                "error = ? WHERE task_id = ? AND due_at = ?",
+                "error = ? WHERE id = ?",
                 (
                     status,
                     (when or now()) if status == RAN else "",
                     note,
                     error,
-                    task.id,
-                    due_at,
+                    found.id,
                 ),
             )
         return self.run(name, due_at)
@@ -509,15 +512,30 @@ class ScheduleStore:
         and a tool that quietly turned one back into work would make the ledger's
         history a function of the last thing anybody said.  The caller is told
         nothing happened by getting the row back unchanged.
+
+        **The task id goes with the ending, and only with the ending.**  A run
+        that *failed* after its background task started still carries that task's
+        id, and reopening only the status would leave a `pending` row that still
+        names a task — `schedule_run_now`'s in-flight guard reads exactly that
+        pair, so the backfill would answer without dispatching anything, do
+        nothing, and be settled `failed` again by the next reconcile.  Clearing
+        the column is what makes that reopened run a run nobody is doing yet.
+
+        But a run that is still `pending` *is* being done, or is waiting to be,
+        and its id is how the guard knows: clearing it there would make a second
+        `schedule_run_now` for the same due time dispatch a second task, which is
+        the repeat the guard exists to prevent.  So the id is kept for `pending`
+        and dropped for the two states that are genuinely over.
         """
         found = self.run(name, due_at)
         if found is None or found.status not in UNSETTLED:
             return found
+        task_id = found.agent_task_id if found.status == PENDING else ""
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = '', note = ?, "
-                "error = '' WHERE id = ?",
-                (PENDING, note, found.id),
+                "error = '', agent_task_id = ? WHERE id = ?",
+                (PENDING, note, task_id, found.id),
             )
         return self.run(name, due_at)
 
@@ -556,26 +574,6 @@ class ScheduleStore:
                 (PENDING,),
             ).fetchall()
         return [_run(row, row["task_name"]) for row in rows]
-
-    def unresolved(self) -> list[Run]:
-        """Every run still awaiting an ending, newest first.
-
-        What the startup sweep needs: a `pending` row left by a process that
-        stopped mid-fire, and a `missed` or `failed` row from before it.  The
-        ledger is the only place any of them is visible — which is the whole
-        difference between this feature and an `agent-task`, and the reason this
-        plugin has a database at all.
-        """
-        placeholders = ",".join("?" * len(UNSETTLED))
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT r.*, t.name AS task_name FROM scheduled_runs r "
-                f"JOIN scheduled_tasks t ON t.id = r.task_id "
-                f"WHERE r.status IN ({placeholders}) "
-                f"ORDER BY r.due_at DESC",
-                UNSETTLED,
-            ).fetchall()
-        return [_run(row, name=row["task_name"]) for row in rows]
 
     def sweep(self) -> int:
         """Fail every `pending` run a stopped process left behind.
