@@ -18,6 +18,7 @@ from slife2.events import (
     ContextChosen,
     TextDelta,
     ToolCallFinished,
+    ToolCallStarted,
     TurnFinished,
     decode,
     encode,
@@ -41,6 +42,13 @@ EVENTS = [
     ContextChosen(kept=12, recalled=3),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
+    # The step counter, and the two keys that are omitted at zero: the first
+    # entry round trips a capped step, the second one that arrived without a
+    # step at all — a rebuilt transcript, or a server from before these keys.
+    ToolCallStarted(
+        call_id="c1", name="calc", arguments={"e": "6*7"}, step=2, max_steps=30
+    ),
+    ToolCallStarted(call_id="c2", name="now"),
     ToolCallFinished(
         call_id="c1",
         name="calc",

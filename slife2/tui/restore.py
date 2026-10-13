@@ -204,6 +204,10 @@ def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
     through unshaped would make a restored panel the one place a tool's entire
     output is rendered — and make it unlike the same call seen live.
     """
+    # No step: the turn log keeps no such column, and a live panel's counter
+    # comes from the event.  Zero is the widget's "nobody said", which leaves
+    # the counter off rather than claiming `(0)` — the same rule the duration
+    # below follows.
     chat.add_tool_start(call.id, call.name, call.arguments)
     chat.add_tool_end(
         call.id,

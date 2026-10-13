@@ -787,8 +787,16 @@ class SlifeApp(App[None]):
                 self._transcript.append_text(text)
             case ThinkingDelta(text=text):
                 self._transcript.append_thinking(text)
-            case ToolCallStarted(call_id=call_id, name=name, arguments=arguments):
-                self._transcript.add_tool_start(call_id, name, arguments)
+            case ToolCallStarted(
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+                step=step,
+                max_steps=max_steps,
+            ):
+                self._transcript.add_tool_start(
+                    call_id, name, arguments, step=step, max_steps=max_steps
+                )
             case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
                 # **The turn is parked on this**, so it is answered off the
                 # message pump rather than in it — see `_ask_approval`.

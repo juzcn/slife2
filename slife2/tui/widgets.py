@@ -678,7 +678,12 @@ class ChatView(VerticalScroll):
     # --- tools ---------------------------------------------------------------
 
     def add_tool_start(
-        self, call_id: str, name: str, arguments: dict | None = None
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict | None = None,
+        step: int = 0,
+        max_steps: int = 0,
     ) -> None:
         # Closes the current text block but not the turn: text may resume after.
         #
@@ -688,7 +693,13 @@ class ChatView(VerticalScroll):
         if self._streaming is not None:
             self._streaming.collapse_thinking()
         self._close_block()
-        widget = ToolCallWidget(call_id=call_id, name=name, arguments=arguments or {})
+        widget = ToolCallWidget(
+            call_id=call_id,
+            name=name,
+            arguments=arguments or {},
+            step=step,
+            max_steps=max_steps,
+        )
         self._tools[call_id] = widget
         self.mount(widget)
         self.follow_tail()
@@ -887,11 +898,24 @@ class ToolCallWidget(VerticalScroll):
         Binding("enter,space", "toggle_detail", "Toggle detail", show=False),
     ]
 
-    def __init__(self, *, call_id: str, name: str, arguments: dict) -> None:
+    def __init__(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        arguments: dict,
+        step: int = 0,
+        max_steps: int = 0,
+    ) -> None:
         super().__init__()
         self.call_id = call_id
         self.tool_name = name
         self.arguments = arguments
+        #: Which step of the turn asked for it (1-based) and the cap that turn
+        #: is running under, `0` for no cap — both from the event, and both 0
+        #: for a panel rebuilt from the turn log, which keeps no such column.
+        self._step = step
+        self._max_steps = max_steps
         self._collapsed = True
         self._result = ""
         self._result_chars = 0
@@ -939,6 +963,19 @@ class ToolCallWidget(VerticalScroll):
             line.append(short, PALETTE["muted"])
         line.append("  ")
         line.append(word, colour)
+        if self._step > 0:
+            # Which step of the turn asked for this, in v1's two spellings: a
+            # bare `(3)` while `max_steps` is 0 — no cap, so there is no
+            # denominator to write — and `(3/30)` under one.  Either way a long
+            # turn is visibly advancing, which is the whole of what the counter
+            # is for; a panel with no step to report (a rebuilt one) draws
+            # nothing rather than `(0)`.
+            counter = (
+                f"({self._step}/{self._max_steps})"
+                if self._max_steps > 0
+                else f"({self._step})"
+            )
+            line.append(f" {counter}", PALETTE["dimmest"])
         if self._elapsed_ms:
             # How long it took, in the collapsed header rather than in the
             # detail: a tool that hung for four seconds is worth seeing without

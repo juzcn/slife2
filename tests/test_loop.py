@@ -347,6 +347,60 @@ async def test_max_steps_cuts_off_a_runaway_loop() -> None:
     assert final.stop_reason == "max_steps"
 
 
+async def test_the_step_travels_with_the_call() -> None:
+    """The panel's counter is built from the event, so the loop has to send it.
+
+    Two tool calls in two steps, the second of which ends the turn: the pair of
+    numbers v1 showed beside a running tool (`(3/30)`) is these two fields, and
+    the loop is the only thing that knows both.
+    """
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="now", arguments={})),
+        tool_turn(ToolCall(id="c2", name="now", arguments={})),
+        text_turn("done"),
+    )
+    observer = ListObserver()
+
+    await AgentLoop(backend, registry(), max_steps=3).run_turn([], "go", observer)
+
+    started = [e for e in observer.events if isinstance(e, ToolCallStarted)]
+    assert [(e.call_id, e.step, e.max_steps) for e in started] == [
+        ("c1", 1, 3),
+        ("c2", 2, 3),
+    ]
+
+
+async def test_no_cap_runs_until_the_model_stops() -> None:
+    """**`max_steps` of 0 is no cap**, and it is the loop's default too.
+
+    Twenty tool calls is past the sixteen an unset cap used to produce, which
+    is what makes this the test of the change: a loop that still stopped at a
+    number would stop here, before the model had said anything.  That it got
+    as far as the text turn is itself part of the assertion — `FakeBackend`
+    raises on a call it has no scripted answer for — so `stop_reason` below
+    says who ended the turn, not that anything had to end it.
+
+    Both spellings are run: the parameter's own default, and the config's
+    written zero (`slife2.config.AgentSettings.max_steps` reads an absent key
+    as the same 0).
+    """
+    for kwargs in ({}, {"max_steps": 0}):
+        backend = FakeBackend(
+            *[
+                tool_turn(ToolCall(id=f"c{i}", name="now", arguments={}))
+                for i in range(20)
+            ],
+            text_turn("done"),
+        )
+
+        result = await AgentLoop(backend, registry(), **kwargs).run_turn([], "go")
+
+        assert result.stop_reason == "stop"
+        assert result.text == "done"
+        assert result.steps == 21
+        assert len(backend.calls) == 21
+
+
 async def test_a_broken_observer_cannot_end_a_turn() -> None:
     """The answer is still correct and still returned."""
     backend = FakeBackend(text_turn("hello"))

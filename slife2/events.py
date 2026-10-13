@@ -93,6 +93,18 @@ class ToolCallStarted:
     #: read or computed rather than only which tool ran — "calc(e=6*7)" is a
     #: sentence; "calc" is a word.
     arguments: dict[str, Any] = field(default_factory=dict)
+    #: Which model call of this turn asked for it (1-based), and the cap that
+    #: turn is running under — `0` for no cap, the same spelling `max_steps`
+    #: uses everywhere else.  v1's `iteration`/`max_iterations`, carried on the
+    #: call rather than on an event of its own for the reason v1 carried them
+    #: here: a tool call is the only thing that marks a step, so this is where
+    #: somebody watching a long turn sees it advancing.
+    #:
+    #: `step` of 0 is **"nobody said" rather than a step**: a rebuilt transcript
+    #: has no step numbers to draw, and neither has a server from before these
+    #: keys — so the counter is left off rather than drawn as `(0)`.
+    step: int = 0
+    max_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -228,6 +240,13 @@ def encode(event: TurnEvent) -> str:
                 # display sense, and a notification is not the place for an
                 # empty object on every single tool.
                 **({"args": arguments} if arguments else {}),
+                # The step and the turn's cap, omitted at zero for the reason
+                # above: "nobody said" is not a number, and a written `0` would
+                # have to be read back as one.  `cap: 0` is no cap, so a turn
+                # that has one shows `(3/30)` and a turn that does not shows a
+                # bare `(3)` — both keys absent hides the counter entirely.
+                **({"step": event.step} if event.step else {}),
+                **({"cap": event.max_steps} if event.max_steps else {}),
             }
         case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
             payload = {
@@ -304,6 +323,10 @@ def decode(message: str) -> TurnEvent | None:
                 call_id=str(payload.get("id") or ""),
                 name=payload["name"],
                 arguments=arguments if isinstance(arguments, dict) else {},
+                # Absent reads as 0, which is the counter's "nobody said" — the
+                # honest answer for a server that predates these keys.
+                step=int(payload.get("step") or 0),
+                max_steps=int(payload.get("cap") or 0),
             )
         case "tool_approval" if isinstance(payload.get("name"), str):
             arguments = payload.get("args")

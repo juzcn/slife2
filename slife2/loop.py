@@ -18,6 +18,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
+from itertools import count
 from typing import Any
 
 from slife2.async_tasks import Deliver, schedule, started
@@ -108,7 +109,7 @@ class AgentLoop:
         backend: LLMBackend,
         tools: ToolRegistry,
         *,
-        max_steps: int = 16,
+        max_steps: int = 0,
         refresh: Callable[[], Awaitable[ToolRegistry]] | None = None,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
@@ -141,9 +142,15 @@ class AgentLoop:
         #: (`slife2.handover`).  A background call that nobody is behind keeps its
         #: result in the registry instead, for `check_async` to hand over.
         self._deliver = deliver
-        #: Model calls allowed in one turn before it is cut off.  A model that
-        #: keeps calling tools would otherwise burn tokens indefinitely; the
-        #: cap produces an ordinary result, not an exception.
+        #: Model calls allowed in one turn before it is cut off, or **0 for no
+        #: cap at all**.  Zero is the config's spelling for "nobody asked for
+        #: one" (`slife2.config.AgentSettings.max_steps`, where an absent key is
+        #: the same 0), and it is the default here for the same reason: a cap is
+        #: something somebody asks for, and a turn that runs until the model
+        #: stops asking for tools is what a loop is when nobody has said
+        #: otherwise.  So there is one rule rather than two — a cap exists when
+        #: the number is positive — and where one exists it produces an ordinary
+        #: result, not an exception.
         self._max_steps = max_steps
 
     async def _retool(self) -> None:
@@ -230,7 +237,11 @@ class AgentLoop:
         last_text = ""
         last_usage = Usage()
 
-        for step in range(1, self._max_steps + 1):
+        # The iterator is the whole of what "no cap" changes here: a positive
+        # number bounds the steps, and zero counts forever — the turn still
+        # ends the way it always did, when the model stops asking for tools.
+        steps = range(1, self._max_steps + 1) if self._max_steps > 0 else count(1)
+        for step in steps:
             # **The call is made before either half is written**, because the
             # pair's text *is* the tool's answer — there is nothing to write
             # until it has answered.  Putting the one `await` in front of both
@@ -305,11 +316,13 @@ class AgentLoop:
 
             # Phase B: run the batch and feed every result back.
             for call in result.tool_calls:
-                text, _ok = await self._one(call, observer)
+                text, _ok = await self._one(call, observer, step)
                 messages.append(
                     Message(role="tool", content=text, tool_call_id=call.id)
                 )
 
+        # Only a capped turn ever gets here: with no cap the iterator does not
+        # end, so the only way out of the loop is the return above.
         logger.warning("turn hit the %d-step limit", self._max_steps)
         await self._emit(
             observer,
@@ -329,12 +342,19 @@ class AgentLoop:
             stop_reason="max_steps",
         )
 
-    async def _one(self, call: ToolCall, observer: TurnObserver) -> tuple[str, bool]:
+    async def _one(
+        self, call: ToolCall, observer: TurnObserver, step: int
+    ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
 
         The whole of one call sits here — the strip, the gate, the clock, the
         two events — because each of those is a fact about *this* call and the
         order between them is the thing that is easy to get wrong:
+
+        `step` is the loop's own counter, and it is here for the same reason:
+        the event that opens the call carries it so the panel can say which
+        step of the turn this is (v1's `(3/30)`), and this is the only place
+        that knows both the call and the step it was made in.
 
         * **Nothing is announced before the gate answers.**  A call the operator
           refused never happened as far as the transcript is concerned: v1's
@@ -372,7 +392,19 @@ class AgentLoop:
             logger.info("tool_denied name=%s", call.name)
             return DENIED, False
 
-        await self._emit(observer, ToolCallStarted(call.id, call.name, call.arguments))
+        await self._emit(
+            observer,
+            ToolCallStarted(
+                call.id,
+                call.name,
+                call.arguments,
+                step=step,
+                # A whole number for a turn that has a cap, and 0 for one that
+                # does not — the panel's two spellings of the counter come from
+                # this, so it is sent rather than left for the reader to guess.
+                max_steps=self._max_steps,
+            ),
+        )
         # Timed here because this is the only place that knows when the call ran:
         # the event carried a duration from the beginning — short key, codec, two
         # tests — and the producer filled it with a zero, so the transcript could

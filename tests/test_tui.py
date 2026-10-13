@@ -539,6 +539,33 @@ async def test_a_tool_call_is_a_panel_showing_what_it_ran() -> None:
     assert "done" in text
 
 
+async def test_a_tool_panel_says_which_step_of_the_turn_it_is() -> None:
+    """**v1's counter**, on the row a reader already has in front of them.
+
+    Three spellings, and each is a different answer to "how far into this turn
+    are we": `(2/30)` while the turn is capped — which is the number v1 wrote —
+    a bare `(3)` when it is not (`max_steps` of 0 means no cap, so there is no
+    denominator to write), and nothing at all for a call that arrived without a
+    step: a rebuilt transcript keeps no such column, and `(0)` would be a step
+    the turn never had.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted("c1", "calc", {"e": "1"}, step=2, max_steps=30))
+        on_event(ToolCallStarted("c2", "calc", {"e": "1"}, step=3))
+        on_event(ToolCallStarted("c3", "calc", {"e": "1"}))
+        return ""
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        rows = [panel.plain_text() for panel in app.query(ToolCallWidget)]
+
+    assert "(2/30)" in rows[0]
+    assert "(3)" in rows[1]
+    assert "(" not in rows[2], "nobody said is not `(0)`"
+
+
 async def test_a_tool_panel_starts_collapsed() -> None:
     app = make_app(tool_turn())
     async with app.run_test(size=SIZE) as pilot:

@@ -282,7 +282,12 @@ agent:
   # Model calls allowed in one turn before it is cut off.  A model that keeps
   # calling tools would otherwise run indefinitely; the cap ends the turn
   # normally rather than raising.
-  max_steps: 16
+  #
+  # 0 is no cap at all, and so is leaving the key out — the turn ends when the
+  # model stops asking for tools, which is the arrangement this file ships
+  # with.  Replace the 0 with a count to bound a turn: `max_steps: 16` is one
+  # model call per step, sixteen steps and no more.
+  max_steps: 0
   # The system prompt is a Jinja2 template, rendered per turn with the agent
   # name — `run_turn(..., agent="jack")` reaches it — because the server is
   # shared and stateless, so two instances on one server are two names asking

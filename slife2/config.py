@@ -570,7 +570,14 @@ class AgentSettings:
     """How the agent loop behaves, and where it listens.  Not an identity."""
 
     server: ServerSettings = field(default_factory=ServerSettings)
-    max_steps: int = 16
+    #: Model calls allowed in one turn, or **0 for no cap** — which is also what
+    #: an absent key reads as.  "Nobody wrote a number" and "somebody wrote
+    #: zero" are one statement here on purpose rather than by accident: a cap is
+    #: something asked for, so a config that does not ask for one does not have
+    #: one, and inventing a number for it is how a turn comes to be cut off at a
+    #: bound nobody chose.  `AgentLoop` reads the same rule off the number it is
+    #: handed, so "is there a cap" is decided in exactly one place.
+    max_steps: int = 0
     #: A Jinja2 template for the system prompt — an absolute path by the time
     #: this is built, or "" for the one the distribution ships.  A template
     #: rather than a string because the prompt has a hole in it where the agent
@@ -1563,11 +1570,22 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         }
 
     agent_raw = _mapping(raw.get("agent"), "agent")
+    max_steps = _int_or(
+        agent_raw.get("max_steps"), base.agent.max_steps, "agent.max_steps"
+    )
+    if max_steps < 0:
+        # Refused rather than read, and refused for the reason `port: 0` is: a
+        # negative count is not a number of anything.  Nothing this value could
+        # be read as is the answer to a typo — and the one direction it would be
+        # read in, "no cap", is the setting that never stops, so a config that
+        # missed a keystroke would get the most expensive meaning of the three.
+        raise ConfigError(
+            f"agent.max_steps: {max_steps} is not a step count; leave the key "
+            f"out or write 0 for no cap"
+        )
     agent = AgentSettings(
         server=servers["agent"],
-        max_steps=_int_or(
-            agent_raw.get("max_steps"), base.agent.max_steps, "agent.max_steps"
-        ),
+        max_steps=max_steps,
         system_prompt=_template_path(
             agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
         ),
@@ -2375,9 +2393,12 @@ def _int_or(value: Any, default: int, where: str) -> int:
     Absent means absent, and that is the whole of what this adds over
     `int(value or default)`: the `or` idiom also treats an explicit `0` as "not
     given", so `tool_load.threshold: 0` — the value the guard below exists to
-    refuse — was silently replaced by the default, as were `max_steps: 0` (a
-    turn with no model call in it) and `port: 0` (the kernel's "pick one for
-    me", which is not something a server of ours should be handed by accident).
+    refuse — was silently replaced by the default, and so was `port: 0` (the
+    kernel's "pick one for me", which is not something a server of ours should
+    be handed by accident).  `max_steps: 0` was the third example and is now
+    the one this reader exists to *keep*: a written zero is the config's "no
+    cap", and it means the same thing as leaving the key out
+    (`slife2.config.AgentSettings.max_steps`).
 
     `where` names the field, because a value that is not a number is the
     caller's typo and has to be reported like every other one.  A bare `int()`

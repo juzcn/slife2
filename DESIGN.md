@@ -2197,12 +2197,29 @@ machinery below changed when the state moved in.
 
 ```
 append the user message
-for step in 1..max_steps:
+for step in 1..max_steps:                     ← 0 = no cap: until the model stops
     Phase A: exhaust the model stream, forwarding deltas       ← no tool runs here
     append the assistant message, from the *result*
     if no tool calls: done
     Phase B: run each call, feed every result back             ← never raises
 ```
+
+**The step cap is opt-in.** `max_steps: 0` — and an absent key, which the config
+reads as the same 0 — is no cap at all: the turn ends when the model stops
+asking for tools, and a turn that never stops is a turn the operator asked for
+by running an agent with nobody watching the bill. A number nobody wrote is a
+bound nobody chose, and inventing one is how a turn comes to be cut off at
+sixteen for no reason anybody can point at. Where a cap does exist it produces
+an ordinary result (`stop_reason: "max_steps"`), not an exception.
+
+**And a turn says which step it is on, on the screen.** Each tool panel carries
+v1's counter — `(3/30)` while the turn has a cap, a bare `(3)` while it does
+not, and nothing at all when the step is unknown — which is why
+`ToolCallStarted` carries both numbers: a closed model API answers in one round
+trip and a long turn is the only reason to care, so the panel is where somebody
+watching sees it advancing rather than a spinner that says nothing. A rebuild
+from the turn log draws no counter, because the log keeps no such column;
+`restore` is not guessing one.
 
 **What the loop is *not* shown is everything around the turn.** The context is
 decided before `run_turn` is called and the turn is recorded after it returns,

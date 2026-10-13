@@ -338,11 +338,13 @@ providers:
 def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     """`int(x or default)` reads a written `0` as "not given".
 
-    Three settings were affected and each fails differently: a threshold of
-    zero is the configuration the guard exists to refuse, and was silently
-    replaced by the default instead; `max_steps: 0` is a turn with no model
-    call in it, and became sixteen; and `port: 0` is a server bound somewhere
-    the launcher will never look for it.
+    Two settings fail visibly when that happens: a threshold of zero is the
+    configuration the guard exists to refuse, and was silently replaced by the
+    default instead; and `port: 0` is a server bound somewhere the launcher
+    will never look for it.  `max_steps: 0` used to fail too — it was read as
+    sixteen — and is the one that changed sides: a written zero is now the
+    config's "no cap", so this reader keeping it is what makes the setting mean
+    what it says.
     """
     path = write(tmp_path, "tool_load:\n  threshold: 0\n")
     with pytest.raises(ConfigError, match="would evict every tool"):
@@ -358,6 +360,23 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     path = write(tmp_path, "servers:\n  context:\n    port: 0\n")
     with pytest.raises(ConfigError, match="is not a port"):
         load(path)
+
+
+def test_no_cap_is_spelt_zero_or_not_at_all(tmp_path) -> None:
+    """**A cap is something asked for**, so a config that does not ask for one
+    does not have one: an absent key and a written `0` are one statement, and
+    the loop is handed the same 0 either way.
+
+    A negative is the other side of that.  It is not a number of steps, and the
+    one direction it could be read in — "no cap" — is the setting that never
+    stops, so a config that missed a keystroke would get the most expensive of
+    the three meanings rather than the one line every other bad value produces.
+    """
+    assert load(write(tmp_path, "agent: {}\n")).agent.max_steps == 0
+    assert load(write(tmp_path, "agent:\n  max_steps: 0\n")).agent.max_steps == 0
+
+    with pytest.raises(ConfigError, match="is not a step count"):
+        load(write(tmp_path, "agent:\n  max_steps: -1\n"))
 
 
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
