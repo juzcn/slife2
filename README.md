@@ -1084,7 +1084,9 @@ slife2/
 │                     #   in-process, because a file already has one writer
 │                     #   (DESIGN §1.1)
 ├─ tokens.py          # how large a piece of a conversation is, when nobody has
-│                     #   measured it — one estimator, every user of one
+│                     #   measured it — the model's own tokenizer, a script
+│                     #   measure where it cannot be fetched, and every user of
+│                     #   one estimator rather than three
 ├─ embedder.py        # the client half of the embeddings server, as a library:
 │                     #   one hop, shared by the two things with an index
 ├─ context.py         # a conversation's context as a pure function: the reply

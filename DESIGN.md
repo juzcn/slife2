@@ -290,8 +290,9 @@ launcher starts every plugin and shares it; a switch that only refused the *work
 would have been a key whose whole content was "do not do what this process
 exists to do".  So the rule is the one the data already states: **a machine that
 should not talk to WeChat is a machine where nobody scans a code.**  There is no
-saved login to pick up until somebody does, and the `wechat_*.yaml` files are the
-whole of what this process resumes.  What is left in the config is an address
+saved login to pick up until somebody does, and the `wechat.yaml` inside an
+agent's own directory is the whole of what this process resumes.  What is left in
+the config is an address
 under `servers:` and nothing else — `slife2-toolhub` is the only other plugin
 that reads no section of its own.
 
@@ -1163,6 +1164,17 @@ of the two it was.  The config it hands mosquitto is not decoration — from
 mosquitto 2.0 a bare `-p` version binds, listens, and then refuses every
 anonymous client, which would arrive as a connect timeout naming nothing.
 
+**And "local" means loopback, which is a third case rather than a detail.**  A
+wildcard `broker.host` — `0.0.0.0`, `::`, or the empty string — is not this
+machine's broker and not another machine's either: it is *every* interface, so
+starting mosquitto on it with `allow_anonymous true` (the thing that makes a
+loopback broker usable without a credential dance) would publish every
+`$a2a/v1/…` topic and accept a task from anybody on the network.  It is refused
+before any config is written, with a message naming the address rather than the
+generic "remote broker is down" — the local half of the split is safe *because*
+nothing but loopback reaches it, so an address that removes that property is not
+a wider version of the same thing.
+
 **`provider:` is a hard constraint and not a default.**  v1 carried a
 `transport:` field, and answered a value it did not implement by disabling the
 feature with a warning at config load — which is precisely the outcome that
@@ -1270,10 +1282,18 @@ can still continue one. (A subagent is that caller — see §9.)
 So a conversation is an object, and the surface is three tools:
 
 ```
-send_message(agent, subagent, prompt) → {text, usage, steps, stop_reason, model}
+send_message(agent, subagent, prompt) → {text, usage, steps, stop_reason, model,
+                                         refused}
 reset(agent, subagent)
 transcript(agent, subagent)           → {turns}   the conversation, for a screen
 ```
+
+**Every key is always there**, including `refused` on the path where nothing
+could be refused: `refused` is the calls a person declined in this turn, and a
+caller that has to ask a reply dict whether a key exists is a caller that gets a
+`KeyError` on the one branch nobody exercised. The folded-in case — a message
+that arrived mid-turn and rode the running one — answers the same keys, which is
+what a previous version got wrong by building the dict a second time by hand.
 
 **`new_messages` is gone**, and its absence is the point: the caller has nothing
 left to remember. It keeps an identity and no state at all — and the identity is
@@ -1735,14 +1755,21 @@ record rather than a mistake in `slife2/tui/restore.py`, and it is worth closing
 in the record rather than guessed at from the text.
 
 **The real token count is not carried over, and that is a decision rather than a
-gap.** v1 counts with `tiktoken`'s `o200k_base` and provisions the vocabulary at
-install time. `slife2.tokens` is a script-aware character measure instead,
-because this system's endpoints are DeepSeek, Qwen, Ollama and whatever gateway
-the operator points at, and `o200k_base` is not one of their vocabularies either
-— the dependency would buy exactness about a tokenizer nobody here uses. What it
-costs is tolerance, and the budget is a fraction of a window, so an estimate 10%
-wrong spends 10% of a window sized for it. Measured usage is untouched:
-`context_tokens` is the provider's own count, and it is the number §5.1's
+gap.** What `slife2.tokens` *sizes* with is `tiktoken`'s `o200k_base` — v1's
+choice — and what it falls back to, when the vocabulary cannot be fetched, is the
+script-aware character measure it used to be alone. The reversal is worth stating
+because the argument for the measure was written here first and it was wrong on
+its own numbers: charging four characters per token for Latin text and one token
+per CJK character came out about 25% high on English and about 60% high on
+Chinese, which is a *bias* and not the tolerance it was described as — every
+budget it fed was spending a window it did not need. A real BPE over the same
+scripts errs small and in both directions, and the vocabulary is fetched once per
+process rather than provisioned at install, so an installation that cannot reach
+it degrades to exactly the old measure instead of failing.
+
+None of this is exactness about the endpoint: a Qwen or DeepSeek model has its
+own vocabulary and `o200k_base` is not it. Measured usage is untouched either
+way — `context_tokens` is the provider's own count, and it is the number §5.1's
 selection is not spending.
 
 **The trim is the one thing still owed here**, and it is named in §9 rather than
@@ -2075,6 +2102,17 @@ v1): a time-style literal anywhere in `slife2/` or `tests/` fails CI unless it i
 in the registry or carries a `# timeouts:` note saying why it stays. What the
 gate cannot check is which of two numbers should be bigger; that is what the
 invariants are for.
+
+**It enforces the second half of the rule too, and that half was missing.** "Read
+at call time" is broken by a registry lookup in a *signature* exactly as it is by
+a literal — `def exclusive(*, timeout: float = _T.timeouts.grace.lock)` reads the
+value once, at import, and a patch to the registry then changes nothing about
+any call that took the default. The gate caught only literals, so three of these
+were live at once (`runtime.exclusive`, `runtime.start_lock`, `a2a.broker.ensure`)
+— each sitting beside a docstring that stated the rule it broke, which is how a
+miss of this shape hides: a lookup in a signature *looks* like the convention it
+violates. The gate now fails on either spelling, so the rule has one form in the
+file and one form in the check.
 
 ## 8. The toolhub
 
@@ -2801,6 +2839,20 @@ A bare `timeout` the model appends to a tool whose schema does not declare one i
 read as the bound *and removed*, because a tool server validates its parameters
 and would refuse the whole call over one extra key — the failure v1 measured and
 the reason the alias exists.
+
+**"Exactly one timer" is a rule about the whole path, and the gateway was
+quietly a second one.**  The link to somebody else's MCP server built its
+`Client` with a per-request timeout pinned to the *connect* budget, and FastMCP
+turns that into the session's read timeout — a total deadline applied to every
+request over that connection.  So a call to an `mcp:` or `rest-api:` entry died
+at 60 s whatever the model had asked for, while the loop's own timer was still
+running and the tool was still working at the far end: the model was told
+`ok=False` about a call that was going to succeed.  The client now carries the
+connect bound and nothing else, which is where the owner-of-await rule puts it —
+a library must not set a total for every caller that borrows it.  The two awaits
+no caller bounds, a listing and the hub's ask for a plugin's sources, carry their
+own at the call site; everything else is bounded by whoever asked for it, and
+"otherwise none" is what §8.8 says a foreground call with no stated bound gets.
 
 **`_async` hands the call to the background and the result comes back by
 itself.** The model gets a `task_id` and a marker — `[AsyncToolCallResult:{…}]`,
