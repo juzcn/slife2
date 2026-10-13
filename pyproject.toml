@@ -111,6 +111,19 @@ dependencies = [
     # module this project imports is a dependency this project states.  It
     # brings `paho-mqtt`, which nothing here imports.
     "aiomqtt>=2.5.0",
+    # The tokenizer `slife2.tokens` sizes a conversation with, and **the one
+    # dependency here that is not needed to run**.  It is imported inside the
+    # one function that resolves it, so a process that never estimates pays
+    # nothing; and the vocabulary it needs is *not* in the wheel — `tiktoken`
+    # fetches a few megabytes the first time anybody asks for an encoding, which
+    # is why a failure to get one is handled rather than raised: the script
+    # measure answers instead, and a machine with no network runs everything
+    # (`slife2.tokens` states the argument, including why `o200k_base` is the
+    # right base for endpoints that do not use it).  Declared as a plain
+    # dependency rather than an extra, because the fallback is a degradation
+    # rather than an alternative — an installation that skipped it would size
+    # every conversation by hand on every machine, not just the offline ones.
+    "tiktoken>=0.14.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

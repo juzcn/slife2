@@ -14,16 +14,30 @@ than three functions in three places is v1's: counting, the trim's stop
 condition and the recall's token budget were the same function there, so the
 three could not come to disagree about how big something is.
 
-**Why not the real tokenizer.**  v1 counts with `tiktoken`'s `o200k_base` and
-provisions the vocabulary at install time.  That is the right answer for a system
-whose models are OpenAI's, and the wrong one here: slife2's endpoints are
-DeepSeek, Qwen, Ollama and whatever gateway the operator points at, and
-`o200k_base` is not one of their vocabularies either — so the dependency would
-buy a number that is exact about a tokenizer nobody is using, at the price of a
-multi-megabyte vocabulary fetched over the network at first use.  What is left is
-a script-aware character measure, and it is honest about being one.  The budget
-it feeds is a fraction of a window, so an estimate that is 10% wrong spends 10%
-of a window that was sized for it.
+**The base measure is OpenAI's own tokenizer**, `tiktoken`'s `o200k_base` — the
+vocabulary GPT-4o and later are trained on, and v1's choice.  It replaces a
+script-aware character measure that was the fallback and is now only the
+fallback, because counting by hand was wrong by a *direction* that mattered: the
+old rule charged 4 characters per token for Latin text and 1 token per CJK
+character, so an English sentence came out about 25% high and a Chinese one
+about 60% high — both in the direction that spends a window it did not need to.
+
+**And the fallback is load-bearing rather than polite.**  `tiktoken` fetches a
+few megabytes of vocabulary over the network the first time it is asked for one,
+so a machine that is offline, air-gapped or behind a proxy that blocks it has no
+tokenizer to use — and this project's whole point is that its endpoints are
+DeepSeek, Qwen, Ollama and whatever gateway the operator points at, most of
+which run perfectly well with no internet at all.  So a failure to load is
+**not** an error here: it is remembered once per process, logged once, and the
+script measure answers from then on.  That is also why nothing resolves at
+import — a backend process that never sizes a conversation never touches this.
+
+**No vocabulary is exact for a non-OpenAI endpoint**, and this one is not
+claimed to be: a Qwen or DeepSeek model has its own.  What makes `o200k_base`
+the better base anyway is that it is a real BPE over the same scripts, so its
+error is small and unbiased where a hand-written ratio's is structural.  The
+budget it feeds is a fraction of a window, so an estimate that is 5% wrong
+spends 5% of a window that was sized for it.
 
 **What the number is for, and what it is not.**  Every caller here is choosing
 what *fits*.  None of them reports it as usage, and a caller that finds itself
@@ -33,12 +47,54 @@ printing one has made a mistake this module cannot catch.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-#: Characters per token for text that is not CJK.  Four is the long-standing
-#: figure for English prose under BPE, and the one v1's own docstring names as
-#: the fallback rationale.
+logger = logging.getLogger(__name__)
+
+#: The vocabulary.  Named rather than inlined so the fallback's log line can say
+#: which one it could not get — `o200k_base` is what the current OpenAI models
+#: use, and the name is the whole of what a reader needs to check that.
+_ENCODING = "o200k_base"
+
+#: Resolved once per process, on the first estimate.  `None` with `_ENCODING_OK`
+#: false means "not tried yet"; `None` with it true means "tried and could not be
+#: had", which is the state an offline machine stays in for its whole life.
+_encoding: Any = None
+_encoding_failed = False
+
+
+def _openai_encoding() -> Any:
+    """`o200k_base`, or `None` if this machine cannot get it — the seam a test
+    replaces to keep the suite off the network (see `tests/conftest.py`).
+
+    Resolved lazily and never at import: the vocabulary is a few megabytes
+    `tiktoken` downloads the first time anybody asks, and a process that never
+    sizes a conversation — a model backend, the TUI, most plugins — should not
+    pay for one at all.  A failure is remembered as firmly as a success, so a
+    machine without it pays the attempt once rather than once per turn.
+    """
+    global _encoding, _encoding_failed
+    if _encoding is None and not _encoding_failed:
+        try:
+            import tiktoken
+
+            _encoding = tiktoken.get_encoding(_ENCODING)
+        except Exception as exc:  # noqa: BLE001 — any failure means "no vocabulary"
+            _encoding_failed = True
+            logger.warning(
+                "tokenizer_unavailable encoding=%s error=%s — falling back to the "
+                "script measure, which runs high on both scripts",
+                _ENCODING,
+                exc,
+            )
+    return _encoding
+
+
+#: Characters per token for text that is not CJK, in the fallback measure.  Four
+#: is the long-standing figure for English prose under BPE, and the one v1's own
+#: docstring names as the fallback rationale.
 _CHARS_PER_TOKEN = 4
 
 #: And a CJK character is close to a token of its own — which is why one ratio
@@ -50,7 +106,8 @@ _WIDE_TOKENS = 1
 #: any; the figure is v1's, and what it is for is keeping an image-bearing turn
 #: from looking free to a budget.  In practice the bytes never reach the db (an
 #: attachment is stored as a note), so this is reached only by the live message
-#: list.
+#: list.  **This is the one thing the real tokenizer cannot answer**, so it is
+#: charged the same way whichever measure is in force.
 _IMAGE_TOKENS = 200
 
 
@@ -79,13 +136,29 @@ def _is_wide(character: str) -> bool:
     )
 
 
-def estimate_text_tokens(text: str) -> int:
-    """About how many tokens `text` is, by its own two scripts."""
-    if not text:
-        return 0
+def _by_script(text: str) -> int:
+    """The fallback: about how many tokens *text* is, by its own two scripts.
+
+    Used when the vocabulary cannot be had (`_openai_encoding`).  It is the
+    measure this module was built on, kept because the machine that needs it is
+    the one with no network — which is a supported machine, not a broken one.
+    """
     wide = sum(1 for character in text if _is_wide(character))
     narrow = len(text) - wide
     return wide * _WIDE_TOKENS + (narrow + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+
+def estimate_text_tokens(text: str) -> int:
+    """About how many tokens `text` is, by the model's tokenizer or its scripts."""
+    if not text:
+        return 0
+    encoding = _openai_encoding()
+    if encoding is not None:
+        # `encode_ordinary` and not `encode`: the latter *refuses* text spelling
+        # a special token — `<|endoftext|>` — and a conversation may contain any
+        # text at all, including that, without the estimator raising a turn.
+        return len(encoding.encode_ordinary(text))
+    return _by_script(text)
 
 
 def _content_tokens(content: Any) -> int:
