@@ -2082,7 +2082,12 @@ refused them as "its owner is not answering" about a server that answers. Every
 row was then written back, so a restart of the real catalogue logged `0 added,
 239 changed` about a config nobody had edited: the two halves of that are
 `slife2.toolhub.configured_sources` and a family that does not stamp a verdict
-of its own on a row (`slife2.toolfamily.Held._row`).
+of its own on a row (`slife2.toolfamily.Held._row`). **And a store nobody told
+is not a store told "none"**: `known` of `None` forgets nothing, which is the
+difference between a catalogue built without the config and one whose config
+names no sources — collapsing them deleted every `plugin`, `mcp` and `rest` row
+in the file, and it is §10.1's first deformation wearing the boot pass's
+clothes.
 
 An index whose recorded identity no longer matches the configuration is dropped
 and rebuilt rather than read, and that is one mechanism for all four things that
@@ -2547,7 +2552,10 @@ counts are the distinction everything above rests on: `tools` is what the source
 last offered, which is a row on disk, while `loaded` is what the model is
 *holding* — and a load outlives the connection, so the second is taken against
 the live set (`ToolStore.source_counts`) or a server that has stopped answering
-would be reported as one whose tools the model still has.
+would be reported as one whose tools the model still has.  A source nobody has
+counted answers **`not counted`** rather than `0`: a zero about a fact this
+process does not have is a verdict, and §8.3 is the answer a person reads when a
+tool is missing.
 
 **A listing also ages, because the change notification no longer arrives.** At
 2026-07-28 change notifications moved to `subscriptions/listen` — a stream the
@@ -3211,3 +3219,378 @@ cannot say all three is a wish rather than a decision.
   `OperationalError`, the store would report it as one caller's bad data, and
   every turn after the upgrade would run perfectly and never be recorded. Add it
   with the reader that needs it.
+---
+
+## 10. Fallbacks
+
+**A fallback is a design behaviour, and it is the one kind that is invisible
+when it is wrong.** Every other section here says what the system does; this one
+says what it does *instead* when the designed road is closed — and an error path
+is the least-read code in any build, so a fallback nobody decided is found by
+its symptom rather than by its line. The symptom has one shape: the system does
+not fail, it *deforms*, and it deforms quietly. That is why this is a section
+rather than a convention in a contributor's head — a deformation is a design
+decision too, and a decision nobody wrote down is the one nobody can review.
+
+**Falling back is allowed. Falling back undeclared is not.** Some failures
+cannot be designed away — a machine with no keyring, a checkout that cannot
+reach the tokenizer's vocabulary, a peer that is somebody else's process — and
+refusing to run in those cases would buy correctness with the whole system. So
+the rule is not "never". It is that **the designed path either happens, or the
+failure is named where it is used, and between those two there is nothing but
+what this section registers.**
+
+**A registered fallback states four things**, and a bullet that cannot state all
+four is a wish rather than a decision — the test §9 applies to a deferred gap:
+
+- **what it does**, in one sentence;
+- **what it gives up**, because a fallback that costs nothing is not one;
+- **what it does not cover** — the boundary at which it hands back to a real
+  failure, which is the half that decides whether it is safe;
+- **where the failure goes**, so that it is still findable afterwards.
+
+### 10.1 The four deformations
+
+The shapes below are how a fallback nobody decided is found without reading
+every error path, and each already had a rule somewhere in this file — written
+for the site that needed it, and not carried to the next one. They are here as
+shapes rather than as rules because a rule per site is how the same mistake
+survives in four places.
+
+- **A value that cannot be read is not a value that is absent.** A section that
+  is not a mapping, a stored list whose JSON is damaged, a reply that is missing
+  the key it was asked for: each is *damage*, and each has an obvious "empty" to
+  be confused with. The confusion is not cosmetic, because the empty value is
+  written back — a corrupt live-context list read as `[]` is a list one turn
+  long on the next save, and the loss is permanent. The rule the code already
+  states where it gets this right (`config._mapping`, `server._adopt`,
+  `toolclient._unreadable`) is: refuse, naming the file, the section and the
+  row. Tolerance is for a value whose damage costs one message; it is never for
+  a value that is structural.
+- **A write that failed is not a write that happened.** A bookkeeping write is
+  the one kind whose failure has no reader, so it is the kind that quietly
+  becomes a wrong fact: a record that did not land makes a live process
+  uncountable, and the count is what stops the shared servers. The rule is that
+  a bookkeeping write either lands or is reported — "the caller is not prepared
+  to fail over" is a reason to report it out of band, not a reason to say
+  nothing.
+- **A failure is not a verdict.** The dangerous form reads as a *confident
+  negative*: a search whose answer could not be read rendered as "nothing
+  matched", a tool list that could not be decoded served as no tools, a name
+  that is not in the config answered as though it had been removed. A model acts
+  on these rather than retrying them. So an unreadable answer is a failure, and
+  only a *readable* one may be a verdict.
+- **A weaker path is not a substitute for a missing capability.** Feature
+  detection — a field that is only sometimes present, a dependency that may not
+  be installed, a model whose window is unknown — must not silently select the
+  degraded branch, because that branch is then indistinguishable from the normal
+  one. Where the value can be asked for, ask; where it cannot, refuse; where it
+  is genuinely optional, it belongs in §10.2.
+
+### 10.2 The register
+
+**A missing config file runs the built-in default.** `slife2.config.load`
+answers `default_config()` — one OpenAI-compatible provider — when there is no
+`slife2.yaml`, and every other section is then absent. *Gives up:* the
+operator's sections, which is why a *write* refuses to create the file
+(`configfile.config_path`): a section written into a fresh file would take the
+place of the whole of it. *Does not cover:* a file that exists and does not
+parse, which is a `ConfigError` naming the line. *Failure goes:* `slife2 status`
+prints the model in use.
+
+**A secret resolves down a chain, and resolution never raises — except when a
+store that is there fails.** `config.resolve_secret` tries an OS keyring URI,
+then `${VAR}` from the environment, then `credstore`, then the entry's own
+literal — and failing all four leaves the reference **verbatim**, which is a
+credential that fails at the API call rather than at load. *Gives up:* load-time
+certainty about a credential. *Does not cover:* a host with **no** credential
+store, which is the only declared degrade; a store that is present but locked,
+corrupt or unsupported raises where the secret is resolved, because a value that
+cannot be read is not an absent one (§10.1). *Failure goes:* the store's own
+error, out of `resolve_secret`; a reference that resolves to nothing is refused
+by `llm/server_common.unresolved_key`, naming it rather than sending it as a
+token.
+
+**An identity the handshake cannot report is probed by tool presence.**
+`mcp_server.identifies` compares the name the server advertised while
+connecting, and falls back to asking whether the expected tool is in its list.
+*Gives up:* exactness — a different server that happens to serve that tool is
+waved through. *Does not cover:* a server that reports a name, which is compared
+exactly. *Failure goes:* `open_server` raises `ConnectionError` naming the URL.
+
+**A link that died mid-call is retried once, and only when the transport proved
+the call never left** (§8.3). *Gives up:* one round trip on a link that is
+already being rebuilt. *Does not cover:* a peer's refusal, and a call whose fate
+is unknown — those are values the model reads, because repeating a call that may
+have run is how one answer arrives twice. *Failure goes:* the retry's own
+failure is the tool's error text.
+
+**The context rebuild keeps the context it had** (§5.1). A timeout, a provider
+failure and an unparsed reply are one answer — the turns in hand — because the
+rebuild has nowhere to send a failure to. *Gives up:* the rebuild, for that
+turn. *Does not cover:* a store that cannot be asked at all, which fails the
+turn. *Failure goes:* the turn runs on the list it has, and the store's own list
+is untouched.
+
+**A token count that cannot fetch its vocabulary falls back to the script
+measure** (§5.1, `slife2.tokens`). *Gives up:* accuracy, in both directions.
+*Does not cover:* nothing — this is the floor, and measured usage is the
+provider's own count either way. *Failure goes:* nowhere: the fallback is the
+answer, remembered once per process so the fetch is attempted once.
+
+**A tool failure is a message, not an exception** (§7). `ToolRegistry.execute`
+answers `ok: false` with text the model reads. *Gives up:* a caller's ability to
+tell a tool error from a tool result by type alone. *Does not cover:* the
+harness's own failures — a missing hub, a missing store, an `_unreadable` answer
+from a plugin — which fail the turn.
+
+**An oversized result is recorded as a digest that says so, and an image in a
+turn that has already died is replaced by a note naming it** (§5). *Gives up:*
+the bytes, in a record that could not hold them. *Does not cover:* the live
+conversation, where the same shortening happens on the way in. *Failure goes:*
+the digest and the note are in the transcript, which is the point of both.
+
+**Text the database cannot encode is normalised, not dropped** (§5). A lone
+surrogate becomes U+FFFD; a valid pair is put back together, which is how an
+emoji survives. *Gives up:* the original code unit. *Does not cover:* nothing —
+a failed write fails the turn. *Failure goes:* the replacement character is
+visible in the record.
+
+**A machine that cannot prove a pid is ours refuses to signal it** (§4,
+`process_start_token` → `None`). *Gives up:* `slife2 down`'s reach, on a machine
+with no way to read a start token. *Does not cover:* a pid it can prove, which
+is signalled normally. *Failure goes:* `down` says it cannot prove the process
+is its own rather than guessing.
+
+**One section warns instead of refusing, and it is the file tunnel's provider
+name** (§1.6). An unknown `file-tunnel: active:` degrades to ngrok, and
+`tunnel_status` reports the provider actually in use. *Gives up:* the operator's
+intent — the tunnel that runs is not the one named. *Does not cover:* a
+malformed *shape* in the same section, which is refused. *Failure goes:* the
+warning at load, and the provider name in `tunnel_status`.
+
+**A turn whose stored body will not parse is one turn with nothing to read.**
+`db._loads` answers the caller's default for a `turn.messages` that is not JSON,
+so the turn reads as having no messages, the keyword index gives it no document,
+and `_turns_without_vectors` counts it as owing no vector — which is exactly
+what "nothing to embed" means, and why it is not offered to the model again.
+*Gives up:* the turn, its text, and any vector it would have had. *Does not
+cover:* a value that is **structural**, where an empty one would be written
+back — the live-context list and the index's own reads refuse instead
+(`_structural`), because a damaged list read as `[]` becomes a one-turn list on
+the next save. *Failure goes:* a warning naming the row, which is the only trace
+there is.
+
+**A turn in the live context with no row is dropped, and counted.**
+`TurnStore.turns_by_ids` drops an id the file has no row for rather than
+refusing, because a rebuild that refused over one absent id would turn a partial
+loss into a total one. *Gives up:* the conversation comes back shorter than it
+was. *Does not cover:* an id whose row exists and is damaged, which comes back
+as the empty record above. *Failure goes:* a warning saying how many ids and
+which ones.
+
+**A file holding the previous schema's `turns` table is reported once and run
+on.** The store gains an empty `turn` table beside it and every read afterwards
+honestly reports no history. *Gives up:* the turns on disk, which are invisible
+— the reason the report exists at all is that nothing else looks wrong. *Does
+not cover:* a file this build wrote. *Failure goes:* one `logger.error` per
+process naming the file and saying to delete it; there is no migration layer
+(§5).
+
+**A stored tool schema that will not parse is served as a tool with no
+arguments.** `toolhub._parameters` answers `{}` for a `schema` column that is
+neither a JSON mapping nor the sentinel a store writes for "nothing to
+declare", because the hub deliberately has no opinion about how absence is
+spelled (`_row_of`). *Gives up:* the arguments — the model calls the tool with
+none and reads the tool's own error several frames from the cause. *Does not
+cover:* a schema that parses, used exactly as written. *Failure goes:* nowhere
+today; telling the sentinel from the damage would need the store's spelling at
+the hub, which is the opinion it must not have.
+
+**A tool-call answer that cannot be read is an empty mapping, and the caller
+must say so.** `mcp_server.tool_payload` answers `{}` for a result that carries
+neither a structured payload nor JSON text, and every hop that reads one of our
+peers is expected to check the keys it needs (`Embedder.embed` does; a caller
+that reads `task_id` and proceeds does not). *Gives up:* the distinction at the
+one place every caller shares. *Does not cover:* a payload that parses, which is
+returned as written. *Failure goes:* the caller — which is the half of this
+entry that the code does not enforce.
+
+**A card with no `a2a-status` property reads as online.** `_presence_status`
+answers `online` for an absent property, which is what a peer that does not
+stamp presence means, and the readiness gate is armed by that default alone.
+*Gives up:* telling a card that omits presence from one that claims it. *Does
+not cover:* a *deleted* card, which carries no property either and is refused by
+its empty payload before this is asked. *Failure goes:* a peer that is really
+gone is retired by its retained offline card or its last will, not by this.
+
+**A failed inbound-ledger write is an error, not a refusal.**
+`InboundStore._save` catches `OSError`, logs an error naming the file, and lets
+the turn go on. *Gives up:* the on-disk record of what this process holds, so a
+restart reads those tasks as ids it has never seen and never warns their peers.
+*Does not cover:* a partially written file — the temp file and `os.replace`
+still leave a reader all of the old file or all of the new one. *Failure goes:*
+the error naming the ledger path, which is the only place it can be seen.
+
+**An unopenable `schedule.db` goes quiet loudly.** `schedule_server`'s ledger
+walk skips a file `adopt` cannot open and logs an error naming it. *Gives up:*
+every task in that one agent's ledger, for as long as the file is damaged, while
+the clock reports healthy about everyone else. *Does not cover:* a ledger whose
+*rows* are bad, which is caught per pass, and the ownerless-file skip beside it,
+which is its own decision (§1.7). *Failure goes:* the error naming the path —
+the model's `schedule_list` only ever reads the caller's own ledger.
+
+**A cursor that could not be written is retried, not fatal.** `Wechat._persist`
+catches `OSError`, warns naming the session file, and leaves `persisted` unset so
+the next cursor move writes again. *Gives up:* this stream's place in that file,
+so a restart re-ingests the bridge's replay window and answers those messages as
+new turns. *Does not cover:* the in-memory cursor, which still acks for the life
+of the process. *Failure goes:* the warning naming the session file.
+
+**A bookkeeping write that fails is logged, not raised.** `runtime`'s
+`_write_json_atomic` suppresses `OSError` so a full disk cannot crash `status`
+or refuse a start. *Gives up:* the record, at the moment it was written — a
+server that started but whose record never landed is invisible to `stop` and is
+orphaned. *Does not cover:* nothing; the write either completes or is not
+attempted. *Failure goes:* a warning naming the path, which is the only trace of
+the orphan.
+
+**A record that is missing, truncated or malformed reads as absent.**
+`runtime._read_json_dataclass` answers `None` for damage, so bookkeeping can
+never block a start. *Gives up:* the pid a damaged record held — the launcher
+treats a running server as record-less and `slife2 down` has nothing to signal.
+*Does not cover:* nothing; it is the floor, and a caller that needs the file to
+exist still only learns that it does not. *Failure goes:* nowhere, which is why
+the writer's warning above is the trace to look for.
+
+**A job that forbids breakaway is retried without the flag.** `runtime.spawn`
+starts a Windows daemon with `CREATE_BREAKAWAY_FROM_JOB` and, on `OSError`,
+starts it without. *Gives up:* the daemon's survival of an enclosing
+kill-on-close job — §4 states escaping it as a requirement, and this is the one
+path that drops it. *Does not cover:* nothing; where breakaway is permitted it
+is used. *Failure goes:* a warning saying the server will not outlive its job.
+
+**A machine that is not recognised as a checkout keeps its data under
+`~/.slife2`.** `paths.data_dir` uses the directory holding a `pyproject.toml`
+that names slife2, else `SLIFE2_DATA_DIR`, else `~/.slife2`. *Gives up:* the
+checkout's own data directory when the marker is absent or unrecognised, which
+is why an unreadable marker now raises rather than answering "not a checkout".
+*Does not cover:* an override, which wins. *Failure goes:* a database or a
+config missing from where it was expected.
+
+**A stale `media.defaults:` entry falls through to the first model of the
+kind.** `MediaSettings.resolve` runs §1.5's four steps and then a fifth: a
+reference that no longer resolves is a weaker statement than the caller's, so
+the first model of that kind answers instead of the call stopping. *Gives up:*
+the operator's `defaults:` intent for that kind. *Does not cover:* a reference
+that names a model of the wrong kind or an unknown provider, both refused.
+*Failure goes:* the answer itself, whose own `provider/model` names the
+substitution.
+
+**A `SKILL.md` whose frontmatter will not parse reads as a skill with no
+header.** A header that is not YAML reads as no frontmatter, so `scan` names the
+skill after its directory and serves its body unread; a `metadata` block that is
+not a mapping declares nothing, which is the same decision one level down.
+*Gives up:* the declared `name`, `description` and every `requires` — so a
+damaged header also stops `readiness` reporting a missing prerequisite. *Does
+not cover:* a header that is a mapping, parsed normally, and the body below the
+fence, returned unread either way. *Failure goes:* a warning naming the parse
+error; the file is the only place the lost declaration can be recovered from.
+
+**A CLI tunnel resolves its binary on PATH and then by guessing.** `_which`
+tries `shutil.which` and then the install locations a platform guess implies
+(OpenSSH's `System32` path, cloudflared's installer roots). *Gives up:* the
+certainty that the program on PATH is the one that ran — a guessed copy is used
+when PATH is silent, which is what makes the feature work on Windows. *Does not
+cover:* a binary named explicitly by the entry's own option, used as written and
+never guessed, or one found nowhere, which is a terminal failure naming the
+provider. *Failure goes:* the resolved path is reported in the provider's
+`status()` (the `binary` key) and `binary_path`.
+
+**A progress line that cannot be read is dropped, and a missing count is
+zero.** `events.decode` answers `None` for anything it does not recognise, and
+defaults every number it does parse (`int(payload.get("steps") or 0)`). The
+stream is display only and one bad frame must not end a turn. *Gives up:* the
+frame, and the difference between "not measured" and "zero" in what the window
+draws. *Does not cover:* the terminal event, whose fields are the ones the
+transcript keeps. *Failure goes:* nowhere; the wire is a second channel and a
+turn's own record is the first.
+
+**A turn is never sized below one token.** `tokens.estimate_turn_tokens` floors
+its answer at one, because a turn that weighs nothing is a turn every budget can
+afford, and a budget that can afford everything is not one. *Gives up:*
+exactness for the smallest turns. *Does not cover:* measured usage, which is the
+provider's own count and is untouched. *Failure goes:* nowhere — the floor is
+the answer.
+
+**A probe that threw is a peer that is not up.** `launcher.probe` answers `False`
+for any failure, because the question it asks is yes-or-no about reachability.
+*Gives up:* the difference between a connect that was refused and one that
+failed mid-handshake, so the start path may try to spawn a server that is
+already there and report the port conflict that follows. *Does not cover:* a
+peer that answers and names another server, which is refused by identity (§4).
+*Failure goes:* the probe's own log line, and the conflict the launcher reports.
+
+**A `taskkill` that could not run does not fail the stop.** `runtime.terminate`
+suppresses `OSError` and `SubprocessError` from `taskkill /F /T` and then polls
+the pid, so a force that could not be launched raises nothing out of `slife2
+down`. *Gives up:* why the force failed — the caller learns that the process is
+still alive, not that `taskkill` was unavailable. *Does not cover:* a process
+that survives the poll, which `terminate` reports as `False` and `down` reports
+as a server it could not stop. *Failure goes:* the pid the caller then polls.
+
+**A tool result JSON cannot serialise is rendered as its `repr`, not dropped.**
+`server_common.render_tool_result` hands a non-string, non-`None` result to
+`json.dumps(..., default=str)`, so an object the encoder does not know becomes
+text instead of failing the turn or emptying the field. *Gives up:* the object's
+exact shape — the model reads a representation of the value, not the value.
+*Does not cover:* a result JSON can encode, which passes through byte for byte,
+and `None`, which is the empty string. *Failure goes:* the rendered text is in
+the request and in the turn's own record, so what was rendered is findable.
+
+**A post-turn trim is skipped when the hub cannot be reached.** The agent
+server's trim and a task's trim both swallow a hub that is unreachable or
+answers with a shape this build cannot read: the turn is over and has been
+answered, and bookkeeping that runs after it must not turn a good turn into a
+failed one. *Gives up:* the trim for that turn, so the loaded set stays over
+budget — and the catalogue is one list for the whole system, so every
+conversation's next request is oversized. *Does not cover:* the next turn, whose
+tool list is asked for before the conversation is touched and fails loudly on a
+hub that is really gone; and because both halves of the pair are read before
+either is appended, a half-written pair cannot be left behind. *Failure goes:* a
+warning naming the conversation, and an error naming the task — a task has one
+turn and no next request for a dead hub to fail on.
+
+**A bookkeeping file that is already gone is not an error to delete.**
+`runtime`'s `clear_record`, `clear_claim` and `unregister_client` remove their
+file with `missing_ok`, so a second `stop` — or a record the client sweep
+already cleaned up on the way past — is not a failure. *Gives up:* the
+distinction between a file that was there and one that was not, so a caller
+cannot tell that it removed anything. *Does not cover:* an unlink that fails for
+any other reason (permissions, a directory in the way), which is logged at
+warning naming the path. *Failure goes:* that warning.
+
+**A trim that cannot happen does not fail a turn.** `toolclient.unload_tools`
+catches every failure from the hub's `_func_tool_unload` — a hub from an older
+build with no such tool, a link that is gone, an answer this build cannot read —
+and answers an empty payload with the reason logged. *Gives up:* the trim for
+that turn, and the names the model would have been told it had lost. *Does not
+cover:* a trim the hub answers, which is used as it comes. *Failure goes:* a
+warning in the agent server's log, and the next `list_tools`, where a missing
+hub cannot be missed.
+
+**Closing a link suppresses the failure.** `gateway`'s `abandon`, `disconnect`,
+`close` and `ready` suppress what a teardown raises, because every one of those
+is a way out — an error path, a shutdown, a link already half gone. *Gives up:*
+the report of a transport that did not tear down. *Does not cover:* the call
+path, where a link that died mid-call is retried once and a refusal is a value
+the model reads (§8.3). *Failure goes:* nowhere, which is the price of a
+teardown that must not replace whatever the caller was doing.
+
+**Everything not in this register is a defect.** The list is the whole of this
+build's declared degradation; a path that substitutes a weaker behaviour and is
+not here — and not argued at the site it happens or in §1.6, §5.1, §6, §7 or
+§8.3 — is a defect rather than a design, and §10.1 is how to find it. The
+register carries one obligation in the other direction as well: a fallback that
+stops being needed is deleted rather than left standing, because a designed path
+that never runs is a designed path that has stopped being tested.

@@ -673,7 +673,8 @@ already ships is the whole requirement. **A tunnel that is not up, or that has
 published a URL nothing can reach, is refused rather than handed out**: a link
 that answers HTTP 530 is worse than an error, because the model that cannot
 fetch it cannot say why. `tunnel_status` is where the detail is — the state, the
-URL, whether it is reachable, and the edge address it is dialing.
+URL, whether it is reachable, the edge address it is dialing, and the path of
+the program that is running it.
 
 ### The cabinet
 
