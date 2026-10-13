@@ -4,15 +4,26 @@
 the whole of the module.**  §1.2 makes `submit` this system's one path for
 "something outside the conversation became a turn in it" — a WeChat message, an
 agent task's answer, a scheduled run coming due — and the design of that path is
-one sentence: **the window first, the agent server as the fallback, and three
-answers rather than two about whether it worked.**
+one sentence: **the window, and only the window.**
 
-The window is first because that is where a message becomes a turn *and* becomes
-something the person sees, in their own queue.  The fallback exists because a
-window that is not showing that agent is **not** a lost result: the agent server
-runs the turn anyway, records it, and a window that opens later restores it.  So
-"nobody is looking" and "nobody is there" are different situations and only the
-second one is a failure.
+**The window is the conversation, because the window is what runs it.**  An agent
+is served by a window — a terminal or `--headless`, and both attach — so a
+conversation with no window is not a conversation with fewer readers; it is one
+nobody is running.  There used to be a second road for that case (the agent server
+ran the turn anyway, and a window that opened later restored it), and it was
+wrong in the way every fallback is: it made "the window is gone" a *state to
+carry on in*, so work nobody could see went ahead anyway — spending the model,
+advancing a conversation no one was reading, and answering a peer that believed
+it had been heard.  A delivery that cannot be made is now a **hard failure**
+(`DeliveryFailed`), and each caller says what that means for the work it was
+trying to hand over.  None of them carries on as though it had landed.
+
+**Retrying is for the gap, and the gap is seconds.**  An agent's window attaches
+a moment after its stack comes up, and a window that loses its attach offers to
+take it again within `pacing.reconnect` — so a first refusal is usually "the
+terminal is starting", which is worth another try.  That retry lives *here*,
+because it is a fact about the window rather than about the message: every caller
+gets the same patience, and none of them has to know why the window was away.
 
 **Three answers, and the middle one is why this is not a boolean.**  Everything a
 tool handler raises arrives at this end as a `ToolError` (`serve` pins
@@ -21,21 +32,16 @@ tool handler raises arrives at this end as a `ToolError` (`serve` pins
 has to be asked, and it is the module that writes the refusal that answers.  A
 refusal is the one failure that proves nothing was written, because the terminal
 looks its session up before it posts anything; everything else means the words
-may already be down the stream.  Repeating *those* is how one message arrives
-twice, which is worse than one arriving late — so the caller is told "unknown"
-and does not retry.
-
-Both callers keep that rule rather than restating it: `slife2-agent-task` marks
-its answer undelivered and does not hand it anywhere else, and `slife2-schedule`
-leaves the run `pending` rather than calling it failed.  Neither one repeats a
-hand-over it could not confirm, and that is a property of this return value.
+may already be down the stream.  That distinction decides *what a retry is worth*
+— a refusal may be tried again, and a call that did not come back may not, since
+repeating it is how one message becomes two turns — and it is spent here rather
+than passed on: what the callers get is one failure, whose reason is in it.
 
 **And one thing this module hands over is not a message at all.**  A *note*
 (`note_to_window`) is a line the harness has to say and nobody has to answer, so
-it goes to the window and stops there: there is no second place for it, and the
-fallback above — the agent server running a turn — is exactly what it must not
-have, since a turn spent on `⚡ jill online` costs a model call to tell somebody a
-fact they do not have to act on.  Same three answers, one road instead of two.
+it goes to the window and stops there: a line no window took is a line nobody
+needs, and it is never retried — a note is about the moment it describes, and a
+`✗ offline` that arrives after the window has moved on is worth less than silence.
 """
 
 from __future__ import annotations
@@ -48,12 +54,19 @@ from collections.abc import AsyncIterator
 from fastmcp import Client
 
 import slife2.timeouts as _T
-from slife2.config import AGENT_SERVER_NAME, TUI_SERVER_NAME, Config
+from slife2.config import TUI_SERVER_NAME, Config
 from slife2.mcp_server import close_server, open_server
 from slife2.tui import control
 from slife2.tui.control import NOTE
 
 logger = logging.getLogger(__name__)
+
+#: How many times a hand-over is tried before it is a failure.  Three, because
+#: what the retry is for is the window's own gap — an agent's window attaches a
+#: moment after its stack comes up — and because the wait between the attempts is
+#: the terminal's own `pacing.reconnect`, the pause before it offers to attach
+#: again.
+_ATTEMPTS = 3
 
 
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
@@ -155,14 +168,13 @@ async def note_to_window(
 ) -> bool | None:
     """Draw one harness line in the window showing this agent, and nowhere else.
 
-    **The one hand-over with no fallback, and it is the exception that proves
-    what the fallback is for.**  `to_agent` exists because a message that reached
-    no window is not a lost message — the agent server runs the turn and a window
-    opened later restores it.  A note is not that: it is a line about the moment
-    it describes (`⚡ jill online`), it is not addressed to anybody, and running a
-    model turn for one would be a turn spent on a fact nobody has to act on.  So
-    when no window is showing this agent the line is simply dropped, and the
-    caller is told `False` rather than sent looking for a second place to put it.
+    **A line is not a message, and the difference is what happens when no window
+    takes it.**  A message that reached no conversation is a hard failure
+    (`hand_over`), because a message *is* work for the conversation; a note is a
+    line about the moment it describes (`⚡ jill online`), it is addressed to
+    nobody, and running a turn for one would spend a model call on a fact nobody
+    has to act on.  So a note no window took is simply dropped, and the caller is
+    told `False` rather than sent looking for a second place to put it.
 
     Answers like `submit_to` — `True` written, `False` provably not, `None` this
     cannot tell — because it takes the same road, and a caller reading one of
@@ -196,37 +208,25 @@ async def note_to_window(
         return False
 
 
-async def to_agent(
-    config: Config,
-    agent: str,
-    text: str,
-    channel: str,
-    *,
-    client: Client | None = None,
-) -> None:
-    """Continue the agent's own conversation, because no window is showing it.
+class DeliveryFailed(RuntimeError):
+    """A message did not reach the conversation it was addressed to.
 
-    §3's "a caller which is not displaying the conversation can still continue
-    one", which is what that sentence is for.  **Raises** rather than answering
-    with a boolean: reaching the agent server and failing is the last thing the
-    caller can try, and there is no third place to go — so the failure belongs to
-    whoever knows what it was handing over.
+    **Hard on purpose.**  The window is what runs an agent, so a delivery that
+    cannot be made is not a degraded success — it is the one thing a caller must
+    not carry on past: the work has not happened, and every caller says so in its
+    own terms (a run ends `failed`, an answer is `undelivered`, a peer's message
+    is not answered).  An exception rather than a fourth return value because a
+    caller that forgot to look at a value would go on as though the hand-over had
+    happened, which is exactly the failure this module was rebuilt to stop.
 
-    `_peer` owns the open and the close; what is here is the call that runs the
-    turn.
+    It carries the agent and the reason, since those are what a caller logs or
+    records — not the words, which are the conversation's business.
     """
-    async with _peer(
-        config.server("agent").url,
-        name=AGENT_SERVER_NAME,
-        fallback_tool="send_message",
-        timeout=_T.timeouts.transport.agent,
-        client=client,
-    ) as server:
-        await server.call_tool(
-            "send_message",
-            {"agent": agent, "prompt": text, "channel": channel},
-            timeout=_T.timeouts.transport.agent,
-        )
+
+    def __init__(self, agent: str, reason: str) -> None:
+        super().__init__(f"{agent}'s conversation could not be reached: {reason}")
+        self.agent = agent
+        self.reason = reason
 
 
 async def hand_over(
@@ -237,42 +237,43 @@ async def hand_over(
     *,
     what: str,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
-) -> bool | None:
-    """Put a message into an agent's conversation, wherever it can be reached.
+) -> None:
+    """Put a message into the agent's conversation, or fail.
+
+    **A failure is raised, and it is the last word on the message**: nothing is
+    handed anywhere else, because the only road is the window (`slife2.handover`'s
+    module docstring has the argument), and nothing here retries a call that may
+    already have landed.
 
     `what` is the caller's own name for the thing being handed over — "agent task
-    research", "the run due at 09:00" — and it is here rather than assembled by
-    the caller because the two lines this function logs are the only place it
-    appears, and a caller that had to write them would be a caller writing this
-    function again.
+    research", "the run due at 09:00" — and it is here because the lines this
+    function logs are the only place it appears; a caller that had to write them
+    would be a caller writing this function again.
 
-    Returns **`True`** when the words reached a conversation, **`False`** when
-    they provably reached none, and **`None`** when this cannot tell.  What each
-    caller does with the last two is its own decision and is the reason this is
-    not a boolean; what neither may do is try a second time on `None`.
+    **The retry below is for the window's own gap**: an agent's window attaches a
+    moment after its stack comes up, and one that lost its attach takes it again
+    within `pacing.reconnect`.  So a refusal is tried again at that pace — the
+    wait the terminal itself uses — and a call that did not come back is not,
+    since its words may be in the conversation already.
     """
-    handed = await to_window(config, agent, text, channel, client=window_client)
-    if handed is None:
-        # **Not repeated anywhere else, and logged rather than swallowed.**  The
-        # words may already be in the conversation — a call that did not come
-        # back says nothing either way — so a second copy is the one outcome
-        # worse than silence.  The count is logged rather than the words, because
-        # the words are the conversation's business and the log's line is only
-        # "this much of it went nowhere we can prove".
-        logger.error(
-            "%s: the hand-over to %s did not come back, so it (%d characters) "
-            "was not handed anywhere else",
-            what,
-            agent,
-            len(text),
-        )
-        return None
-    if handed is True:
-        return True
-    try:
-        await to_agent(config, agent, text, channel, client=agent_client)
-    except Exception:  # noqa: BLE001 - nothing left to try, and it must be said
-        logger.exception("%s: could not be handed over at all", what)
-        return False
-    return True
+    for attempt in range(1, _ATTEMPTS + 1):
+        handed = await to_window(config, agent, text, channel, client=window_client)
+        if handed is True:
+            return
+        if handed is None:
+            # The words may already be in the conversation — a call that did not
+            # come back says nothing either way — so this is not repeated, and
+            # the count is logged rather than the words: the words are the
+            # conversation's business and the log's line is only "this much of it
+            # went nowhere we can prove".
+            raise DeliveryFailed(
+                agent,
+                f"the hand-over did not come back, so it ({len(text)} characters) "
+                f"was not repeated",
+            )
+        if attempt < _ATTEMPTS:
+            await asyncio.sleep(_T.timeouts.pacing.reconnect)
+    raise DeliveryFailed(
+        agent,
+        f"no window is showing it after {_ATTEMPTS} attempts ({what})",
+    )

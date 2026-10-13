@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -118,47 +119,12 @@ class Window:
 
 
 @dataclass
-class AgentServer:
-    """A recorder standing in for `slife2-agent`'s `send_message`.
-
-    `gone` is for the test that needs *both* paths to fail.  It is wired rather
-    than left out on purpose: a config's `agent` address is a real port, and a
-    test that fell back to it would be talking to whatever daemon happens to be
-    running on the machine — which is the test passing for the worst reason.
-    """
-
-    client: Client | None = None
-    gone: bool = False
-    handed: list[dict[str, Any]] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.mcp: FastMCP = FastMCP("agent-server")
-
-        @self.mcp.tool
-        async def send_message(
-            agent: str, prompt: str, subagent: str = "", channel: str = ""
-        ) -> dict[str, Any]:
-            if self.gone:
-                raise ConnectionError("the agent server is gone")
-            self.handed.append(
-                {
-                    "agent": agent,
-                    "prompt": prompt,
-                    "subagent": subagent,
-                    "channel": channel,
-                }
-            )
-            return {"text": "ok"}
-
-
-@dataclass
 class Built:
     """A task server, and the two things a test needs to look at it with."""
 
     mcp: FastMCP
     backend: FakeBackend
     window: Window | None = None
-    agent: AgentServer | None = None
 
     def messages(self) -> list[Any]:
         """The message list of the **last** model call this server made."""
@@ -170,7 +136,6 @@ def build(
     hub: Client,
     context: Store,
     window: Window | None = None,
-    agent: AgentServer | None = None,
     real_window: Client | None = None,
     **task_overrides: Any,
 ) -> Built:
@@ -186,24 +151,15 @@ def build(
         context_client=context.client,
         hub_client=hub,
         window_client=real_window or (window.client if window else None),
-        agent_client=agent.client if agent else None,
         source=lambda: config(**task_overrides),
     )
-    return Built(mcp=mcp, backend=backend, window=window, agent=agent)
+    return Built(mcp=mcp, backend=backend, window=window)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def window() -> AsyncIterator[Window]:
     """A recorder window, connected — a `Client` nobody entered is not a peer."""
     node = Window()
-    async with Client(node.mcp) as client:
-        node.client = client
-        yield node
-
-
-@pytest_asyncio.fixture(loop_scope="function")
-async def agent_server() -> AsyncIterator[AgentServer]:
-    node = AgentServer()
     async with Client(node.mcp) as client:
         node.client = client
         yield node
@@ -273,7 +229,7 @@ async def start(built: Built, name: str = "research") -> dict[str, Any]:
         )
 
 
-async def wait_for_handover(node: Window | AgentServer, count: int = 1) -> None:
+async def wait_for_handover(node: Window, count: int = 1) -> None:
     """Wait for a hand-over to land.
 
     **Generous, and asserted rather than bounded-and-ignored** — the rule
@@ -624,12 +580,20 @@ async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) ->
 # ── the way back ─────────────────────────────────────────────────────────────
 
 
-async def test_with_no_window_showing_the_agent_server_is_given_the_answer(
-    hub: Client, store: Store, agent_server: AgentServer
+async def test_an_answer_with_no_window_is_undelivered_and_said(
+    hub: Client, store: Store, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The case a background task exists for: start it, close the window, walk
-    away.  Built against **the real `slife2-tui`** with nothing attached, because
-    what makes this fire is that plugin's own refusal rather than a stub's."""
+    away — and the answer reaches nobody.
+
+    Built against **the real `slife2-tui`** with nothing attached, because what
+    makes this fire is that plugin's own refusal rather than a stub's: no
+    terminal is showing this agent, and there is no second road for the answer
+    (`slife2.handover`).  The work happened; the delivery did not; the log says
+    so, and nothing runs a turn in a conversation nobody is watching to make the
+    two agree.
+    """
+    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
     # Nothing has attached, so `submit` refuses with the terminal's own error
     # rather than a stand-in's — and the client is connected, so that refusal is
     # the refusal being tested rather than "not connected".
@@ -639,107 +603,62 @@ async def test_with_no_window_showing_the_agent_server_is_given_the_answer(
             hub=hub,
             context=store,
             real_window=nobody,
-            agent=agent_server,
         )
         await start(built)
         await settle(built)
-        await wait_for_handover(agent_server)
+        await wait_for_log(caplog, "was not delivered")
 
-    assert len(agent_server.handed) == 1
-    sent = agent_server.handed[0]
-    assert sent["agent"] == AGENT
-    # The agent's *own* conversation, and that is the point — `subagent` empty is
-    # §3's "this agent's conversation", not a worker's.
-    assert sent["subagent"] == ""
-    assert sent["channel"] == f"{CHANNEL}:research"
-    assert sent["prompt"].startswith(MARKER_PREFIX)
-    assert sent["prompt"].endswith("three tries")
+    assert "was not delivered" in caplog.text
 
 
 async def test_a_hand_over_that_did_not_come_back_is_not_repeated(
     hub: Client,
     store: Store,
     broken_window: Window,
-    agent_server: AgentServer,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """**The measured bug this rule comes from.**  A call that did not come back
     says nothing about whether it wrote: the words may be down the window's
-    stream already, and giving them to the agent server as well is how one answer
-    arrives *twice* — which the agent then acts on twice.  So the unknown case is
-    logged and not repeated, and §1.2 states the same rule from the caller's
-    side.
-
-    `agent_server` is wired and must stay empty: that is the assertion, not the
-    absence of a fallback.
+    stream already, and sending them again is how one answer arrives *twice* —
+    which the agent then acts on twice.  So the unknown case is logged and not
+    repeated, and the task's answer is undelivered rather than doubled.
     """
-    with caplog.at_level("WARNING"):
-        built = build(
-            text_turn("three tries"),
-            hub=hub,
-            context=store,
-            window=broken_window,
-            agent=agent_server,
-        )
-        await start(built)
-        await settle(built)
-        await wait_for_log(caplog, "did not come back")
+    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
+    built = build(
+        text_turn("three tries"),
+        hub=hub,
+        context=store,
+        window=broken_window,
+    )
+    await start(built)
+    await settle(built)
+    await wait_for_log(caplog, "was not repeated")
 
-    assert agent_server.handed == []
-    assert "did not come back" in caplog.text
+    assert "was not repeated" in caplog.text
 
 
-async def test_a_refusal_is_the_one_failure_the_fallback_is_for(
-    hub: Client, store: Store, dead_window: Window, agent_server: AgentServer
+async def test_a_refusing_window_is_the_end_of_that_answer(
+    hub: Client, store: Store, dead_window: Window, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The other side of the same rule: a *refusal* proves nothing was written,
-    so the answer is not lost — it goes to the agent server, which is the whole
-    reason that fallback exists."""
+    """And the same for the other answer: a refusal proves nothing was written,
+    which used to be the licence to run the answer through the agent server.
+
+    There is no such road now — a fallback that runs the work where the window is
+    not is exactly "carry on without the window" — so a refusal is a failed
+    delivery like any other, and the task is over.
+    """
+    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
     built = build(
         text_turn("three tries"),
         hub=hub,
         context=store,
         window=dead_window,
-        agent=agent_server,
     )
     await start(built)
     await settle(built)
-    await wait_for_handover(agent_server)
+    await wait_for_log(caplog, "was not delivered")
 
-    assert len(agent_server.handed) == 1
-    assert agent_server.handed[0]["prompt"].endswith("three tries")
-
-
-async def test_an_answer_nobody_can_be_given_is_logged_not_raised(
-    hub: Client,
-    store: Store,
-    dead_window: Window,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Both paths gone is the one outcome worth saying loudly, and it is a *log*
-    rather than a failure: the task is over either way, and raising here would
-    replace the answer's own fate with a traceback nobody asked for.
-
-    The agent server is wired and *gone* rather than left out, so the fallback
-    fails where the test can see it — a config's `agent` address is a real port,
-    and reaching it would mean talking to whatever daemon is running on this
-    machine.
-    """
-    gone = AgentServer(gone=True)
-    async with Client(gone.mcp) as client:
-        gone.client = client
-        with caplog.at_level("ERROR"):
-            built = build(
-                text_turn("lost"),
-                hub=hub,
-                context=store,
-                window=dead_window,
-                agent=gone,
-            )
-            await start(built)
-            await settle(built)
-            await wait_for_log(caplog, "could not be handed over")
-    assert "could not be handed over" in caplog.text
+    assert "was not delivered" in caplog.text
 
 
 # ── what the registry remembers ──────────────────────────────────────────────

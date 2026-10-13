@@ -29,6 +29,7 @@ from fastmcp import Client, FastMCP
 
 import slife2.timeouts as _T
 from slife2 import handover, ilink, markers, wechat
+from slife2.handover import DeliveryFailed
 from slife2.audience import client_meta, for_the_model
 from slife2.config import TUI_SERVER_NAME, Config, load
 from slife2.paths import agent_dir
@@ -148,23 +149,16 @@ class Notes:
     fact this process can assert: what is recorded is what a window would have
     put under `ChatView.add_note`, brackets and all being the widget's.
 
-    **And whether a window was there to take it**, which is `show`: the seam's
-    answer is `slife2.handover.note_to_window`'s three — written, provably
-    written nowhere, or unknown — and a test that starts with `show=False` is
-    the start of the stack, where the plugin is up before the terminal is.  A
-    line offered to nobody is *not* recorded, because that is what the plugin
-    believing it was drawn would look like.
+    **What the call answers is not read** (`slife2.wechat.Note`): a line is said
+    once, and whether a window took it is the window's business rather than
+    something this plugin acts on.
     """
 
-    def __init__(self, *, show: bool = True) -> None:
+    def __init__(self) -> None:
         self.lines: list[tuple[str, str]] = []
-        self.show = show
 
-    async def __call__(self, agent: str, text: str) -> bool:
-        if not self.show:
-            return False
+    async def __call__(self, agent: str, text: str) -> None:
         self.lines.append((agent, text))
-        return True
 
 
 @dataclass
@@ -184,21 +178,14 @@ def rig(
     monkeypatch: pytest.MonkeyPatch,
     *,
     bridge: Bridge | None = None,
-    show: bool = True,
 ) -> Rig:
-    """A plugin over a fresh bridge, with every loop hurried along.
-
-    `show=False` is a stack whose terminal has not attached yet — the plugin is
-    up and the window is not — and `reconnect` is hurried with the rest of them
-    because it is the pace a line nobody has taken is offered at.
-    """
+    """A plugin over a fresh bridge, with every loop hurried along."""
     monkeypatch.setattr(_T.timeouts.pacing, "wechat_poll", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "qr_poll", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "typing_refresh", QUICK)
-    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", QUICK)
     made = Bridge() if bridge is None else bridge
     delivery = Delivery()
-    notes = Notes(show=show)
+    notes = Notes()
     return Rig(
         plugin=Wechat(load(), http=made, deliver=delivery, note=notes),
         bridge=made,
@@ -726,7 +713,7 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
 
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
-    await made.plugin._ask_agent("jack", "hello")
+    await made.plugin._deliver_to_window("jack", "hello")
 
     # Where it went, and what it says: the address is the `tui` plugin's — one
     # for every agent — and the name is what a caller proves before handing
@@ -747,13 +734,12 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
 async def test_a_window_that_is_not_there_fails_the_hand_over(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retried once, then raised — and a failure here means *not delivered*.
+    """Tried while the window may be attaching, then a hard failure.
 
-    The plugin refuses a `submit` for an agent no window is showing, by name, and
-    a refusal took nothing: that is what makes this process free to retry, and
-    what stops the retry from being a second turn (`slife2.tui.control`).  So the
-    honest thing to assert is the shape of the failure — two attempts, then the
-    error — rather than that something was quietly dropped.
+    A refusal is the one answer that proves nothing was written, so it is worth
+    another attempt — but the attempts are `slife2.handover`'s rather than a
+    second copy here, and when they are spent the message is *not delivered*
+    rather than quietly dropped or carried somewhere else.
     """
     attempts = 0
 
@@ -765,10 +751,10 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(ConnectionError, match="no window is showing"):
-        await made.plugin._ask_agent("jack", "hello")
+    with pytest.raises(DeliveryFailed, match="could not be reached"):
+        await made.plugin._deliver_to_window("jack", "hello")
 
-    assert attempts == 2
+    assert attempts == handover._ATTEMPTS
 
 
 # --- logging out, and two logins at once --------------------------------------
@@ -806,18 +792,17 @@ async def test_logging_out_forgets_the_login_and_the_scan(
 
 
 @pytest.mark.asyncio
-async def test_a_login_resumed_at_start_up_says_so(
+async def test_a_login_resumed_at_start_up_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A saved login coming back is a link this conversation has, and it says so.
+    """A saved login coming back is this *process* starting, not the link moving.
 
-    **This is the defect the rule used to be**: the state was resolved into a
-    window that was not there yet — the plugin comes up before the terminal
-    attaches — so `⚡ Wechat online` was drawn into nothing, and a start that
-    showed a link nothing could reach looked exactly like one with no WeChat at
-    all.  A line nobody took is *kept*, and offered again until a window is there
-    (`_offer_line`), which is how a peer already on the mesh is announced to the
-    window that joins it.
+    The plugin is up before the terminal is, so a line drawn here is drawn into
+    nobody — and what a window shows is what happened *while somebody was
+    watching*.  Without this rule every start of the stack would put
+    `⚡ Wechat online` in every window of every agent that has a saved login,
+    which is a line about the process rather than about the link.  The state is
+    marked known instead (`_adopt`), so the poll loop says nothing either.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -829,53 +814,21 @@ async def test_a_login_resumed_at_start_up_says_so(
     finally:
         await made.close()
 
-    # Once, however many polls pass under it.
-    assert made.notes.lines == [("jack", "⚡ Wechat online")]
+    # Nothing, however many polls pass under it.
+    assert made.notes.lines == []
     assert session.announced == wechat.LINK_ONLINE
 
 
 @pytest.mark.asyncio
-async def test_a_line_offered_to_a_window_that_is_not_there_yet(
+async def test_a_login_that_did_not_come_back_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The start of the stack: the plugin is up before the terminal is.
+    """And the other half of a start-up: a login that is there and is not working.
 
-    A window that is not showing this agent *refuses*, and a refusal is the one
-    answer that proves nothing was written (`slife2.tui.control.refused`) — so
-    the line is owed rather than spent, and the window that opens a moment later
-    is told.  Nothing is drawn twice: `announced` is set where a window takes the
-    line, and the poll loop and the offering are two drivers of one claim.
-    """
-    signed_in("jack")
-    made = rig(monkeypatch, show=False)
-    await made.plugin.start()
-    try:
-        session = made.plugin.session("jack")
-        await until(lambda: made.bridge.paths.count("ilink/bot/getupdates") >= 2)
-        assert made.notes.lines == [], "nobody was there to take it"
-        assert session.announced == "", "and so it is still owed"
-        # And then the terminal attaches.
-        made.notes.show = True
-        await until(lambda: made.notes.lines == [("jack", "⚡ Wechat online")])
-        await until(lambda: session.announced == wechat.LINK_ONLINE)
-        # A poll or two more, with the line already taken.
-        await until(lambda: made.bridge.paths.count("ilink/bot/getupdates") >= 4)
-    finally:
-        await made.close()
-
-    assert made.notes.lines == [("jack", "⚡ Wechat online")]
-
-
-@pytest.mark.asyncio
-async def test_a_login_that_did_not_come_back_is_said(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The other half of a start-up check: a login that is there and is not working.
-
-    A link this agent *has* — a file on disk — is a channel somebody uses, so a
-    window opening on one that did not come back is owed the answer rather than
-    the silence a cold absence gets.  The reasons stay in
-    `wechat_check_status`; the line is that there is no link.
+    Nothing is drawn for it either, for `..._says_nothing`'s reason — nobody is
+    watching yet.  What is *not* silent is why: `restore_note` is what
+    `wechat_check_status` repeats, so a model asked about WeChat says the saved
+    login could not be confirmed rather than that nothing was ever scanned.
     """
     signed_in("jack")
     bridge = Bridge()
@@ -884,13 +837,14 @@ async def test_a_login_that_did_not_come_back_is_said(
     await made.plugin.start()
     try:
         session = made.plugin.session("jack")
-        await until(lambda: made.notes.lines == [("jack", "✗ Wechat offline")])
+        await until(lambda: session.restore_note)
         assert session.poll is None, "no link, so there is nothing to poll"
-        assert session.restore_note, "and `wechat_check_status` says why"
+        answer = await made.plugin.status(session)
     finally:
         await made.close()
 
-    assert made.notes.lines == [("jack", "✗ Wechat offline")]
+    assert made.notes.lines == []
+    assert "could not be confirmed" in answer
 
 
 @pytest.mark.asyncio
@@ -910,12 +864,9 @@ async def test_logging_out_takes_the_line_back(monkeypatch: pytest.MonkeyPatch) 
     finally:
         await made.close()
 
-    # The arrival first, then the departure: the login was resumed at start-up
-    # and that is said like any other link (`test_a_login_resumed_at_start_up_says_so`).
-    assert made.notes.lines == [
-        ("jack", "⚡ Wechat online"),
-        ("jack", "✗ Wechat offline"),
-    ]
+    # The departure only: the login was resumed at start-up, and a resume says
+    # nothing (`test_a_login_resumed_at_start_up_says_nothing`).
+    assert made.notes.lines == [("jack", "✗ Wechat offline")]
 
 
 @pytest.mark.asyncio
@@ -939,12 +890,9 @@ async def test_a_token_the_far_end_refuses_takes_the_line_down(
     finally:
         await made.close()
 
-    # The arrival that came with the resumed login (`..._says_so`), and then the
-    # departure this test is about.
-    assert made.notes.lines == [
-        ("jack", "⚡ Wechat online"),
-        ("jack", "✗ Wechat offline"),
-    ]
+    # The departure this test is about, and nothing for the resumed login that
+    # came before it (`test_a_login_resumed_at_start_up_says_nothing`).
+    assert made.notes.lines == [("jack", "✗ Wechat offline")]
 
 
 @pytest.mark.asyncio
@@ -975,10 +923,7 @@ async def test_a_second_login_of_the_same_account_retires_the_first(
     finally:
         await made.close()
 
-    assert made.notes.lines == [
-        ("jack", "⚡ Wechat online"),
-        ("jack", "✗ Wechat offline"),
-    ]
+    assert made.notes.lines == [("jack", "✗ Wechat offline")]
     # And the reason is the bridge's own words, so the model can say which of
     # the two things happened rather than sending somebody to scan blindly.
     assert "session timeout" in answer
@@ -993,9 +938,9 @@ async def test_a_link_that_never_came_up_says_nothing(
 
     An agent that has never scanned a code must not open a window with a
     complaint about a channel nothing has happened to.  This is the rule the mesh
-    states about a cold card, and it is the same rule said about a link — and it
-    is *not* the rule for a login that did not come back, which is a link this
-    agent has (`test_a_login_that_did_not_come_back_is_said`).
+    states about a cold card, and it is the same rule said about a link — a
+    start-up is not something a window watched, whether the login came back or
+    not (`test_a_login_that_did_not_come_back_says_nothing`).
     """
     made = rig(monkeypatch)  # no `signed_in`: there is no login to resume
     await made.plugin.start()
@@ -1185,7 +1130,7 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     `submit`, which is what `transport.window` bounds — so the words may already
     be down the stream.  Retrying on *any* exception is how one WeChat message
     runs as two turns and draws two replies, the failure DESIGN §1.2/§1.3 call
-    worse than a late answer.  `slife2.handover.submit_to` classifies this as
+    worse than a late answer.  `slife2.handover` classifies this as
     *unknown* rather than a refusal, so no retry is taken.
     """
     attempts = 0
@@ -1207,8 +1152,8 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(ConnectionError, match="did not come back"):
-        await made.plugin._ask_agent("jack", "hello")
+    with pytest.raises(DeliveryFailed, match="was not repeated"):
+        await made.plugin._deliver_to_window("jack", "hello")
 
     assert attempts == 1, "an unclassified failure is not retried"
 

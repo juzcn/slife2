@@ -1710,8 +1710,8 @@ async def test_the_prompt_knows_whether_anybody_is_watching(
 
     The third case is the one a narrower reading would miss: **nobody is running
     under that name at all** is the same situation, not a fourth thing — a peer
-    tasking an agent no window is showing is exactly what the fallback exists for
-    (`slife2.handover.to_agent`).
+    asking something of an agent with no window is told that there is nobody,
+    rather than served by a conversation nobody is running (`slife2.handover`).
     """
     from slife2.runtime import AgentClaim, clear_claim, write_claim
 

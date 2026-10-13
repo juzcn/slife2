@@ -87,7 +87,7 @@ from slife2.a2a.mesh import (
 )
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import A2A_SERVER_NAME, Config, load_cached
-from slife2.handover import hand_over, note_to_window
+from slife2.handover import DeliveryFailed, hand_over, note_to_window
 from slife2.mcp_server import agent_reader, house_server, serve_plugin
 from slife2.paths import a2a_inbound_paths
 from slife2.prompt import render
@@ -458,33 +458,33 @@ async def _drain(
     session: Session,
     config: Config,
     window_client: Client | None,
-    agent_client: Client | None,
 ) -> None:
     """Hand over what the mesh delivers, one message at a time, in order.
 
     **Two kinds of thing take this one road, and that is the point of it.**  A
-    message is handed to a conversation (`slife2.handover.hand_over`: the window
-    showing it, or the agent server when none is) and a note is drawn in the
-    window and nowhere else.  Sharing the queue is what keeps them in arrival
-    order with each other — a peer's arrival line lands between the two turns it
-    happened between — and one writer is what keeps a mesh callback off the MQTT
-    reader's stack.
+    message is handed to the conversation the window is running
+    (`slife2.handover.hand_over`: the window, and nothing else) and a note is
+    drawn in that window and nowhere else.  Sharing the queue is what keeps them
+    in arrival order with each other — a peer's arrival line lands between the
+    two turns it happened between — and one writer is what keeps a mesh callback
+    off the MQTT reader's stack.
 
-    The three-answer rule is `slife2.handover`'s and this keeps it: `False` is
-    the one result that proves nothing was written, `True` means it reached a
-    conversation, and `None` means this cannot tell — and **`None` is not tried
-    anywhere else**, because the words may already be down the stream and a
-    second copy of a peer's message is worse than a late one.
+    **A delivery that fails is an error, and the message is not carried on
+    anywhere.**  There is no second road for it (`slife2.handover`), so a peer's
+    message that reached no conversation has not been answered — and the one
+    party who can do something about that is the peer, which is why the line
+    says whose message it was.  Nothing is softened into a state here: this
+    plugin has no ledger to write it into and no right to claim the work
+    happened.
 
-    **What a caller does with the last two is the caller's, which is why the
-    retry below is here.**  `handover` says so itself: the classification is its
-    job, the policy is the plugin's whose message it is — `agent-task` marks its
-    answer undelivered, `schedule` leaves its run pending.  What this plugin's
-    own message gets is another attempt, because a *peer's* message has a retry
-    that knows what it is retrying (the peer re-sends the task) and an orphan
-    notice has nobody behind it at all.  So the count rides the queue item, it
-    is zero for everything a peer sent, and only `False` — never `None` — earns
-    another try.
+    **The retry below is this plugin's own notices, and the count is the queue
+    item's.**  An orphan notice is a message this process owes a peer about work
+    its predecessor died holding: nobody will re-send it, and the window may be
+    attaching right now, so it gets another attempt after `orphan_retry` — which
+    is the delay that makes the wait worth having, and the notice goes to the
+    *back* of the queue so everything that arrived meanwhile is handed over
+    first, in arrival order.  A peer's message carries zero, because a peer that
+    wants it again can send it again.
 
     **A message that cannot be delivered must not take the writer with it.**
     This task is one per agent for the life of the process and nothing watches
@@ -498,9 +498,9 @@ async def _drain(
         try:
             if note:
                 # A harness line for whoever is looking, and that is the whole of
-                # where it goes: no fallback to the agent server (a note is not a
-                # turn anybody runs) and no retry (a `✗ offline` that arrives
-                # after the window has moved on is worth less than silence).
+                # where it goes: a note is not a turn anybody runs, and it is not
+                # retried (a `✗ offline` that arrives after the window has moved on
+                # is worth less than silence).
                 if (
                     await note_to_window(
                         config, session.agent, text, client=window_client
@@ -511,35 +511,32 @@ async def _drain(
                         "a2a_note_no_window agent=%s line=%s", session.agent, what
                     )
                 continue
-            handed = await hand_over(
-                config,
-                session.agent,
-                text,
-                channel_for(peer),
-                what=what,
-                window_client=window_client,
-                agent_client=agent_client,
-            )
-            if handed is True:
-                continue
-            logger.warning(
-                "a2a_delivery_not_confirmed agent=%s peer=%s handed=%s",
-                session.agent,
-                peer,
-                handed,
-            )
-            if handed is False and retries > 0:
-                # The delay is what makes the retry worth having — without it
-                # the attempt is repeated before the peers it needs can
-                # possibly have arrived — and the notice then goes to the
-                # *back* of the queue, so everything that arrived meanwhile
-                # is handed over first, in arrival order, rather than behind
-                # it.  What the wait costs is this writer's own idleness,
-                # which is the queue's normal mode: one path, one delivery at
-                # a time, and a reader that never waits on it
-                # (`Session.post`).
-                await asyncio.sleep(_T.timeouts.pacing.orphan_retry)
-                session.post(text, peer, what, retries=retries - 1)
+            try:
+                await hand_over(
+                    config,
+                    session.agent,
+                    text,
+                    channel_for(peer),
+                    what=what,
+                    window_client=window_client,
+                )
+            except DeliveryFailed as exc:
+                # **An error, because the words are the only thing that could
+                # answer `peer` and they went nowhere.**  Its own key rather than
+                # the handler's below, which is about this plugin's own fault:
+                # this one is a conversation that could not be reached.  The
+                # count is logged rather than the text: the text is the
+                # conversation's business.
+                logger.error(
+                    "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+                    session.agent,
+                    peer,
+                    len(text),
+                    exc,
+                )
+                if retries > 0:
+                    await asyncio.sleep(_T.timeouts.pacing.orphan_retry)
+                    session.post(text, peer, what, retries=retries - 1)
         except asyncio.CancelledError:
             # `shutdown` cancels this writer; a cancellation is not a
             # delivery failure and must reach the awaiting task as one.
@@ -601,7 +598,6 @@ def build_server(
     config: Config,
     *,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     source: Callable[[], Config] | None = None,
     connecting: bool = True,
 ) -> FastMCP:
@@ -636,7 +632,7 @@ def build_server(
             found = Session(agent=agent, mesh=A2AMesh(live().a2a, agent))
             _wire(found)
             found.writer = asyncio.create_task(
-                _drain(found, live(), window_client, agent_client)
+                _drain(found, live(), window_client)
             )
             sessions[agent] = found
         return found

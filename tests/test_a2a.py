@@ -662,39 +662,9 @@ class Window:
             self.noted.append({"agent": agent, "text": text})
 
 
-@dataclass
-class Conversation:
-    """A recorder standing in for the agent server's `send_message`."""
-
-    client: Client | None = None
-    #: A turn that failed — which on a cold start is every turn, because the hub
-    #: is one wave behind (`slife2.launcher.NEEDS`) and a turn's first step is
-    #: the hub.  The call arrives and the answer is a refusal, so nothing was
-    #: written and the hand-over is `False` rather than `None`.
-    broken: bool = False
-    handed: list[dict[str, Any]] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.mcp: FastMCP = FastMCP("agent")
-
-        @self.mcp.tool
-        async def send_message(agent: str, prompt: str, channel: str) -> None:
-            if self.broken:
-                raise ToolError("the turn failed: the toolhub is not answering")
-            self.handed.append({"agent": agent, "prompt": prompt, "channel": channel})
-
-
 @pytest_asyncio.fixture(loop_scope="function")
 async def window() -> AsyncIterator[Window]:
     node = Window()
-    async with Client(node.mcp) as client:
-        node.client = client
-        yield node
-
-
-@pytest_asyncio.fixture(loop_scope="function")
-async def conversation() -> AsyncIterator[Conversation]:
-    node = Conversation()
     async with Client(node.mcp) as client:
         node.client = client
         yield node
@@ -707,10 +677,7 @@ async def conversation() -> AsyncIterator[Conversation]:
 #  MQTT reader would drive it.
 
 
-def wired(
-    window: Window | None = None,
-    conversation: Conversation | None = None,
-) -> Session:
+def wired(window: Window | None = None) -> Session:
     """A real mesh, never connected, with the plugin's callbacks on it.
 
     `A2AMesh.__init__` builds topics, a card and the agent's ledger and dials
@@ -729,7 +696,6 @@ async def drain_until_idle(
     session: Session,
     *,
     window: Window | None = None,
-    conversation: Conversation | None = None,
 ) -> None:
     """Run the writer until it has handed over everything queued.
 
@@ -741,7 +707,6 @@ async def drain_until_idle(
             session,
             default_config(),
             window.client if window else None,
-            conversation.client if conversation else None,
         )
     )
     deadline = (  # timeouts: the value this test is built around, not a budget
@@ -854,24 +819,21 @@ async def test_a_presence_change_is_drawn_and_a_heartbeat_is_not(
 
 
 @pytest.mark.asyncio
-async def test_a_presence_line_with_no_window_to_draw_it_goes_nowhere(
-    conversation: Conversation,
-) -> None:
-    """No fallback, unlike every message here.
+async def test_a_presence_line_with_no_window_to_draw_it_goes_nowhere() -> None:
+    """A line is not a message, and is not retried or carried anywhere.
 
-    `to_agent` exists because a message that reached no window is not a lost
-    message — the agent server runs the turn and a window opened later restores
-    it.  A line about a moment is not that: running a model turn for one costs a
-    call to tell somebody a fact they cannot act on, so it is dropped and the
-    log says so (`a2a_note_no_window`).
+    A message that reached no conversation is a hard failure, because a message
+    *is* work for the conversation.  A line about a moment is not: running a
+    model turn for one costs a call to tell somebody a fact they cannot act on,
+    so it is dropped and the log says so (`a2a_note_no_window`).
     """
     session = wired()
     session.mesh.on_agent_change(
         AgentCard(agent_name=AgentName(PEER), status="online"), "online"
     )
-    await drain_until_idle(session, conversation=conversation)
+    await drain_until_idle(session)
 
-    assert conversation.handed == []
+    assert session.queue.empty(), "and nothing was left behind for a retry"
 
 
 @pytest.mark.asyncio
@@ -883,31 +845,51 @@ async def test_an_empty_result_pushes_nothing(window: Window) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_window_is_tried_before_the_agent_server(
-    window: Window, conversation: Conversation
-) -> None:
-    """§1.2's policy: the window is where a message becomes something a person
-    sees, and the agent server is the fallback for when none is showing it."""
-    session = wired(window=window, conversation=conversation)
+async def test_a_message_is_handed_to_the_window(window: Window) -> None:
+    """§1.2's policy, and there is one road in it: the window is where a message
+    becomes a turn somebody sees, and a conversation with no window is not a
+    conversation with fewer readers — it is one nobody is running."""
+    session = wired(window=window)
     session.mesh.on_inbound_task(PEER, "hello", TASK)
-    await drain_until_idle(session, window=window, conversation=conversation)
+    await drain_until_idle(session, window=window)
 
     assert len(window.handed) == 1
-    assert conversation.handed == []
 
 
 @pytest.mark.asyncio
-async def test_a_refusing_window_falls_back_to_the_agent_server() -> None:
-    refusing, conversation = Window(refuse=True), Conversation()
-    async with Client(refusing.mcp) as window_client:
-        async with Client(conversation.mcp) as agent_client:
-            refusing.client, conversation.client = window_client, agent_client
-            session = wired(window=refusing, conversation=conversation)
-            session.mesh.on_inbound_task(PEER, "hello", TASK)
-            await drain_until_idle(session, window=refusing, conversation=conversation)
+async def test_a_refusing_window_is_a_failure_and_nothing_else_is_tried(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fallback is gone, so a refusal is the end of that message.
 
-    assert conversation.handed[-1]["agent"] == AGENT
-    assert a2a_message_type(conversation.handed[-1]["prompt"]) == "task_request"
+    It used to be handed to the agent server — a turn nobody was watching, run
+    because the window was not there — which is the one outcome a channel whose
+    whole point is the terminal must not have.  What a caller gets now is a
+    failure it cannot mistake for success, logged where the peer it belongs to is
+    named, because the peer is the only party who can send the task again.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
+    refusing = Window(refuse=True)
+    async with Client(refusing.mcp) as window_client:
+        refusing.client = window_client
+        session = wired(window=refusing)
+        session.mesh.on_inbound_task(PEER, "hello", TASK)
+        await writer_until(
+            session,
+            lambda: any(
+                "a2a_delivery_unreachable" in record.getMessage()
+                for record in caplog.records
+            ),
+            window=refusing,
+        )
+
+    assert refusing.handed == []
+    assert session.queue.empty(), "a peer's message is not this plugin's to retry"
+    assert any(
+        "a2a_delivery_unreachable" in record.getMessage() and PEER in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -962,7 +944,6 @@ async def writer_until(
     done: Callable[[], bool],
     *,
     window: Window | None = None,
-    conversation: Conversation | None = None,
 ) -> None:
     """Run the writer until *done*, and cancel it the way the lifespan does.
 
@@ -975,7 +956,6 @@ async def writer_until(
             session,
             default_config(),
             window.client if window else None,
-            conversation.client if conversation else None,
         )
     )
     deadline = (  # timeouts: the value this test is built around, not a budget
@@ -1041,60 +1021,65 @@ async def test_the_orphan_notice_lands_on_the_channels_the_window_draws_alone() 
 async def test_a_notice_that_reached_nothing_is_offered_again(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`False` is the one answer that licenses a second attempt — and this is the
-    one message with no peer behind it to make that attempt itself.
+    """A refused delivery licenses a second attempt for this plugin's own
+    notice, and only for that.
 
-    The two fakes are the cold start exactly: a window that is not showing that
-    conversation (refused, so provably nothing was written) and a turn that
-    fails because the hub is not up yet.
+    The fake is the cold start exactly: a window that is not showing that
+    conversation, so the hand-over is refused and provably wrote nothing.  A
+    peer's message has the peer behind it — a peer that gets no answer sends the
+    task again, and a second copy of its words is worse than a late one — while
+    an orphan notice is a debt nobody else knows about, so it is the one thing
+    here that tries again.
     """
     monkeypatch.setattr(_T.timeouts.pacing, "orphan_retry", 0.01)
+    # The hand-over's own patience, which every attempt of it pays: three tries
+    # at this pace is what an orphan notice waits through.
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
     monkeypatch.setattr(a2a_server, "ORPHAN_RETRIES", 2)
-    caplog.set_level(logging.WARNING, logger="slife2.a2a.server")
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
 
     def attempts(peer: str) -> int:
         return sum(
             1
             for record in caplog.records
             if f"peer={peer} " in record.getMessage()
-            and record.getMessage().startswith("a2a_delivery_not_confirmed")
+            and record.getMessage().startswith("a2a_delivery_unreachable")
         )
 
-    refusing, broken = Window(refuse=True), Conversation(broken=True)
+    refusing = Window(refuse=True)
     async with Client(refusing.mcp) as window_client:
-        async with Client(broken.mcp) as agent_client:
-            refusing.client, broken.client = window_client, agent_client
-            InboundStore.open(AGENT).add(TASK, PEER)
-            session = wired()
-            announce_orphans(session)
-            session.post("a peer's own message", PEER, "a message from jill")
+        refusing.client = window_client
+        InboundStore.open(AGENT).add(TASK, PEER)
+        session = wired()
+        announce_orphans(session)
+        session.post("a peer's own message", PEER, "a message from jill")
 
-            await writer_until(
-                session,
-                lambda: attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1,
-                window=refusing,
-                conversation=broken,
-            )
+        await writer_until(
+            session,
+            lambda: attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1,
+            window=refusing,
+        )
 
     # The first attempt and every retry it was given, and no more than that.
     assert attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1
     # The peer's message: offered once.  A peer re-sends its own task when it
     # gets no answer, and a second copy of its words is worse than a late one.
     assert attempts(PEER) == 1
-    assert broken.handed == []
+    assert refusing.handed == []
 
 
 @pytest.mark.asyncio
 async def test_a_notice_the_writer_cannot_judge_is_not_offered_again(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The third answer stops it, retries or not.
+    """A call that did not come back stops it, retries or not.
 
     A stream that died says nothing either way about whether the words landed,
     and a notice arriving twice is how a conversation is told twice about a debt
-    it may already have paid.
+    it may already have paid.  The refusal path retries; this one may not, and
+    the test is the same in both cases: the queue is empty afterwards.
     """
-    caplog.set_level(logging.WARNING, logger="slife2.a2a.server")
+    caplog.set_level(logging.ERROR, logger="slife2.a2a.server")
     dying = Window(broken=True)
     async with Client(dying.mcp) as client:
         dying.client = client
@@ -1105,13 +1090,13 @@ async def test_a_notice_the_writer_cannot_judge_is_not_offered_again(
         await writer_until(
             session,
             lambda: any(
-                "handed=None" in record.getMessage() for record in caplog.records
+                "was not repeated" in record.getMessage() for record in caplog.records
             ),
             window=dying,
         )
 
-    assert "handed=None" in caplog.records[-1].getMessage()
-    assert session.queue.empty(), "a `None` is not put back"
+    assert "was not repeated" in caplog.records[-1].getMessage()
+    assert session.queue.empty(), "a call that may have landed is not put back"
 
 
 @pytest.mark.asyncio

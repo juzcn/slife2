@@ -20,10 +20,11 @@ exists to argue against.
 three ways — *timing* | *execution* | *record* — and the execution half was a
 dispatch into its subagent worker pool, which this build has no equivalent of
 (§9).  So a fire does what §1.2 is for: `slife2-tui`'s `submit` puts the task in
-front of the agent as a turn of its own, the agent server's `send_message` is the
-fallback when no window is showing — and that turn has **one** instruction, to
-call `schedule_run_now`, which is this plugin *starting the work itself* as an
-ordinary agent task.  Nothing in this file makes a model call: the loop is
+front of the agent as a turn of its own, in the window running that conversation —
+and that turn has **one** instruction, to call `schedule_run_now`, which is this
+plugin *starting the work itself* as an ordinary agent task.  A window that is
+not showing that agent is a failure, and the run ends `failed` with the reason on
+it rather than waiting for a turn nobody is running.  Nothing in this file makes a model call: the loop is
 `slife2-agent-task`'s, exactly as it is when a model asks for one.
 
 **That split is what makes the ledger close itself, and it is the whole reason
@@ -97,7 +98,7 @@ from slife2.agent_task_server import (
 from slife2.audience import FOR_THE_MODEL, client_meta
 from slife2.clock import at, now
 from slife2.config import AGENT_TASK_SERVER_NAME, Config, load_cached
-from slife2.handover import hand_over
+from slife2.handover import DeliveryFailed, hand_over
 from slife2.mcp_server import (
     agent_reader,
     close_server,
@@ -271,7 +272,6 @@ async def fire(
     due_at: str,
     *,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
 ) -> Run:
     """Hand one due task to its agent, and open the run it will be answered in.
 
@@ -297,45 +297,44 @@ async def fire(
     in the case that matters.
 
     **A run that is already settled is not re-fired**, which is what stops a poll
-    that ran twice from handing the same work over twice.  `True` and `None` both
-    leave it `pending`: the first because a turn is what closes it, the second
-    because nothing is known — and a run whose fate is unknown must not be
-    reported as either.
+    that ran twice from handing the same work over twice.
+
+    **A trigger that could not be handed over ends the run `failed`**, because
+    the turn is the whole of the run: there is no other place the work can
+    happen, and leaving the row `pending` would say "this may still run" about a
+    fire that has already passed.  The reason is recorded with it — a fact about
+    this machine rather than about the task, and the one thing a person looking
+    at the ledger needs to know.
     """
     run = store.record(task, due_at)
     if run.status != PENDING:
         return run
-    handed = await hand_over(
-        config,
-        store.agent,
-        render(
-            TRIGGER_TEMPLATE,
-            name=task.name,
-            description=task.description,
-            due_at=due_at,
-            agent=store.agent,
-        ),
-        channel_for(task.name),
-        what=f"scheduled task {task.name}",
-        window_client=window_client,
-        agent_client=agent_client,
-    )
-    if handed is False:
-        # `False` is the one answer that proves nothing was written anywhere, so
-        # the run is finished rather than left open — and it says why, because
-        # "no conversation could be reached" is a fact about this machine rather
-        # than about the task.
-        settled = store.settle(
-            task.name,
-            due_at,
-            FAILED,
-            error="no conversation could be reached for this run",
+    try:
+        await hand_over(
+            config,
+            store.agent,
+            render(
+                TRIGGER_TEMPLATE,
+                name=task.name,
+                description=task.description,
+                due_at=due_at,
+                agent=store.agent,
+            ),
+            channel_for(task.name),
+            what=f"scheduled task {task.name}",
+            window_client=window_client,
         )
+    except DeliveryFailed as exc:
+        # The one answer that proves nothing was written anywhere, and the only
+        # other outcome of a hand-over that may leave the run open (`None`) is
+        # spent inside `hand_over` as a failure too — a run whose trigger did not
+        # reach its conversation has not happened.
+        settled = store.settle(task.name, due_at, FAILED, error=exc.reason)
         assert settled is not None
+        logger.warning(
+            "scheduled run of %s for %s failed: %s", task.name, store.agent, exc
+        )
         return settled
-    # `True` and `None` both leave it pending: the first because the turn is what
-    # closes it, the second because nothing is known.  A run whose fate is
-    # unknown must not be reported as either.
     return run
 
 
@@ -535,7 +534,6 @@ async def poll_once(
     config: Config,
     *,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     tasks_client: Client | None = None,
     reference: datetime | None = None,
 ) -> list[str]:
@@ -588,7 +586,6 @@ async def poll_once(
                     task,
                     due_at,
                     window_client=window_client,
-                    agent_client=agent_client,
                 )
                 did.append(f"{store.agent}: {task.name} due {due_at} -> {run.status}")
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
@@ -635,7 +632,6 @@ async def poll_forever(
     config: Callable[[], Config],
     *,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     tasks_client: Client | None = None,
 ) -> None:
     """The loop: sweep once, then ask the clock every `_T.timeouts.pacing.schedule_poll`.
@@ -672,7 +668,6 @@ async def poll_forever(
             for line in await poll_once(
                 config(),
                 window_client=window_client,
-                agent_client=agent_client,
                 tasks_client=tasks_client,
             ):
                 logger.info("%s", line)
@@ -689,7 +684,6 @@ def build_server(
     config: Config,
     *,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     tasks_client: Client | None = None,
     source: Callable[[], Config] | None = None,
     polling: bool = True,
@@ -758,7 +752,6 @@ def build_server(
                 poll_forever(
                     live,
                     window_client=window_client,
-                    agent_client=agent_client,
                     tasks_client=tasks_client,
                 )
             )

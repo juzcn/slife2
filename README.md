@@ -744,13 +744,12 @@ Four tools, and the model uses all of them:
 | `wechat_logout` | Forget this agent's login |
 
 **The link's own coming and going is a line in the window**, not a turn:
-`[⚡ Wechat online]` when a scan lands or a saved login is picked up at start-up,
-`[✗ Wechat offline]` when it drops, is forgotten, or is there but did not come
-back — the same shape as `[⚡ jill online]` from the A2A mesh, because both say
-the same thing about a conversation: what it can reach now. The plugin is up
-before the terminal is, so a line drawn at start-up waits for the window that
-attaches a moment later rather than being drawn into nobody. The *reasons* stay
-in `wechat_check_status`, where a model asks for them.
+`[⚡ Wechat online]` when a scan lands, `[✗ Wechat offline]` when the login drops
+or is forgotten — the same shape as `[⚡ jill online]` from the A2A mesh, because
+both say the same thing about a conversation: what it can reach now. A login
+*picked up at start-up* says nothing, since a window shows what happened while
+you were watching rather than that the process started. The *reasons* stay in
+`wechat_check_status`, where a model asks for them.
 
 A message somebody sends arrives as a **turn of that agent's own conversation —
 in the window**. The plugin hands it to the terminal showing that conversation,
@@ -822,9 +821,9 @@ fetch one.
 The answer arrives on the `agent-task:<name>` channel wearing
 `[AsyncTaskResult:{…}]` — the task's id, name, state and times — so the window
 shows `AsyncTaskResult(research)> ` and the model learns the id its next call
-needs. It goes to the terminal showing that conversation; when no window is
-showing it, the agent server is given it instead, and the turn is recorded and
-drawn on the next restore.
+needs. It goes to the terminal showing that conversation, and nowhere else: with
+no window there is no conversation running, so the answer is `undelivered` and
+the log says so rather than a turn being run for nobody.
 
 ```yaml
 agent-task:
@@ -843,9 +842,11 @@ much happens at once (DESIGN.md §9).
 **The one thing here that starts work nobody asked for at the moment it starts.**
 A scheduled task is a name, a description and a cron expression, written down by
 the model; from then on `slife2-schedule` fires it, and when it comes due the
-agent is handed the task as a turn of its own — through the terminal, or through
-the agent server when no window is showing that conversation. **That turn has one
-instruction**: call `schedule_run_now` with the due time it carries. A task that
+agent is handed the task as a turn of its own, in the terminal running that
+conversation. **That turn has one instruction**: call `schedule_run_now` with the
+due time it carries. A fire nothing was there to receive — no window showing that
+agent — ends the run `failed` with the reason recorded, rather than leaving it
+`pending`: the ledger is where "did it run?" is answered. A task that
 has come due is **not the agent's to decline**; `schedule_run_skip` exists for the
 runs that did not happen at all.
 

@@ -273,11 +273,12 @@ refused ends the loop, and its last act is to say so, which is how a link that
 dies on its own reaches a window nobody is asking anything of — and `logout`
 says it where somebody asked for it, since it cancels that loop where it stands.
 A link that was **never** up produces no line at all: a cold absence is not an
-event, which is the rule §1.8 states about a cold retained card.  A link this
-agent *has* — a login on disk — is the one absence that is said, because a
-channel somebody has used is not a channel nothing has happened to: a window
-opening on a login that did not come back is told `✗ Wechat offline` rather than
-left to ask.
+event, which is the rule §1.8 states about a cold retained card.  **And neither
+does a login picked up at start-up**: `_resume` adopts a saved session with the
+state already marked as known, so a link that was up before the window opened is
+not the window's news — what a window shows is what happened while somebody was
+watching, which is why a scan landing does say so and a process starting does
+not.
 
 **One WeChat account holds one live login, and iLink decides which.**  Scanning
 a code for a second agent — or on a second machine — with the same phone does not
@@ -293,15 +294,12 @@ answers it had sent nowhere; both pairs are read now
 the model is given the bridge's own words for what happened rather than being
 sent to scan a code for no stated reason.
 
-**And a line nobody has taken has not been said.**  A login picked up at
-start-up is resolved into a window that is not there yet — the plugin comes up
-first, and the terminal attaches afterwards — so the state is not marked as known
-and dropped; it is *owed*, and offered again until a window takes it
-(`_offer_line`).  That is §1.8's own shape: a card already retained on the broker
-is announced to the window that joins, because what a window shows when it opens
-is what this conversation can reach *now*.  A refusal is what makes it decidable
-— `slife2.tui.control.refused` is the one answer that proves nothing was written
-— and it is why the `note` seam carries the three answers rather than none.
+**And a line is said once, where a window is.**  It is the window that runs an
+agent — a terminal or `--headless`, and both attach — so there is no window only
+in the seconds around that agent's own start, and a line the gap swallows is not
+offered again.  Holding it *owed* and redialling for it is machinery for a case
+this deployment does not have: the line is for somebody watching, and in that gap
+nobody was.
 
 And a window is
 not where the *reasons* are told apart — "no login saved", "waiting for a scan",
@@ -625,24 +623,28 @@ away from being a line in `slife2.tui.widgets.MARKERS`.  The *names* stay with
 their writers, because the module that writes a marker is the one that knows what
 it looks like, and a copy drifts into printing the raw marker at somebody.
 
-**And the delivery has a fallback, which fires on exactly one failure.**  `submit`
-refuses when no window is showing that agent, and it looks the session up before
-it posts anything (`slife2.tui.control`) — so **that refusal is the one that
-proves nothing was written**, and it is the only thing the fallback is for.
-Anything else means the call did not come back, and the words may be down the
-stream already: repeating them is how one answer arrives *twice*, which is what
-treating "it raised" as "it did not happen" produced when it was tried.  So the
-hand-over answers in three values rather than a boolean — written, refused,
-unknown — and the unknown one is logged and not repeated.  That is §1.2's rule
-from the caller's side, and it is worth stating where it bites: a caller that
-gave up cannot know, so it does not repeat.
+**And a delivery that cannot be made is a failure.**  There used to be a second
+road for it — `send_message` on the agent server, so that "start a task, close
+the window, walk away" left the answer waiting in the transcript — and it was
+wrong in the way every fallback for a normal case is: it made "the window is
+gone" a state to carry on in, and the work went ahead in a conversation nobody
+was running.  An agent's window is what runs it (a terminal or `--headless`, and
+both attach), so a message with no window has no conversation to become a turn
+in, and now says so (`slife2.handover.DeliveryFailed`).
 
-What the fallback does is `send_message` on the agent server with `subagent`
-empty — §3's "a caller which is not displaying the conversation can still
-continue one", which is what that sentence is for.  The turn runs, is recorded,
-and is drawn when a window opens and restores: the result is late rather than
-gone.  Start a task, close the window, walk away, and the answer is waiting in
-the transcript.
+What survives that is the *classification*, and it is about retrying rather than
+about roads.  `submit` refuses when no window is showing that agent, and it looks
+the session up before it posts anything (`slife2.tui.control`) — so **that
+refusal is the one answer that proves nothing was written**.  Anything else means
+the call did not come back, and the words may be down the stream already:
+repeating them is how one answer arrives *twice*, which is what treating "it
+raised" as "it did not happen" produced when it was tried.  So the hand-over
+answers in three values rather than a boolean — written, refused, unknown — tries
+a refusal again while the window may still be attaching, and raises on the
+unknown one without repeating it.  A caller that gave up cannot know, so it does
+not repeat; what it does instead is its own business, and §1.2 states the rule
+from the caller's side: the run ends `failed`, the answer is undelivered, and
+neither pretends the delivery happened.
 
 **Nothing here auto-dispatches an answer**, which is §1.2's rule unchanged.  A
 task's result is something the agent acts on; whether that becomes a message to
@@ -949,13 +951,13 @@ and the execution half was a dispatch into its subagent worker pool.  slife2 has
 no pool: what hangs a worker off its parent is §9's deferred half.  What it has
 instead is `agent-task`, a plugin whose entire job is "a loop of the agent's own,
 answering by a message" — so the fire does what §1.2 is for (`slife2-tui`'s
-`submit` opens a turn of the agent's own, with the agent server's `send_message`
-as the fallback when no window is showing) and that turn has **one instruction**:
+`submit` opens a turn of the agent's own, and a window that is not showing that
+agent is a failure rather than a detour) and that turn has **one instruction**:
 
 > call `schedule_run_now` with the due time the trigger carried.
 
 **And the trigger says whose task it is.**  The hand-over already carries the
-agent as its *address* — the window to type into, the server to fall back to —
+agent as its *address* — the window to type into, and the only one there is —
 and an address is not a thing the model reading the turn can see.  So the words
 name the owner as well, and that name is all a conversation holding no such task
 has to go on: without it, a trigger that was mis-delivered and a trigger for a
@@ -1168,13 +1170,13 @@ the last reply arrived.
 harness polled `__a2a_drain_incoming` once a second and injected what it found
 into the agent's inbox; there is no harness here.  What replaced it is exactly
 what §1.2 says replaced `__wechat_drain_incoming`: **`slife2.handover`** — the
-window showing that conversation first, the agent server when no window is, and
-three answers about whether it worked.  So the five queues become one ordering
-queue per session with one writer behind it, which is the job the queues were
-doing for the harness: arrival order, and keeping a mesh callback off the MQTT
-reader's stack.  A message that reaches neither place is logged and dropped;
-nothing retries, because a peer re-sends a task itself when it gets no answer,
-and that is the retry that knows what it is retrying.
+window showing that conversation, which is the only road, and a hard failure when
+it cannot be reached.  So the five queues become one ordering queue per session
+with one writer behind it, which is the job the queues were doing for the
+harness: arrival order, and keeping a mesh callback off the MQTT reader's stack.
+A peer's message that reached no window is logged and dropped rather than run
+somewhere else, because a peer re-sends a task itself when it gets no answer, and
+that is the retry that knows what it is retrying.
 
 **The marker is v1's, character for character** — `[A2A:{"from": …}]`, with the
 peer under `from` and deliberately *not* `agent_name`, which every system prompt
@@ -1288,14 +1290,14 @@ writing a different string.
 ### 1.9 The unattended agent, and what a window was for
 
 **What the flag is for is §1.8's enrollment, because that is the one thing only
-a window could provide.**  Everything else already works with no window at all,
-and that is an earlier decision rather than an accident: §1.2's hand-over is *the
-window first, the agent server when there is none* (`slife2.handover`), so a
-peer's task, a due scheduled run and a task's answer all reach a conversation no
-screen is showing — the turn runs, it is recorded, and the reply goes back where
-it came from.  What nothing else could do was hold `join`, and an agent nobody
-holds is simply **offline**: a machine with no terminal is a machine a peer
-cannot task, which is the gap this closes.  `--headless` is a window with no
+a window could provide.**  Everything else already works with no *terminal*, and
+that is not a fallback but the same fact twice: §1.2's hand-over goes to the
+window, and `--headless` **is** a window — the same connections, the same turns,
+with a driver that reads and writes nothing — so a peer's task, a due scheduled
+run and a task's answer all reach it.  What no other process could do was hold
+`join`, and an agent nobody holds is simply **offline**: a machine with no
+terminal is a machine a peer cannot task, which is the gap this closes.
+`--headless` is a window with no
 screen, so the enrollment is held and the agent is on the mesh — and everything
 the window was already doing, it keeps doing.
 
@@ -3022,8 +3024,8 @@ process's (v1's: a task belongs to the *call*), it is bounded only by a cap on
 finished entries, and a turn being cancelled does not cancel the task — which is
 the whole of what background means. What is not v1's is the delivery: a finished
 call's result is **handed back into the conversation it came from**
-(`slife2.handover`: the window first, the agent server as the fallback) rather
-than being held for a poll, and a *cancellation* is handed back too — a
+(`slife2.handover`: the window, and a failure if it is not there) rather than
+being held for a poll, and a *cancellation* is handed back too — a
 cancellation nobody hears about leaves a panel on screen that is running forever.
 So `check_async` answers where the call **is**, and the one thing it still carries
 is a result that could not be handed back, because the alternative to returning

@@ -83,7 +83,7 @@ def no_live_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     data-directory guard above stops a test from stopping real daemons; this one
     stops it from *talking* to them, which is worse because it cannot be told
     apart from success.  A plugin takes its peers as arguments —
-    `window_client`, `agent_client`, `hub_client`, `context_client`,
+    `window_client`, `hub_client`, `context_client`,
     `backend`, `tasks_client` — and `None` means "the real address in the
     config", which in a test is the developer's stack listening on the standard
     ports.  So a test that forgot one does not fail: it types into a live
@@ -127,7 +127,7 @@ def no_live_stack(monkeypatch: pytest.MonkeyPatch) -> None:
             + (f" ({left_out})" if left_out else "")
             + ". This machine's slife2 may be running, and a test that reaches it "
             "types into a live conversation. Hand the plugin the peer instead: "
-            "`window_client=`, `agent_client=`, `hub_client=`, `context_client=`, "
+            "`window_client=`, `hub_client=`, `context_client=`, "
             "`backend=`, `tasks_client=` — or patch this name in the module under "
             "test if the connection is the thing being tested."
         )

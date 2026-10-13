@@ -49,9 +49,10 @@ than because it was left out:
 
 The answer goes back through `slife2-tui`'s `submit`, which is this system's one
 path for "something outside the conversation became a turn in it" (DESIGN.md
-§1.2).  A window that is not showing that agent is **not** a lost result: the
-fallback is the agent server's `send_message`, so the turn runs, is recorded, and
-is drawn when a window opens and restores.
+§1.2).  A window that is not showing that agent is a **failed delivery**: the
+work happened, the answer reached no conversation, and the log says so — a task
+is over either way, and running a turn for nobody to make the two agree is the
+"carry on without the window" this system dropped.
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ from slife2.config import (
     Config,
     load_cached,
 )
-from slife2.handover import hand_over
+from slife2.handover import DeliveryFailed, hand_over
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult, harness_call
@@ -274,7 +275,6 @@ def build_server(
     context_client: Client | None = None,
     hub_client: Client | None = None,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """Build the agent-task server.
@@ -283,9 +283,8 @@ def build_server(
     a turn, so exercising one means exercising a model call, a tool list, a
     restore, a rebuild and a hand-over — and every peer that would make those
     network calls can be handed in as a client over the in-memory transport
-    instead.  Two of them are the agent server's (`window_client`,
-    `agent_client`) because the hand-over is the one thing a task does that a
-    turn does not.
+    instead.  `window_client` is the agent server's too, because the hand-over is
+    the one thing a task does that a turn does not.
 
     `source` is the config to read when a task actually runs, so a test can hand
     in a config that no file backs; without it the file is re-read, which is what
@@ -696,10 +695,9 @@ def build_server(
             task.finished_at = now()
         finally:
             # **A task is over when it stops, not when its answer has been handed
-            # over.**  The hand-over may wait on a whole turn of the agent's —
-            # the fallback runs one — and the cap counts what has stopped, so
-            # retiring here is what keeps "finished" and "still holding a slot"
-            # from being the same thing.
+            # over.**  The hand-over waits on another process, and the cap counts
+            # what has stopped, so retiring here is what keeps "finished" and
+            # "still holding a slot" from being the same thing.
             retire(task)
         try:
             await deliver(task)
@@ -737,30 +735,36 @@ def build_server(
         """Hand a finished task's answer to the conversation that asked for it.
 
         **The hand-over itself is `slife2.handover`, and it is shared with
-        `slife2-schedule`** — the window first, the agent server as the fallback,
-        and three answers rather than two about whether it worked.  Two plugins
-        that both put a message into a conversation nobody asked them about is
-        one more copy than this project keeps of anything, so what is left here
-        is only the part that *is* an agent task's: what an answer wears, and
-        what "delivered" means when it does not arrive.
+        `slife2-schedule`** — one road, the window, and one failure when it
+        cannot be made.  Two plugins that both put a message into a conversation
+        nobody asked them about is one more copy than this project keeps of
+        anything, so what is left here is only the part that *is* an agent
+        task's: what an answer wears, and what "delivered" means when it does not
+        arrive.
 
-        A task that finished with nobody watching is the case a background task
-        exists for — start it, close the window, walk away — so nothing here is a
-        failure until both paths have been tried.  **`None` is not tried again
-        anywhere else**: it means the call did not come back, which says nothing
-        about whether the words were written, and a second copy of an answer is
-        worse than a late one because the agent would act on it twice.
+        **An undelivered answer is a failure rather than a stage.**  A task that
+        finished with nobody watching is the case a background task exists for —
+        start it, close the window, walk away — and the honest report of that is
+        that the answer reached no conversation *and was not carried anywhere
+        else*: the work happened, the delivery did not, and the log says which.
+        The answer is not run into the conversation to make the mismatch go away,
+        because that is a turn nobody is watching.
         """
-        handed = await hand_over(
-            config,
-            task.agent,
-            f"{marker(task)} {task.text}",
-            channel_for(task),
-            what=f"agent task {task.name}",
-            window_client=window_client,
-            agent_client=agent_client,
-        )
-        task.delivered = handed is True
+        try:
+            await hand_over(
+                config,
+                task.agent,
+                f"{marker(task)} {task.text}",
+                channel_for(task),
+                what=f"agent task {task.name}",
+                window_client=window_client,
+            )
+        except DeliveryFailed as exc:
+            logger.error(
+                "agent task %s for %s was not delivered: %s", task.name, task.agent, exc
+            )
+            return
+        task.delivered = True
 
     # ── whose task ───────────────────────────────────────────────────────
 

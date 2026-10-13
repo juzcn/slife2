@@ -101,7 +101,7 @@ from slife2.events import (
     TurnObserver,
     encode,
 )
-from slife2.handover import hand_over
+from slife2.handover import DeliveryFailed, hand_over
 from slife2.llm.base import LLMBackend
 from slife2.llm.client import MCPBackend, open_backend
 from slife2.loop import AgentLoop, TurnResult, harness_call
@@ -372,7 +372,6 @@ def build_server(
     context_client: Client | None = None,
     hub_client: Client | None = None,
     window_client: Client | None = None,
-    agent_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
@@ -381,11 +380,10 @@ def build_server(
     server — model call, tools, the restore, the rebuild, the write — can be
     exercised over the in-memory transport with no network at all.
 
-    `window_client` and `agent_client` are the same seam for the one thing this
-    server *hands* rather than asks: a background call's result, on its way back
-    into the conversation it came from (`slife2.handover`, which is where the
-    window-first-then-the-agent-server policy is argued).  They are the same pair
-    `slife2.agent_task_server` takes, for the same reason.
+    `window_client` is the seam for the one thing this server *hands* rather
+    than asks: a background call's result, on its way back into the conversation
+    it came from (`slife2.handover`, which is where the window-is-the-only-road
+    policy is argued).  `slife2.agent_task_server` takes it for the same reason.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -417,12 +415,11 @@ def build_server(
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
-    #: The two peers a background result is *handed* to rather than asked of —
-    #: the window, and this server as its own fallback (`slife2.handover`).
-    #: Injected only by a test: in production both are opened per hand-over,
-    #: because that is once per finished call rather than once per turn.
+    #: The peer a background result is *handed* to rather than asked of — the
+    #: window (`slife2.handover`).  Injected only by a test: in production it is
+    #: opened per hand-over, because that is once per finished call rather than
+    #: once per turn.
     window_conn: Client | None = window_client
-    agent_conn: Client | None = agent_client
 
     def current() -> Config:
         """The config a *new* conversation is built from.
@@ -729,9 +726,9 @@ def build_server(
         being read, so a model that asks is spending the turn it was given.  Two
         ways for nobody to be there, and they are one answer: the instance
         holding the name has no terminal (`slife2 --headless`), or **no instance
-        is holding it at all** — a peer that tasks an agent nobody is running is
-        exactly the case `slife2.handover.to_agent` exists for, and it is
-        unattended for the same reason.
+        is holding it at all** — a peer that asks something of an agent nobody is
+        running is told so rather than served (`slife2.handover`), and a turn
+        that runs here anyway is unattended for the same reason.
         """
         claim = read_claim(agent)
         system = render_system_prompt(
@@ -1259,18 +1256,15 @@ def build_server(
             **A result nobody comes back for is a result lost**, which is the one
             thing backgrounding must not do: the call was made for this
             conversation, and v1's only road back was the model remembering to
-            poll.  So it is delivered the way every other piece of work this
-            system does in the background delivers its answer — the window first,
-            the agent server as the fallback (`slife2.handover`, where those two
-            answers and the third one are argued).
+            poll.  So it is handed to the window like every other piece of work
+            this system does in the background (`slife2.handover`).
 
-            **`bool(...)` of three answers, and both "no" cases mean the same
-            thing here**: `False` is a refusal that provably wrote nothing and
-            `None` is a hand-over that did not come back, and a caller that
-            cannot tell which happened may not claim either.  Either way the task
-            keeps its result for `check_async` to hand over — the fallback road
-            under the fallback road, and the reason nothing is ever dropped for
-            want of a window.
+            **A failure here is `False`, and `False` is not "lost"**: the call
+            keeps its result, `check_async` is what hands it over, and the model
+            that asks for it is the model that has a window.  What is *not* done
+            is running the delivery into a conversation nobody is watching —
+            that road used to exist and it is exactly the "carry on without the
+            window" this system dropped.
 
             It goes to the **agent's** conversation and not the subagent's,
             because `send_message` addresses a conversation by `(agent,
@@ -1278,7 +1272,7 @@ def build_server(
             call is reported where the person is, which is the only place a
             result can be read by somebody.
             """
-            return bool(
+            try:
                 await hand_over(
                     current(),
                     loop.agent,
@@ -1289,9 +1283,15 @@ def build_server(
                         f"{describe((loop.agent, loop.subagent))}"
                     ),
                     window_client=window_conn,
-                    agent_client=agent_conn,
                 )
-            )
+            except DeliveryFailed as exc:
+                logger.warning(
+                    "a background call's result was not delivered to %s: %s",
+                    describe((loop.agent, loop.subagent)),
+                    exc,
+                )
+                return False
+            return True
 
         agent_loop = await loop_for(
             loop,

@@ -42,16 +42,16 @@ half:
 
 **Finished, and pushed.**  A call that completes hands its answer to the
 conversation it was made in, on `CHANNEL`, by the road every other piece of
-background work in this system takes (`slife2.handover`: the window first, the
-agent server as the fallback).  A call that is *cancelled* is handed back too —
+background work in this system takes (`slife2.handover`: the window, and a
+failure if it is not there).  A call that is *cancelled* is handed back too —
 a cancellation the conversation never hears about would leave a panel on screen
 that is running forever.
 
 So **`check_async` answers where the call is**, not what it said: running,
 finished, failed, cancelled.  The one thing it still carries is a result that
-**could not be handed back** — no window, and an agent server that refused it —
-because the alternative to returning it there is losing it, and an answer nobody
-can ask for a second time is worse than one that arrives by the fallback road.
+**could not be handed back** — no window was showing that conversation — because
+the alternative to returning it there is losing it, and an answer nobody can ask
+for a second time is worse than one that arrives a turn late.
 
 Why a module rather than a corner of `slife2.tools`
 ---------------------------------------------------

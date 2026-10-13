@@ -124,29 +124,6 @@ class Window:
 
 
 @dataclass
-class Conversation:
-    """A recorder standing in for the agent server's `send_message`.
-
-    The fallback's own peer, and it is reached only when the window refused —
-    which is the case a background task exists for: start it, close the window,
-    walk away.
-    """
-
-    client: Client | None = None
-    refuse: bool = False
-    handed: list[dict[str, Any]] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.mcp: FastMCP = FastMCP("agent")
-
-        @self.mcp.tool
-        async def send_message(agent: str, prompt: str, channel: str) -> None:
-            if self.refuse:
-                raise ToolError("this conversation cannot be reached")
-            self.handed.append({"agent": agent, "prompt": prompt, "channel": channel})
-
-
-@dataclass
 class Tasks:
     """A recorder standing in for `slife2-agent-task`.
 
@@ -243,27 +220,17 @@ async def broken_window() -> AsyncIterator[Window]:
         yield node
 
 
-@pytest_asyncio.fixture(loop_scope="function")
-async def conversation() -> AsyncIterator[Conversation]:
-    node = Conversation()
-    async with Client(node.mcp) as client:
-        node.client = client
-        yield node
-
-
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
 def build(
     window: Window | None = None,
-    conversation: Conversation | None = None,
     tasks: Tasks | None = None,
 ) -> FastMCP:
     """The plugin, wired to recorders and with its clock not running."""
     return build_server(
         default_config(),
         window_client=window.client if window else None,
-        agent_client=conversation.client if conversation else None,
         tasks_client=tasks.client if tasks else None,
         polling=False,
     )
@@ -594,69 +561,53 @@ async def test_a_disabled_task_is_never_fired(window: Window) -> None:
     assert ledger().newest("daily") is None
 
 
-async def test_a_hand_over_that_refuses_falls_back_to_the_conversation(
-    dead_window: Window, conversation: Conversation
+async def test_a_run_no_window_could_be_reached_for_is_failed(
+    dead_window: Window,
 ) -> None:
-    """A window that is not showing that agent is not a lost result — the turn
-    runs, is recorded, and is drawn when a window opens and restores."""
-    async with Client(build(dead_window, conversation)) as client:
+    """A window that is not showing that agent is a failure, not a detour.
+
+    The fallback used to run the turn in the agent server — a turn nobody was
+    watching, for a task whose whole point is that somebody is told the clock
+    came due.  So the run is finished `failed` and the reason goes with it: the
+    ledger is where "did it run?" is answered, and this one did not.
+    """
+    async with Client(build(dead_window)) as client:
         await write(client)
 
     await poll_once(
         default_config(),
         window_client=dead_window.client,
-        agent_client=conversation.client,
         reference=later(90),
     )
 
-    assert len(conversation.handed) == 1
-    assert conversation.handed[0]["channel"] == f"{CHANNEL}:daily"
-    run = ledger().newest("daily")
-    assert run is not None and run.status == PENDING
-
-
-async def test_a_run_nothing_could_be_reached_for_is_failed(
-    dead_window: Window,
-) -> None:
-    """`False` is the one answer that proves nothing was written anywhere, so the
-    run is finished rather than left open — and it says why."""
-    conversation = Conversation(refuse=True)
-    async with Client(conversation.mcp) as agent_client:
-        conversation.client = agent_client
-        async with Client(build(dead_window, conversation)) as client:
-            await write(client)
-        await poll_once(
-            default_config(),
-            window_client=dead_window.client,
-            agent_client=agent_client,
-            reference=later(90),
-        )
-
+    assert dead_window.handed == []
     run = ledger().newest("daily")
     assert run is not None and run.status == FAILED
-    assert "no conversation could be reached" in run.error
+    assert run.error, "and the reason travels with the run"
 
 
-async def test_a_hand_over_that_does_not_come_back_leaves_the_run_pending(
-    broken_window: Window, conversation: Conversation
+async def test_a_hand_over_that_does_not_come_back_fails_the_run_too(
+    broken_window: Window,
 ) -> None:
-    """The third answer. The words may already be in the conversation, so the
-    fallback is *not* tried — one message arriving twice is worse than one
-    arriving late — and the run is not called failed either, because nothing
-    about it is known."""
-    async with Client(build(broken_window, conversation)) as client:
+    """The third answer, and it is not a state to wait in either.
+
+    A call that did not come back is not repeated — its words may already be in
+    the conversation, and one message arriving twice is worse than one arriving
+    late — but the run's trigger reached no conversation that could be confirmed,
+    so the run did not happen either.  `failed`, with the reason recorded.
+    """
+    async with Client(build(broken_window)) as client:
         await write(client)
 
     await poll_once(
         default_config(),
         window_client=broken_window.client,
-        agent_client=conversation.client,
         reference=later(90),
     )
 
-    assert conversation.handed == []
     run = ledger().newest("daily")
-    assert run is not None and run.status == PENDING
+    assert run is not None and run.status == FAILED
+    assert "was not repeated" in run.error
 
 
 async def test_the_clock_is_one_loop_that_sees_every_agents_ledger(

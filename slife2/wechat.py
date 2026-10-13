@@ -82,7 +82,7 @@ import slife2.timeouts as _T
 from slife2 import ilink
 from slife2.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.config import Config
-from slife2.handover import note_to_window, to_window
+from slife2.handover import hand_over, note_to_window
 from slife2.ilink import Http, IlinkClient
 from slife2.mcp_server import house_server, serve_plugin
 from slife2.paths import agent_dir, agents_dir
@@ -295,26 +295,11 @@ class Session:
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
         self.qr_error: str = ""
         self.qr_task: asyncio.Task[None] | None = None
-        #: The link state a window has been told about, so a transition is
+        #: The link state this session has already said, so a transition is
         #: announced once and a state that has not moved is announced not at
-        #: all (`_announce`).  `""` is "nobody has been told yet", which is also
+        #: all (`_announce`).  `""` is "nothing has been said yet", which is also
         #: what says a link that is already down is not news — see `_announce`.
-        #:
-        #: **Told, and not decided**: a line no window took stays owed, so this
-        #: is set where a window has it rather than where the state changed.
         self.announced: str = ""
-        #: The offering of a line no window has taken yet (`_offer_line`).  A
-        #: link picked up at start-up is resolved before the terminal attaches,
-        #: so its line is offered again at the pace a window is waited for
-        #: instead of being drawn into nothing.
-        self.offering: asyncio.Task[None] | None = None
-        #: Whether this session is about a link this agent **has** — a login was
-        #: saved for it (`_adopt`), or a scan landed (`_confirmed`).  A session
-        #: born from a tool call for an agent that never scanned a code has none,
-        #: and a cold absence is not an event: there is no link here for a window
-        #: to be told about (the rule `slife2.a2a.mesh` states about a cold
-        #: card).  `logout` takes it away with the login it stood for.
-        self.saved_login: bool = False
 
     @property
     def polling(self) -> bool:
@@ -427,18 +412,18 @@ def clear_session(agent: str) -> bool:
 Deliver = Callable[[str, str], Awaitable[None]]
 
 #: How this plugin tells a window about its own link: `(agent, line)`, drawing a
-#: harness line rather than running a turn (`slife2.tui.control`'s `note`), and
-#: answering the way that call does — `True` written, `False` provably written
-#: nowhere, `None` this cannot tell.  A seam for `Deliver`'s reason — the whole
-#: point of these tests is that no window and no server is anywhere — and it is a
-#: second seam rather than a use of the first because the two are different
-#: things: a message the person reads as their own, and a line the harness has to
-#: say.
+#: harness line rather than running a turn (`slife2.tui.control`'s `note`).  A
+#: seam for `Deliver`'s reason — the whole point of these tests is that no window
+#: and no server is anywhere — and it is a second seam rather than a use of the
+#: first because the two are different things: a message the person reads as
+#: their own, and a line the harness has to say.
 #:
-#: **The answer is read, where a message's is not**: the one reply that proves
-#: nothing was written is what says the link line is still owed rather than said
-#: (`_announce`).
-Note = Callable[[str, str], Awaitable[bool | None]]
+#: **What the call answers is not read.**  A line is said once, where a window
+#: is.  An agent's window is what runs it — a terminal or `--headless`, both of
+#: which attach — so "no window" is the seconds around that agent's own start
+#: and not a state, and a line the gap swallows is not worth a second attempt
+#: (`handover`'s own rule for a note: the moment it describes has passed).
+Note = Callable[[str, str], Awaitable[None]]
 
 
 #: The two states a login is in, as a window is told them.  Derived from the
@@ -482,7 +467,7 @@ class Wechat:
     ) -> None:
         self._config = config
         self._http = http
-        self._deliver = deliver or self._ask_agent
+        self._deliver = deliver or self._deliver_to_window
         self._note = note or self._note_window
         self._agents = directory or agents_dir()
         self._sessions: dict[str, Session] = {}
@@ -547,10 +532,6 @@ class Wechat:
         for session in self._sessions.values():
             self._cancel(session.poll)
             session.poll = None
-            # A line still being offered goes with everything else: there is no
-            # window left to take it, and the process is ending.
-            self._cancel(session.offering)
-            session.offering = None
             for task in session.typing.values():
                 self._cancel(task)
             session.typing.clear()
@@ -599,18 +580,15 @@ class Wechat:
             await self._adopt(session, saved)
 
     async def _resume(self, session: Session) -> None:
-        """The startup path: restore what can be restored, and say what happened.
+        """The startup path: restore if there is anything to restore.
 
-        **The state is announced from here and not from the restore**, because
-        the two outcomes are the same piece of news: a login that came back is a
-        link that is up, and one that did not is a link that is down, and a
-        window opening after either is owed the answer.  `_adopt` cannot say it —
-        it is the second of the two — and the poll loop cannot say the first of
-        them, since there is no loop when there is no login.
+        **Nothing is said from here.**  A login picked up at start-up is not a
+        change to the link, and this process comes up before the terminal does —
+        the line belongs to what happens while a window is there (`_announce`,
+        and `_adopt` for why the state is marked known rather than announced).
         """
         with contextlib.suppress(Exception):
             await self.ready(session)
-        await self._announce(session)
 
     async def _adopt(self, session: Session, saved: Mapping[str, Any]) -> bool:
         """Take a saved login up, and start watching it.
@@ -623,11 +601,6 @@ class Wechat:
         rather than re-deriving from the file.
         """
         client = session.client
-        # A login is on disk for this agent, so this session is about a link it
-        # *has* — which is what makes its state, up or down, something a window
-        # is owed (`_announce`).  Set before the first thing that can fail: the
-        # file is the fact, not the outcome of reading it.
-        session.saved_login = True
         if not await client.try_restore_session(
             saved, max_age=_T.timeouts.pacing.wechat_session_max_age
         ):
@@ -688,39 +661,40 @@ class Wechat:
         if owner:
             client.last_contact = {"from_id": owner, "context_token": ""}
         session.heard_from = False
-        # The state is *not* marked as told here, and that is the point: a window
-        # opening after this is owed the answer, which `_resume` announces — see
-        # `_announce` for why a link that came up before anybody looked is news
-        # rather than a line about the process.
+        # **Known, and not worth saying.**  A saved login coming back is this
+        # *process* starting, not the link changing, and the poll loop it is
+        # about to start would otherwise announce it in every window of every
+        # agent that has one (`_announce`).  Marking it here is what makes the
+        # difference between "it came up while you were watching" and "it was
+        # already up when you looked" — the second is not news.
+        session.announced = LINK_ONLINE
         self.watch(session)
         logger.info("wechat %s: login resumed", session.agent)
         return True
 
     # ── Polling ──────────────────────────────────────────────────────────
 
-    async def _note_window(self, agent: str, line: str) -> bool | None:
+    async def _note_window(self, agent: str, line: str) -> None:
         """Draw *line* in the window showing *agent*, and nowhere else.
 
         The default behind the `note` seam, and the exact call the A2A plugin
-        makes for a peer's arrival: the window first, and **no fallback** — a
-        line about a moment has nowhere else to go, and running a turn for one
-        would spend a model call telling somebody a fact they cannot act on
+        makes for a peer's arrival: the window, and nowhere else — a line about a
+        moment has nowhere else to go, and running a turn for one would spend a
+        model call telling somebody a fact they cannot act on
         (`slife2.handover.note_to_window`).
 
-        What comes back is that call's own answer, passed through rather than
-        read here: `False` is a window that is not showing this agent, and it is
-        the one reply `_announce` acts on.
+        What that call answers — written, refused, unknown — is not read here: a
+        line no window took is a line nobody needs, and it is not said again
+        (`Note`).
         """
-        return await note_to_window(self._config, agent, line)
+        await note_to_window(self._config, agent, line)
 
     @staticmethod
     def _state(session: Session) -> str:
         """This session's link, as one of the two words — **the client's**.
 
         Derived rather than stored, so there is one answer to "is the link up"
-        and a tool call cannot leave a stale one behind; asked from both of this
-        session's drivers (`_announce`, `_offer_line`) because a rule spelled
-        twice is a rule that drifts once.
+        and a tool call cannot leave a stale one behind.
         """
         client = session.client
         return (
@@ -738,78 +712,42 @@ class Wechat:
         window with a complaint about a channel nothing has happened to.  That is
         the same rule the mesh states about a cold card
         (`slife2.a2a.mesh._handle_discovery`), and for the same reason: a line
-        about an absence is a line about an event that did not happen.  The one
-        absence that *is* said is a link this agent has: a login left on disk is
-        a fact about a channel that has been used, so a window opening on a login
-        that did not come back is owed the answer rather than the silence —
-        `session.saved_login` is where that difference lives.
+        about an absence is a line about an event that did not happen.
 
-        **A line nobody has taken has not been said.**  This process comes up
-        before the terminal does, so `_resume` resolves a saved login while there
-        is no window to draw the answer in yet — and a line spent there would be
-        a line drawn into nothing, which is exactly what a start-up that showed
-        no link looked like.  The refusal is the one answer that proves nothing
-        was written (`slife2.tui.control.refused`, which is why `Note` carries
-        it), so what follows a refusal is that the state stays *owed*:
-        `announced` is put back and `_offer_line` keeps offering the line until a
-        window takes it.  That is the shape `slife2.a2a.mesh` plays by for a card
-        already retained on the broker — what a window shows when it opens is
-        what this conversation can reach *now*, and a link that was up before
-        anybody looked is the one arrival that would otherwise be lost, because
-        it is the one that happened first.
+        **And a login picked up at start-up is not an event either** — `_adopt`
+        marks that state known, so what a window shows is what happened *while
+        somebody was watching*: a scan landing, a token the far end refuses, an
+        account expiring, a logout.  Without that, every start of the stack would
+        put `⚡ Wechat online` in every window of every agent that has a saved
+        login, which is a line about the process rather than about the link.
 
-        Called from the poll loop, from `logout` and from `_resume`, so the state
-        is derived here rather than set at five call sites.
+        **Said once, and not owed.**  An agent's window is what runs that agent —
+        a terminal or `--headless`, and both attach — so there is no window only
+        in the seconds around that agent's own start, and a line the gap swallows
+        is not offered again (`Note`).  This used to hold the line *owed* and
+        redial for it, which is machinery for a case the deployment does not
+        have: the line is for somebody watching, and in that gap nobody was.
+
+        Called from the poll loop and from `logout`, so the state is derived here
+        rather than set at a call site — there is one answer to "is the link up",
+        and it is the client's.
         """
         state = self._state(session)
-        # **Claimed before the await.**  Two drivers call this — the poll loop
-        # and `_offer_line` — and they are the same event loop, so setting
-        # `announced` here is what keeps a link that comes up from being drawn
-        # twice by both of them; a refusal puts the old value back.
+        # **Claimed before the await.**  The poll loop and `logout` are the two
+        # drivers of this, and a cancelled poll loop may already be inside a draw
+        # of its own, so setting it here is what keeps one transition from being
+        # said twice.
         was, session.announced = session.announced, state
-        if state == was:
-            return
-        if state == LINK_OFFLINE and not was and not session.saved_login:
+        if state == was or (not was and state == LINK_OFFLINE):
             return
         try:
-            handed = await self._note(session.agent, format_link_line(state))
+            await self._note(session.agent, format_link_line(state))
         except Exception as exc:  # noqa: BLE001 - a line is not worth a loop
             # A window that cannot be drawn in is not a reason to stop watching
             # messages, and the poll loop is where this is usually called from.
             logger.debug(
                 "wechat %s: the link line was not drawn: %s", session.agent, exc
             )
-            return
-        if handed is False:
-            session.announced = was
-            self._offer(session)
-
-    def _offer(self, session: Session) -> None:
-        """Keep offering an untaken line, until a window takes it."""
-        if session.offering is None or session.offering.done():
-            session.offering = self._spawn(self._offer_line(session))
-
-    async def _offer_line(self, session: Session) -> None:
-        """Offer this session's owed line again, at the pace a window is waited for.
-
-        The first wait is `reconnect`'s number — the terminal's own pause before
-        offering to attach again — because it is the same wait: something this
-        process cannot see yet and cannot be told about, so the only thing left is
-        to look again.  **And it grows**, for the reason the poll loop's does: the
-        ordinary wait is a second or two (the terminal is already starting), and a
-        window that has not come for minutes is not a reason to ask every two
-        seconds forever — an agent whose login is on disk but whose window nobody
-        opened is the case this is paid for.
-
-        The loop ends the moment the line is taken (`announced` then *is* the
-        state), and a state that moves while nobody is looking is offered as what
-        it moved to, since `_announce` derives it afresh each time.
-        """
-        wait = _T.timeouts.pacing.reconnect
-        while session.announced != self._state(session):
-            await asyncio.sleep(wait)
-            await self._announce(session)
-            wait = min(wait * BACKOFF_FACTOR, _T.timeouts.pacing.wechat_backoff_max)
 
     def watch(self, session: Session) -> None:
         """Start this session's poll loop, if it is not already running."""
@@ -856,9 +794,10 @@ class Wechat:
             )
             await asyncio.sleep(backoff)
         # The loop ended because the link did — a token the far end refused, or
-        # an account that expired — and that is the transition the window is
-        # owed.  A *deliberate* end (`logout`, which cancels this task) never
-        # reaches here and says so itself.
+        # an account that expired — and a link that dies on its own is the one
+        # transition nobody asked about, so it is said here.  A *deliberate* end
+        # (`logout`, which cancels this task) never reaches here and says so
+        # itself.
         await self._announce(session)
         logger.info("wechat %s: polling stopped", session.agent)
 
@@ -946,10 +885,15 @@ class Wechat:
         try:
             await self._deliver(session.agent, prompt)
         except Exception as exc:  # noqa: BLE001 — one message is not the loop
-            # The text is not logged: it is a private message, and its length is
-            # the part that matters to whoever is reading the log.
-            logger.warning(
-                "wechat %s: could not hand over a %d-character message from %s: %s",
+            # **An error rather than a warning**, because this is the one outcome
+            # a person can see and the plugin cannot make right: their message is
+            # not answered, and nothing else will happen to it (`hand_over`'s
+            # failure is the last word on a message).  The text is not logged: it
+            # is a private message, and its length is the part that matters to
+            # whoever is reading the log.
+            logger.error(
+                "wechat %s: a %d-character message from %s was not delivered to "
+                "its conversation, so nothing will answer it: %s",
                 session.agent,
                 len(prompt),
                 peer,
@@ -1019,7 +963,7 @@ class Wechat:
 
     # ── Handing over, for real ───────────────────────────────────────────
 
-    async def _ask_agent(self, agent: str, prompt: str) -> None:
+    async def _deliver_to_window(self, agent: str, prompt: str) -> None:
         """Hand one message over to the window showing this agent's conversation.
 
         **The window and not the agent server**, and that is the whole of what
@@ -1035,37 +979,20 @@ class Wechat:
         machine, so a second terminal could not be reached at all; now the plugin
         keeps a session per agent and this says which one (`slife2.tui.control`).
 
-        **The call returns when the words are on their way to that window, not
-        when the turn ends** — a connection that died *after* they were written
-        cannot make them run twice — and that is the whole reason the retry below
-        is safe.
+        **The retry and the classification are `slife2.handover.hand_over`'s** —
+        one copy of "the window may be attaching right now" for every caller, and
+        one copy of the rule that a call which did not come back may not be
+        repeated.  What is left here is the naming: a message off a phone is
+        handed over as `wechat`, which is the channel its turn is recorded under
+        and the bubble it wears.
 
-        **A failure is classified before it is retried, and this is why the
-        hand-over goes through `slife2.handover`.**  The shared `to_window` answers
-        in three values: `True` (written), `False` (provably written nowhere), and
-        `None` (the call did not come back, so the words may already be down the
-        stream).  Only `False` is safe to try again; retrying `None` is how a
-        message a person sent once runs as *two* turns and draws two replies,
-        which §1.2/§1.3 call the one failure worse than a late answer.  A second
-        copy of that classification here would be the copy that loses it, so
-        there is none — the retry below is a retry of a proven refusal, and
-        `None` is raised rather than repeated.
+        **And a failure is a failure**: this used to fall back on the agent
+        server, which is a turn nobody is watching — the one thing a channel
+        whose whole point is the terminal must not do (`slife2.handover`).
         """
-        for _attempt in (1, 2):
-            handed = await to_window(self._config, agent, prompt, CONFIG_KEY)
-            if handed is True:
-                return
-            if handed is None:
-                # The words may already be in the conversation, so this is not
-                # handed anywhere else — raised so `_answer` logs it, the way
-                # `slife2.handover` logs its own copy of the same fact.
-                raise ConnectionError(
-                    f"the hand-over to {agent} did not come back, so it was not "
-                    f"repeated"
-                )
-            # `False` proves nothing was written, so a second attempt cannot
-            # duplicate anything — the window may have attached in between.
-        raise ConnectionError(f"no window is showing {agent}'s conversation")
+        await hand_over(
+            self._config, agent, prompt, CONFIG_KEY, what="a WeChat message"
+        )
 
     # ── The QR login ─────────────────────────────────────────────────────
 
@@ -1215,9 +1142,6 @@ class Wechat:
         session.heard_from = False
         # The note a failed restore left is stale the moment a login works.
         session.restore_note = ""
-        # A scan landing is a login this agent has, for the same reason a file is
-        # one — and the link it stands for is owed to a window from here on.
-        session.saved_login = True
         session.qr_state = "confirmed"
         self.watch(session)
         logger.info("wechat %s: logged in", session.agent)
@@ -1427,12 +1351,10 @@ class Wechat:
         # from here rather than from the loop's exit, because `logout` cancels
         # that loop where it stands (`_poll`).
         #
-        # **Before the link is forgotten, and the order is the whole of it.**  A
-        # line nobody has taken yet leaves the state owed (`_announce`), and this
-        # is the departure that discharges it: told afterwards, the session would
-        # read as one that never had a link and the logout would be silent.
+        # **Before the link is forgotten, and the order is the whole of it.**
+        # Told afterwards, the session would read as one that never had a link,
+        # and a logout somebody asked for would be silent (`_announce`).
         await self._announce(session)
-        session.saved_login = False
         logger.info("wechat %s: logged out", session.agent)
         return (
             "Logged out of WeChat, and the saved login is gone. Call "

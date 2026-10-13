@@ -164,11 +164,6 @@ class Transport:
     #: Handing a message to a window: it returns when the words are down the
     #: stream, not when the turn they started ends.
     window: float = 10.0
-    #: Handing one to the agent server, which runs a whole turn before answering.
-    #: **Must outlast `window`** (`validate`): the fallback's promise is bigger
-    #: than the fast path's, and using the fast path's number would cut off every
-    #: hand-over that had to go the long way round.
-    agent: float = 600.0
     #: One call to the schedule plugin.
     tasks: float = 30.0
 
@@ -328,13 +323,6 @@ def validate(ts: Timeouts) -> list[str]:
         errs.append(
             "invariant: work.hub >= ready.list_settle (a listing's wait is "
             "inside the asker's patience)"
-        )
-    if ts.transport.agent < ts.transport.window:
-        # Handing a message to the agent server runs a whole turn; handing one to
-        # a window only writes it.  The slower road needs the longer patience.
-        errs.append(
-            "invariant: transport.agent >= transport.window "
-            "(the fallback's promise is bigger than the fast path's)"
         )
     if ts.ready.tunnel_heal < ts.ready.tunnel_read_url:
         # A running child gets at least the patience a fresh start gets, or the
