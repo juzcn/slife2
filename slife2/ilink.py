@@ -25,6 +25,19 @@ question answers `logged_in` — which is what v1 did until the envelope was rea
 and why :func:`error_envelope` exists as a thing named rather than a check
 inlined at each of the three places it is needed.
 
+**And the same "no" comes in a second spelling**, which is how this defect came
+back after being fixed once.  iLink keeps **one live session per WeChat
+account**: scanning a code for a second agent — or on a second machine — with the
+same phone retires the older login, and the retired one is then answered
+`{"errcode": -14, "errmsg": "session timeout"}` to its polls *and its sends*,
+instantly and for as long as the token is offered.  Nothing about that body is
+new: it is a rejection wearing a `200`, the thing this section is about.  What
+was new is the pair of keys — a reader that knew `errno` and not `errcode` read
+it as an empty poll, so the retired session kept a poll loop, kept answering
+`logged_in`, and kept **reporting a send as delivered that the bridge had already
+thrown away**.  Both pairs are read (see :data:`ENVELOPE_ERROR_KEYS`), and the
+window is told its link is down by the same loop that used to spin.
+
 The **`get_updates_buf`** cursor is the other half of the same problem.  iLink
 re-serves recent messages until the cursor advances, so a client that does not
 persist it re-ingests the whole replay window after every restart.  The cursor
@@ -155,20 +168,46 @@ def base_info() -> dict[str, str]:
     return {"channel_version": CHANNEL_VERSION, "bot_agent": BOT_AGENT}
 
 
+#: The keys the bridge says "no" with.  Two spellings of one thing, and the
+#: second is not decoration: a session a newer login of the same WeChat account
+#: has taken over is answered `{"errcode": -14, "errmsg": "session timeout"}`,
+#: which a reader that knew only the first pair read as a healthy empty poll —
+#: see the module docstring.  **`errmsg` is deliberately not here**: it is the
+#: *text* of a "no", and a body carrying text without a verdict has not said one.
+ENVELOPE_ERROR_KEYS = ("errno", "error", "retcode", "errcode")
+
+#: Where that "no"'s own words are read off, most specific first — `errmsg`
+#: before the numeric codes because a `-14` is a number nobody can act on.
+ENVELOPE_TEXT_KEYS = ("error", "errno", "retcode", "errmsg", "errcode")
+
+
 def error_envelope(result: Mapping[str, Any]) -> bool:
     """Whether an iLink body is a *failure* wearing a `200`.
 
-    See the module docstring: `errno`, `error` and `retcode` are the three keys
-    the bridge uses to say "no" in a successful response, and a client that
-    only reads `msgs` reads every one of them as silence.
+    See the module docstring: any of :data:`ENVELOPE_ERROR_KEYS` is the bridge
+    saying "no" in a successful response, and a client that only reads `msgs`
+    reads every one of them as silence.
     """
-    return bool(result.get("errno") or result.get("error") or result.get("retcode"))
+    return any(result.get(key) for key in ENVELOPE_ERROR_KEYS)
 
 
 def envelope_error(result: Mapping[str, Any]) -> str:
-    """That failure, as a sentence — `""` when the envelope is not one."""
-    err = result.get("error") or result.get("errno") or result.get("retcode")
-    return f"session rejected by server: {err}" if err else ""
+    """What the bridge said, in its own words — `""` when it said nothing.
+
+    **The failure and nothing around it**, because every caller is already
+    writing that sentence: a caller that handed this to a model prefixed with
+    "the server rejected the login" would otherwise have it say "the server
+    rejected the login (session rejected by server: session timeout)", and the
+    half worth reading is the bridge's (`session timeout`), not ours twice.
+
+    `errmsg` is preferred to the numeric codes for the same reason: a `-14` is a
+    number nobody can act on.  An envelope that carries only numbers answers
+    with one, which is the bridge being terse rather than this being empty.
+    """
+    for key in ENVELOPE_TEXT_KEYS:
+        if result.get(key):
+            return str(result[key])
+    return ""
 
 
 class IlinkClient:

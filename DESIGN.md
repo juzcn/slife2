@@ -273,12 +273,37 @@ refused ends the loop, and its last act is to say so, which is how a link that
 dies on its own reaches a window nobody is asking anything of — and `logout`
 says it where somebody asked for it, since it cancels that loop where it stands.
 A link that was **never** up produces no line at all: a cold absence is not an
-event, which is the rule §1.8 states about a cold retained card.  **And neither
-does a login picked up at start-up**: `_resume` adopts a saved session with the
-state already marked as known, so a link that was up before the window opened is
-not the window's news — what a window shows is what happened while somebody was
-watching, which is why a scan landing does say so and a process starting does
-not.  And a window is
+event, which is the rule §1.8 states about a cold retained card.  A link this
+agent *has* — a login on disk — is the one absence that is said, because a
+channel somebody has used is not a channel nothing has happened to: a window
+opening on a login that did not come back is told `✗ Wechat offline` rather than
+left to ask.
+
+**One WeChat account holds one live login, and iLink decides which.**  Scanning
+a code for a second agent — or on a second machine — with the same phone does not
+fail and does not warn: it *retires* the login that was there first, which is
+then answered `{"errcode": -14, "errmsg": "session timeout"}` to its polls *and
+to its sends*, instantly, for as long as that token is offered.  That is a
+rejection wearing a `200` — the thing §1.2's reader exists for — in the *other*
+spelling of it: `errcode` / `errmsg` where a revoked token answers `errno` /
+`error`.  A reader that knew one pair and not the other left the retired login
+polling a bridge that had stopped serving it, `online` in its window, reporting
+answers it had sent nowhere; both pairs are read now
+(`slife2.ilink.ENVELOPE_ERROR_KEYS`), so that loop ends, the window is told, and
+the model is given the bridge's own words for what happened rather than being
+sent to scan a code for no stated reason.
+
+**And a line nobody has taken has not been said.**  A login picked up at
+start-up is resolved into a window that is not there yet — the plugin comes up
+first, and the terminal attaches afterwards — so the state is not marked as known
+and dropped; it is *owed*, and offered again until a window takes it
+(`_offer_line`).  That is §1.8's own shape: a card already retained on the broker
+is announced to the window that joins, because what a window shows when it opens
+is what this conversation can reach *now*.  A refusal is what makes it decidable
+— `slife2.tui.control.refused` is the one answer that proves nothing was written
+— and it is why the `note` seam carries the three answers rather than none.
+
+And a window is
 not where the *reasons* are told apart — "no login saved", "waiting for a scan",
 "connected but not answering" are three different pieces of advice — so those
 stay in `wechat_check_status`, which is where a model asks.

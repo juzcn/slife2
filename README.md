@@ -716,6 +716,14 @@ app at it, and the token that comes back is saved to
 `agents/<agent>/wechat.yaml` where the next start picks it up. A login lasts
 about a day; `wechat_check_status` says how much of it is left.
 
+**One WeChat account holds one live login.** Scan a code with the same phone for
+a second agent — or on a second machine — and the login that was there first is
+retired by the bridge, silently: it is answered `session timeout` from then on,
+so nothing it sends arrives. slife2 reads that answer for what it is, which is
+why the first agent's window says `[✗ Wechat offline]` and its
+`wechat_check_status` says why; the fix is to scan a code again, taking the
+account back.
+
 Four tools, and the model uses all of them:
 
 | tool | what it does |
@@ -726,12 +734,13 @@ Four tools, and the model uses all of them:
 | `wechat_logout` | Forget this agent's login |
 
 **The link's own coming and going is a line in the window**, not a turn:
-`[⚡ Wechat online]` when a scan lands, `[✗ Wechat offline]` when the login drops
-or is forgotten — the same shape as `[⚡ jill online]` from the A2A mesh, because
-both say the same thing about a conversation: what it can reach now. A login
-*picked up at start-up* says nothing, since a window shows what happened while
-you were watching rather than that the process started. The *reasons* stay in
-`wechat_check_status`, where a model asks for them.
+`[⚡ Wechat online]` when a scan lands or a saved login is picked up at start-up,
+`[✗ Wechat offline]` when it drops, is forgotten, or is there but did not come
+back — the same shape as `[⚡ jill online]` from the A2A mesh, because both say
+the same thing about a conversation: what it can reach now. The plugin is up
+before the terminal is, so a line drawn at start-up waits for the window that
+attaches a moment later rather than being drawn into nobody. The *reasons* stay
+in `wechat_check_status`, where a model asks for them.
 
 A message somebody sends arrives as a **turn of that agent's own conversation —
 in the window**. The plugin hands it to the terminal showing that conversation,
