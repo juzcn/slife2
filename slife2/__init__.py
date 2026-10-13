@@ -26,6 +26,7 @@ import sys
 import time
 
 from slife2.config import (
+    A2A_SERVER_NAME,
     DEFAULT_AGENT,
     Config,
     ConfigError,
@@ -238,6 +239,24 @@ def control_url(config: Config) -> str:
     return config.server("tui").url
 
 
+def mesh_url(config: Config) -> str:
+    """Where the window puts its agent on the A2A mesh, or `""` for not on one.
+
+    **`""` is the whole of what "not on the mesh" means here**, and it is the
+    config's own switch rather than a second one (`slife2.config.A2ASettings`: a
+    machine with no `a2a:` section is a machine that is not on the mesh).  So the
+    empty string is returned for an absent section and the window then holds
+    nothing and draws nothing — rather than holding a call to a plugin that would
+    answer "this machine is not on the A2A mesh" every two seconds, which reads
+    as a fault rather than as a setting.
+
+    The address itself always exists: every plugin is started and shared (§4), so
+    `servers:` carries `slife2-a2a` whether or not the section that decides what
+    it *does* is there.
+    """
+    return config.server(A2A_SERVER_NAME).url if config.a2a.configured else ""
+
+
 def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     """Which model the window starts on, and what that model is.
 
@@ -366,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
                     # agent: what picks out this window is the agent name it
                     # attaches under, not a port of its own.
                     control_url=control_url(config),
+                    # And where it holds its place on the A2A mesh, if this
+                    # machine is on one: an agent's window is what puts it
+                    # online, so the address has to reach the window rather
+                    # than the plugin that was already started without it.
+                    mesh_url=mesh_url(config),
                 )
                 app.run()
     except AgentInUse as exc:

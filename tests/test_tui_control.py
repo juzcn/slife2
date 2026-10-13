@@ -131,6 +131,23 @@ async def submitted(client: Client, agent: str, **payload: Any) -> None:
     raise AssertionError(f"no window ever attached for {agent}")
 
 
+async def noted(client: Client, agent: str, text: str) -> None:
+    """Draw one line on the attached window, with `submitted`'s safe retry.
+
+    Safe for the same reason and no further: a refusal proves nothing was
+    written, so trying again cannot draw the line twice.  What no caller may do
+    is retry a note whose write could not be *confirmed* — everything a note says
+    is about a moment that has passed.
+    """
+    for _ in range(200):
+        try:
+            await client.call_tool(control.NOTE, {"agent": agent, "text": text})
+            return
+        except ToolError:
+            await asyncio.sleep(0.01)
+    raise AssertionError(f"no window ever attached for {agent}")
+
+
 async def test_a_handed_over_message_reaches_the_attached_window() -> None:
     server = control.build_server()
 
@@ -235,9 +252,9 @@ async def test_a_window_that_goes_away_answers_every_caller_still_waiting() -> N
 
 
 async def test_nothing_here_is_offered_to_the_model() -> None:
-    """Two tools, and the hub must leave both out of the tool set.
+    """Three tools, and the hub must leave all of them out of the tool set.
 
-    Neither carries the audience mark, and the plugin declares no sources — so it
+    None carries the audience mark, and the plugin declares no sources — so it
     contributes no catalogue rows either, which is what makes it one of the
     plugins the hub has no reason to ask (`slife2.mcp_server.LIST_SOURCES`).
     """
@@ -246,7 +263,11 @@ async def test_nothing_here_is_offered_to_the_model() -> None:
     async with Client(server) as client:
         tools = await client.list_tools()
 
-    assert {tool.name for tool in tools} == {control.ATTACH, control.SUBMIT}
+    assert {tool.name for tool in tools} == {
+        control.ATTACH,
+        control.SUBMIT,
+        control.NOTE,
+    }
     assert not any(for_the_model(tool.meta) for tool in tools)
 
 
@@ -278,6 +299,51 @@ async def test_a_handover_round_trips_and_foreign_lines_are_dropped() -> None:
     assert control.decode("not json") is None
     assert control.decode('{"t":"text","d":"hi"}') is None
     assert control.decode('{"t":"handover","d":"hi"}') is None
+
+
+async def test_an_old_handover_reads_as_a_turn_and_a_note_as_a_note() -> None:
+    """The kind is on the wire, and its absence is `TURN` rather than nothing.
+
+    A window holding a stream from a plugin that predates notes must run what it
+    is handed — that is what every hand-over *was* — and an unknown kind is a
+    word this build has no meaning for, which is the same situation.  Dropping
+    either would lose a message somebody's turn is waiting on.
+    """
+    turn = control.Handover(ticket=1, text="hi", channel="wechat")
+    note = control.Handover(
+        ticket=2, text="⚡ jill online", channel="", kind=control.NOTE
+    )
+
+    assert control.decode(control.encode(turn)) == turn
+    assert control.decode(control.encode(note)) == note
+    assert turn.kind == control.TURN, "the default, for every existing caller"
+
+    # No `k` at all: what a hand-over was before there were two kinds.
+    old = control.decode('{"t":"handover","id":3,"d":"hi","c":"wechat"}')
+    assert old is not None and old.kind == control.TURN
+    # A kind from a future build is not a kind this one may act on.
+    future = control.decode('{"t":"handover","id":4,"d":"hi","c":"","k":"shrug"}')
+    assert future is not None and future.kind == control.TURN
+
+
+async def test_a_note_reaches_the_window_as_a_note_and_is_acknowledged() -> None:
+    """The `note` tool, down the same held call a `submit` uses.
+
+    Same ticket, same acknowledgement, same refusal — one road with two kinds on
+    it, which is what keeps a note in arrival order with the turns it landed
+    between.  What it does *not* carry is a channel: a note is the harness
+    talking, and there is no channel for that.
+    """
+    server = control.build_server()
+    async with Client(server) as client:
+        async with attached(server) as seen:
+            await noted(client, "jack", "⚡ jill online")
+            assert [h.kind for h in seen] == [control.NOTE]
+            assert seen[0].text == "⚡ jill online"
+            assert seen[0].channel == ""
+
+        with pytest.raises(ToolError, match=control.NO_WINDOW):
+            await client.call_tool(control.NOTE, {"agent": "nobody", "text": "hi"})
 
 
 @pytest.mark.integration

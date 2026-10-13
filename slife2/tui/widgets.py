@@ -483,6 +483,16 @@ class ChatView(VerticalScroll):
     def add_note(self, text: str, *, ends_turn: bool = False) -> None:
         """A line from the harness rather than from anyone in the conversation.
 
+        **The brackets are applied here, and every harness line wears them.**
+        `[restored 3 turns]`, `[cancelled]`, `[⚡ jill online]` — the shape is
+        what tells a reader this line is not somebody speaking, so it belongs to
+        the one widget that draws them rather than to each producer.  A caller
+        passing text that already carried them would be a caller spelling the
+        format a second time, and a caller that forgot them would leave a line
+        nothing marks as the harness's.  The words inside are
+        `slife2.tui.notes`' (or a plugin's, for a line that arrived over the
+        wire).
+
         **The turn stays open by default, and that is load-bearing.**  A note
         lands *inside* a turn that is still going: the discriminator's `[kept …]`
         arrives before the first delta, and everything the model then streams has
@@ -499,7 +509,7 @@ class ChatView(VerticalScroll):
         if ends_turn:
             self._turn_open = False
         self._close_block()
-        self._add(Static(plain(text, PALETTE["dim"])), "system-message")
+        self._add(Static(plain(f"[{text}]", PALETTE["dim"])), "system-message")
 
     def add_picker(self, picker: ModelPicker) -> ModelPicker:
         """Mount the model picker inline, at the tail.
@@ -522,11 +532,20 @@ class ChatView(VerticalScroll):
         return self._add(prompt, "approval-prompt")
 
     def add_error(self, text: str) -> None:
+        """A harness line whose news is bad — `add_note`'s shape, in red.
+
+        **The same bracket as a note, on purpose.**  Both are the harness
+        speaking; the difference between them is how bad the news is, and colour
+        says that without a second format for a reader to learn.  The glyph sits
+        inside the bracket, where the bracket is the format rather than part of
+        the message.
+        """
         self._turn_open = False
         self._close_block()
         line = Text.assemble(
-            (f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}"),
+            (f"[{GLYPHS['failed']} ", f"bold {PALETTE['red']}"),
             (text, PALETTE["red"]),
+            ("]", PALETTE["red"]),
         )
         self._add(Static(line), "system-message")
 

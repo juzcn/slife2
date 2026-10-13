@@ -26,8 +26,8 @@ a directory (§5, and `slife2.paths`), so it is ``<agent>/a2a.yaml`` beside
 ``turns.db`` and ``wechat.yaml`` — and that move is why there is an ``agent:`` key
 v1 did not need.  The directory holds the **sanitised** name
 (``slife2.db.safe_agent_name``: ``a/b`` lands in ``a_b``), and whose ledger it is
-decides *which conversation an orphan notice is handed to* and *which name the
-mesh resumes under*, so a name read off the directory would address a
+decides *which conversation an orphan notice is handed to*, so a name read off the
+directory would address a
 conversation that is not the one that received the task.  Two instances on one
 machine are still the normal way to run two agents, and a shared file would have
 each read the other's in-flight tasks as its own orphans.
@@ -104,19 +104,20 @@ class InboundStore:
     def open(cls, agent: str) -> InboundStore:
         """The ledger for one agent, created and stamped with its name.
 
-        This is the only way a ledger comes into existence, and — with the file
-        itself — the record that this agent is on the mesh: the plugin resumes
-        from `paths.a2a_inbound_paths()`, so the file's existence is why an agent
-        is reachable the next time slife2 starts.
+        This is the only way a ledger comes into existence, and the file's
+        existence says one thing: this agent has had inbound tasks, so a *later*
+        start has something to read — `slife2.a2a.server.announce_ledgers` walks
+        `paths.a2a_inbound_paths()` and tells the model what a previous process
+        died holding.  **It is not an enrollment list**, and treating it as one
+        (a start joining the mesh as every agent that had ever spoken) made
+        presence mean "has spoken at least once, ever".  What puts an agent on
+        the mesh is a window showing it (`slife2.a2a.server.join`).
 
         **So this writes, where v1's constructor only read.**  v1's file turned up
-        when a task did, because v1 had a plugin process per agent and always knew
-        which names to be reachable under.  A shared process learns that from
-        these files and nowhere else, so an agent that has only ever *sent* would
-        be one nothing resumes — reachable the day it spoke and gone the next
-        morning.  Writing an empty ledger at open is what makes the file the
-        enrollment it is described as; it is also where the `pending → stale`
-        migration above gets persisted.
+        when a task did, and a shared process needs the file to say *whose* it is
+        before any task has arrived — an empty ledger is a name, and the name is
+        what an orphan notice is addressed to.  It is also where the
+        ``pending → stale`` migration above gets persisted.
         """
         store = cls(a2a_inbound_path(agent), agent)
         store._save()

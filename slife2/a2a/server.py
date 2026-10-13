@@ -30,6 +30,25 @@ thing whose delivery this plugin repeats, for the reason it has no peer behind
 it: a peer re-sends its task when it gets no answer, so nothing a peer sent is
 ever offered twice.
 
+**And it carries a second kind of thing, which is not a message at all.**  A
+presence transition — a peer arriving, a peer going — is a *note*: the window
+draws it and nothing else happens, no turn is run and the conversation never
+learns of it.  v1 kept presence out of the inbox for the same reason (its TUI had
+an activity feed and its model a per-turn prompt); here the roster a model can
+ask for is `a2a_list_agents`, and a peer that wants to be answered sends a task.
+One queue, one writer, two kinds — because arrival order is worth keeping across
+both.
+
+**Who is on the mesh is a window, not a ledger.**  v1's plugin *was* its agent's
+process, so being up and being online were the same fact.  A shared process has
+to decide, and reading it off `agents/<agent>/a2a.yaml` — the record of inbound
+tasks a process died holding — made it mean "has spoken at least once, ever": a
+card for a conversation nobody was having, and none for the window somebody had
+just opened.  So the mesh is joined by `join` for as long as a window holds that
+call, and by an `a2a_*` call for as long as the task it started may be answered.
+That ledger is still the plugin's own file, and the orphan notice is still its
+job; it is just no longer an enrollment list.
+
 Two things v1 had here are deliberately absent.  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported is now
 `a2a_list_agents`' answer, which is where a model would look anyway.  And the
@@ -63,12 +82,13 @@ from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
     A2AMesh,
     AgentCard,
+    AgentName,
     format_presence_line,
     safe_name,
 )
 from slife2.audience import FOR_THE_MODEL
 from slife2.config import A2A_SERVER_NAME, Config, load_cached
-from slife2.handover import hand_over
+from slife2.handover import hand_over, note_to_window
 from slife2.mcp_server import agent_reader, house_server, serve_plugin
 from slife2.paths import a2a_inbound_paths
 from slife2.prompt import render
@@ -83,14 +103,29 @@ SERVER_NAME = A2A_SERVER_NAME
 #: (`slife2.config.A2ASettings`).
 CONFIG_KEY = "a2a"
 
-#: The four tools — v1's four, under v1's names, and the whole surface.  A
-#: `task_response` is not a fifth tool: it is `a2a_send_message` with
-#: `message_type` said, because on the wire it *is* the same operation and a
-#: second name for it would be a second thing for a model to learn.
+#: The four tools the model gets — v1's four, under v1's names.  A
+#: `task_response` is not a fifth: it is `a2a_send_message` with `message_type`
+#: said, because on the wire it *is* the same operation and a second name for it
+#: would be a second thing for a model to learn.
 A2A_SEND_MESSAGE = "a2a_send_message"
 A2A_CANCEL_TASK = "a2a_cancel_task"
 A2A_LIST_AGENTS = "a2a_list_agents"
 A2A_BROADCAST = "a2a_broadcast"
+
+#: The tool that puts an agent *on* the mesh — and it is not the model's.  A
+#: window calls it and holds it open; see `join` for why the mesh's membership
+#: is a call rather than a state the plugin keeps.  Spelled here because a name
+#: crossing a process boundary is written in two places
+#: (`slife2.tui.client`), like the tui plugin's `attach` and `submit`.
+JOIN = "join"
+
+#: The two reasons an agent is on the mesh (`Session.reasons`), and they differ
+#: in whether they ever go away.  `USED` is a tool's: it is added when a call
+#: needs the mesh and never released, because what follows a send is a reply the
+#: agent is waiting for.  `WINDOW` is a window's (`join`), and it is released the
+#: moment that window stops holding the call.
+USED = "used"
+WINDOW = "window"
 
 #: The channel an inbound message arrives on, and the first half of what it is
 #: keyed by: `a2a:jill`.  The window draws a bubble from the channel alone
@@ -240,9 +275,34 @@ class Session:
     connect_error: str = ""
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(MAX_QUEUED))
     writer: asyncio.Task | None = None
+    #: Why this agent is on the mesh — and the mesh lives exactly as long as this
+    #: set has something in it.  `USED` is added by any call that needs the mesh
+    #: and is never taken back: a send is followed by a reply the agent is
+    #: waiting for, so an agent with a task outstanding *is* on the mesh and
+    #: nothing inside this process's life makes that stop being true.  `WINDOW` is
+    #: added by `join` for as long as its call is open, which is what makes a
+    #: closed window show up as `✗ offline` rather than as a card nobody retires.
+    reasons: set[str] = field(default_factory=set)
 
-    def post(self, text: str, peer: str, what: str, retries: int = 0) -> None:
-        """Queue one message for the hand-over writer.
+    def hold(self, reason: str) -> None:
+        """Add one reason for this agent to be on the mesh."""
+        self.reasons.add(reason)
+
+    def release(self, reason: str) -> bool:
+        """Give up one reason.  True when it was the last one."""
+        self.reasons.discard(reason)
+        return not self.reasons
+
+    def post(
+        self,
+        text: str,
+        peer: str,
+        what: str,
+        retries: int = 0,
+        *,
+        note: bool = False,
+    ) -> None:
+        """Queue one line for the writer — a message, or a note with `note`.
 
         Never blocks and never raises: this runs on the mesh's reader, and a
         delivery that has to wait is a delivery that stops the mesh reading.
@@ -254,13 +314,41 @@ class Session:
         answer, and a second copy of its message is worse than a late one.  The
         orphan notice is the one message with no peer behind it, so its delivery
         is this plugin's to repeat (`_drain`).
+
+        `note` says this line is the harness's rather than anybody's: the writer
+        draws it in the window that is showing this agent and goes no further
+        (`slife2.handover.note_to_window`), so it is never a turn, never stored,
+        and never retried.
         """
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.queue.get_nowait()
             logger.warning("a2a_delivery_overflow dropped=1 peer=%s", peer)
         with contextlib.suppress(asyncio.QueueFull):
-            self.queue.put_nowait((text, peer, what, retries))
+            self.queue.put_nowait((text, peer, what, retries, note))
+
+
+async def _hold_open(ctx: Context) -> None:
+    """Wait for the window that called `join` to go away, and notice by writing.
+
+    **Silence is not a signal.**  A stream closed while nothing was being written
+    on it may sit unnoticed until something tries to write — and this call is
+    *defined* by writing nothing, so a window that was killed rather than quit
+    could leave its agent advertised online for the life of the process.  That is
+    the lie this whole arrangement exists to avoid, so the hold says something
+    instead: the same keepalive `MeshResponder` pings a working task's stream
+    with, on the same cadence, and the first ping that fails is the departure —
+    it raises, and `join`'s `finally` takes the agent off the mesh.
+
+    **A caller that sent no progress token gets no keepalive**, because
+    `report_progress` is then a silent no-op (`slife2.events`): such a window is
+    still held and still leaves when its stream is cancelled, but nothing here
+    can hasten the noticing, and that is a fact about the caller rather than
+    something to paper over.
+    """
+    while True:
+        await asyncio.sleep(_T.timeouts.deliver.keepalive)
+        await ctx.report_progress(0, None, None)
 
 
 def _wire(session: Session) -> None:
@@ -320,10 +408,22 @@ def _wire(session: Session) -> None:
         # Only real transitions are worth anybody's attention: a cold retained
         # offline card is cached by the mesh and never announced, and a
         # non-transition event renders as None (`format_presence_line`).
+        #
+        # **A note, not a message** — which is where this parts company with
+        # every other callback here.  A peer coming online asks the model for
+        # nothing: the peer that wants to talk sends a task, and the roster is
+        # `a2a_list_agents`' answer.  Handing a transition to the conversation
+        # instead spends a whole turn and a context on a fact nobody has to act
+        # on, which is what v1 avoided by never putting presence in the inbox.
         text = format_presence_line(card, event)
         if text is None:
             return
-        session.post(text, safe_name(card.agent_name), f"{card.agent_name} is {event}")
+        session.post(
+            text,
+            safe_name(card.agent_name),
+            f"{card.agent_name} is {event}",
+            note=True,
+        )
 
     def on_peer_cancel(task_id: str, peer: str) -> None:
         """A peer withdrew an inbound task — hand it over like any other message.
@@ -363,6 +463,14 @@ async def _drain(
 ) -> None:
     """Hand over what the mesh delivers, one message at a time, in order.
 
+    **Two kinds of thing take this one road, and that is the point of it.**  A
+    message is handed to a conversation (`slife2.handover.hand_over`: the window
+    showing it, or the agent server when none is) and a note is drawn in the
+    window and nowhere else.  Sharing the queue is what keeps them in arrival
+    order with each other — a peer's arrival line lands between the two turns it
+    happened between — and one writer is what keeps a mesh callback off the MQTT
+    reader's stack.
+
     The three-answer rule is `slife2.handover`'s and this keeps it: `False` is
     the one result that proves nothing was written, `True` means it reached a
     conversation, and `None` means this cannot tell — and **`None` is not tried
@@ -387,8 +495,23 @@ async def _drain(
     failure is logged and dropped, and the loop goes on to the next.
     """
     while True:
-        text, peer, what, retries = await session.queue.get()
+        text, peer, what, retries, note = await session.queue.get()
         try:
+            if note:
+                # A harness line for whoever is looking, and that is the whole of
+                # where it goes: no fallback to the agent server (a note is not a
+                # turn anybody runs) and no retry (a `✗ offline` that arrives
+                # after the window has moved on is worth less than silence).
+                if (
+                    await note_to_window(
+                        config, session.agent, text, client=window_client
+                    )
+                    is False
+                ):
+                    logger.debug(
+                        "a2a_note_no_window agent=%s line=%s", session.agent, what
+                    )
+                continue
             handed = await hand_over(
                 config,
                 session.agent,
@@ -502,10 +625,12 @@ def build_server(
     def session_of(agent: str) -> Session:
         """This agent's mesh, built on first use and kept.
 
-        Built rather than connected: the mesh's constructor writes the agent's
-        ledger (`InboundStore.open`), which is also how a *later* start knows to
-        resume this agent — the file is the record, as it is for a login and for
-        a schedule.
+        Built rather than connected, and the difference is the whole of what
+        enrollment means here: building writes the agent's ledger
+        (`InboundStore.open`), which is the record of the *inbound tasks a
+        process died holding* — a fact about work already received, not a claim
+        about who is here now.  What connects is `join` (a window is showing the
+        agent) or the first `a2a_*` call that needs the mesh.
         """
         found = sessions.get(agent)
         if found is None:
@@ -517,12 +642,22 @@ def build_server(
             sessions[agent] = found
         return found
 
-    async def connected(agent: str) -> Session:
+    async def connected(agent: str, reason: str) -> Session:
         """The agent's mesh, connected — or a refusal naming why it is not.
 
         Double-checked under the session's lock, v1's shape: two calls arriving
         together must not both dial the broker, and a mesh whose connect failed
         is discarded rather than half-kept, so a retry starts from nothing.
+
+        **`reason` is the caller's, and it is what the mesh's lifetime is made
+        of** (`Session.reasons`).  A caller that is waiting for something back —
+        every tool here but `join` — holds `USED`, for the rest of this process's
+        life: what follows a send is a reply the agent is waiting for, and an
+        agent with a task outstanding is on the mesh in the only sense that
+        matters to the peer answering it.  A window passes `WINDOW`, which it
+        gives back when its call ends.  Which one it is has to be said by the
+        caller: a `join` that inherited a tool's reason would keep the agent
+        online after the window it was joining for had gone.
         """
         settings = live().a2a
         if not settings.configured:
@@ -532,9 +667,11 @@ def build_server(
             )
         session = session_of(agent)
         if session.mesh.is_connected:
+            session.hold(reason)
             return session
         async with session.lock:
             if session.mesh.is_connected:
+                session.hold(reason)
                 return session
             try:
                 await session.mesh.connect()
@@ -548,6 +685,7 @@ def build_server(
                     f"could not join the mesh as {agent!r} on {settings.address}: {e}"
                 ) from e
             session.connect_error = ""
+            session.hold(reason)
             logger.info("a2a_mesh_connected agent=%s", agent)
         return session
 
@@ -560,22 +698,29 @@ def build_server(
         "a peer sees",
     )
 
-    async def resume(config_now: Config) -> None:
-        """Join the mesh as every agent this plugin has a ledger for.
+    async def announce_ledgers(config_now: Config) -> None:
+        """Tell the model about what a previous process died holding.
 
-        The file is the record — there is no registry of agents anywhere
-        (`slife2.paths`) — so what a start resumes is exactly what an earlier
-        call enrolled.  A failure to *join* is logged and the others go on: one
-        agent's name being taken is not a reason for a second agent to be
-        unreachable.  The broker is the one thing that is not tolerated, and it
-        is asked about first.
+        **The ledger is the orphan record, and that is all it is.**  It used to
+        be read here as an enrollment list too — a start joined the mesh as every
+        agent that had ever made an `a2a_*` call — and that made an agent's
+        presence depend on having spoken once and then last forever: a card for a
+        conversation nobody was having, which is the thing `slife2.paths` says
+        the ledger must not become.  What puts an agent on the mesh is a window
+        showing it (`join`); what this does is the other half of the file's job,
+        which no window can do for it — a peer is still owed an answer, and the
+        only party who can give one is the model, at a start that is *not* the
+        one that received the task.
+
+        The broker is asked about first, and it is the one thing not tolerated:
+        a machine whose config says `a2a:` has said it wants the mesh, so an
+        absent broker is a missing dependency rather than a preference.
         """
-        # **The broker, before any of it.**  A machine whose config says `a2a:`
-        # has said it wants the mesh, so an absent broker is a missing
-        # dependency: one is started if it can be, and one that will not serve
-        # raises out of the lifespan — which is this plugin failing to start,
-        # which is `slife2` refusing to start rather than handing the model four
-        # tools attached to nothing (`slife2/a2a/broker.py`).
+        # **The broker, before any of it.**  One is started if it can be, and one
+        # that will not serve raises out of the lifespan — which is this plugin
+        # failing to start, which is `slife2` refusing to start rather than
+        # handing the model four tools attached to nothing
+        # (`slife2/a2a/broker.py`).
         logger.info("a2a_broker %s", ensure_broker(config_now.a2a))
 
         for path in a2a_inbound_paths():
@@ -583,38 +728,43 @@ def build_server(
             if store is None:
                 logger.warning("a2a_ledger_without_an_owner path=%s", path)
                 continue
-            agent = store.agent
-            try:
-                session = await connected(agent)
-            except ToolError as e:
-                logger.warning("a2a_resume_failed agent=%s err=%s", agent, e)
-                continue
-            # Queued rather than awaited: joining the mesh is what this plugin's
-            # readiness is for, and a hand-over into a conversation is not —
-            # see `announce_orphans`, which is also where the retries come from.
-            announce_orphans(session)
+            # Queued rather than sent from here: this start's peers cannot run a
+            # turn yet — a turn's first step is the hub, and the hub waits for
+            # every plugin, so it is up *after* this one — see `announce_orphans`,
+            # which is also where the retries come from.  The session is built,
+            # not connected: the notice needs the agent's queue and its writer,
+            # and being on the mesh is not what a notice is for.
+            announce_orphans(session_of(store.agent))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        """Join the mesh eagerly, so a peer can reach this agent unprompted.
+        """Start the broker, and announce what the last process left owed.
 
-        v1's reasoning, unchanged: the mesh announces presence (a retained card)
-        and is reachable without any `a2a_*` call, and a *failed* eager connect
-        is tolerated — it is logged, and the tools connect lazily on demand.  On
-        shutdown every mesh disconnects, which is what publishes the offline card
-        that retires this agent's name rather than leaving a card nobody holds.
+        **Nothing joins the mesh here, and that is the change this port needed.**
+        v1's plugin *was* its agent's process, so coming up meant coming online; a
+        shared process has no such moment, and reading one out of the ledgers made
+        presence mean "has spoken at least once, ever" — a card for a conversation
+        nobody was having, and none at all for the window somebody had just
+        opened.  So what a start does is the half no window can do for it: the
+        broker is brought up, and every ledger's orphans are handed to the model.
+        An agent comes onto the mesh when a window shows it (`join`), which is
+        also the only thing that takes it off again.
 
-        **Resume is inside the guard, and that is the point of the guard.**  A
-        resume that fails halfway — the broker comes up, one agent's mesh
-        connects, and the next step raises (a template that will not render, a
-        ledger path that will not read) — leaves that mesh holding two MQTT
-        connections, a retained *online* card and a `_drain` writer.  The
-        `finally` is what hands those back, so it has to be entered *before* the
-        first connection is made rather than after the last one succeeded.
+        On shutdown every mesh disconnects, which publishes the offline card that
+        retires the names this process was holding rather than leaving cards
+        nobody holds.
+
+        **The start-up work is inside the guard, and that is the point of the
+        guard.**  A start that fails halfway — the broker comes up, one agent's
+        session is built, and the next step raises (a template that will not
+        render, a ledger path that will not read) — would otherwise leave that
+        session's `_drain` writer running with nothing watching it.  The `finally`
+        is what hands those back, so it has to be entered *before* the first
+        session exists rather than after the last one succeeded.
         """
         try:
             if connecting and live().a2a.configured:
-                await resume(live())
+                await announce_ledgers(live())
             yield {}
         finally:
             for session in sessions.values():
@@ -632,6 +782,62 @@ def build_server(
     #  work out for itself — `house_server` says the same thing about the spec's
     #  own advice, and the other plugins here make the same choice.
     mcp: FastMCP = house_server(SERVER_NAME, lifespan=lifespan)
+
+    @mcp.tool
+    async def join(agent: str, ctx: Context) -> None:
+        """Put *agent* on the mesh, and keep it there for as long as this call.
+
+        **Hold this call open for as long as a window is showing that agent.**
+        It does not return: the mesh joins on entry and its cancellation is the
+        departure, so a window that quits, is killed, or loses its stream takes
+        its agent off the mesh with nothing to send — the offline card and the
+        last will are then both honest about when it left.  That is the contract
+        `slife2.tui.control`'s `attach` has on the same window's inbox, and it is
+        the same lifetime for the same reason: what a peer is told about an agent
+        should be decided by whether anyone is there, not by which process
+        happened to be running.
+
+        **This is the enrollment.**  The ledger at `agents/<agent>/a2a.yaml` is
+        the record of inbound tasks a process died holding, which is a fact about
+        work already received rather than a claim about who is here; a window is
+        the only thing that is both true while somebody is present and untrue the
+        moment they leave.  An `a2a_*` call still joins its agent lazily, for as
+        long as the task it started may be answered.
+
+        The agent's own line is the first thing anybody sees of it
+        (`format_presence_line`), drawn in the window that is joining — the same
+        words, from the same function, as the line a peer's arrival wears in that
+        window.  A window that cannot be told is not a reason to fail the join.
+
+        Raises:
+            ToolError: If the mesh refused the agent — the refusal, verbatim: the
+                name already in use on this broker, or a broker that is not
+                there.  A caller that retries should say so once rather than once
+                per attempt: the reason does not change between them.
+        """
+        session = await connected(agent, WINDOW)
+        # Announced before the hold, so the line is drawn while the window is
+        # certainly still there — and it must not be what keeps an agent off the
+        # mesh, so a line nobody could draw is logged rather than raised.
+        line = format_presence_line(
+            AgentCard(agent_name=AgentName(agent), status="online"), "online"
+        )
+        if line is not None:
+            try:
+                await note_to_window(live(), agent, line, client=window_client)
+            except Exception as exc:  # noqa: BLE001 - the mesh is up either way
+                logger.debug("a2a_join_line_failed agent=%s err=%s", agent, exc)
+
+        try:
+            await _hold_open(ctx)
+        finally:
+            # Only when this was the last reason: an agent that has sent
+            # something is waiting for a reply, and a window closing is not a
+            # reason to stop listening for it.  The reason itself was taken by
+            # `connected`, which is where every caller says which one it is.
+            if session.release(WINDOW):
+                with contextlib.suppress(Exception):
+                    await session.mesh.disconnect()
 
     # ═══════════════════════════════════════════════════════════════════════
     # The mesh tools (standard A2A operations, v1's four)
@@ -679,7 +885,7 @@ def build_server(
                 "task_id is required for message_type='task_response' — it "
                 "is the [A2A:…] marker's task_id."
             )
-        session = await connected(who)
+        session = await connected(who, USED)
         if message_type == "task_response":
             answer = session.mesh.complete_task(task_id, message, False)
             if answer != "ok":
@@ -712,7 +918,7 @@ def build_server(
         process never sent.
         """
         who = agent_of(ctx)
-        session = await connected(who)
+        session = await connected(who, USED)
         status = await session.mesh.cancel_task(agent, task_id)
         return {"peer": agent, "task_id": task_id, "status": status}
 
@@ -770,7 +976,7 @@ def build_server(
         'broadcast', with no task and no completion.
         """
         who = agent_of(ctx)
-        session = await connected(who)
+        session = await connected(who, USED)
         await session.mesh.broadcast(event)
         return {
             "broadcast": event,

@@ -36,6 +36,15 @@ keyed by the name this object was built with.  What the name *is* comes from the
 caller's client id rather than from the config, which is why it is a constructor
 argument here and a config field in v1.
 
+**What puts an agent on the mesh is somebody being there.**  One of these is
+connected because a window is showing that agent — `slife2.tui.client.MeshClient`
+holds the call that says so, and cancelling it is the departure, so the card and
+the last will are both honest about when the agent left — or because an `a2a_*`
+call needed the mesh and kept it for as long as the task it started may still be
+answered.  v1's plugin *was* the agent's process, so its lifetime settled this by
+construction; a shared process has to decide, and `slife2.a2a.server`'s `join`
+is where it is decided.
+
 The timeouts are v1's numbers, and they are module constants rather than v1's
 `slife.timeouts` registry: that registry existed so a value could be re-read at
 call time in a long-lived harness process, and nothing here wants one.
@@ -175,14 +184,21 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     (``"status_change"`` — a heartbeat from an already-known peer) so callers can
     filter them out.
 
-    v1 shared this between the TUI and the per-turn prompt so the two could not
-    drift; the line is unchanged and its one reader now is the message the mesh
-    hands to a conversation.
+    **The words are v1's and the trailing status is not.**  v1 wrote
+    ``⚡ jill online [online]`` because its line was also read by a model, which
+    was told the wire's status verbatim; here the only reader is a window, and
+    ``online`` twice in one line is a fact the first word already carries.  What
+    a peer *is* on the wire is still in the card and still decides whether this
+    is a transition at all (`_handle_discovery`); it is not shown.
+
+    The one reader is the message the mesh has a window draw
+    (`slife2.tui.control`'s `note`), for a peer's transition and for the agent's
+    own arrival alike — so a window cannot spell its own line differently from
+    the line its peers' arrivals wear.
     """
     name = safe_name(card.agent_name)
-    status = safe_name(card.status)
     if event == "online":
-        return f"⚡ {name} online [{status}]"
+        return f"⚡ {name} online"
     if event == "offline":
         return f"✗ {name} offline"
     return None
@@ -776,6 +792,19 @@ class A2AMesh:
                     self._outbound = client
                     self._connected = True
                     self._ready.set()
+                    # **A fresh subscription, so the roster is read fresh.**  The
+                    # broker re-sends every retained card on subscribe, and each
+                    # one is news to whoever is listening *now* — a window that
+                    # has just opened wants to be told who is already here, not
+                    # to be told the delta against a window that has since
+                    # closed, and a peer that was cached by the previous
+                    # membership would otherwise be silently unchanged.  It is
+                    # also what a reconnect needs: the connection is new, and
+                    # everything re-delivered on it is a fact this client has to
+                    # read again.  `_handle_discovery` still refuses to announce
+                    # a *cold offline* card, so this cannot resurrect a peer that
+                    # is gone (`prev is None and offline`).
+                    self._peers.clear()
                     logger.info(
                         "a2a_outbound_connected id=%s broker=%s",
                         kwargs["identifier"],

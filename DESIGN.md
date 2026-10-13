@@ -1079,13 +1079,26 @@ leave it advertising as offline to every peer.
 in the driver distinguishes them and nothing needs to: a local agent is simply
 one whose mesh this process happens to hold, published to the same broker under
 its own name.  What that costs is the enrollment question — a shared process has
-to know *which names to be reachable under* — and the answer is the one §1.7
-already gives for agents in general: **the file is the record.**  An agent is on
-the mesh because it has used one, the ledger at `agents/<agent>/a2a.yaml` is that
-use, and a restart resumes exactly the agents an earlier call enrolled.  Asking
-`agents/` instead would put a retained card on the broker for every conversation
-the machine had ever had, and there is no per-agent switch to hang that on.  The
-cost is one call per agent, once, and it is permanent.
+to know *which names to be reachable under* — and the answer is **a window**.
+An agent is on the mesh while a window is showing it: the window holds `join`
+open for its life, so the connection, the retained card and the last will all
+end at the moment somebody stops looking, and a peer that watched it arrive
+watches it leave.  That is `attach`'s contract on the same window's inbox,
+reused because it answers the same question — is anybody there? — and it is why
+`resume` announces orphaned tasks and joins nothing.
+
+**The ledger is not the enrollment, and using it as one was the mistake.**  It
+is tempting — the file at `agents/<agent>/a2a.yaml` is already a per-agent record
+— but what it records is the *inbound tasks a process died holding*, which is a
+fact about work already received.  Read as an enrollment list it made presence
+mean "has spoken at least once, ever": a card on the broker for a conversation
+nobody was having, none at all for the window somebody had just opened, and a
+permanent one for every agent that had ever called a tool.  Comparing against
+`agents/` would be worse in exactly the way the old rule was meant to avoid.
+A tool call still joins its agent lazily and keeps it — what follows a send is a
+reply the agent is waiting for, so an agent with a task outstanding *is*
+reachable, and that reason is never given back because nothing here knows when
+the last reply arrived.
 
 **The plugin delivers its own turns, and the drain tool was the seam.**  v1's
 harness polled `__a2a_drain_incoming` once a second and injected what it found
@@ -1133,15 +1146,26 @@ which is exactly why its delivery is this plugin's to repeat. That this plugin
 says something nobody asked for is the point rather than a lapse: the peer is
 waiting.
 
-**Everything else the mesh delivers is a message too**, and v1's shapes are kept
-for each — a task request marked and answerable, an auto-pushed result wearing
-its task id, a withdrawal, a broadcast, and a presence *transition* rendered by
-v1's own `format_presence_line`.  A non-transition renders as `None` and is not
-delivered, and a **cold retained offline card** — a peer already gone before we
-subscribed — is cached for the roster but never announced, so a dead card from a
-past session cannot fire a fake "went offline".  Peer values reach a model's
-context only through `safe_name`, which strips the control characters a peer
-could otherwise use to write instructions into somebody's turn.
+**Everything else the mesh delivers is a message too, with one exception, and
+that exception is presence.**  A task request is marked and answerable, an
+auto-pushed result wears its task id, a withdrawal and a broadcast arrive as
+messages — all of them things the model may have to act on.  A presence
+*transition* is not: it is a line the harness has to say and nobody has to
+answer, so it is a **note** — `ChatView.add_note` in the window showing that
+agent, in the same bracket as `[restored 3 turns]`, with no turn run, nothing
+stored, and the conversation never told.  v1 kept presence out of the inbox for
+the same reason (its TUI had an activity feed, its model a per-turn prompt);
+here the roster a model can ask for is `a2a_list_agents`, and a peer that wants
+to be answered sends a task.  The words are v1's `format_presence_line` minus
+its trailing `[status]`, which v1 needed because a model read that line too and
+`online` twice in one line is a fact the first word already carries.
+
+A non-transition renders as `None` and is not delivered, and a **cold retained
+offline card** — a peer already gone before we subscribed — is cached for the
+roster but never announced, so a dead card from a past session cannot fire a
+fake "went offline".  Peer values reach a window, a model's context or a log
+only through `safe_name`, which strips the control characters a peer could
+otherwise use to write instructions into somebody's turn.
 
 **Two things v1 had are gone.**  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported — the
@@ -1645,9 +1669,14 @@ many came back from the log — and the agent server turns them into a
 `ContextChosen` event **before the turn's first token**: it is a fact about what
 the conversation is about to be, and a display that learned it afterwards would be
 showing one turn's context under another turn's answer. The window draws it as a
-note between the prompt and the answer, in the same shape and the same dim
-styling as `[restored N turns]`, because both say what the harness did rather than
-what anyone in the conversation said.
+note between the prompt and the answer, in the shape every harness line wears:
+the *words* are `slife2.tui.notes`' and the *brackets* are `ChatView.add_note`'s,
+applied to whatever that one widget is given — so `[restored 3 turns]`,
+`[kept 12 turns, recalled 3]`, `[cancelled]` and a peer's `[⚡ jill online]`
+cannot be spelled differently from each other, whether the window wrote them or a
+plugin did.  What they have in common is the reason the shape is worth fixing:
+they all say what the harness did rather than what anyone in the conversation
+said.
 
 **And there is no switch for this**, which is a decision rather than an omission.
 A `context.rebuild: false` that grew the context append-only would configure a

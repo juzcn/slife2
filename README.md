@@ -911,10 +911,21 @@ topic. Two agents on one machine are therefore two peers, and one agent reached
 from two places is what the name-collision check refuses, before joining, rather
 than fighting over.
 
-**An agent joins the mesh by using it.** The ledger at
-`<data>/agents/<agent>/a2a.yaml` is the record, so the first `a2a_*` call
-enrolls that agent permanently and every later start resumes it — that file is
-also how the shared plugin knows whose names to be reachable under.
+**Coming and going is a line in the window, not a turn.** A peer arriving shows
+as `[⚡ jill online]` beside `[restored 3 turns]` and `[kept 12 turns, recalled
+3]` — the same shape, because they are the same kind of thing: something the
+harness did rather than something anyone in the conversation said. Nothing runs
+and the model is not told: the roster is `a2a_list_agents`' answer, and a peer
+that wants to be answered sends a task.
+
+**An agent is on the mesh while a window is showing it.** The window holds a call
+open for its agent's life, so coming online and going offline follow somebody
+actually being there — a peer that watched the agent arrive watches it leave,
+with nothing to send. One `a2a_*` call joins its agent too and keeps it: what
+follows a send is a reply the agent is waiting for. The ledger at
+`<data>/agents/<agent>/a2a.yaml` is *not* the enrollment — what it records is the
+inbound tasks a process died holding, which is what a restart needs to tell an
+orphan from an id it has never seen.
 
 **The broker is started for you if it is not there**, which is where this
 departs from v1. Point `a2a.broker` at an address; if nothing is listening there
@@ -963,8 +974,7 @@ runtime state of what is running, and the turns they produced:
       media/                       what it generated
       wechat.yaml                  its WeChat login (~24h, written on a scan)
       a2a.yaml                     its A2A ledger: the inbound tasks whose
-                                   completion bridge this process holds, which
-                                   is also what puts it on the mesh
+                                   completion bridge this process holds
 ```
 
 **Nothing inside an agent's directory repeats its name** — the directory says

@@ -42,6 +42,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from fastmcp.exceptions import ToolError
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.message import Message as TextualMessage
@@ -59,15 +60,18 @@ from slife2.events import (
     TurnEvent,
     TurnFinished,
 )
+from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,
     MCPAgentClient,
+    MCPMeshClient,
     MCPWindowClient,
+    MeshClient,
     WindowClient,
     refused,
 )
-from slife2.tui.control import Handover
-from slife2.tui.restore import as_turns, restore
+from slife2.tui.control import NOTE, Handover
+from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import (
     WINDOW_CHANNEL,
@@ -198,8 +202,10 @@ class SlifeApp(App[None]):
         vision: bool = False,
         models: Sequence[ModelChoice] = (),
         control_url: str = "",
+        mesh_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
         window_factory: Callable[[], WindowClient] | None = None,
+        mesh_factory: Callable[[], MeshClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
@@ -243,6 +249,13 @@ class SlifeApp(App[None]):
         #: the window is its client.  Empty means no inbox, which is what a test
         #: wants and what a window started without a config address gets.
         self._control_url = control_url
+        #: Where this window puts its agent *on the A2A mesh*, and the two halves
+        #: of that are the same object as everywhere else here: the window is the
+        #: mesh's client, and holding the call is what keeps the agent online
+        #: (`slife2.tui.client.MeshClient`).  Empty means this machine is not on
+        #: the mesh at all — no `a2a:` section — and then nothing is held and no
+        #: line is drawn, which is the whole of what the absence means.
+        self._mesh_url = mesh_url
         #: Injectable so the TUI can be driven by a scripted client, with no
         #: server and no network.
         self._client_factory = client_factory or (
@@ -253,8 +266,13 @@ class SlifeApp(App[None]):
         self._window_factory = window_factory or (
             lambda: MCPWindowClient(control_url, agent=agent)
         )
+        #: And the third: the mesh membership this window holds for its agent.
+        self._mesh_factory = mesh_factory or (
+            lambda: MCPMeshClient(mesh_url, agent=agent)
+        )
         self._client: AgentClient | None = None
         self._window: WindowClient | None = None
+        self._mesh: MeshClient | None = None
         self._connected = False
         self._connection_text = "connecting"
         #: Whether the previous conversation is drawn, or being drawn.  Once
@@ -282,6 +300,9 @@ class SlifeApp(App[None]):
         self._draining = False
         #: The worker serving the control surface, held so unmounting stops it.
         self._control: Worker[None] | None = None
+        #: The worker holding this agent's place on the mesh, held for the same
+        #: reason and with the same consequence: cancelling it is the departure.
+        self._held_mesh: Worker[None] | None = None
         #: The running turn, as its own task so that cancelling one leaves the
         #: queue alone.  Cancelling the worker would take the queue with it.
         #: It resolves to the turn's answer, which the queue applies before the
@@ -333,6 +354,11 @@ class SlifeApp(App[None]):
             self._control = self.run_worker(
                 self._attach_inbox(), group="control", exit_on_error=False
             )
+        if self._mesh_url:
+            self._mesh = self._mesh_factory()
+            self._held_mesh = self.run_worker(
+                self._hold_mesh(), group="mesh", exit_on_error=False
+            )
         # Connecting can take a moment; a worker keeps the first paint prompt.
         self.run_worker(self._connect(), group="connect", exit_on_error=False)
 
@@ -342,8 +368,16 @@ class SlifeApp(App[None]):
             # Cancelling the worker drops the attach call, and the plugin sees
             # that as the window going away — there is no `detach` to send.
             control.cancel()
+        if self._held_mesh is not None:
+            held, self._held_mesh = self._held_mesh, None
+            # The same mechanism on the mesh: cancelling this worker drops the
+            # `join` call, and its cancellation is what publishes the agent's
+            # offline card.  There is no `leave` to send.
+            held.cancel()
         if self._window is not None:
             await self._window.close()
+        if self._mesh is not None:
+            await self._mesh.close()
         if self._client is not None:
             await self._client.close()
 
@@ -382,13 +416,78 @@ class SlifeApp(App[None]):
             else:
                 return
 
+    async def _hold_mesh(self) -> None:
+        """Put this agent on the A2A mesh, and hold it there while the window is up.
+
+        A worker of its own, for `_attach_inbox`'s reason exactly: the call does
+        not return while the window is up, because the call *is* the membership
+        (`slife2.tui.client.MeshClient`).  Cancelling it — which unmounting does —
+        is what takes the agent off the mesh, so a window that quits, crashes or
+        is killed is reported to every peer as `✗ offline` without anything being
+        sent.
+
+        **The agent's own `⚡ online` line is the plugin's, not this worker's.**
+        There is nothing here to draw it from: the call succeeds by *not
+        returning*, so a window that waited for a return to draw a line would
+        report a successful join as a silence.  The plugin draws it — the same
+        function that draws every peer's arrival — and this worker's business is
+        only what went wrong.
+
+        Retried rather than fatal, for `_connect`'s reason: a plugin that is not
+        answering must not make the window unusable, and what is lost while it is
+        down is a place on the mesh rather than any words.  A *refusal* — the name
+        taken, the broker gone — is said once rather than once per attempt: the
+        reason does not change between them, and a terminal left open beside it
+        would otherwise write the same line every two seconds.
+        """
+        assert self._mesh is not None
+        complained = False
+        while True:
+            try:
+                await self._mesh.connect()
+                await self._mesh.hold()
+            except asyncio.CancelledError:
+                raise
+            except ToolError as exc:
+                # The mesh answered and said no.  Worth a line of its own,
+                # because it is the one failure the person can act on — a name
+                # another instance is holding, a broker that is not running —
+                # and because the window would otherwise look exactly like one
+                # on a mesh that is working.
+                if not complained:
+                    self._transcript.add_note(notes.not_on_the_mesh(str(exc)))
+                    complained = True
+                else:
+                    logger.debug("A2A mesh still refusing %s: %s", self._agent, exc)
+                await self._mesh.close()
+                await asyncio.sleep(_T.timeouts.pacing.reconnect)
+            except Exception as exc:  # noqa: BLE001 - a missing mesh is operational
+                (logger.debug if complained else logger.warning)(
+                    "A2A mesh unavailable: %s", exc
+                )
+                complained = True
+                await self._mesh.close()
+                await asyncio.sleep(_T.timeouts.pacing.reconnect)
+            else:
+                return
+
     def _take(self, handover: Handover) -> None:
-        """Take one handed-over message, from the plugin's push.
+        """Take one hand-over, from the plugin's push.
 
         A method of its own rather than `deliver` passed straight through,
         because the two say different things: this is the wire's shape arriving
         (`slife2.tui.control`), and `deliver` is the window's one way in.
+
+        **And this is where the two kinds part.**  A message becomes a turn and
+        joins the queue, so it is drawn when its turn starts like anything the
+        person typed.  A note is drawn *now*, because that is what it is: a line
+        about the moment it describes — a peer arriving, most of them — and one
+        that waited behind a running turn would be telling the person about a
+        peer who has since left.
         """
+        if handover.kind == NOTE:
+            self._transcript.add_note(handover.text)
+            return
         self.deliver(handover.text, handover.channel)
 
     def deliver(self, text: str, channel: str) -> None:
@@ -610,7 +709,7 @@ class SlifeApp(App[None]):
                     # now is what the next turn's own bump does for the tail of
                     # the turn before it — the cancel just does it early.
                     self._ticket += 1
-                    self._transcript.add_note("[cancelled]", ends_turn=True)
+                    self._transcript.add_note(notes.cancelled(), ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
                     self._transcript.add_error(str(exc))
@@ -669,13 +768,11 @@ class SlifeApp(App[None]):
                 # one model call decides what the turn runs on, it is the most
                 # expensive thing a turn does, and until this arrived nothing in
                 # the window said whether it had run, what it kept or what it
-                # went back to the log for.  A note rather than a panel, in the
-                # same bracketed shape as "[restored N turns]", because it is the
-                # same kind of thing: something the harness did that the
-                # conversation itself does not show.
-                self._transcript.add_note(
-                    f"[kept {as_turns(kept)}, recalled {recalled}]"
-                )
+                # went back to the log for.  A note rather than a panel,
+                # because it is the same kind of thing as "[restored N turns]":
+                # something the harness did that the conversation itself does
+                # not show — and `notes.kept` is where that pair is written.
+                self._transcript.add_note(notes.kept(kept, recalled))
             case TextDelta(text=text):
                 self._transcript.append_text(text)
             case ThinkingDelta(text=text):

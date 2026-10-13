@@ -7,11 +7,16 @@ addresses it by name), but the *sight* of it is a client's: a turn's events reac
 the client that asked for that turn, so a message delivered by a plugin runs and
 is answered while the window that is watching shows nothing.
 
-So the message goes *to the window*, and becomes the one thing a window already
-knows how to handle: something the person typed.  It lands in the same queue
+**Two things reach a window, and they are two kinds of hand-over.**  The first is
+a *message*: it goes *to the window* and becomes the one thing a window already
+knows how to handle — something the person typed.  It lands in the same queue
 (`slife2.tui.app`), is run as the same kind of turn, and wears the same bubble —
 which is the whole of the design, and the reason there is no second display path
-anywhere in this system.
+anywhere in this system.  The second is a *note*: a line the harness has to say
+and nobody has to answer — a peer came online, a turn was cancelled — so it is
+drawn where every such line is drawn (`ChatView.add_note`, `slife2.tui.notes`)
+and the conversation never learns of it.  Same stream, same acknowledgement,
+one branch at the far end.
 
 **This is a plugin, and the window is a client of it.**  It used to be the one
 server here that was not: the window served it in-process, on a `tui:` section
@@ -34,11 +39,11 @@ a row somewhere else.  Holding the call open is also what makes a session
 self-cleaning — a window that dies takes its stream with it, which cancels the
 handler behind it, which is the detach.
 
-**Two tools, and neither is the model's.**  `submit` is a channel's, `attach` is
-a window's; both are addressed by an agent name.  Nothing here carries
-`slife2.audience.FOR_THE_MODEL`, so the hub leaves all of it out of the tool set,
-and the plugin serves no `list_sources` — it declares no rows, and is therefore
-asked for none (`slife2.mcp_server`).
+**Three tools, and none of them is the model's.**  `submit` is a channel's,
+`note` is the harness's, `attach` is a window's; all three are addressed by an
+agent name.  Nothing here carries `slife2.audience.FOR_THE_MODEL`, so the hub
+leaves all of it out of the tool set, and the plugin serves no `list_sources` —
+it declares no rows, and is therefore asked for none (`slife2.mcp_server`).
 
 **Returning is the acknowledgement, and it is the write.**  A caller whose
 `submit` came back knows the words are on their way down a stream a window is
@@ -75,11 +80,21 @@ SERVER_NAME = TUI_SERVER_NAME
 #: that owns no section: an address is the whole of what is written down about it.
 CONFIG_KEY = "tui"
 
-#: The two tool names, spelled once because each crosses a process boundary: the
-#: window's client calls `attach` (`slife2.tui.client`) and a channel calls
-#: `submit` (`slife2.wechat`).
+#: The tool names, spelled once because each crosses a process boundary: the
+#: window's client calls `attach` (`slife2.tui.client`), and a channel calls
+#: `submit` — or `note`, when it has a line for the person rather than a message
+#: for the conversation.
 ATTACH = "attach"
 SUBMIT = "submit"
+NOTE = "note"
+
+#: What a hand-over asks the window to do with the words, and the one branch
+#: between them: `TURN` is run as a turn of the conversation, `NOTE` is drawn as
+#: a harness line and nothing else.  `NOTE` is its own tool name because the two
+#: coincide; `TURN` is not `SUBMIT` because what the window does with a submitted
+#: message is *run it*, which is the fact the window branches on.
+TURN = "turn"
+KINDS: tuple[str, ...] = (TURN, NOTE)
 
 #: What `submit` says when there is nothing to hand a message to.  A constant
 #: because a *caller* has to be able to recognise it: see `refused`.
@@ -114,16 +129,23 @@ INSTRUCTIONS = (
 
 @dataclass(frozen=True)
 class Handover:
-    """One message on its way to a window: the words, and where they came in.
+    """One hand-over on its way to a window: the words, and where they came in.
 
     `ticket` exists so that a caller and the push that carries it can agree on
-    *which* message is being acknowledged — a number rather than the words,
+    *which* hand-over is being acknowledged — a number rather than the words,
     because the same words twice is an ordinary thing for somebody to send.
+
+    `kind` is what the window does with it, and there are two: a **turn** is put
+    in the queue the person's own typing goes into and run as one (`submit`), and
+    a **note** is drawn as a line and nothing else (`note`).  A note needs no
+    channel — it is not on any channel, it is the harness talking — and carries
+    `""` in its place so that one dataclass and one wire shape serve both.
     """
 
     ticket: int
     text: str
     channel: str
+    kind: str = TURN
 
 
 def encode(handover: Handover) -> str:
@@ -136,7 +158,8 @@ def encode(handover: Handover) -> str:
     round-trip test covers the contract.
 
     It is deliberately **not** one of `slife2.events`' variants: those are the
-    events a *turn* produces, and this is a control message that causes one.
+    events a *turn* produces, and this is a control message that causes one — or
+    a line drawn without one.
     """
     return json.dumps(
         {
@@ -144,6 +167,7 @@ def encode(handover: Handover) -> str:
             "id": handover.ticket,
             "d": handover.text,
             "c": handover.channel,
+            "k": handover.kind,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -156,6 +180,10 @@ def decode(message: str) -> Handover | None:
     None rather than an exception for `slife2.events.decode`'s reason: a
     notification this build has no word for is a line not read, and the caller
     is a display that should stay up rather than a turn that should die.
+
+    A missing or unknown `k` reads as `TURN`, which is what a hand-over was
+    before there were two kinds — so a window holding a stream from an older
+    plugin runs what it is handed rather than dropping it.
     """
     try:
         payload = json.loads(message)
@@ -168,7 +196,13 @@ def decode(message: str) -> Handover | None:
     channel = payload.get("c")
     if not isinstance(text, str) or not isinstance(channel, str):
         return None
-    return Handover(ticket=int(payload.get("id") or 0), text=text, channel=channel)
+    kind = payload.get("k")
+    return Handover(
+        ticket=int(payload.get("id") or 0),
+        text=text,
+        channel=channel,
+        kind=kind if kind in KINDS else TURN,
+    )
 
 
 class WindowSession:
@@ -194,10 +228,12 @@ class WindowSession:
         #: refused rather than queued behind a window that has gone.
         self.attached = True
 
-    def post(self, text: str, channel: str) -> tuple[Handover, asyncio.Future[None]]:
+    def post(
+        self, text: str, channel: str, kind: str = TURN
+    ) -> tuple[Handover, asyncio.Future[None]]:
         """Queue a hand-over, and answer with it and the caller that will wait."""
         self._next_ticket += 1
-        handover = Handover(self._next_ticket, text, channel)
+        handover = Handover(self._next_ticket, text, channel, kind)
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.pending[handover.ticket] = waiter
         self.handovers.put_nowait(handover)
@@ -340,6 +376,42 @@ def build_server(_config: Config | None = None) -> FastMCP:
     windows = Windows()
     mcp: FastMCP = house_server(SERVER_NAME, instructions=INSTRUCTIONS)
 
+    async def _hand_over(agent: str, text: str, channel: str, kind: str) -> None:
+        """Put one hand-over down the stream the window showing *agent* holds.
+
+        The two tools differ in the kind and in nothing else, so they meet here —
+        and the part that must not be written twice is the `finally`: a
+        cancellation landing between the push answering and this task resuming
+        leaves a failure on the future with nobody to read it, and `asyncio`
+        reports that at collection time as a warning about a turn that failed for
+        a reason the log line cannot name.
+        """
+        session = windows.showing(agent)
+        if session is None:
+            raise ToolError(
+                f"{NO_WINDOW} {agent}'s conversation; "
+                f"start `slife2 --agent {agent}` and hand it over again"
+            )
+
+        handover, waiter = session.post(text, channel, kind)
+        try:
+            await waiter
+        finally:
+            # A caller that gave up — a cancelled call, a dropped client — takes
+            # its message back out with it, so that a retry is a retry and not a
+            # second turn.  False means the push got there first and the words are
+            # already written.
+            if session.abandon(handover.ticket):
+                logger.debug(
+                    "handover %d for %s withdrawn: its caller gave up",
+                    handover.ticket,
+                    agent,
+                )
+            # **Collected even though the `await` above already raised it.**  See
+            # the docstring.
+            if waiter.done() and not waiter.cancelled():
+                waiter.exception()
+
     @mcp.tool
     async def attach(agent: str, ctx: Context) -> None:
         """Attach this window to *agent*'s session, and be handed messages on it.
@@ -394,34 +466,35 @@ def build_server(_config: Config | None = None) -> FastMCP:
                 thing this system says for any missing peer, arriving here as
                 "nobody is looking at that conversation".
         """
-        session = windows.showing(agent)
-        if session is None:
-            raise ToolError(
-                f"{NO_WINDOW} {agent}'s conversation; "
-                f"start `slife2 --agent {agent}` and hand it over again"
-            )
+        await _hand_over(agent, text, channel, TURN)
 
-        handover, waiter = session.post(text, channel)
-        try:
-            await waiter
-        finally:
-            # A caller that gave up — a cancelled call, a dropped client — takes
-            # its message back out with it, so that a retry is a retry and not a
-            # second turn.  False means the push got there first and the words are
-            # already written.
-            if session.abandon(handover.ticket):
-                logger.debug(
-                    "handover %d for %s withdrawn: its caller gave up",
-                    handover.ticket,
-                    agent,
-                )
-            # **Collected even though the `await` above already raised it.**  A
-            # cancellation landing between the push answering and this task
-            # resuming leaves the failure on the future with nobody to read it,
-            # and `asyncio` reports that at collection time as a warning about a
-            # turn that failed for a reason the log line cannot name.
-            if waiter.done() and not waiter.cancelled():
-                waiter.exception()
+    @mcp.tool
+    async def note(agent: str, text: str) -> None:
+        """Hand an agent's window a line to draw — no turn, no model, no record.
+
+        **A note is the harness talking, not a channel.**  It reaches the window
+        as `add_note` does (`slife2.tui.notes`), in the same bracket every other
+        harness line wears, and the conversation never learns of it: nothing is
+        queued, nothing runs, and nothing is stored — so a peer coming online
+        costs no model call and leaves no trace in the turn log, which is exactly
+        what it is worth.
+
+        It is acknowledged like a `submit` and refused like one, because it takes
+        the same road: the window's own stream, in arrival order with the turns.
+        What is *not* here is the fallback a message has — see
+        `slife2.handover.note_to_window` — since a line for whoever is looking
+        has nowhere else to go.
+
+        Args:
+            agent: Whose window is showing the conversation this belongs to.
+            text: The words inside the brackets, e.g. `⚡ jill online`. The
+                window adds the brackets; a caller that supplied them would be
+                spelling the harness's format a second time.
+
+        Raises:
+            ToolError: If no window is showing that agent.
+        """
+        await _hand_over(agent, text, "", NOTE)
 
     return mcp
 

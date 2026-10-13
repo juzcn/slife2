@@ -12,8 +12,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from fakes import FakeAgentClient, FakeWindowClient
+from fakes import (
+    FakeAgentClient,
+    FakeMeshClient,
+    FakeWindowClient,
+    RefusingMeshClient,
+)
 
+import slife2.timeouts as _T
 from slife2.events import (
     ContextChosen,
     TextDelta,
@@ -2465,3 +2471,93 @@ async def test_a_window_with_no_inbox_attaches_to_nothing() -> None:
 
     assert not window.attaching.is_set()
     assert not window.connected
+
+
+async def test_a_pushed_note_is_drawn_and_does_not_wait_for_a_turn() -> None:
+    """A note is a line, not a message: drawn now, run never.
+
+    Both kinds arrive on the same held call (`slife2.tui.control`), and this is
+    the branch between them.  `push` here is deliberately *not* followed by a
+    turn: a presence line that waited for the queue would be telling the person
+    about a peer who has since gone.
+    """
+    client = FakeAgentClient(answering("ok"))
+    window = FakeWindowClient()
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        control_url="http://test/inbox",
+        window_factory=lambda: window,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        assert await settled(pilot, window.attaching.is_set), "never attached"
+        window.push_note("⚡ jill online")
+        await settled(pilot, lambda: "jill online" in shown(app))
+        text = shown(app)
+
+    # The harness's own shape, applied by the widget and not by the plugin.
+    assert "[⚡ jill online]" in text
+    assert client.prompts == [], "a note is not a turn"
+    assert "A2A(jill)>" not in text
+
+
+async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> None:
+    """The window is the enrollment: joining is the call, leaving is its cancel.
+
+    Nothing is asserted about a line here, and that is the design rather than an
+    omission: the `⚡ jack online` line is the *plugin's* (`format_presence_line`,
+    drawn through the same `note` tool as a peer's arrival), because a call that
+    succeeds by not returning gives this side nothing to draw it from.
+    """
+    client = FakeAgentClient(answering("ok"))
+    window = FakeWindowClient()
+    mesh = FakeMeshClient()
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        control_url="http://test/inbox",
+        mesh_url="http://test/mesh",
+        window_factory=lambda: window,
+        mesh_factory=lambda: mesh,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        assert await settled(pilot, mesh.holding.is_set), "never joined the mesh"
+        assert shown(app) == "", "the plugin draws the online line, not the window"
+
+    # The window is gone, so the call it held is gone with it — which is what
+    # publishes the offline card, and why there is no `leave` to send.
+    assert not mesh.connected
+
+
+async def test_a_refused_mesh_says_so_once_and_keeps_trying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A taken name is worth one line, not one every two seconds.
+
+    The retry itself is `_attach_inbox`'s rule and is right here too: a plugin
+    that is not answering must not make the window unusable.  What must not be
+    repeated is the *sentence* — it is the same sentence each time, and a
+    terminal left open beside a broker holding the name would otherwise fill the
+    transcript with it.
+    """
+    # The cadence, not the rule: the retry is what is under test, and the real
+    # two seconds would be a test that waits for them.
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
+    client = FakeAgentClient(answering("ok"))
+    mesh = RefusingMeshClient()
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        mesh_url="http://test/mesh",
+        mesh_factory=lambda: mesh,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        assert await settled(pilot, lambda: mesh.attempts >= 2), "never retried"
+        await pilot.pause()
+        text = shown(app)
+
+    assert text.count("not on the mesh") == 1
+    assert "already in use" in text, "the reason, verbatim"

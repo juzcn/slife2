@@ -1,12 +1,15 @@
-"""How the TUI talks to the servers it needs: the agent, and its own inbox.
+"""How the TUI talks to the servers it needs: the agent, its inbox, and the mesh.
 
-Two clients, because a window holds two conversations with the outside: it *asks*
-the agent server for turns (:class:`AgentClient`), and it *is asked* by the plugin
-that hands it messages from other channels (:class:`WindowClient`).  The second is
-the newer half and it points the other way — `slife2-tui` pushes, this window
-receives — which is why it is a call held open rather than anything polled.
+Three clients, because a window holds three conversations with the outside: it
+*asks* the agent server for turns (:class:`AgentClient`), it *is asked* by the
+plugin that hands it messages from other channels (:class:`WindowClient`), and it
+*holds a place* for its agent on the A2A mesh (:class:`MeshClient`).  The last two
+point the other way round from the first, which is why both are calls held open
+rather than anything polled — and why the window's own liveness is what they
+report: a window that goes away drops both, and a peer sees the agent leave the
+mesh at the same moment the inbox closes.
 
-Both are Protocols, so the TUI never imports FastMCP at the point of use and
+All three are Protocols, so the TUI never imports FastMCP at the point of use and
 tests can inject scripted clients.  That seam is the whole reason the widgets can
 be built and verified without a server running.
 """
@@ -21,7 +24,13 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 import slife2.timeouts as _T
-from slife2.config import AGENT_SERVER_NAME, DEFAULT_AGENT, TUI_SERVER_NAME
+from slife2.a2a.server import JOIN
+from slife2.config import (
+    A2A_SERVER_NAME,
+    AGENT_SERVER_NAME,
+    DEFAULT_AGENT,
+    TUI_SERVER_NAME,
+)
 from slife2.events import TurnEvent, decode
 from slife2.mcp_server import close_server, open_server
 from slife2.tui.control import ATTACH, Handover
@@ -412,6 +421,30 @@ class WindowClient(Protocol):
         ...
 
 
+class MeshClient(Protocol):
+    """The window's view of the A2A mesh, from the end that keeps it up."""
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def hold(self) -> None:
+        """Put this window's agent on the mesh, and keep it there.
+
+        **Does not return while the window is up**, and that is the mechanism
+        rather than an oversight: `slife2.a2a.server`'s `join` is the other end of
+        it, so the mesh connection lives exactly as long as this call and
+        cancelling it is the departure.  A window that quits, is killed, or loses
+        the stream therefore takes its agent *offline* with nothing to send, which
+        is what makes `✗ offline` true rather than noticed late — the same
+        lifetime `attach` has on the window's own inbox.
+
+        Returns, or raises, only when the window is done — or when the mesh
+        refused the agent, which arrives as a `ToolError` carrying the reason.
+        """
+        ...
+
+
 class MCPWindowClient:
     """A :class:`WindowClient` backed by an MCP connection.
 
@@ -478,5 +511,85 @@ class MCPWindowClient:
         except Exception:
             # The transport is gone.  Dropping the client is what lets the app's
             # retry reconnect, for `run_turn`'s reason.
+            await self.close()
+            raise
+
+
+class MCPMeshClient:
+    """A :class:`MeshClient` backed by an MCP connection to the A2A plugin.
+
+    **Held rather than opened per call**, which is the opposite of
+    `slife2.handover`'s way and deliberately so: a hand-over happens once per
+    message and a connection that dropped costs one retry, where being *on* the
+    mesh is a state other people can see — an agent that reconnected per message
+    would be watched coming and going by every peer on it.
+
+    What the mesh does with the agent name is the a2a plugin's business, and none
+    of it is here: this class knows where the door is and how long to hold it.
+    """
+
+    def __init__(self, url: str, *, agent: str = DEFAULT_AGENT):
+        self._url = url
+        #: Whose mesh this window is responsible for.  The name *is* the mesh
+        #: identity (`slife2.a2a.mesh`), so this is not a label: it is the MQTT
+        #: client id and the last segment of the request topic a peer will use.
+        self._agent = agent
+        self._client: Client | None = None
+
+    async def connect(self) -> None:
+        """Open the connection, or raise with a message worth showing.
+
+        The named-peer check is the point here too: an `a2a:` address pointed at
+        something else — a stale port, another plugin — fails by name rather than
+        as a window whose agent silently never appears on the mesh
+        (`slife2.mcp_server.identifies`).
+        """
+        if self._client is not None:
+            return
+        self._client = await open_server(
+            self._url, name=A2A_SERVER_NAME, fallback_tool=JOIN
+        )
+
+    async def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await close_server(client)
+
+    async def hold(self) -> None:
+        if self._client is None:
+            raise ConnectionError("not connected")
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            # **Nothing to do, and that is not the same as nothing to have.**
+            # What arrives here is the plugin's keepalive — the write that makes
+            # a dead window notice-able at the other end
+            # (`slife2.a2a.server._hold_open`) — and receiving it means the mesh
+            # still counts this window as here.  A caller that sent *no* progress
+            # token would get no keepalive at all, because `report_progress` is
+            # then a silent no-op, and its agent would stay online until
+            # something else noticed; sending this handler is what makes the
+            # departure a fact rather than a hope.
+            return
+
+        try:
+            await self._client.call_tool(
+                JOIN,
+                {"agent": self._agent},
+                progress_handler=on_progress,
+                # A mesh membership lasts as long as the window, so this call is
+                # bounded by nothing: the default timeout would take an agent off
+                # the mesh that had merely been on it for a while.
+                timeout=None,
+            )
+        except ToolError:
+            # The mesh answered and refused — the name is taken, or the broker is
+            # not there.  The connection is fine, so keep it: the caller decides
+            # whether to try again, and the sentence it carries is the reason.
+            raise
+        except Exception:
+            # The transport is gone.  Dropping the client is what lets the app's
+            # retry reconnect, for `attach`'s reason.
             await self.close()
             raise

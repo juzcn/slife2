@@ -29,6 +29,13 @@ Both callers keep that rule rather than restating it: `slife2-agent-task` marks
 its answer undelivered and does not hand it anywhere else, and `slife2-schedule`
 leaves the run `pending` rather than calling it failed.  Neither one repeats a
 hand-over it could not confirm, and that is a property of this return value.
+
+**And one thing this module hands over is not a message at all.**  A *note*
+(`note_to_window`) is a line the harness has to say and nobody has to answer, so
+it goes to the window and stops there: there is no second place for it, and the
+fallback above — the agent server running a turn — is exactly what it must not
+have, since a turn spent on `⚡ jill online` costs a model call to tell somebody a
+fact they do not have to act on.  Same three answers, one road instead of two.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ import slife2.timeouts as _T
 from slife2.config import AGENT_SERVER_NAME, TUI_SERVER_NAME, Config
 from slife2.mcp_server import close_server, open_server
 from slife2.tui import control
+from slife2.tui.control import NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +143,56 @@ async def to_window(
             return await submit_to(window, agent, text, channel)
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.info("no window for %s could be reached: %s", agent, exc)
+        return False
+
+
+async def note_to_window(
+    config: Config,
+    agent: str,
+    text: str,
+    *,
+    client: Client | None = None,
+) -> bool | None:
+    """Draw one harness line in the window showing this agent, and nowhere else.
+
+    **The one hand-over with no fallback, and it is the exception that proves
+    what the fallback is for.**  `to_agent` exists because a message that reached
+    no window is not a lost message — the agent server runs the turn and a window
+    opened later restores it.  A note is not that: it is a line about the moment
+    it describes (`⚡ jill online`), it is not addressed to anybody, and running a
+    model turn for one would be a turn spent on a fact nobody has to act on.  So
+    when no window is showing this agent the line is simply dropped, and the
+    caller is told `False` rather than sent looking for a second place to put it.
+
+    Answers like `submit_to` — `True` written, `False` provably not, `None` this
+    cannot tell — because it takes the same road, and a caller reading one of
+    these and then the other should not have to learn a second vocabulary.  What
+    no caller may do with a note is retry it: everything a note says is about a
+    moment that has passed.
+    """
+    try:
+        async with _peer(
+            config.server("tui").url,
+            name=TUI_SERVER_NAME,
+            fallback_tool=NOTE,
+            timeout=_T.timeouts.transport.window,
+            client=client,
+        ) as window:
+            try:
+                await window.call_tool(
+                    NOTE,
+                    {"agent": agent, "text": text},
+                    timeout=_T.timeouts.transport.window,
+                )
+            except Exception as exc:  # noqa: BLE001 - three answers, and this is both
+                if control.refused(exc):
+                    logger.debug("no window is showing %s: %s", agent, exc)
+                    return False
+                logger.debug("the note to %s did not come back: %s", agent, exc)
+                return None
+            return True
+    except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
+        logger.debug("no window for %s could be reached: %s", agent, exc)
         return False
 
 

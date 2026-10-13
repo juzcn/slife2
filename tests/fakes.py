@@ -26,7 +26,7 @@ from slife2.config import Config
 from slife2.events import TurnEvent
 from slife2.llm.base import Chunk, Stream
 from slife2.messages import Message, StreamChatResult, ToolSpec
-from slife2.tui.control import Handover
+from slife2.tui.control import NOTE, Handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -285,6 +285,65 @@ class FakeWindowClient:
         """Hand the window one message, as the plugin's push does."""
         assert self.on_handover is not None, "nothing has attached"
         self.on_handover(Handover(ticket=1, text=text, channel=channel))
+
+    def push_note(self, text: str) -> None:
+        """Draw one harness line in the window, as the plugin's `note` does.
+
+        The same road as `push` and no channel, which is what a note is: it is
+        the harness talking, not somebody on a channel.
+        """
+        assert self.on_handover is not None, "nothing has attached"
+        self.on_handover(Handover(ticket=2, text=text, channel="", kind=NOTE))
+
+
+class FakeMeshClient:
+    """A :class:`~slife2.tui.client.MeshClient` that joins on demand.
+
+    The third direction again: this one is how a test plays the A2A mesh, holding
+    the window's agent online for as long as the window holds the call.  What it
+    records is what went wrong, because a successful join is a call that does not
+    come back — so `holding` is the whole of what a test can wait on.
+    """
+
+    def __init__(self, *, connect_error: Exception | None = None) -> None:
+        self._connect_error = connect_error
+        self.connected = False
+        #: Set once `hold` has been entered: the real call blocks until the
+        #: window goes away, so "am I on the mesh" is a fact the fake says by
+        #: hand, exactly as `FakeWindowClient.attaching` does for the inbox.
+        self.holding = asyncio.Event()
+        #: How many times the window tried, which is what says whether a refusal
+        #: was retried rather than given up on.
+        self.attempts = 0
+
+    async def connect(self) -> None:
+        if self._connect_error is not None:
+            raise self._connect_error
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+
+    async def hold(self) -> None:
+        self.attempts += 1
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.holding.set()
+        # Held rather than returned, for the reason `attach` is: a fake that came
+        # back would let a test pass while the app's worker spun on a dead mesh.
+        await asyncio.Event().wait()
+
+
+class RefusingMeshClient(FakeMeshClient):
+    """A mesh that answers, and says no — a name another agent is holding.
+
+    The one failure the window draws a line for, and the one it must not draw
+    once per attempt: the reason does not change between them.
+    """
+
+    async def hold(self) -> None:
+        self.attempts += 1
+        raise ToolError("agent name 'jack' is already in use on default/default")
 
 
 @dataclass

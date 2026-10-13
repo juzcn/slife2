@@ -22,6 +22,7 @@ peer stops being a debt.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -59,9 +60,12 @@ from slife2.a2a.server import (
     A2A_SEND_MESSAGE,
     A2A_TYPES,
     CHANNEL,
+    JOIN,
     MAX_QUEUED,
     ORPHAN_PEER,
     ORPHAN_RETRIES,
+    USED,
+    WINDOW,
     Session,
     _drain,
     _wire,
@@ -142,8 +146,15 @@ def test_a_peer_cannot_write_a_newline_into_a_message() -> None:
 
 
 def test_a_presence_line_is_v1s_and_only_for_real_transitions() -> None:
+    """v1's words, without v1's trailing `[status]`.
+
+    v1 wrote `⚡ jill online [online]` because that line was also read by a model,
+    which was handed the wire's status verbatim.  The one reader now is a window
+    (`slife2.tui.control`'s `note`), and `online` twice in one line is a fact the
+    first word carries.
+    """
     online = AgentCard(agent_name=AgentName(PEER), status="online")
-    assert format_presence_line(online, "online") == "⚡ jill online [online]"
+    assert format_presence_line(online, "online") == "⚡ jill online"
     assert format_presence_line(online, "offline") == "✗ jill offline"
     # A heartbeat from an already-known peer is not worth anybody's turn.
     assert format_presence_line(online, "status_change") is None
@@ -526,7 +537,13 @@ def test_a_broker_that_never_answers_is_given_a_deadline() -> None:
 
 @dataclass
 class Window:
-    """A recorder standing in for `slife2-tui`, and what it was handed."""
+    """A recorder standing in for `slife2-tui`, and what it was handed.
+
+    Two tools, because the window has two kinds of arrival (`slife2.tui.control`):
+    a `submit` becomes a turn, and a `note` is drawn as a line and goes no
+    further.  They are recorded apart so a test can say which one a thing was —
+    which is the whole of what presence's delivery is now decided by.
+    """
 
     client: Client | None = None
     #: Refuse, the way a terminal not showing that conversation does — the one
@@ -536,6 +553,8 @@ class Window:
     #: and therefore the one no caller may act on by trying again.
     broken: bool = False
     handed: list[dict[str, Any]] = field(default_factory=list)
+    #: The lines drawn, in the order they arrived: `{"agent", "text"}`.
+    noted: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.mcp: FastMCP = FastMCP("window")
@@ -547,6 +566,14 @@ class Window:
             if self.refuse:
                 raise ToolError(f"no window is showing {agent}'s conversation")
             self.handed.append({"agent": agent, "text": text, "channel": channel})
+
+        @self.mcp.tool
+        async def note(agent: str, text: str) -> None:
+            if self.broken:
+                raise RuntimeError("the stream died")
+            if self.refuse:
+                raise ToolError(f"no window is showing {agent}'s conversation")
+            self.noted.append({"agent": agent, "text": text})
 
 
 @dataclass
@@ -717,18 +744,48 @@ async def test_an_outbound_result_is_pushed_back_wearing_its_task_id(
 
 
 @pytest.mark.asyncio
-async def test_a_presence_change_is_delivered_and_a_heartbeat_is_not(
+async def test_a_presence_change_is_drawn_and_a_heartbeat_is_not(
     window: Window,
 ) -> None:
+    """A note, and not a message: no turn, no channel, and nothing for the model.
+
+    This is where presence stopped being something the conversation is told.  A
+    peer coming online asks the model for nothing — the peer that wants to be
+    answered sends a task, and the roster is `a2a_list_agents`' answer — so the
+    line goes to the window that is showing the agent and stops there.
+    """
     session = wired(window=window)
     card = AgentCard(agent_name=AgentName(PEER), status="online")
     session.mesh.on_agent_change(card, "status_change")
     session.mesh.on_agent_change(card, "online")
     await drain_until_idle(session, window=window)
 
-    assert len(window.handed) == 1
-    assert window.handed[0]["text"] == "⚡ jill online [online]"
-    assert window.handed[0]["channel"] == f"a2a:{PEER}"
+    assert window.handed == [], "presence is not a turn, and wears no channel"
+    # Addressed to the agent whose window it is — the peer is in the words, as
+    # it is for every line: `Session.post`'s `peer` is who the line is *about*,
+    # and only a message needs a channel name (`channel_for`).
+    assert window.noted == [{"agent": AGENT, "text": "⚡ jill online"}]
+
+
+@pytest.mark.asyncio
+async def test_a_presence_line_with_no_window_to_draw_it_goes_nowhere(
+    conversation: Conversation,
+) -> None:
+    """No fallback, unlike every message here.
+
+    `to_agent` exists because a message that reached no window is not a lost
+    message — the agent server runs the turn and a window opened later restores
+    it.  A line about a moment is not that: running a model turn for one costs a
+    call to tell somebody a fact they cannot act on, so it is dropped and the
+    log says so (`a2a_note_no_window`).
+    """
+    session = wired()
+    session.mesh.on_agent_change(
+        AgentCard(agent_name=AgentName(PEER), status="online"), "online"
+    )
+    await drain_until_idle(session, conversation=conversation)
+
+    assert conversation.handed == []
 
 
 @pytest.mark.asyncio
@@ -860,12 +917,14 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
 
     announce_orphans(session)
 
-    text, peer, what, retries = session.queue.get_nowait()
+    text, peer, what, retries, note = session.queue.get_nowait()
     assert session.queue.empty(), "one notice, and nothing else on the queue"
     assert peer == ORPHAN_PEER
     assert channel_for(peer) == f"{CHANNEL}:{ORPHAN_PEER}"
     assert what == "1 orphaned inbound task(s)"
     assert TASK in text and PEER in text
+    # It is a message for the model to act on, not a line for a window to draw.
+    assert note is False
     # It carries the retries, and it is the only message that does: everything
     # a peer sent is posted with none.
     assert retries == ORPHAN_RETRIES
@@ -982,20 +1041,20 @@ async def test_the_queue_is_bounded_so_a_peer_cannot_grow_this_process() -> None
 
 # ── the start, and what it must not leak ────────────────────────────────────
 #
-#  The eager resume runs inside the guarded region, so a start that fails
-#  *after* one agent's mesh is joined still hands that mesh back.  This is the
-#  one place a shared process can leak a retained *online* card and a pair of
-#  MQTT connections on a machine somebody then restarts.
+#  The start-up work runs inside the guarded region, so a start that fails
+#  *after* one agent's session exists still hands it back.  What leaks otherwise
+#  is a `_drain` writer running with nothing watching it — one per ledger — for
+#  the life of a process somebody then restarts.
 
 
 @pytest.mark.asyncio
-async def test_a_resume_that_fails_after_connecting_still_tears_down(
+async def test_a_start_that_fails_after_building_a_session_still_tears_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The `finally` used to guard only the `yield`, so a `resume` that raised
-    on its way to it left every connected mesh holding its connections, its
-    retained online card and its `_drain` writer.  Now `resume` is inside: the
-    teardown runs even though the start never reached `yield`."""
+    """The `finally` used to guard only the `yield`, so a start that raised on
+    its way to it left every built session running: its writer, and — when a
+    start still joined the mesh as well — a pair of MQTT connections and a
+    retained *online* card nobody would retire."""
     InboundStore.open(AGENT).add(TASK, PEER)  # a ledger, and an orphan in it
     left: list[str] = []
 
@@ -1012,7 +1071,7 @@ async def test_a_resume_that_fails_after_connecting_still_tears_down(
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
     # The failure the defect names: an orphan notice whose template will not
-    # render, reached after the mesh joined.
+    # render, reached with the agent's session already built.
     monkeypatch.setattr(a2a_server, "render", boom)
 
     config = default_config()
@@ -1023,10 +1082,14 @@ async def test_a_resume_that_fails_after_connecting_still_tears_down(
         async with Client(mcp):
             pass
 
+    # The session was handed back — disconnected, and its writer cancelled with
+    # it.  Nothing here joined the mesh on the way (that is a window's call now),
+    # so the disconnect is the teardown's own, which is the half that still has
+    # to run.
     assert left == [AGENT]
 
 
-# ── the plugin: four tools, and who may call them ───────────────────────────
+# ── the plugin: what it offers, and to whom ─────────────────────────────────
 
 
 def build(**overrides: Any) -> FastMCP:
@@ -1038,17 +1101,33 @@ def build(**overrides: Any) -> FastMCP:
 
 
 @pytest.mark.asyncio
-async def test_the_four_tools_are_the_models_and_nothing_else_is() -> None:
+async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     """Four, which is v1's four.  `__check` has no port — v2 has no system_health
-    and what it reported is `a2a_list_agents`' answer."""
+    and what it reported is `a2a_list_agents`' answer.
+
+    `join` is here and is deliberately not one of them: it crosses a process
+    boundary for a *window* (it is held open, and holding it is what keeps the
+    agent on the mesh), so it carries no audience and the hub leaves it out of
+    the tool set — the arrangement `slife2.tui.control`'s `attach` has.
+    """
     tools = await build().list_tools()
-    assert sorted(t.name for t in tools) == [
+    by_name = {t.name: t for t in tools}
+    assert sorted(by_name) == [
+        A2A_BROADCAST,
+        A2A_CANCEL_TASK,
+        A2A_LIST_AGENTS,
+        A2A_SEND_MESSAGE,
+        JOIN,
+    ]
+
+    model_tools = [name for name, tool in by_name.items() if for_the_model(tool.meta)]
+    assert sorted(model_tools) == [
         A2A_BROADCAST,
         A2A_CANCEL_TASK,
         A2A_LIST_AGENTS,
         A2A_SEND_MESSAGE,
     ]
-    assert all(for_the_model(t.meta) for t in tools)
+    assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
 
 
 @pytest.mark.asyncio
@@ -1098,10 +1177,200 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
         answer = await client.call_tool(A2A_LIST_AGENTS, {}, meta=client_meta(AGENT))
     data = answer.data
     assert data["agent_name"] == AGENT
-    assert data["agent_name"] == AGENT
     assert data["broker"] == "localhost:1883"
     assert data["status"] == "offline"
     assert "not connected to the broker" in data["error"]
     # Its own card is always first — v1's roster, from the cache and never by
     # dialling.
     assert data["agents"] == [{"agent_name": AGENT, "status": "offline"}]
+
+
+# ── the window's call, which is what puts an agent on the mesh ──────────────
+
+
+@contextlib.asynccontextmanager
+async def served(mcp: FastMCP) -> AsyncIterator[str]:
+    """Serve a built server on a real port, and yield its URL.
+
+    `tests/test_tui_control.py` has its own, and this is deliberately a second
+    copy rather than a shared one: what each needs it *for* is different — that
+    file proves a hand-over reaches a stream, this one proves a stream that ends
+    takes the mesh with it — and a helper shared between two modules for two
+    reasons is the shape that grows a parameter per caller.
+    """
+    import socket
+
+    import uvicorn
+
+    app = mcp.http_app(path="/mcp", json_response=False, stateless_http=True)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+
+    uv = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+    serve_task = asyncio.create_task(uv.serve(sockets=[sock]))
+    try:
+        for _ in range(500):
+            if uv.started:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the server never came up")
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        uv.should_exit = True
+        await asyncio.wait_for(
+            serve_task,
+            timeout=5,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        sock.close()
+
+
+async def until(predicate: Callable[[], bool], what: str) -> None:
+    """Wait for *predicate*, or fail saying what never happened."""
+    deadline = (  # timeouts: the value this test is built around, not a budget
+        asyncio.get_running_loop().time() + 5.0
+    )  # timeouts: the value this test is built around, not a budget
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(what)
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_join_puts_the_agent_on_the_mesh_and_draws_its_own_line(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """Joined on entry, and held: the call *is* the membership.
+
+    Nothing goes offline here, because nothing has gone away — what this pins is
+    the other half, and it is the half a window cannot see for itself.  The
+    `⚡ jack online` line is drawn by the *plugin*, from the same
+    `format_presence_line` a peer's arrival wears, because a call that succeeds
+    by not returning leaves the window with nothing to draw it from.
+
+    The real connect is replaced — a unit test has no broker — and what is under
+    test is the lifetime and the line, not MQTT.
+    """
+    left = _a_mesh_that_records_leaving(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: bool(window.noted), "the join drew no line")
+        assert not left, "the mesh went down while the window was still holding it"
+        holding.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await holding
+
+    assert window.noted == [{"agent": AGENT, "text": f"⚡ {AGENT} online"}]
+    assert window.handed == [], "the agent's own line is a note, not a turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """A departure with nothing sent: the stream ends, the mesh goes down.
+
+    This is a property of the *wire* and cannot be shown in process — closing a
+    response stream is what cancels the handler behind it, which is the only
+    `leave` this system has — so it is served on a real port, like
+    `tests/test_tui_control.py`'s proof for the window's own inbox.  What is
+    asserted is the effect and it is asserted *while the server is still up*: the
+    teardown below would disconnect every mesh anyway, so a check made after it
+    would pass for the wrong reason.
+    """
+    left = _a_mesh_that_records_leaving(monkeypatch)
+    # The cadence, not the rule: the plugin's keepalive is what makes a closed
+    # stream noticeable at all (`_hold_open`), and the real twenty-five seconds
+    # would be a test that waits for them.
+    monkeypatch.setattr(_T.timeouts.deliver, "keepalive", 0.01)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with served(mcp) as url:
+        window_client = Client(url)
+        await window_client.__aenter__()
+        task = asyncio.create_task(
+            window_client.call_tool(
+                JOIN,
+                {"agent": AGENT},
+                # What the real window sends (`MCPMeshClient.hold`): the token
+                # the keepalive is reported on, which is what makes the write
+                # that notices this window going away possible at all.
+                progress_handler=lambda progress, total, message: asyncio.sleep(0),
+                timeout=None,
+            )
+        )
+        try:
+            await until(
+                lambda: bool(window.noted), "the join drew no line over the wire"
+            )
+            assert left == [], "offline before the window went anywhere"
+
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            await window_client.__aexit__(None, None, None)
+
+            await until(lambda: left == [AGENT], "the agent stayed on the mesh")
+        finally:
+            with contextlib.suppress(Exception):
+                await window_client.__aexit__(None, None, None)
+
+
+def _a_mesh_that_records_leaving(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace the mesh's two connection ends, and report who left.
+
+    `A2AMesh`'s own lifetime is not what any of this tests: what is under test is
+    *when* the plugin decides to take an agent off the mesh, which is the same
+    decision with a broker and without one.
+    """
+    left: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def disconnect(self: Any) -> None:
+        left.append(self.agent_name)
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    return left
+
+
+def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() -> None:
+    """Two reasons to be on the mesh, and the mesh outlives either one alone.
+
+    This is why the reasons are a set rather than a flag, and it is the rule the
+    window's departure test above depends on being *wrong* about: a `join` that
+    counted as having used the mesh would leave the agent online for the life of
+    the process, and a `join` that ignored a tool's reason would take it offline
+    while an answer was still on its way.
+
+    `USED` is never released by anything — a task's result may come many turns
+    later, and nothing inside this process knows when the last one has arrived —
+    which is what makes it the caller's to add and nobody's to remove.
+    """
+    session = Session(
+        agent=AGENT,
+        mesh=A2AMesh(default_config().a2a, AGENT),  # opens the ledger
+    )
+
+    session.hold(WINDOW)
+    assert session.release(WINDOW), "a window alone: its departure is the departure"
+
+    session.hold(WINDOW)
+    session.hold(USED)
+    assert not session.release(WINDOW), "a tool is still waiting to be answered"
+    assert session.release(USED), "the last reason is the one that ends it"

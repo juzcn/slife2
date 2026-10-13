@@ -260,14 +260,14 @@ _A2A_INBOUND = "a2a.yaml"
 def a2a_inbound_paths() -> list[Path]:
     """Every agent's A2A ledger on this machine.
 
-    **The same mechanism `schedule_dbs` is, and here it carries more weight.**
-    A mesh identity is the agent name — the MQTT client id and the request
-    topic's last segment — so a shared process has to know *which names to be
-    reachable under*, and it cannot ask: there is no registry of agents, and
-    "every directory under `agents/`" is every agent this machine has ever run,
-    which would mean a retained card on the broker for conversations nobody is
-    having.  So the file is the record, as it is for a login and for a schedule:
-    an agent is on the mesh because it has used one.
+    **The same mechanism `schedule_dbs` is, and it is a walk for the same
+    reason**: a ledger is a file per agent and there is no registry of agents to
+    read instead.  What a start does with what it finds is
+    `slife2.a2a.server.announce_ledgers` — a peer is still owed an answer, and
+    the model is the only party who can give one — which is why the file is worth
+    a walk and why it is **not** an enrollment list: an agent is on the mesh
+    while a window is showing it, not because it once spoke
+    (`slife2.a2a.server.join`).
     """
     return sorted(agents_dir().glob(f"*/{_A2A_INBOUND}"))
 
