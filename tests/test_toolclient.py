@@ -177,10 +177,32 @@ async def test_a_payload_this_build_cannot_read_is_loud(junk: Any) -> None:
 
 
 def test_a_listed_tool_tolerates_what_it_does_not_understand() -> None:
-    """`parameters` is the one field with a shape; the rest is text."""
+    """`parameters` is the one field with a shape; the rest is text.
+
+    `name` is the exception, and it is not tested here because it is not
+    `from_wire`'s to enforce: a nameless element is refused where the list is
+    (`remote_tools`), the way a wrongly-typed element is.
+    """
     tool = UpstreamTool.from_wire({"name": "a__b", "parameters": "nonsense"})
     assert tool.parameters == {}
     assert (tool.server, tool.tool) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_a_listed_tool_without_a_name_fails_the_list() -> None:
+    """**A nameless tool is one the model can never call, so the list is refused.**
+
+    `UpstreamTool.from_wire` fills every missing field with `""` or `{}`, which
+    is a tolerance for text and a silent hole for the one field that is an
+    identity: a hub daemon from another build answering `{"tools": [{}]}` used to
+    arrive as a tool whose name was the empty string.  The element that broke the
+    shape is the evidence of the wrong build, so it is the element that is quoted
+    (DESIGN.md §10.1).
+    """
+    with pytest.raises(ConnectionError, match="slife2 down"):
+        await remote_tools(FakeHub(junk={"tools": [{}]}))
+    with pytest.raises(ConnectionError, match="slife2 down"):
+        await remote_tools(FakeHub(junk={"tools": [{"description": "no name here"}]}))
 
 
 @pytest.mark.asyncio

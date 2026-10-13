@@ -202,8 +202,16 @@ def frontmatter(content: str) -> dict[str, Any]:
     the description.  ruamel is already here for `slife2.yaml`, so the correct
     reading costs nothing to adopt.
 
-    A header that does not parse degrades to no header rather than to an
-    exception: the skill still exists, and `scan` names it after its directory.
+    **A header that does not parse degrades to no header, and that is a
+    decision registered in `DESIGN.md` §10.2 — not an accident.**  What it does:
+    a header that is not YAML reads as a file with no frontmatter, so `scan`
+    names the skill after its directory and shows its body unread.  What it
+    gives up: the declared `name`, `description` and every `requires`, so a
+    skill whose header is damaged also stops being reported by `readiness` — the
+    half a reader cannot see.  What it does not cover: a header that *is* a
+    mapping, parsed normally, and a body below the fence, returned unread either
+    way.  Where the failure goes: `logger.warning` names the parse error and the
+    file is the only place the lost declaration can be recovered from.
     """
     header, _ = split_frontmatter(content)
     if not header.strip():
@@ -226,8 +234,15 @@ def requirements(header: Mapping[str, Any]) -> Requirements:
     client, and blindness here is silent: the skill loads, reads perfectly, and
     dies on a missing key three steps later.
 
-    Malformed blocks are skipped rather than fatal, for the same reason a
-    malformed header is: the skill is still a skill.
+    **A malformed `metadata` block is skipped rather than fatal**, which is the
+    same decision as `frontmatter`'s, one level down and registered with it in
+    `DESIGN.md` §10.2: a declaration that is not a mapping declares nothing, so
+    the skill still loads and reads — and its requirements are simply not
+    reported.  What it gives up: a prerequisite that a malformed block *meant*
+    to state, which `readiness` then cannot warn about.  What it does not cover:
+    a block that is a mapping, read in full.  Where the failure goes: nowhere on
+    its own — the block is in the file, and the skill's header is the only place
+    it can be read from.
     """
     env: list[str] = []
     bins: list[str] = []

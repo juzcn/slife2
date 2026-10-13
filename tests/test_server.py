@@ -26,6 +26,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -430,6 +431,89 @@ async def test_a_window_that_has_never_run_reads_nothing(context, hub) -> None:
         answer = await client.call_tool("transcript", {"agent": "nobody"})
 
     assert answer.data["turns"] == []
+
+
+class UnreadableStore:
+    """A context plugin answering with the shapes this build refuses.
+
+    `_adopt`, `rebuild_into` and `transcript` read the store's answers as things
+    they must be able to trust, and a store this build started never returns one
+    it cannot read — so a test of the refusals hands in the shape a *daemon from
+    another build* does, by name.
+    """
+
+    def __init__(self, **answers: dict[str, Any]) -> None:
+        self.answers = answers
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        return SimpleNamespace(data=self.answers[name])
+
+
+@pytest.mark.asyncio
+async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
+    hub,
+) -> None:
+    """`turn_ids` was tolerated where `messages` beside it was validated.
+
+    So an answer carrying messages and no ids was adopted as a live context the
+    loop could name no turn of: the loop and the store disagreed about what the
+    context was from that point on, and the next write persisted the wrong list.
+    Both halves are one answer and are now read the same way — a missing or null
+    `turn_ids` is refused, naming the payload (DESIGN.md §10.1: a value that
+    cannot be read is not a value that is absent).
+    """
+    store = UnreadableStore(restore={"messages": [], "turns": []})
+    server = build_server(
+        config(), context_client=store, hub_client=hub, backend=FakeBackend()
+    )
+
+    with pytest.raises(ToolError, match="turn-id list"):
+        await send(server, "hi", agent="jack")
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_that_carried_no_counts_is_refused_rather_than_drawn_as_zero(
+    hub,
+) -> None:
+    """`kept`/`recalled` were read as `int(payload.get(...) or 0)`.
+
+    A reply that replaced the context list but omitted the two counts drew
+    `[kept 0, recalled 0]` — a note reporting a decision nobody made, since the
+    discriminator *was* paid and did decide.  The answer is refused the way a
+    shape `_adopt` cannot read is, naming the payload (DESIGN.md §10.1: a
+    failure is not a verdict).
+    """
+    store = UnreadableStore(
+        restore={"messages": [], "turn_ids": [], "turns": []},
+        rebuild={"messages": [], "turn_ids": []},
+    )
+    server = build_server(
+        config(), context_client=store, hub_client=hub, backend=answering("x")
+    )
+
+    with pytest.raises(ToolError, match="counts"):
+        await send(server, "hi", agent="jack")
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_read_of_an_unreadable_turn_list_is_refused(hub) -> None:
+    """A `turns` that is not a list became `[]`.
+
+    A context plugin answering with a shape this build cannot read drew an empty
+    conversation on a screen and said nothing — the same deformation `_adopt`
+    refuses, one reader over.  The shape is named and the caller is pointed at
+    `slife2 down`, exactly as the adopting path does.
+    """
+    store = UnreadableStore(
+        restore={"messages": [], "turn_ids": [], "turns": "not a list"}
+    )
+    server = build_server(
+        config(), context_client=store, hub_client=hub, backend=FakeBackend()
+    )
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="turn list"):
+            await client.call_tool("transcript", {"agent": "jack"})
 
 
 @pytest.mark.asyncio
@@ -1383,6 +1467,42 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     assert result["role"] == "tool"
     assert result["content"].startswith("2 tool(s) unloaded")
     assert "fake__echo" in result["content"] and "fake__boom" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none(
+    context, hub, monkeypatch, caplog
+) -> None:
+    """`found.get("unloaded") or []` read a missing key as "nothing was unloaded".
+
+    So an answer from the hub that this build cannot read — the shape a daemon
+    from another build returns — was taken as an honest no-op: no pair was
+    written, and the model went on believing it still held the tools that had
+    gone.  Absent is not empty: both halves of the answer are read as strictly
+    as `_adopt` reads the store's, so an answer without the key is a failure and
+    only a *readable* empty answer is a verdict (DESIGN.md §10.1: a failure is
+    not a verdict).  The trim is post-turn, so the refusal is caught and logged
+    rather than failing a turn that has already answered.
+    """
+    import logging
+
+    from slife2.server import server as server_module
+
+    async def no_names(_client: Any) -> dict[str, Any]:
+        # Every key but the one the trim acts on: the same silence an empty list
+        # makes, from an answer that says nothing at all.
+        return {"refused": [], "not_loaded": [], "text": "the list is fine"}
+
+    monkeypatch.setattr(server_module, "unload_tools", no_names)
+    caplog.set_level(logging.WARNING, logger="slife2.server.server")
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=answering("done")
+    )
+
+    result = await send(server, "hi", agent="jack")
+
+    assert result.data["text"] == "done", "bookkeeping did not fail the turn"
+    assert "names it unloaded" in caplog.text
 
 
 @pytest.mark.asyncio

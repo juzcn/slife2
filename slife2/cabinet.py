@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2 import textindex
 from slife2.audience import FOR_THE_MODEL, request_client, unaddressed
@@ -927,8 +928,21 @@ def _found_text(found: dict[str, Any]) -> str:
     will sort by and be wrong about. `matched your words` marks the rows the
     keyword leg found, which is the one piece of evidence here that is certain
     rather than graded, and it says *where* when that is not the line printed.
+
+    **A search answer that cannot be read is not a search that found nothing.**
+    An answer with no `results` list used to render as "Nothing matched", which
+    is a verdict a model acts on rather than a failure it retries (§10.1, "a
+    failure is not a verdict"); only a *readable* empty list may say nothing
+    matched, and anything else raises.  The raise is this plugin's to make — the
+    store's shape is the thing that is wrong — and the far end reads it as a
+    failed call rather than as a confident negative.
     """
-    rows = found.get("results") or []
+    rows = found.get("results")
+    if not isinstance(rows, list):
+        raise ToolError(
+            f"cabinet_search could not read the cabinet's answer — `results` "
+            f"came back as {rows!r}"
+        )
     if not rows:
         return "Nothing matched. Try fewer or different words."
     scored = [

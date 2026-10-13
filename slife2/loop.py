@@ -452,18 +452,20 @@ class AgentLoop:
         # this call's two halves by.
         return started(task_id, dispatch.id, dispatch.name), True
 
-    async def _result(self, dispatch: ToolCall) -> str:
-        """One call's answer as text, for the background registry to hold.
+    async def _result(self, dispatch: ToolCall) -> tuple[str, bool]:
+        """One call's answer, as its text *and* whether it worked.
 
-        **A background task stores text, not `(text, ok)`.**  The registry's
-        whole vocabulary is the string the poller reads back, and a failure is
-        already text by the time it reaches here (`ToolRegistry.execute` renders
-        one, which is the rule that makes this possible) — so `_ok` is not lost,
-        it is the `Error` the string starts with, which is exactly what
-        `check_async` reads to decide whether the task failed.
+        **The pair travels now, and the old argument for dropping it is the one
+        DESIGN.md §10.1 forbids.**  `_ok` used to be thrown away on the grounds
+        that it was not lost — a failure is text by the time it reaches here
+        (`ToolRegistry.execute` renders one) so the `Error` the string starts
+        with was said to *be* the fact, and `slife2.async_tasks` read the prefix.
+        A fact spelled as a prefix is a fact nothing guarantees: an answer that
+        legitimately begins "Error" reads as a failure, and a tool that failed
+        without that prefix (the registry's `ok=False` path has more than one
+        spelling) reads as a success.  `execute` already answers the pair.
         """
-        text, _ok = await self._tools.execute(dispatch)
-        return text
+        return await self._tools.execute(dispatch)
 
     async def _drain(
         self, chunks: AsyncIterator[Chunk], observer: TurnObserver

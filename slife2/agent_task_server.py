@@ -445,6 +445,14 @@ def build_server(
         has come apart — the same rule `slife2.toolclient.remote_tools` applies
         to a tool list — and quietly keeping the context we had would make an
         unreadable answer indistinguishable from a decision to keep it.
+
+        **`turn_ids` is read as strictly as `messages`**, and it did not used to
+        be: `payload.get("turn_ids") or []` adopted an answer that carried
+        messages and no ids as a context whose turns nothing could name, so the
+        task's loop and the store disagreed about what it held from that point
+        on.  A missing or null `turn_ids` is the same damage as a non-list
+        `messages` and is refused the same way (DESIGN.md §10.1: a value that
+        cannot be read is not a value that is absent).
         """
         raw = payload.get("messages")
         if not isinstance(raw, list):
@@ -453,9 +461,16 @@ def build_server(
                 f"{payload!r}); a daemon from another build does this — try "
                 f"`slife2 down`"
             )
+        turn_ids = payload.get("turn_ids")
+        if not isinstance(turn_ids, list):
+            raise ConnectionError(
+                f"the context store did not return a turn-id list (it said "
+                f"{payload!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
         return (
             [Message.from_wire(item) for item in raw],
-            [int(turn_id) for turn_id in payload.get("turn_ids") or []],
+            [int(turn_id) for turn_id in turn_ids],
         )
 
     async def restore(
@@ -601,6 +616,38 @@ def build_server(
         await trim_tools(task, messages)
         return result
 
+    def _trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
+        """Read a trim's answer — the names it unloaded and its sentence — or
+        refuse it.
+
+        **An answer the harness cannot read is not a trim that unloaded
+        nothing.**  `found.get("unloaded") or []` read a missing or null key as
+        the same "nothing to unload" an honest no-op produces, so no pair was
+        written and the reader went on believing the list still held the tools
+        that had gone; `found.get("text") or ""` did the same one key over,
+        writing an empty sentence where the hub's own belongs.  Both halves are
+        one answer and are read as strictly as `adopt` reads `messages` and
+        `turn_ids`: only a *readable* empty answer is a verdict, and a missing
+        key is damage (DESIGN.md §10.1: a failure is not a verdict).  Reading
+        both before either half is appended also means a refused answer can
+        never leave the half-written pair every provider rejects.
+        """
+        names = found.get("unloaded")
+        if not isinstance(names, list):
+            raise ConnectionError(
+                f"the toolhub did not return the names it unloaded (it said "
+                f"{found!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        text = found.get("text")
+        if not isinstance(text, str):
+            raise ConnectionError(
+                f"the toolhub did not return the trim's sentence (it said "
+                f"{found!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        return [str(name) for name in names], text
+
     async def trim_tools(task: AgentTask, messages: list[Message]) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
@@ -618,18 +665,32 @@ def build_server(
         it still believes it has (§8.5).  Nothing is written when nothing moved:
         an empty pair would be a record of something that did not happen.
 
-        Best-effort, like the agent server's, and for its reason: the turn is
-        over and has been answered, and bookkeeping that runs after it must not
-        turn a good turn into a failed one.
+        **A skip is a failure, and it is said at `error`.**  A task runs one
+        turn and has no next request for a dead hub to make itself heard on, so
+        the agent server's argument — "a hub that is really gone fails the next
+        turn's tool list" — is not true here.  What is kept is the *outcome*
+        (best-effort, so a task that has answered is not turned into a failed
+        one by bookkeeping) and what is added is visibility: the skip is logged
+        at `error`, naming the task, because the loaded set is one list for the
+        whole system and an untrimmed one leaves every other conversation's
+        request longer (DESIGN.md §1.3).  Registered as a §10.2 fallback: it
+        *skips the trim* when the hub cannot be reached or answers with a shape
+        this build cannot read; it *gives up* the trim for that turn; it *does
+        not cover* a hub that is gone for good — there is no next turn here to
+        surface it on, which is why the skip is said at `error`; the *failure
+        goes* to the log as an error naming the task.
         """
         try:
             found = await unload_tools(await hub())
+            unloaded, text = _trim_answer(found)
         except Exception as exc:  # noqa: BLE001 - bookkeeping does not fail a turn
-            logger.warning(
-                "agent task %s: the tool list was not trimmed: %s", task.name, exc
+            logger.error(
+                "agent task %s: the tool list was not trimmed (%s); the loaded "
+                "set stays over budget for every conversation's next request",
+                task.name,
+                exc,
             )
             return
-        unloaded = [str(name) for name in found.get("unloaded") or []]
         if not unloaded:
             return
         logger.info(
@@ -648,7 +709,7 @@ def build_server(
         messages.append(
             Message(
                 role="tool",
-                content=str(found.get("text") or ""),
+                content=text,
                 tool_call_id=call.id,
             )
         )

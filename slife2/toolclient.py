@@ -171,8 +171,17 @@ async def remote_tools(
     # `AttributeError: 'str' object has no attribute 'get'` — a traceback about
     # a dict where the deliberate message about a *build* belongs.  The check is
     # the same one for both halves of the shape because the diagnosis is.
-    if not isinstance(listed, list) or not all(isinstance(raw, dict) for raw in listed):
+    if not isinstance(listed, list):
         raise _unreadable("return a tool list", payload)
+    # **And an element with no name is the same diagnosis, not a tool.**  Every
+    # missing field becomes `""` in `from_wire`, which is a tolerance for text
+    # and a silent hole for the field that is an identity: a hub from another
+    # build answering `{"tools": [{}]}` would hand the model a nameless tool it
+    # could never call.  The element that broke the shape is the evidence, so
+    # the element is what is quoted (DESIGN.md §10.1).
+    for raw in listed:
+        if not isinstance(raw, dict) or not str(raw.get("name") or ""):
+            raise _unreadable("return a tool list", raw)
     return [
         Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
         for entry in (UpstreamTool.from_wire(raw) for raw in listed)

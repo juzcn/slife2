@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2 import cabinet_store
 from slife2.audience import client_meta, for_the_model
@@ -387,6 +388,28 @@ async def test_a_search_can_name_one_kind() -> None:
     assert "same-word" in only_notes
     assert "same-word" not in only_files
     assert "Nothing matched" in only_files
+
+
+@pytest.mark.asyncio
+async def test_a_search_answer_without_results_is_not_nothing_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A search answer that cannot be read is not a search that found nothing.**
+
+    An answer with no `results` key used to render as the same "Nothing matched"
+    a real miss produces, and that is a verdict a model acts on rather than a
+    failure it retries (DESIGN.md §10.1, "a failure is not a verdict").  Only a
+    *readable* empty list may say it; anything else fails the call.
+    """
+
+    async def no_results(self: CabinetStore, **_: Any) -> dict[str, Any]:
+        return {"rows": []}
+
+    monkeypatch.setattr(CabinetStore, "search", no_results)
+
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError, match="results"):
+            await ask(client, "cabinet_search", keywords=[WORD])
 
 
 @pytest.mark.asyncio

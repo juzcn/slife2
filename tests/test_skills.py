@@ -190,6 +190,26 @@ def test_a_file_with_no_fence_has_no_header() -> None:
     assert split_frontmatter("---\nname: one\n") == ("", "---\nname: one\n")
 
 
+def test_a_header_that_will_not_parse_is_a_skill_with_no_declarations(
+    root: Path,
+) -> None:
+    """The fallback is a decision, and this pins what it costs.
+
+    `frontmatter` degrades to `{}` rather than raising, so the skill still
+    exists and `scan` names it after its directory — but it loses its declared
+    name, its description and every `requires`, which is why a damaged header
+    also stops `readiness` reporting a missing prerequisite.  That is the
+    fallback DESIGN.md §10.2 registers; this is the half a reader would
+    otherwise have to infer.
+    """
+    skill(root, "one", header="metadata: [unclosed\n")
+    (found,) = scan()
+
+    assert found.name == "one", "named after its directory, since the header is gone"
+    assert found.description == ""
+    assert not found.requires.declared
+
+
 # --- what a skill says it needs -----------------------------------------------
 #
 # A skill has no process and can still have a credential: a playbook that says

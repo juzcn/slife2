@@ -312,17 +312,75 @@ async def test_the_switch_takes_the_row_out_without_taking_the_entry(
 async def test_forgetting_a_command_takes_the_row_and_leaves_the_program(
     isolated_runtime: Path,
 ) -> None:
-    """It forgets; it does not uninstall.  The answer has to say which."""
+    """It forgets; it does not uninstall.  The answer has to say which.
+
+    And forgetting a name that is not recorded is refused, not answered as one
+    that was: ordinary text arrives with `ok` true and reads as a removal that
+    happened (`cli_set`'s rule, one tool over).
+    """
     async with Client(build_server(config_for(isolated_runtime))) as client:
         answer = await ask(client, "cli_remove", name="yt-dlp")
         declared = await client.call_tool(LIST_SOURCES, {})
-        missing = await ask(client, "cli_remove", name="yt-dlp")
+        with pytest.raises(ToolError) as missing:
+            await client.call_tool("cli_remove", {"name": "yt-dlp"})
 
     names = {row["name"] for row in declared.data["sources"][0]["rows"]}
     assert "forgotten" in answer
     assert "yt-dlp" not in section(isolated_runtime)
     assert "cli:yt-dlp" not in names
-    assert "is not recorded" in missing
+    assert "is not recorded" in str(missing.value)
+
+
+@pytest.mark.asyncio
+async def test_switching_a_name_that_is_not_recorded_is_refused(
+    isolated_runtime: Path,
+) -> None:
+    """A switch over a name nobody wrote arrives with `ok` true as ordinary text.
+
+    That is the shape `cli_set` calls out as a refusal it must not answer — a
+    caller reading `ok` true would take it for a switch that was set.
+    """
+    config = config_for(isolated_runtime)
+    before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+
+    async with Client(build_server(config)) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "cli_set_enabled", {"name": "nothing", "enabled": False}
+            )
+
+    assert "is not recorded" in str(raised.value)
+    assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_a_command_line_that_cannot_be_split_is_refused_before_the_write(
+    isolated_runtime: Path,
+) -> None:
+    """A line `shlex` cannot take apart is one the argv runner cannot either.
+
+    `_on_path` used to meet the unbalanced quote *after* the entry was written
+    and answer `""` — the same silence as "the program is on PATH" — so `cli_set`
+    reported a success over a row nothing can run (DESIGN.md §9: an argv rather
+    than a shell).  The split is checked before the write, and the refusal names
+    the line.
+    """
+    config = config_for(isolated_runtime)
+    before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+
+    async with Client(build_server(config)) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "cli_set",
+                {
+                    "name": "quoted",
+                    "command": 'tool "unterminated',
+                    "description": "d",
+                },
+            )
+
+    assert "cannot be split" in str(raised.value)
+    assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
 
 
 @pytest.mark.asyncio

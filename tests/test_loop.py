@@ -518,9 +518,9 @@ async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
     """
     finished = asyncio.Event()
 
-    async def read_policy(_arguments: dict[str, Any]) -> str:
+    async def read_policy(_arguments: dict[str, Any]) -> tuple[str, bool]:
         finished.set()
-        return "the retry policy is three tries"
+        return "the retry policy is three tries", True
 
     # No `deliver`, so the hand-back never lands and the task keeps its answer —
     # the state this is about, and the one a late `cancel_async` meets.

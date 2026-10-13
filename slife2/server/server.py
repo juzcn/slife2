@@ -877,6 +877,15 @@ def build_server(
         come apart — the same rule `slife2.toolclient.remote_tools` applies to a
         tool list — and quietly keeping the context we had would make an
         unreadable answer indistinguishable from a decision to keep it.
+
+        **`turn_ids` is read as strictly as `messages`**, and it did not used to
+        be: `payload.get("turn_ids") or []` adopted an answer that carried
+        messages and no ids as a list whose turns the loop could not name, so
+        the loop's `turn_ids` and the store's disagreed from that point on and
+        the next write persisted the wrong list.  A missing or null `turn_ids`
+        is the same damage as a non-list `messages` and is refused the same way
+        (DESIGN.md §10.1: a value that cannot be read is not a value that is
+        absent).
         """
         messages = payload.get("messages")
         if not isinstance(messages, list):
@@ -885,8 +894,15 @@ def build_server(
                 f"{payload!r}); a daemon from another build does this — try "
                 f"`slife2 down`"
             )
+        turn_ids = payload.get("turn_ids")
+        if not isinstance(turn_ids, list):
+            raise ConnectionError(
+                f"the context store did not return a turn-id list (it said "
+                f"{payload!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
         loop.messages = [Message.from_wire(raw) for raw in messages]
-        loop.turn_ids = [int(turn_id) for turn_id in payload.get("turn_ids") or []]
+        loop.turn_ids = [int(turn_id) for turn_id in turn_ids]
         loop.covered = len(loop.messages) - carried
 
     async def restore_into(loop: Loop) -> None:
@@ -934,6 +950,11 @@ def build_server(
         hand it kept, and how much it went back to the log for.  Handing back the
         event rather than the counts keeps the vocabulary in one module: this
         knows *what happened*, `slife2.events` knows how it is said.
+
+        **An answer that carried no counts is refused**, like a shape `_adopt`
+        cannot read: a reply that replaced the context list but omitted `kept`
+        and `recalled` used to draw `[kept 0, recalled 0]`, a note reporting a
+        decision nobody made (DESIGN.md §10.1: a failure is not a verdict).
         """
         carried = max(len(loop.messages) - loop.covered, 0)
         payload = tool_payload(
@@ -951,10 +972,14 @@ def build_server(
             )
         )
         _adopt(loop, payload, carried=carried)
-        return ContextChosen(
-            kept=int(payload.get("kept") or 0),
-            recalled=int(payload.get("recalled") or 0),
-        )
+        kept, recalled = payload.get("kept"), payload.get("recalled")
+        if kept is None or recalled is None:
+            raise ConnectionError(
+                f"the context store did not report the rebuild's counts (it "
+                f"said {payload!r}); a daemon from another build does this — "
+                f"try `slife2 down`"
+            )
+        return ContextChosen(kept=int(kept), recalled=int(recalled))
 
     async def forget_context(agent: str, subagent: str) -> None:
         """Clear a conversation's stored live context.
@@ -967,6 +992,38 @@ def build_server(
         await (await memory()).call_tool(
             "forget", {"agent": agent, "subagent": subagent}
         )
+
+    def _trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
+        """Read a trim's answer — the names it unloaded and its sentence — or
+        refuse it.
+
+        **An answer the harness cannot read is not a trim that unloaded
+        nothing.**  `found.get("unloaded") or []` read a missing or null key as
+        the same "nothing to unload" an honest no-op produces, so no pair was
+        written and the model went on believing it still held the tools that had
+        gone; `found.get("text") or ""` did the same one key over, writing an
+        empty sentence where the hub's own belongs.  Both halves are one answer
+        and are read as strictly as `_adopt` reads `messages` and `turn_ids`:
+        only a *readable* empty answer is a verdict, and a missing key is damage
+        (DESIGN.md §10.1: a failure is not a verdict).  Reading both before
+        either half is appended also means a refused answer can never leave the
+        half-written pair every provider rejects.
+        """
+        names = found.get("unloaded")
+        if not isinstance(names, list):
+            raise ConnectionError(
+                f"the toolhub did not return the names it unloaded (it said "
+                f"{found!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        text = found.get("text")
+        if not isinstance(text, str):
+            raise ConnectionError(
+                f"the toolhub did not return the trim's sentence (it said "
+                f"{found!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        return [str(name) for name in names], text
 
     async def trim_tools(loop: Loop) -> None:
         """Bring the model's tool list back within its budget — and say so in the
@@ -996,13 +1053,20 @@ def build_server(
         empty pair every turn would be a record of something that did not
         happen, and a model reading it would learn to distrust the mechanism.
 
-        Best-effort by construction: the turn is over and has been answered, and
+        Best-effort by construction, and registered as a §10.2 fallback.  It
+        *skips the trim* when the hub cannot be reached or answers with a shape
+        this build cannot read — the turn is over and has been answered, and
         bookkeeping that runs after it must not turn a good turn into a failed
-        one.  A hub that is really gone makes itself heard on the next turn's
-        tool list, which is asked for before the conversation is touched.
+        one.  It *gives up* the trim for that turn, so the loaded set stays over
+        budget.  It *does not cover* the next turn, whose tool list is asked for
+        before the conversation is touched and fails loudly on a hub that is
+        really gone; and because both halves are read before either is appended,
+        it never leaves a half-written pair.  The *failure goes* to the log as a
+        warning naming the conversation.
         """
         try:
             found = await unload_tools(await hub())
+            unloaded, text = _trim_answer(found)
         except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
             logger.warning(
                 "%s: the tool list was not trimmed: %s",
@@ -1010,7 +1074,6 @@ def build_server(
                 exc,
             )
             return
-        unloaded = [str(name) for name in found.get("unloaded") or []]
         if not unloaded:
             return
         logger.info(
@@ -1031,7 +1094,7 @@ def build_server(
         loop.messages.append(
             Message(
                 role="tool",
-                content=str(found.get("text") or ""),
+                content=text,
                 tool_call_id=call.id,
             )
         )
@@ -2300,6 +2363,12 @@ def build_server(
         the conversation, and so does one opened against a server that has just
         started.
 
+        **A `turns` this build cannot read is refused, not drawn as none.**  A
+        context plugin answering with a shape this build does not know — the
+        same damage `_adopt` refuses — used to become `[]`, so a screen showed
+        an empty conversation and said nothing (DESIGN.md §10.1: a failure is
+        not a verdict).
+
         Args:
             agent: Whose conversation.
             subagent: Which of that agent's conversations; empty for its own.
@@ -2328,7 +2397,13 @@ def build_server(
             )
         )
         turns = payload.get("turns")
-        return {"turns": turns if isinstance(turns, list) else []}
+        if not isinstance(turns, list):
+            raise ConnectionError(
+                f"the context store did not return a turn list (it said "
+                f"{payload!r}); a daemon from another build does this — try "
+                f"`slife2 down`"
+            )
+        return {"turns": turns}
 
     @mcp.tool
     async def reset(agent: str, subagent: str = "") -> dict[str, Any]:

@@ -27,6 +27,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -84,6 +85,21 @@ class Store:
 
     client: Client
     ask: Discriminator
+
+
+class UnreadableStore:
+    """A context plugin answering with the shapes this task server refuses.
+
+    `adopt` reads the store's answer as a thing it must be able to trust, and a
+    store this build started never returns one it cannot read — so a test of the
+    refusal hands in the shape a *daemon from another build* does, by name.
+    """
+
+    def __init__(self, **answers: dict[str, Any]) -> None:
+        self.answers = answers
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        return SimpleNamespace(data=self.answers[name])
 
 
 @dataclass
@@ -410,6 +426,36 @@ async def test_the_context_it_runs_on_is_the_agents_own(
 # ── the answer comes back as a message ───────────────────────────────────────
 
 
+async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
+    hub: Client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`turn_ids` was tolerated where `messages` beside it was validated.
+
+    So an answer carrying messages and no ids was adopted as a context whose
+    turns nothing could name, and the task's loop and the store disagreed about
+    what it held from that point on — the identical deformation the agent
+    server's `_adopt` was fixed for.  Both halves of one answer are read the same
+    way: a missing or null `turn_ids` is refused, naming the payload
+    (DESIGN.md §10.1: a value that cannot be read is not a value that is
+    absent).  A task has no record to corrupt, so the refusal is the task's own
+    failed answer rather than a store that quietly kept the context it had.
+    """
+    caplog.set_level(logging.WARNING, logger="slife2.agent_task_server")
+    built = build(
+        text_turn("done"),
+        hub=hub,
+        context=Store(
+            client=UnreadableStore(restore={"messages": [], "turns": []}),
+            ask=Discriminator(),
+        ),
+    )
+    await start(built)
+    answer = await settle(built)
+
+    assert answer["status"] == "failed"
+    assert "turn-id list" in caplog.text
+
+
 async def test_the_answer_arrives_on_the_tasks_own_channel(
     hub: Client, store: Store, window: Window
 ) -> None:
@@ -707,3 +753,162 @@ async def test_a_name_that_has_been_started_again_is_a_different_task(
         listed = await ask(client, AGENT_TASK_LIST)
     assert [row["name"] for row in listed["tasks"]] == ["research"]
     assert listed["tasks"][0]["status"] == "finished"
+
+
+# ── the trim, and a status carried rather than read ─────────────────────────
+
+
+async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
+    hub: Client, store: Store, caplog: pytest.LogCaptureFixture, monkeypatch
+) -> None:
+    """The trim is not optional (§1.3), and a task has no next turn for a dead
+    hub to surface on.
+
+    The agent server can leave its trim best-effort because its next request
+    rebuilds the tool list from the hub and fails loudly if it is gone; a task
+    runs one turn, so a skip with a warning and nothing else is a skip nobody
+    ever reads.  What the task keeps is the outcome — bookkeeping does not fail a
+    turn that already answered — and what it adds is that the skip is *said* at
+    `error`, naming the task, because the loaded set is one list for the whole
+    system.  Registered as a §10.2 fallback.
+    """
+    import slife2.agent_task_server as module
+
+    async def no_hub(_client: Any) -> dict[str, Any]:
+        raise ConnectionError("the hub is gone")
+
+    monkeypatch.setattr(module, "unload_tools", no_hub)
+    caplog.set_level(logging.ERROR, logger="slife2.agent_task_server")
+    built = build(text_turn("three tries"), hub=hub, context=store)
+    await start(built)
+    await settle(built)
+
+    assert "was not trimmed" in caplog.text
+
+
+async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none(
+    hub: Client, store: Store, caplog: pytest.LogCaptureFixture, monkeypatch
+) -> None:
+    """An answer missing `unloaded` read as "nothing was unloaded".
+
+    The same deformation the agent server's trim was fixed for, one plugin over:
+    `found.get("unloaded") or []` took a hub answer this build cannot read — the
+    shape a daemon from another build returns — as an honest no-op, so no pair
+    was written and the record never said the list had shrunk.  Absent is not
+    empty: both halves of the answer are read strictly, so a missing key is a
+    failure and only a *readable* empty answer is a verdict (DESIGN.md §10.1: a
+    failure is not a verdict).  The skip is still best-effort and said at
+    `error`, naming the task, because the trim is post-turn bookkeeping.
+    """
+    import slife2.agent_task_server as module
+
+    async def no_names(_client: Any) -> dict[str, Any]:
+        # Every key but the one the trim acts on: the same silence an empty list
+        # makes, from an answer that says nothing at all.
+        return {"refused": [], "not_loaded": [], "text": "the list is fine"}
+
+    monkeypatch.setattr(module, "unload_tools", no_names)
+    caplog.set_level(logging.ERROR, logger="slife2.agent_task_server")
+    built = build(text_turn("three tries"), hub=hub, context=store)
+    await start(built)
+    answer = await settle(built)
+
+    assert answer["status"] == "finished", "bookkeeping did not fail the turn"
+    assert "names it unloaded" in caplog.text
+
+
+async def test_an_async_calls_status_is_carried_not_read_off_its_words() -> None:
+    """`_runner` used to set `FAILED if result.startswith("Error") else FINISHED`.
+
+    Which made a verdict out of a spelling, in both directions: a tool that
+    failed with text not beginning `"Error"` was recorded `finished`, and an
+    answer that happened to begin `"Error"` was recorded `failed` — and that
+    status is the whole of what `agent_task_status`/`agent_task_list` answer
+    from.  The coroutine now answers the pair a foreground call comes back as
+    (`ToolRegistry.execute`), so `ok` decides and the words decide nothing
+    (DESIGN.md §10.1, "a failure is not a verdict").
+
+    Three cases, because the two the pair exists to tell apart are exactly the
+    two the words cannot: a call that failed *without* saying "Error", a call
+    that failed and did, and an answer that begins "Error" and is fine.
+    """
+    import slife2.async_tasks as async_tasks
+
+    async def raises() -> tuple[str, bool]:
+        raise RuntimeError("the provider is down")
+
+    async def failed_quietly() -> tuple[str, bool]:
+        return "the endpoint refused", False
+
+    async def failed_loudly() -> tuple[str, bool]:
+        return "Error: no such tool", False
+
+    async def says_error() -> tuple[str, bool]:
+        return "Error: no such thing, but here is what I found", True
+
+    ids = {
+        "raised": async_tasks.schedule(raises(), call_id="c1", tool="boom"),
+        "quiet": async_tasks.schedule(failed_quietly(), call_id="c2", tool="lookup"),
+        "loud": async_tasks.schedule(failed_loudly(), call_id="c3", tool="lookup"),
+        "fine": async_tasks.schedule(says_error(), call_id="c4", tool="lookup"),
+    }
+    for task_id in ids.values():
+        for _ in range(400):
+            handle = async_tasks._tasks[task_id].handle  # noqa: SLF001
+            if handle.done():
+                break
+            await asyncio.sleep(0.01)
+
+    try:
+        # No `deliver`, so nothing is handed back and the status is the whole
+        # record — the one thing these four ids are asked about.
+        status = {
+            name: async_tasks._tasks[task_id].status  # noqa: SLF001
+            for name, task_id in ids.items()
+        }
+        assert status == {
+            "raised": async_tasks.FAILED,
+            "quiet": async_tasks.FAILED,
+            "loud": async_tasks.FAILED,
+            "fine": async_tasks.FINISHED,
+        }
+    finally:
+        for task_id in ids.values():
+            async_tasks._tasks.pop(task_id, None)  # noqa: SLF001
+
+
+async def test_a_hand_back_that_could_not_land_says_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`contextlib.suppress(Exception)` dropped the reason a hand-back failed.
+
+    The task still recorded `delivered=False`, which is the fact — but nothing
+    said *why*, so a delivery that could not land left a silence with no cause
+    beside it.  The exception is now logged at `warning`, naming the task, and
+    the suppress is kept: a hand-back that cannot land is a result `check_async`
+    can still offer rather than an error with no reader (DESIGN.md §10.1, "a
+    failure is not a verdict" — said out of band).
+    """
+    import slife2.async_tasks as async_tasks
+
+    async def refuses(_message: str) -> bool:
+        raise ConnectionError("no window is showing jack's conversation")
+
+    async def answers() -> tuple[str, bool]:
+        return "the answer", True
+
+    caplog.set_level(logging.WARNING, logger="slife2.async_tasks")
+    task_id = async_tasks.schedule(
+        answers(), call_id="c1", tool="lookup", deliver=refuses
+    )
+    task = async_tasks._tasks[task_id]  # noqa: SLF001
+    try:
+        await task.handle
+        assert task.delivered is False
+        assert task.result == "the answer", (
+            "an undelivered answer stays for check_async"
+        )
+        assert task_id in caplog.text
+        assert "could not be handed back" in caplog.text
+    finally:
+        async_tasks._tasks.pop(task_id, None)  # noqa: SLF001

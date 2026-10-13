@@ -285,6 +285,33 @@ def test_no_skills_is_no_rows(isolated_runtime: Path) -> None:
     assert catalogue(default_config().skills) == []
 
 
+@pytest.mark.asyncio
+async def test_a_failure_in_readiness_is_not_turned_into_a_note_line(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`readiness` opens nothing, so an `OSError` from it is nobody's expected one.
+
+    It reads `os.environ`, the skill's `skills:` entry and `shutil.which`, so an
+    `except OSError` around the call could only ever fire for a failure nobody
+    anticipated — and it turned that into a "cannot be read" line beside the
+    skill (DESIGN.md §10.1).  The guard belongs where the read is,
+    `skills.document`, so a failure raised from the *check* is one the caller
+    sees rather than a note.
+    """
+    skill(isolated_runtime, "one")
+
+    def explode(*args: object, **kwargs: object) -> str:
+        raise OSError("nobody expected this")
+
+    monkeypatch.setattr("slife2.skills_server.skills.readiness", explode)
+
+    async with Client(build_server(default_config())) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool("skill_list", {})
+
+    assert "nobody expected this" in str(raised.value)
+
+
 def test_the_source_is_not_the_servers_own_name(isolated_runtime: Path) -> None:
     """The rows are filed under the *family*, and the server under its key.
 

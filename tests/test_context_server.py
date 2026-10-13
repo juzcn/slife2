@@ -654,18 +654,18 @@ async def test_a_recall_adds_to_what_was_kept(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_context_list_that_cannot_be_written_does_not_fail_the_turn(
+async def test_a_context_list_that_cannot_be_written_fails_the_turn(
     tmp_path, monkeypatch
 ) -> None:
-    """The sentence beside that write promised a tolerance the code did not have.
+    """The list is authoritative, so a publish that did not land must not pass.
 
-    "A failure here is not the turn's problem: the in-memory rebuild stands on
-    its own, and the next turn publishes the list again."  That is a deliberate
-    trade — a restart comes back one turn short — and it was written above an
-    unguarded `await`, so a busy or full disk raised out of `rebuild` and failed
-    a turn whose rebuilt messages the caller was already being handed.  The
-    answer is the rebuilt list either way; what changes is whether the caller
-    gets it.
+    The in-memory rebuild used to be returned with only a warning while the
+    *persisted* list — the state a restart replays — did not move, so the next
+    start came back one turn short, silently.  The caller adopts this answer as
+    its context, so returning it while the write failed leaves the two
+    disagreeing; the write is now unguarded and the failure reaches the caller
+    (DESIGN.md §5.1: the list is authoritative).  The old guard did not even buy
+    the tolerance it named — a busy or full disk raised out of `rebuild` anyway.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
@@ -682,24 +682,86 @@ async def test_a_context_list_that_cannot_be_written_does_not_fail_the_turn(
         )
     ) as client:
         ids = await _seed(client, "jack", ("one", "1"))
+        with pytest.raises(ToolError, match="database is locked"):
+            await client.call_tool(
+                "rebuild",
+                {
+                    "agent": "jack",
+                    "messages": [
+                        SYSTEM,
+                        {"role": "user", "content": "one"},
+                        {"role": "assistant", "content": "1"},
+                    ],
+                    "turn_ids": ids,
+                    "prompt": "hi",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened(
+    tmp_path, monkeypatch
+) -> None:
+    """A query with no indexable term used to be turned into no query at all.
+
+    With an `anchor` (or a `since`/`until`) beside it, that ran the recall as a
+    *period* recall — a different selection from the one the model asked for, and
+    a much larger one when the anchor named the oldest turns.  The whole recall
+    is dropped instead, which is §5.1's outcome when a rebuild cannot do its job:
+    the decision's keep-list runs on its own and the context it had stands.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    hold = [SYSTEM, {"role": "user", "content": "two"}]
+    reply = '{"recall": {"query": "***", "anchor": "oldest"}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
         answer = await client.call_tool(
             "rebuild",
-            {
-                "agent": "jack",
-                "messages": [
-                    SYSTEM,
-                    {"role": "user", "content": "one"},
-                    {"role": "assistant", "content": "1"},
-                ],
-                "turn_ids": ids,
-                "prompt": "hi",
-            },
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[1]], "prompt": "hi"},
         )
 
-    # Reaching here at all is the assertion: the write above raised, and the turn
-    # came back with the rebuilt list rather than a `ToolError`.
-    assert answer.data["changed"] is True, "the rebuild is still the answer"
-    assert answer.data["messages"] == [SYSTEM], "and it is the rebuilt one"
+    assert answer.data["changed"] is False
+    assert answer.data["messages"] == hold
+    assert answer.data["turn_ids"] == [ids[1]]
+
+
+@pytest.mark.asyncio
+async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_count(
+    tmp_path, monkeypatch
+) -> None:
+    """`except Exception` around `config.resolve` could not tell a declared-absent
+    window from a broken config.
+
+    A model the config does not have is a *failure*, not a zero: folding the two
+    together silently dropped the token cap and let a recall spend by count — the
+    overfill the cap exists to stop.  A window nobody *declared* still keeps the
+    count cap; a window that cannot be asked for is loud (DESIGN.md §10.1: a
+    weaker path is not a substitute for a missing capability).
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"recall": {"query": "one"}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        with pytest.raises(ToolError, match="no-such-provider"):
+            await client.call_tool(
+                "rebuild",
+                {
+                    "agent": "jack",
+                    "messages": [SYSTEM, {"role": "user", "content": "one"}],
+                    "turn_ids": [1],
+                    "prompt": "hi",
+                    "model": "no-such-provider/model",
+                },
+            )
 
 
 @pytest.mark.asyncio

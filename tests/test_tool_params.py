@@ -404,9 +404,9 @@ async def test_cancelling_a_background_call_hands_back_that_it_was_cancelled() -
 
     never = asyncio.Event()
 
-    async def hangs(_arguments: dict[str, Any]) -> str:
+    async def hangs(_arguments: dict[str, Any]) -> tuple[str, bool]:
         await never.wait()
-        return "never"
+        return "never", True
 
     task_id = async_tasks.schedule(
         hangs({}), call_id="call-9", tool="hangs", deliver=deliver

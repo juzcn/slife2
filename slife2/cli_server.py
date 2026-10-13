@@ -145,9 +145,14 @@ def _prepare(name: str, entry: dict[str, Any]) -> tuple[CliToolSettings | None, 
     keep, and the one whose text a `[refused]` prefix used to mark while it was
     returned as a success.
 
-    Only one refusal, and it is not a name collision: a `cli:` row is called
-    `cli:{name}`, so it cannot collide with anything — which is why this family
-    needs no `toolfamily.refusal` and the other two do.
+    **Both refusals come before the write.**  `_cli_tool` refuses an entry
+    naming no program, and the split below refuses a command line `shlex` cannot
+    take apart — which the argv runner (`DESIGN.md` §9) would meet on the way in
+    too.  A line nothing can split is a row a search finds and no call can run,
+    so it is refused here rather than written over a success.  Neither is a name
+    collision: a `cli:` row is called `cli:{name}`, so it cannot collide with
+    anything — which is why this family needs no `toolfamily.refusal` and the
+    other two do.
 
     **No `Config`, unlike the two connection families' `_prepare`s.**  Theirs
     take it because they ask `toolfamily.refusal` whether the name is one the hub
@@ -157,6 +162,17 @@ def _prepare(name: str, entry: dict[str, Any]) -> tuple[CliToolSettings | None, 
     (`_cli_tool`) needs only the entry and the name, and the write is
     `slife2.configfile`'s own.
     """
+    command = entry.get("command")
+    try:
+        # The same split `_on_path` makes, moved before the write: the entry is
+        # what the argv runner reads, and refusing an unsplittable line here is
+        # the only way the refusal lands on the call rather than a note.
+        shlex.split(command if isinstance(command, str) else "", posix=False)
+    except ValueError:
+        return None, (
+            f"`{command}` cannot be split into a command line — check for an "
+            f"unbalanced quote, or how the path is quoted"
+        )
     try:
         settings = _cli_tool(entry, name)
         configfile.upsert(SECTION, name, entry)
@@ -183,15 +199,14 @@ def _on_path(command: str) -> str:
     leaves on a word come off here.  The first word only, because
     `python -m mytool` is a program plus its arguments and the program is what
     has to exist.
+
+    **The split cannot fail here**, and there is deliberately no `try` for it:
+    `_prepare` has already refused a line `shlex` cannot take apart, so the only
+    caller that reaches this has one that splits.  The `except ValueError` this
+    used to carry answered `""` — the same silence as "the program is on PATH" —
+    for a failure that by then could not happen.
     """
-    try:
-        words = shlex.split(command, posix=False)
-    except ValueError:
-        # An unbalanced quote is a command line the argv runner will not be able
-        # to take apart either, and this runs *after* the entry has been written:
-        # raising would turn a note into a failed call.  There is nothing true to
-        # say about `PATH` here, so say nothing.
-        return ""
+    words = shlex.split(command, posix=False)
     program = words[0].strip("\"'") if words else ""
     if not program or shutil.which(program):
         return ""
@@ -330,7 +345,11 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             name: The entry to forget, from `cli_list`.
         """
         if name not in configfile.read_section(family.section):
-            return f"'{name}' is not recorded under `cli:` — see `cli_list`."
+            # **Refused by raising, for `cli_set`'s reason**: returned as
+            # ordinary text this arrives with `ok` true and reads as a removal
+            # that happened.  Nothing was written, so the call is a failure the
+            # caller can see.
+            raise ToolError(f"'{name}' is not recorded under `cli:` — see `cli_list`.")
         configfile.remove(family.section, name)
         family.forgotten(name)
         logger.info("cli_removed name=%s", name)
@@ -348,7 +367,10 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
                 catalogue, the same switch as on a server.
         """
         if name not in configfile.read_section(family.section):
-            return (
+            # The same refusal as `cli_remove`'s, and for the same reason: a
+            # switch answered as ordinary text arrives with `ok` true and reads
+            # as one that was set.
+            raise ToolError(
                 f"'{name}' is not recorded under `cli:` — `cli_set` records one, "
                 f"`cli_list` shows what is there."
             )

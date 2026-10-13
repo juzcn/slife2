@@ -540,12 +540,15 @@ def build_server(
         and keeps the count cap, rather than inventing a number — a guessed
         window is a context silently sized against a model that is not the one
         answering.
+
+        **A model the config cannot resolve is not that answer.**  A broad
+        `except` folded a `ConfigError` in with a declared-absent window, so a
+        broken config silently dropped the token cap and let a recall spend by
+        count — the overfill the cap exists to stop.  A window that cannot be
+        *asked for* is a failure, not a zero (DESIGN.md §10.1: a weaker path is
+        not a substitute for a missing capability).
         """
-        try:
-            return int(config.resolve(model)[2].context_window)
-        except Exception:  # noqa: BLE001 — an unknown model is not a failed turn
-            logger.warning("no context window for %r; sizing by count", model)
-            return 0
+        return int(config.resolve(model)[2].context_window)
 
     async def _discriminate(
         agent: str,
@@ -734,18 +737,17 @@ def build_server(
         # the user's own message from a turn that was cut off mid-flight.
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
-        # Published before the caller is told, and a failure here is not the
-        # turn's problem: the in-memory rebuild stands on its own, and the next
-        # turn publishes the list again.  What it costs is a restart that comes
-        # back one turn short — v1's trade, in the same place.  **Which is why
-        # this is guarded and not merely commented about**: as it was, the
-        # sentence described a tolerance the code did not have, so a busy or
-        # full disk raised out of `rebuild` and failed a turn whose answer the
-        # caller had already been handed.
-        try:
-            await _on_thread(store.set_context_turns, target)
-        except Exception as exc:  # noqa: BLE001 — the rebuild stands without it
-            logger.warning("context_list_not_published error=%s", exc)
+        # Published before the caller is told, and a failure here **fails the
+        # turn**.  The list is authoritative (DESIGN.md §5.1): the caller adopts
+        # this answer as its context, so returning the in-memory rebuild while
+        # the *persisted* list did not move leaves the two disagreeing, and the
+        # next start replays the stale one — a conversation that comes back one
+        # turn short, silently.  The guard that used to swallow this described a
+        # tolerance the code did not have anyway (a busy or full disk raised out
+        # of `rebuild` regardless); refusing it is the honest half, and the
+        # caller that cannot have the write is told rather than handed a context
+        # the log will not have on the next start.
+        await _on_thread(store.set_context_turns, target)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d",
             len(target),
@@ -784,13 +786,15 @@ def build_server(
         if query and not terms(query):
             # **A query with no term is not a query the store can run.**  The
             # keyword leg refuses such a thing — `"***"`, `"—"` — with
-            # `EmptyQuery`, and an exception out of here fails the whole turn:
-            # the discriminator's answer is not a caller the harness can hand a
-            # refusal back to, so the recall is dropped and the decision's other
-            # half, the keep-list, runs on its own.  `toolhub` drops the same
-            # input for the same reason.
+            # `EmptyQuery`, and the store's own contract is that an empty query
+            # reaching the full-text index is a syntax error and embeds to noise.
+            # Dropping the *query* and keeping the recall would run it as a
+            # *period* recall instead — a different selection from the one the
+            # model asked for — so the whole recall is dropped and the decision's
+            # other half, the keep-list, runs on its own, which is §5.1's outcome
+            # when a rebuild cannot do its job: keep the context it had.
             logger.info("recall_query_has_no_term")
-            query = ""
+            return []
         since = condition.get("since") or None
         until = condition.get("until") or None
         anchor = condition.get("anchor") or None

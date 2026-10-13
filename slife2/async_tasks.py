@@ -66,7 +66,6 @@ have made it stop being.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import uuid
@@ -220,13 +219,23 @@ def _prune_finished() -> None:
 
 
 def schedule(
-    coro: Awaitable[str], *, call_id: str, tool: str, deliver: Deliver | None = None
+    coro: Awaitable[tuple[str, bool]],
+    *,
+    call_id: str,
+    tool: str,
+    deliver: Deliver | None = None,
 ) -> str:
     """Start `coro` in the background and answer the id the model polls.
 
     `asyncio.create_task`, so the task is not a child of the turn that started
     it: cancellation reaches what the loop is awaiting, and the loop has stopped
     awaiting this.
+
+    **What it answers with is a pair**, `(text, ok)` — the same pair
+    `ToolRegistry.execute` answers a foreground call with.  A background task
+    stores text for the model to read, but whether that text is an answer or a
+    failure is not something a reader of the string can decide, and this
+    registry is the thing that has to decide it (see `_runner`).
     """
     task_id = uuid.uuid4().hex[:8]
     _tasks[task_id] = Task(
@@ -240,7 +249,7 @@ def schedule(
     return task_id
 
 
-async def _runner(coro: Awaitable[str], task_id: str) -> str:
+async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
     """Await one background call, then hand its result back.
 
     **The hand-back is the delivery, not a favour to `check_async`.**  A call
@@ -252,14 +261,24 @@ async def _runner(coro: Awaitable[str], task_id: str) -> str:
     system (`slife2.tools`): the text goes back, the marker says `failed`, and
     the model reads it as a call it can retry — where an exception raised into
     the conversation would have no reader at all.
+
+    **The status is the caller's answer, not a reading of its prose.**  The
+    coroutine answers `(text, ok)` — the pair a foreground call already comes
+    back as — and `ok` is what `check_async` reports.  This used to ask whether
+    the text began `"Error"`, which made a verdict out of a spelling: an answer
+    that legitimately begins "Error" was recorded `failed`, and a tool the
+    registry itself marked `ok=False` without that prefix was recorded
+    `finished` (DESIGN.md §10.1, "a failure is not a verdict").  A coroutine
+    that *raises* is the one case left, and a raise is a failure because it is
+    the only thing it can be.
     """
     try:
-        result = await coro
+        result, ok = await coro
     except Exception as exc:  # noqa: BLE001 — the conversation reads this, so it is text
-        result = f"Error: {type(exc).__name__}: {exc}"
+        result, ok = f"Error: {type(exc).__name__}: {exc}", False
     task = _tasks.get(task_id)
     if task is not None:
-        task.status = FAILED if result.startswith("Error") else FINISHED
+        task.status = FINISHED if ok else FAILED
         task.result = result
     logger.info(
         "async_task_done id=%s status=%s len=%d",
@@ -278,7 +297,9 @@ async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
     **Not raised when it cannot land.**  `deliver` answers whether it did, the
     task records that, and `check_async` offers the text to whoever asks next —
     so a hand-back that failed is a result the model can still get, rather than
-    an error with no reader (v1's arrival of last resort, kept).
+    an error with no reader (v1's arrival of last resort, kept).  The failure is
+    still *said*, at `warning` and naming the task: `delivered=False` is the
+    fact, but a fact with no reason beside it is a delivery nobody can explain.
 
     A result that *did* land is dropped here: holding it would be keeping an
     answer nobody can ask for twice, which is the mistake in the other direction
@@ -286,9 +307,13 @@ async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
     """
     if task.deliver is None:
         return
-    with contextlib.suppress(Exception):  # noqa: BLE001 - it is recorded, not raised
+    try:
         task.delivered = bool(
             await task.deliver(handed_back(task, task_id, status, body))
+        )
+    except Exception as exc:  # noqa: BLE001 — it is recorded, not raised
+        logger.warning(
+            "async task %s: the answer could not be handed back: %s", task_id, exc
         )
     if task.delivered:
         task.result = ""

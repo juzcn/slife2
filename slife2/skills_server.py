@@ -121,8 +121,13 @@ def catalogue(entries: Mapping[str, SkillSettings]) -> list[dict[str, object]]:
         # while `skill_use` refused it as switched off.
         found = skills.entry_for(skill, entries)
         supplied = dict(found.env) if found is not None else None
+        note = skills.readiness(skill, supplied)
+        # **The guard is around the read, not the check.**  `readiness` opens no
+        # file (see `skill_list`), so an `OSError` can only come from `document`
+        # — the one call here that touches one, and the only failure a row is
+        # expected to report.  A `try` wide enough to cover `readiness` would
+        # turn a failure nobody anticipated into a row that reads as unreadable.
         try:
-            note = skills.readiness(skill, supplied)
             text, status = skills.document(skill, note), "enabled"
         except OSError:
             text, status = "", "error"
@@ -277,12 +282,14 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             lines.append(f"- {skill.name} [{state}]")
             if skill.description:
                 lines.append(f"    {skill.description}")
-            try:
-                note = skills.readiness(
-                    skill, dict(settings.env) if settings is not None else None
-                )
-            except OSError as exc:
-                note = f"cannot be read: {exc}"
+            # **No `except OSError` here.**  `readiness` opens nothing: it reads
+            # `os.environ`, the skill's `skills:` entry and `shutil.which`, so an
+            # `OSError` arm could only fire for a failure nobody anticipated —
+            # and it turned that into a note line (DESIGN.md §10.1).  The guard
+            # belongs where the read is, `skills.document` in `catalogue` below.
+            note = skills.readiness(
+                skill, dict(settings.env) if settings is not None else None
+            )
             if note:
                 lines.append(f"    {note}")
         return "\n".join(lines)

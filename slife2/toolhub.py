@@ -167,7 +167,6 @@ The failure rules, all four
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 from collections.abc import (
@@ -636,12 +635,17 @@ class Catalogue:
         so this call is what makes "the least recently used tool goes" true
         rather than merely intended.
 
-        Suppressed on failure: this runs after a call that already happened, and
-        turning a bookkeeping stamp into the error a model reads would report
-        the wrong thing — the tool *did* run.
+        A failure is not the error the model reads — this runs after a call that
+        already happened, and the tool *did* run — but it is not nothing either:
+        a stamp that did not land leaves the budget evicting the wrong tool, and
+        nothing else reads this write to notice.  §10.1's rule for a bookkeeping
+        write is that it either lands or is reported, so it is logged, naming the
+        tool, rather than suppressed.
         """
-        with contextlib.suppress(Exception):
+        try:
             await self._off_loop((await self.store()).touch, name)
+        except Exception as exc:  # noqa: BLE001 — a stamp that failed is not a call that failed
+            logger.warning("the catalogue did not stamp %s as used: %s", name, exc)
 
     async def close(self) -> None:
         """Nothing to release, and deliberately still a method.
@@ -675,6 +679,13 @@ def _unpacked(text: str, ok: bool) -> tuple[str, bool]:
     return str(answer.get("text") or ""), bool(answer.get("ok"))
 
 
+#: What a source that has never been counted says where its counts go.
+#: `ToolStore.source_counts` has no row for a source with no rows at all, so a
+#: `tools` of `0` would be a count this process does not have — the absent value
+#: wearing the empty one's shape (DESIGN.md §10.1).
+NOT_COUNTED = "not counted"
+
+
 def _server_row(
     *,
     name: str,
@@ -693,7 +704,15 @@ def _server_row(
     read the same whether the answer is a plugin, an entry under `mcp:` that
     this process connects to, or a source a plugin holds on its behalf — and two
     builders of the same row is how the third one ends up missing a field.
+
+    **A source nobody has counted says so, rather than reporting zero.**  The
+    counts come from `catalogue.sources`, which has an entry only for a source
+    that has rows; one that never answered has none, and `0` there would be a
+    confident count this process does not have — the same confusion §10.1 names
+    between a value that is absent and the empty one it is spelled like.  A
+    counted source keeps its number, so a reader that compares the two still can.
     """
+    counted = counts or {}
     return {
         "name": name,
         "kind": kind,
@@ -703,8 +722,8 @@ def _server_row(
         #: source with ninety tools and none loaded is a healthy server the model
         #: has not asked anything of — and that is a different answer from a
         #: server that has stopped offering them.
-        "tools": int((counts or {}).get("tools", 0)),
-        "loaded": int((counts or {}).get("loaded", 0)),
+        "tools": counted.get("tools", NOT_COUNTED),
+        "loaded": counted.get("loaded", NOT_COUNTED),
         #: Wanted every turn: its tools start loaded and are never evicted
         #: (`autoload` in the config, or `required`, which means the same thing
         #: for our own servers).
@@ -1634,27 +1653,52 @@ async def unload_tools(
     }
 
 
+def _unload_names(found: Mapping[str, Any], key: str) -> list[str]:
+    """One name list out of a trim's answer, refusing an answer that is not one.
+
+    **A trim whose answer cannot be read is not a trim that took nothing out of
+    the list.**  The five lists are the whole of the answer, and `unloaded` is
+    the one a caller acts on: an unreadable `found` used to be rendered as the
+    same "nothing to unload" a real no-op produces, which is a verdict rather
+    than a failure (§10.1, "a failure is not a verdict").  Raising is what the
+    two callers already handle — `call_tool`'s local branch answers `ok` false,
+    and the harness's trim leaves the list alone and logs why.
+    """
+    names = found.get(key)
+    if not isinstance(names, list):
+        raise ConnectionError(
+            f"the trim's answer could not be read — {key!r} came back as {names!r}"
+        )
+    return [str(name) for name in names]
+
+
 def _unload_as_text(found: Mapping[str, Any]) -> str:
-    """What a trim did, said in a sentence — for a log line and for a person."""
-    unloaded = [str(name) for name in found.get("unloaded") or []]
+    """What a trim did, said in a sentence — for a log line and for a person.
+
+    Every list is read through `_unload_names`, so an answer this process cannot
+    read fails rather than reading as "nothing to unload: the list is within its
+    budget" — a model that lost tools and reads that stops looking (DESIGN.md
+    §10.1, "a failure is not a verdict").
+    """
+    unloaded = _unload_names(found, "unloaded")
     parts = [
         f"{len(unloaded)} tool(s) unloaded: " + ", ".join(unloaded)
         if unloaded
         else "nothing to unload: the list is within its budget"
     ]
-    refused = [str(name) for name in found.get("refused") or []]
+    refused = _unload_names(found, "refused")
     if refused:
         parts.append("refused (the system needs them): " + ", ".join(refused))
-    documents = [str(name) for name in found.get("no_load_state") or []]
+    documents = _unload_names(found, "no_load_state")
     if documents:
         parts.append(
             "not a tool to unload (a playbook or an installed command): "
             + ", ".join(documents)
         )
-    unknown = [str(name) for name in found.get("unknown") or []]
+    unknown = _unload_names(found, "unknown")
     if unknown:
         parts.append("no such tool: " + ", ".join(unknown))
-    not_loaded = [str(name) for name in found.get("not_loaded") or []]
+    not_loaded = _unload_names(found, "not_loaded")
     if not_loaded:
         parts.append("already out of the list: " + ", ".join(not_loaded))
     return "; ".join(parts)
@@ -1810,8 +1854,20 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
     "switched off" and "its server is not answering" are answers the model can
     act on, and are exactly what v1 kept rows for a failing server to be able to
     say.
+
+    **A search answer that cannot be read is not a search that found nothing.**
+    "Nothing matched" is a verdict a model acts on rather than a failure it
+    retries, so only a *readable* empty list may say it; an answer with no
+    `results` list at all is damage, and it raises (§10.1, "a failure is not a
+    verdict").  `call_tool` turns the raise into `ok` false, so the model reads
+    the failure instead of the confident negative.
     """
-    rows = found.get("results") or []
+    rows = found.get("results")
+    if not isinstance(rows, list):
+        raise ConnectionError(
+            f"tool_search could not read the catalogue's answer — `results` came "
+            f"back as {rows!r}"
+        )
     if not rows:
         # The advice this used to carry — "call tool_search with an empty query
         # to see what is installed" — is gone with the browse it named, and a
@@ -2000,9 +2056,19 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
 def _parameters(schema: str) -> dict[str, Any]:
     """A stored schema, as the parameter mapping the model's tool list takes.
 
-    Tolerant on purpose: the column holds a JSON document *or* a store's
-    sentinel for "nothing to declare", and a tool whose schema cannot be read is
-    a tool with no arguments rather than a reason to fail the whole list.
+    Tolerant on purpose, and the tolerance is a decision rather than an accident:
+    the column holds a JSON document *or* a sentinel a store chose for "nothing
+    to declare", and this process deliberately has no opinion about how absence
+    is spelled (`_row_of`).  So a value that will not parse becomes "no
+    arguments" rather than a reason to fail the whole list.
+
+    **What it costs is registered, not argued away.**  A row whose *real* schema
+    was damaged is handed to the model as a tool with no arguments, so the model
+    calls it with none and reads the tool's own error several frames from the
+    cause — the weaker path standing in for a value nobody could read (§10.1).
+    Failing the row instead would need this half to tell the sentinel from the
+    damage, which is the opinion it must not have; DESIGN.md §10.2 carries it
+    for that reason.
     """
     try:
         found = json.loads(schema)
@@ -2348,9 +2414,22 @@ def build_server(
         Nothing is added here for the hub's own tools: they are rows like
         everything else, which is the property worth having — one query, one
         naming rule, and no second list to disagree with the first.
+
+        **An answer with no tool list is a failure, not an empty list.**  A
+        catalogue whose shape this process does not know used to be served as no
+        tools at all, which is the one answer the model cannot tell from a hub
+        that has nothing — and DESIGN.md §8.6's rule is the opposite in as many
+        words: a hub that cannot read a plugin's tool list refuses to list
+        anything.  The same rule reaches a shape change here (§10.1, "a value
+        that cannot be read is not a value that is absent").
         """
         rows = found.get("tools")
-        return [_from_row(row) for row in rows] if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            raise ConnectionError(
+                f"the tool catalogue answered without a tool list — `tools` "
+                f"came back as {rows!r}"
+            )
+        return [_from_row(row) for row in rows]
 
     def begin_connecting() -> None:
         for upstream in upstreams:
@@ -2744,9 +2823,11 @@ def build_server(
             `description` it was configured with, the `error` if there is one,
             and `required` — whether slife2 starts it, which is what decides if
             its absence fails a turn or merely shortens the tool list.  A
-            plugin that offers fewer tools than it has is the normal case,
-            not a fault: the rest are its own code's, and this count is the one
-            the model sees.
+            source nobody has counted reports `"not counted"` for both counts
+            rather than `0`, because `0` would be a number this process does not
+            have (`NOT_COUNTED`).  A plugin that offers fewer tools than it has
+            is the normal case, not a fault: the rest are its own code's, and
+            this count is the one the model sees.
         """
         # Settles for the same reason `list_tools` does: this is the answer to
         # "why is my tool missing", and a server that failed to start a moment

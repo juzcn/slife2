@@ -10,6 +10,7 @@ them is ours.
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import time
 import types
@@ -41,6 +42,7 @@ from slife2.toolfamily import Family, Held
 from slife2.toolhub import (
     MAX_LOAD_NAMES,
     PLUGIN,
+    _parameters,
     _verdict,
     model_name,
 )
@@ -682,8 +684,34 @@ async def test_a_switched_off_server_is_reported_as_off() -> None:
 
     rows = {row["name"]: row for row in reported.data["servers"]}
     assert rows["nowhere"]["state"] == "off"
-    assert rows["nowhere"]["tools"] == 0, "it never answered, so it never offered"
+    assert rows["nowhere"]["tools"] == "not counted", (
+        "it never answered, so this process has no count of it"
+    )
     assert rows["nowhere"]["error"] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_uncounted_source_says_not_counted_rather_than_zero() -> None:
+    """**A count nobody has is not a count of zero.**
+
+    `servers()` reads its numbers from `catalogue.sources`, which has an entry
+    only for a source that has rows.  A source that has never answered used to
+    report `tools: 0` / `loaded: 0` — a confident zero about a fact this process
+    does not have, on the very tool a person reads when a tool is missing
+    (DESIGN.md §10.1, "a value that cannot be read is not a value that is
+    absent").  A source that *has* been counted keeps its number, so the two
+    cases stay apart.
+    """
+    answer = one_source(
+        name="nowhere", category="mcp", up=False, rows=None, transport="stdio"
+    )
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        reported = await hub.call_tool("servers", {})
+
+    rows = {row["name"]: row for row in reported.data["servers"]}
+    assert rows["nowhere"]["state"] == "connecting"
+    assert rows["nowhere"]["tools"] == "not counted"
+    assert rows["nowhere"]["loaded"] == "not counted"
 
 
 @pytest.mark.asyncio
@@ -961,6 +989,36 @@ async def test_the_budget_spares_the_tool_the_model_called(
 
 
 @pytest.mark.asyncio
+async def test_a_stamp_that_cannot_be_written_is_said_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The LRU stamp is a write, and a write that failed is not a write that
+    happened.**  `Catalogue.touch` feeds the budget's eviction order, and it is
+    written beside the call it stamps — so a suppressed failure leaves the
+    budget evicting the wrong tool with nothing anywhere to say so (DESIGN.md
+    §10.1).  The call the model made still succeeded, so this is not the model's
+    error; it is logged, naming the tool, out of band.
+    """
+
+    def broken(self: ToolStore, name: str) -> int:
+        raise RuntimeError("the catalogue file is locked")
+
+    monkeypatch.setattr(ToolStore, "touch", broken)
+    caplog.set_level(logging.WARNING, logger="slife2.toolhub")
+
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()})
+    ) as hub:
+        answer = await call(hub, "fake__echo", {"text": "hi"})
+
+    assert answer["ok"] is True, "the tool ran; a failed stamp is not its failure"
+    assert any(
+        "fake__echo" in record.getMessage() and "stamp" in record.getMessage()
+        for record in caplog.records
+    ), "the tool that was not stamped is named"
+
+
+@pytest.mark.asyncio
 async def test_loading_says_why_it_cannot() -> None:
     """A name that resolves to nothing is answered with the way to find one.
 
@@ -1216,6 +1274,51 @@ async def test_a_search_says_how_to_load_what_it_found() -> None:
 
     assert answer["text"], "a hit answers with the rows it found"
     assert "func_tool_load" in answer["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_answer_without_results_is_not_nothing_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A search answer that cannot be read is not a search that found nothing.**
+
+    "Nothing matched" is a verdict a model acts on rather than a failure it
+    retries, and an answer with no `results` key used to be rendered as exactly
+    that — a confident negative made out of damage (DESIGN.md §10.1, "a failure
+    is not a verdict").  Only a *readable* empty list may say it; anything else
+    comes back as `ok` false with the failure named.
+    """
+
+    async def no_results(self: ToolStore, **_: Any) -> dict[str, Any]:
+        return {"rows": []}
+
+    monkeypatch.setattr(ToolStore, "search", no_results)
+
+    async with Client(hub_for()) as hub:
+        answer = await call(
+            hub, "tool_search", {"keywords": ["video"], "sentences": []}
+        )
+
+    assert answer["ok"] is False, "an unreadable answer fails the call"
+    assert "Nothing matched" not in answer["text"], "it is not a verdict"
+    assert "results" in answer["text"], "and it names what was wrong"
+
+
+def test_a_schema_that_will_not_parse_is_a_tool_with_no_arguments() -> None:
+    """**The tolerance is the store's spelling of "nothing to declare", kept on
+    purpose.**  The schema column holds a JSON document *or* a sentinel this
+    process deliberately does not claim to spell (`_row_of`), so a value that
+    will not parse becomes "no arguments" rather than failing the whole list.
+
+    What that gives up is registered rather than hidden: a row whose *real*
+    schema was damaged is handed to the model as a tool with no arguments, so
+    the model reads the tool's own error several frames from the cause
+    (DESIGN.md §10.2).  Failing the row instead would need this half to tell the
+    sentinel from the damage, which is the opinion it must not have.
+    """
+    assert _parameters("n/a") == {}, "the store's sentinel is not damage"
+    assert _parameters('{"type": "object"}') == {"type": "object"}
+    assert _parameters("[1, 2]") == {}, "a schema that is not a mapping"
 
 
 @pytest.mark.asyncio
@@ -1618,6 +1721,34 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_trim_answer_without_unloaded_is_not_a_trim_that_took_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A trim whose answer cannot be read is not a trim that took nothing out.**
+
+    `_unload_as_text` read its five lists as `found.get(key) or []`, so a `found`
+    without an `unloaded` key was rendered as the same "nothing to unload: the
+    list is within its budget" a real no-op produces — a verdict a model acts on
+    rather than a failure it retries, and the worst one to be wrong about, since
+    the model has just lost tools (DESIGN.md §10.1, "a failure is not a verdict").
+    Only a readable empty list may say it; anything else raises, and the local
+    route answers `ok` false.
+    """
+
+    async def no_answer(*_: Any, **__: Any) -> dict[str, Any]:
+        return {"rows": []}
+
+    monkeypatch.setattr("slife2.toolhub.unload_tools", no_answer)
+
+    async with Client(hub_for()) as hub:
+        answer = await call(hub, "_func_tool_unload", {})
+
+    assert answer["ok"] is False, "an unreadable answer is a failure"
+    assert "within its budget" not in answer["text"], "not a verdict"
+    assert "could not be read" in answer["text"], "and it names what was wrong"
+
+
+@pytest.mark.asyncio
 async def test_a_call_reaches_the_upstream() -> None:
     async with Client(
         hub_for(connected={"fake": lambda settings: upstream_server()})
@@ -1735,7 +1866,7 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
     rows = {row["name"]: row for row in reported.data["servers"]}
     assert rows["broken"]["state"] == "failed"
     assert "no such program" in rows["broken"]["error"]
-    assert rows["broken"]["tools"] == 0, "it never listed anything"
+    assert rows["broken"]["tools"] == "not counted", "it never listed anything"
 
 
 @pytest.mark.asyncio
@@ -2123,6 +2254,26 @@ async def test_a_catalogue_that_cannot_record_fails_the_list_with_its_reason(
     assert "the embedding model is down" in reported.data["catalogue"]
     rows = {row["name"]: row for row in reported.data["servers"]}
     assert rows["context"]["error"] == "", "it answered; it is not the broken one"
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_answer_without_tools_fails_the_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A shape a hub cannot read is not a hub with no tools.**
+
+    An answer with no `tools` key used to be served as an empty tool list, which
+    is the one answer a model cannot tell from a hub that has nothing — a shape
+    change would hand it zero tools and report success.  DESIGN.md §8.6 says the
+    opposite in as many words: a hub that cannot read a plugin's tool list
+    refuses to list anything, so the list fails and names what came back
+    (§10.1, "a value that cannot be read is not a value that is absent").
+    """
+    monkeypatch.setattr(ToolStore, "injectable", lambda self, sources: {"rows": []})
+
+    async with Client(hub_for()) as hub:
+        with pytest.raises(ToolError, match="without a tool list"):
+            await hub.call_tool("list_tools", {})
 
 
 @pytest.mark.asyncio
