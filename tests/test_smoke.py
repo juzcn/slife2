@@ -213,11 +213,21 @@ def test_headless_reaches_the_driver_and_the_claim(
 
     The claim is read *from inside the run*, because that is when it is true —
     it is cleared on the way out, exactly as a window's is.
+
+    **Under a name of its own**, because the claim is a *machine-wide* lock on
+    the name rather than one scoped to the data directory: `slife2` running in
+    somebody's terminal — the ordinary case while this feature is being used —
+    holds that mutex, and a test that claimed the default name would fail as
+    `agent 'slife2' is already running` for a reason that has nothing to do with
+    what it asserts.  `tests/test_launcher.py` names its claims `alpha`, `beta`
+    and so on for exactly this.
     """
-    from slife2.config import DEFAULT_AGENT
+    from uuid import uuid4
+
     from slife2.runtime import read_claim
     from slife2.tui import app as app_module
 
+    agent = f"smoke-{uuid4().hex[:8]}"
     seen: dict[str, Any] = {}
 
     class RecordingApp:
@@ -229,14 +239,16 @@ def test_headless_reaches_the_driver_and_the_claim(
 
         def run(self, *, headless: bool = False) -> None:
             seen["ran"] = headless
-            seen["claim"] = read_claim(DEFAULT_AGENT)
+            seen["claim"] = read_claim(agent)
 
     monkeypatch.setattr(slife2, "_ensure", lambda config, config_path: 0)
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
     # `--keep-servers`, so the last-instance-out take-down does not run against
     # a data directory with nothing in it.
-    code = main(["--data-dir", str(tmp_path), "--headless", "--keep-servers"])
+    code = main(
+        ["--data-dir", str(tmp_path), "--agent", agent, "--headless", "--keep-servers"]
+    )
 
     assert code == 0
     assert seen["ran"] is True, "the driver was not told to write nothing"

@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -375,13 +376,33 @@ async def test_a_call_that_does_not_say_whose_schedule_it_is_is_refused() -> Non
 
 
 async def test_a_task_is_written_read_back_and_listed() -> None:
+    """The fire is recomputed on the way out, and read in the reader's own zone.
+
+    `next_run` is a fact about the expression and the clock rather than about
+    anything this system wrote down, so it is computed when the task is read —
+    which is what makes it right after an edit rather than stale.
+
+    **And it goes out through `slife2.clock.at`**, like every stamp this system
+    hands to a person: local time with an explicit offset.  So the offset here is
+    *this machine's*, and asserting `+08:00` was asserting the runner's clock —
+    it passed on a machine set to it and failed on the other three, which is the
+    failure `tests/test_timeutil.py` writes down for the same reason.  What every
+    timezone shares is the fire itself, which is also the half worth holding:
+    `timezone: Asia/Shanghai` is the claim that `0 9 * * *` fires at nine in the
+    morning *there*, and that is what this asserts — without naming an offset the
+    machine is not obliged to have.
+    """
     async with Client(build()) as client:
         written = await write(client, cron="0 9 * * *", timezone="Asia/Shanghai")
         assert written["cron"] == "0 9 * * *"
         assert written["enabled"] is True
-        # Computed from the expression rather than stored, so it is right the
-        # moment it is read.
-        assert written["next_run"].endswith("09:00:00+08:00")
+
+        fire = datetime.fromisoformat(written["next_run"])
+        assert fire.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M") == "09:00"
+        # The other half of the same rule, and the half that says *which* zone
+        # the string came back in: the offset it carries is this machine's for
+        # that instant, compared against the machine rather than named.
+        assert fire.utcoffset() == fire.astimezone().utcoffset()
 
         listed = await ask(client, SCHEDULE_LIST)
         assert [row["name"] for row in listed["tasks"]] == ["daily"]
@@ -760,16 +781,27 @@ async def test_a_task_the_peer_no_longer_holds_closes_the_run(tasks: Tasks) -> N
 
 async def test_the_poll_asks_after_the_task_has_ended(tasks: Tasks) -> None:
     """Both ends of a run's life in one pass: the clock's fires, then the asking
-    about what is in flight."""
+    about what is in flight.
+
+    **Asserted on the run `run_now` started, not on the newest one**, and that is
+    a flake rather than a preference.  The task here fires `EVERY_MINUTE` and this
+    is the one poll in the file that asks with the *real* clock, so a pass that
+    straddles a minute boundary opens a second run behind the one under test:
+    `newest` then answers with a row nothing has reported on yet and the
+    assertion fails, about once in a few hundred runs, for a reason that has
+    nothing to do with what is being tested.  Naming the run makes the extra one
+    harmless — which is also the rule the module docstring gives: ask a question
+    about the moment you chose.
+    """
     async with Client(build(tasks=tasks)) as client:
         await write(client)
-        await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        started = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
     tasks.status = TASK_FINISHED
 
     did = await poll_once(default_config(), tasks_client=tasks.client)
 
     assert any(line.endswith("closed") for line in did)
-    run = ledger().newest("daily")
+    run = ledger().run("daily", started["due_at"])
     assert run is not None and run.status == RAN
 
 
