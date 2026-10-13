@@ -1,5 +1,5 @@
 """The broker: probed at the configured address, started if it is not there,
-and **fatal if it still is not**.
+**fatal if it still is not**, and stopped when the stack that started it goes.
 
 This is the one place this port departs from v1 on purpose, and the departure is
 the operator's call rather than a discovery.  v1's rule was that slife "does NOT
@@ -9,6 +9,18 @@ a machine whose config says `a2a:` has said it wants the mesh, so a missing brok
 is a missing dependency rather than a preference — the plugin brings one up, and a
 broker that will not serve is a start that fails loudly instead of an `a2a_*` tool
 surface quietly attached to nothing.
+
+**And it is stopped by the take-down, because otherwise nothing ever would.**  The
+first version of this left it running — "a broker is a machine's, not a run's" —
+and what that produced in practice was a live mosquitto whose parent process had
+died: an orphan that `slife2 down` did not know about, at a port the next start
+would then find "already listening" and adopt without owning.  So a broker is
+started by `ensure` **and recorded** (`BROKER_NAME`, at the broker's own
+`mqtt://` address), and `stop` below reads that record — which is what makes it
+stoppable *and* what keeps it out of the take-down when it is somebody else's: no
+record, no signalling.  The two halves live in this module because the policy
+about whose broker it is (local, concrete address, started by us) is the same
+question in both directions.
 
 **A hard failure is the launcher's, and it is the right one.**  `slife2` starts
 every plugin together and refuses to start at all if one of them will not come
@@ -41,13 +53,29 @@ from pathlib import Path
 import slife2.timeouts as _T
 from slife2.config import A2ASettings
 from slife2.paths import runtime_dir
-from slife2.runtime import spawn, tail_log, tcp_listening
+from slife2.runtime import (
+    ServerRecord,
+    clear_record,
+    pid_alive,
+    read_record,
+    same_process,
+    spawn,
+    tail_log,
+    tcp_listening,
+    terminate,
+    write_record,
+)
 
 logger = logging.getLogger(__name__)
 
 #: The broker binary, and the only provider this build has
 #: (`A2ASettings.provider` refuses anything else at config load).
 MOSQUITTO = "mosquitto"
+
+#: What the broker is called in the records and in what `stop` reports — the
+#: name of a *daemon*, not of the plugin that starts it, because `slife2 down`
+#: says this word to somebody deciding whether the machine is clean.
+BROKER_NAME = "a2a-broker"
 
 #: The hosts `broker.host` may name and still be *this* machine at one address —
 #: the only ones a broker is started for.  **Deliberately without the wildcards**
@@ -219,6 +247,22 @@ def ensure(
         config,
     )
     process = start([binary, "-c", str(config)], url=url)
+    # **The record is what makes the broker stoppable, and it is written here
+    # because this is the only moment anything knows the pid.**  It is the same
+    # file every other daemon writes (`runtime.ServerRecord`), keyed by the
+    # broker's own `mqtt://` address, so `stop` can prove the process is the one
+    # *this machine's slife2* started rather than something at that pid later —
+    # and so a broker slife2 did **not** start (a system service, one somebody
+    # ran by hand) has no record and is never signalled.
+    write_record(
+        ServerRecord.now(
+            name=BROKER_NAME,
+            url=url,
+            pid=process.pid,
+            config=str(config),
+            version="",
+        )
+    )
 
     # The registry is read *here*, not in the signature: a def-time default
     # would capture the value at import and ignore a patch, which is the rule
@@ -248,3 +292,58 @@ def ensure(
                 f"{ready_seconds:.0f}s\n{tail_log(url)}".rstrip()
             )
         time.sleep(_T.timeouts.pacing.broker_poll)
+
+
+def stop(
+    settings: A2ASettings,
+    *,
+    kill: Callable[[int], bool] = terminate,
+    listening: Callable[[str, int], bool] | None = None,
+) -> str:
+    """Stop the broker **this machine's slife2 started**, and say what happened.
+
+    **The record is the whole of the permission.**  `ensure` writes one when it
+    starts a broker and nothing else ever does, so a broker with no record is
+    somebody else's — a system service, one an operator ran, one belonging to a
+    data directory this config does not name — and it is left alone.  A record
+    whose pid is gone, or whose pid has been reused by something that is not the
+    process we started, is the same answer for `slife2.runtime.terminate`'s
+    reason: killing an innocent process is a much worse failure than leaving a
+    daemon running.
+
+    **This is the other half of `ensure`, and the shape is the launcher's.**
+    Every other daemon here is stopped by the record its start wrote
+    (`slife2.launcher.stop`), and until this existed the broker was stopped only
+    as a *side effect* of killing the plugin that spawned it — the tree kill
+    reaching a child.  That works for a broker whose parent is still the plugin
+    and leaks for every other case: a plugin restarted after a crash leaves the
+    broker orphaned, and an orphan is a process nobody will ever stop.
+
+    Returns the sentence `slife2` prints, like `ensure`'s — the two are the
+    halves of one story and read the same way in a terminal — or **`""` when
+    there is nothing to say**: no record and nothing listening means this
+    machine has no broker at all, and a take-down that announced it would be
+    reporting the absence of a daemon nobody asked for.
+    """
+    url = log_url(settings)
+    record = read_record(url)
+    if record is None:
+        probe = listening or _probe
+        if not probe(settings.broker_host, settings.broker_port):
+            return ""
+        return "not started by slife2; left alone"
+
+    if not same_process(record):
+        clear_record(url)
+        # Two situations, and they are different sentences: a pid that is gone
+        # (a machine rebooted, a broker that exited on its own) and a pid that
+        # now belongs to somebody else — which is what the start token is for.
+        why = "the process is gone" if not pid_alive(record.pid) else "pid reused"
+        return f"the broker at {settings.address} is no longer pid {record.pid} ({why})"
+
+    gone = kill(record.pid)
+    clear_record(url)
+    if not gone:
+        return f"pid {record.pid} did not exit"
+    logger.info("a2a_broker_stopped address=%s pid=%d", settings.address, record.pid)
+    return f"stopped {MOSQUITTO} on {settings.address}"

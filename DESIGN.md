@@ -257,6 +257,32 @@ Two things follow, and both are the shape rather than an implementation detail:
   is handed over, down when the reply goes out — because that is a courtesy owed
   to somebody holding a phone, not a decision about the conversation.
 
+**And the window is told about the link itself, in the one vocabulary a
+channel's arrival is spelled in.**  A login coming up, and a login going away,
+are the same news as a peer arriving on the mesh (§1.8) — something this
+conversation can now reach, and then cannot — so they are drawn the same way:
+`⚡ Wechat online`, `✗ Wechat offline`, in the same bracket as `[restored 3
+turns]`, as a note rather than a turn.  **Both channels' lines come from one
+place** (`slife2.tui.notes`), so the shared shape is code rather than a
+resemblance a later edit can break; what each channel supplies is the name
+(`jill`, `Wechat`).
+
+What is said is the *transition* and nothing else, and the two halves of that
+are both deliberate.  The announcement rides the poll loop — a token the far end
+refused ends the loop, and its last act is to say so, which is how a link that
+dies on its own reaches a window nobody is asking anything of — and `logout`
+says it where somebody asked for it, since it cancels that loop where it stands.
+A link that was **never** up produces no line at all: a cold absence is not an
+event, which is the rule §1.8 states about a cold retained card.  **And neither
+does a login picked up at start-up**: `_resume` adopts a saved session with the
+state already marked as known, so a link that was up before the window opened is
+not the window's news — what a window shows is what happened while somebody was
+watching, which is why a scan landing does say so and a process starting does
+not.  And a window is
+not where the *reasons* are told apart — "no login saved", "waiting for a scan",
+"connected but not answering" are three different pieces of advice — so those
+stay in `wechat_check_status`, which is where a model asks.
+
 **The prompt carries its own addressing, because the turn's record cannot.**
 `channel` says `wechat` and nothing more, and answering needs the peer's id and
 the conversation's `context_token` — so the message is prefixed
@@ -1187,6 +1213,20 @@ broker is the same hard failure with no attempt made and a message saying which
 of the two it was.  The config it hands mosquitto is not decoration — from
 mosquitto 2.0 a bare `-p` version binds, listens, and then refuses every
 anonymous client, which would arrive as a connect timeout naming nothing.
+
+**And the take-down stops it, which is the other half of starting it.**  The
+broker is the one daemon here the launcher does not launch — a native binary,
+with no module and no MCP identity to check — so it is not in `specs` and
+`launcher.stop` never sees it; what it has instead is a **record**, written by
+`ensure` at the moment it spawns one, and `slife2.a2a.broker.stop` reads exactly
+that record and nothing else.  So the last instance out (or `slife2 down`) takes
+mosquitto with it, and a broker *slife2 did not start* — a system service, an
+operator's own, one belonging to another data directory — is never signalled,
+because there is no record to prove it is ours.  This replaced "a broker is a
+machine's, not a run's", and the measurement that replaced it is what an orphan
+looks like: a plugin killed rather than stopped leaves mosquitto alive with no
+parent and no record, at a port the next start adopts as "already listening"
+while owning nothing.
 
 **And "local" means loopback, which is a third case rather than a detail.**  A
 wildcard `broker.host` — `0.0.0.0`, `::`, or the empty string — is not this

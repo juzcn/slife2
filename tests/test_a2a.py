@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +80,8 @@ from slife2.a2a.task_store import TaskStore
 from slife2.audience import client_meta, for_the_model
 from slife2.config import A2ASettings, default_config
 from slife2.paths import a2a_inbound_path, a2a_inbound_paths
+from slife2.runtime import read_record
+from slife2.tui.client import MCPMeshClient
 
 pytestmark = pytest.mark.unit
 
@@ -420,6 +423,9 @@ def test_a_missing_broker_on_this_machine_is_started() -> None:
 
     class Child:
         returncode = None
+        #: `ensure` records what it spawned, so a stand-in for `Popen` needs the
+        #: one field that record is made of.
+        pid = os.getpid()
 
         def poll(self) -> None:
             return None
@@ -502,6 +508,7 @@ def test_a_broker_that_exits_at_once_is_reported_with_its_own_log() -> None:
 
     class Dead:
         returncode = 1
+        pid = os.getpid()
 
         def poll(self) -> int:
             return 1
@@ -518,6 +525,7 @@ def test_a_broker_that_exits_at_once_is_reported_with_its_own_log() -> None:
 def test_a_broker_that_never_answers_is_given_a_deadline() -> None:
     class Alive:
         returncode = None
+        pid = os.getpid()
 
         def poll(self) -> None:
             return None
@@ -530,6 +538,84 @@ def test_a_broker_that_never_answers_is_given_a_deadline() -> None:
             start=lambda argv, *, url: Alive(),
             ready_seconds=0.0,
         )
+
+
+# ── and stopped, which is the other half of the same record ─────────────────
+
+
+def test_the_broker_a_start_brought_up_is_stopped_by_the_record_it_wrote() -> None:
+    """`ensure` writes what it started, and `stop` reads exactly that.
+
+    The record is the *permission*: it is written when — and only when — this
+    machine's slife2 starts a broker, so a take-down can tell the one it owns
+    from a system service at the same address, and from a pid that now belongs to
+    somebody else.
+    """
+    killed: list[int] = []
+    answers = iter([False, True])
+
+    class Child:
+        returncode = None
+        #: *This* process, because the record has to be provable: `same_process`
+        #: refuses a pid whose start token cannot be read, which is exactly what
+        #: a made-up number is — and that refusal is the rule this test's
+        #: `stop` is checking the other half of.
+        pid = os.getpid()
+
+        def poll(self) -> None:
+            return None
+
+    broker.ensure(
+        settings(),
+        listening=lambda host, port: next(answers),
+        which=lambda name: "/usr/bin/mosquitto",
+        start=lambda argv, *, url: Child(),
+    )
+    wrote = read_record(broker.log_url(settings()))
+
+    said = broker.stop(settings(), kill=lambda pid: killed.append(pid) or True)
+
+    assert wrote is not None and wrote.pid == os.getpid()
+    assert wrote.name == broker.BROKER_NAME
+    assert said == "stopped mosquitto on localhost:1883"
+    assert killed == [os.getpid()]
+    # And the record goes with it, so a second take-down has nothing to act on.
+    assert read_record(broker.log_url(settings())) is None
+
+
+def test_a_broker_that_was_not_ours_is_never_stopped() -> None:
+    """No record, and something *is* listening: somebody else's broker.
+
+    Which is the case this rule exists for — a system mosquitto, one an operator
+    ran, one belonging to another data directory — and the answer is to say so
+    and signal nothing.  The probe is stubbed because what is at that address on
+    the machine running this test is none of the test's business: with the real
+    one it passed on a machine that happened to have a broker up and failed on
+    one that did not, which is the definition of a test that proves nothing.
+    """
+    killed: list[int] = []
+    said = broker.stop(
+        settings(),
+        kill=lambda pid: killed.append(pid) or True,
+        listening=lambda host, port: True,
+    )
+
+    assert said == "not started by slife2; left alone"
+    assert killed == []
+
+
+def test_a_machine_with_no_broker_has_nothing_to_report() -> None:
+    """`""`, so the take-down says nothing about a daemon nobody asked for.
+
+    The probe is stubbed because this machine *does* have mosquitto installed
+    and a test that depended on that would be a test of the machine.
+    """
+    said = broker.stop(
+        settings(),
+        kill=lambda pid: False,
+        listening=lambda host, port: False,
+    )
+    assert said == ""
 
 
 # ── the peers, as recorders ─────────────────────────────────────────────────
@@ -1227,10 +1313,20 @@ async def served(mcp: FastMCP) -> AsyncIterator[str]:
         sock.close()
 
 
-async def until(predicate: Callable[[], bool], what: str) -> None:
-    """Wait for *predicate*, or fail saying what never happened."""
+async def until(
+    predicate: Callable[[], bool], what: str, *, seconds: float = 5.0
+) -> None:
+    """Wait for *predicate*, or fail saying what never happened.
+
+    `seconds` is the caller's because the budgets here are not the same kind of
+    number.  Waiting for the plugin to *draw* something is waiting for a call
+    this process just made, so it is prompt; waiting for it to notice a window
+    that has gone is waiting for the transport to surface a failed write, which
+    is the socket's timing and not the plugin's — see the one caller that asks
+    for more.
+    """
     deadline = (  # timeouts: the value this test is built around, not a budget
-        asyncio.get_running_loop().time() + 5.0
+        asyncio.get_running_loop().time() + seconds
     )  # timeouts: the value this test is built around, not a budget
     while not predicate():
         if asyncio.get_running_loop().time() > deadline:
@@ -1239,21 +1335,22 @@ async def until(predicate: Callable[[], bool], what: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_join_puts_the_agent_on_the_mesh_and_draws_its_own_line(
+async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
     monkeypatch: pytest.MonkeyPatch, window: Window
 ) -> None:
-    """Joined on entry, and held: the call *is* the membership.
+    """Joined on entry and held — and **not** announced to the agent's own window.
 
-    Nothing goes offline here, because nothing has gone away — what this pins is
-    the other half, and it is the half a window cannot see for itself.  The
-    `⚡ jack online` line is drawn by the *plugin*, from the same
-    `format_presence_line` a peer's arrival wears, because a call that succeeds
-    by not returning leaves the window with nothing to draw it from.
+    Two halves of one decision.  The call *is* the membership: it returns only
+    when the window goes away, so nothing in this test ends it, and the mesh
+    stays up throughout.  And nobody is *told* about it: a window showing jack is
+    jack, so `⚡ jack online` in it would be the harness telling somebody what
+    they already are — the same reason the mesh's own discovery path has never
+    announced our own card.  What a window shows is its peers.
 
     The real connect is replaced — a unit test has no broker — and what is under
-    test is the lifetime and the line, not MQTT.
+    test is the lifetime, not MQTT.
     """
-    left = _a_mesh_that_records_leaving(monkeypatch)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
     config = default_config()
     object.__setattr__(config, "a2a", settings())
     mcp = build_server(
@@ -1262,14 +1359,14 @@ async def test_join_puts_the_agent_on_the_mesh_and_draws_its_own_line(
 
     async with Client(mcp) as client:
         holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
-        await until(lambda: bool(window.noted), "the join drew no line")
-        assert not left, "the mesh went down while the window was still holding it"
+        await until(lambda: joined == [AGENT], "the join never reached the mesh")
+        assert left == [], "the mesh went down while the window was still holding it"
         holding.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await holding
 
-    assert window.noted == [{"agent": AGENT, "text": f"⚡ {AGENT} online"}]
-    assert window.handed == [], "the agent's own line is a note, not a turn"
+    assert window.noted == [], "the agent's own arrival is not news to itself"
+    assert window.handed == []
 
 
 @pytest.mark.asyncio
@@ -1277,17 +1374,24 @@ async def test_join_puts_the_agent_on_the_mesh_and_draws_its_own_line(
 async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     monkeypatch: pytest.MonkeyPatch, window: Window
 ) -> None:
-    """A departure with nothing sent: the stream ends, the mesh goes down.
+    """A departure with nothing sent: the window closes, the mesh goes down.
 
-    This is a property of the *wire* and cannot be shown in process — closing a
-    response stream is what cancels the handler behind it, which is the only
-    `leave` this system has — so it is served on a real port, like
-    `tests/test_tui_control.py`'s proof for the window's own inbox.  What is
-    asserted is the effect and it is asserted *while the server is still up*: the
-    teardown below would disconnect every mesh anyway, so a check made after it
-    would pass for the wrong reason.
+    This is a property of the *wire* and cannot be shown in process — the end of
+    the call the window was holding is what ends the membership, and there is no
+    `leave` for it to send — so it is served on a real port, like
+    `tests/test_tui_control.py`'s proof for the window's own inbox.
+
+    **And it is driven through the real client** (`MCPMeshClient`, the three
+    lines `SlifeApp._hold_mesh` runs), because that is the half that has to be
+    right: a hand-rolled `call_tool` was tried first and its teardown left the
+    stream open, which made this test assert a departure that had not happened
+    yet.  A test of a held call has to hold it the way the caller does.
+
+    What is asserted is the effect, *while the server is still up*: the teardown
+    below would disconnect every mesh anyway, so a check made after it would pass
+    for the wrong reason.
     """
-    left = _a_mesh_that_records_leaving(monkeypatch)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
     # The cadence, not the rule: the plugin's keepalive is what makes a closed
     # stream noticeable at all (`_hold_open`), and the real twenty-five seconds
     # would be a test that waits for them.
@@ -1299,54 +1403,64 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     )
 
     async with served(mcp) as url:
-        window_client = Client(url)
-        await window_client.__aenter__()
-        task = asyncio.create_task(
-            window_client.call_tool(
-                JOIN,
-                {"agent": AGENT},
-                # What the real window sends (`MCPMeshClient.hold`): the token
-                # the keepalive is reported on, which is what makes the write
-                # that notices this window going away possible at all.
-                progress_handler=lambda progress, total, message: asyncio.sleep(0),
-                timeout=None,
-            )
-        )
+        mesh = MCPMeshClient(url, agent=AGENT)
+        await mesh.connect()
+        holding = asyncio.create_task(mesh.hold())
         try:
-            await until(
-                lambda: bool(window.noted), "the join drew no line over the wire"
-            )
+            await until(lambda: joined == [AGENT], "the join never reached the mesh")
             assert left == [], "offline before the window went anywhere"
 
-            task.cancel()
+            # The window goes away: the call it was holding is cancelled, and the
+            # client that held it is closed — which is `SlifeApp.on_unmount`'s
+            # two lines, and the whole of what a departure is.
+            holding.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-            await window_client.__aexit__(None, None, None)
+                await holding
+            await mesh.close()
 
-            await until(lambda: left == [AGENT], "the agent stayed on the mesh")
+            await until(
+                lambda: left == [AGENT],
+                "the agent stayed on the mesh — a window that closed was never "
+                "noticed, which is the departure this test exists to prove",
+                # Not five seconds: the plugin's promise is *one keepalive*
+                # (mocked to nothing above, from twenty-five seconds), and the
+                # slack is for the machine running the whole suite at once.
+                seconds=30.0,
+            )
         finally:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                holding.cancel()
+                await holding
             with contextlib.suppress(Exception):
-                await window_client.__aexit__(None, None, None)
+                await mesh.close()
 
 
-def _a_mesh_that_records_leaving(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Replace the mesh's two connection ends, and report who left.
+def _a_mesh_that_records_its_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], list[str]]:
+    """Replace the mesh's two connection ends, and report who joined and left.
 
     `A2AMesh`'s own lifetime is not what any of this tests: what is under test is
-    *when* the plugin decides to take an agent off the mesh, which is the same
-    decision with a broker and without one.
+    *when* the plugin decides to put an agent on the mesh and take it off, which
+    is the same decision with a broker and without one.
+
+    `joined` is the only signal these tests have that a `join` call got as far as
+    the mesh, and it is the honest one: nothing is *drawn* for the agent's own
+    arrival (a window showing jack is jack), so there is no line to wait on.
     """
+    joined: list[str] = []
     left: list[str] = []
 
     async def connect(self: Any) -> None:
         self._connected = True
+        joined.append(self.agent_name)
 
     async def disconnect(self: Any) -> None:
         left.append(self.agent_name)
 
     monkeypatch.setattr(A2AMesh, "connect", connect)
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
-    return left
+    return joined, left
 
 
 def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() -> None:

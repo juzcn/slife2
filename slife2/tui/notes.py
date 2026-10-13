@@ -14,16 +14,22 @@ applies them, so the shape is a property of the widget rather than a convention
 every caller has to remember — a line that skipped them would be a line nobody
 could tell was the harness's.  What this module owns is the words *inside* them.
 
-**A line that arrives from a plugin is not spelled here either.**  The A2A
-plugin's presence lines (`⚡ jill online`) are written by the mesh that saw the
-peer arrive (`slife2.a2a.mesh.format_presence_line`), for the same reason: the
-producer is the only party that knows the fact.  What the window adds to those
-is the bracket, and that is `add_note`'s.
+**Who a channel saw arrive is the producer's; how an arrival is spelled is not.**
+`⚡ jill online` comes from the peer's name, which only the mesh that saw the card
+has — and `⚡ wechat online`, which is the same sentence about a *link* rather
+than a peer.  Both go through the two functions below, so a channel cannot
+announce itself in a vocabulary of its own: what it supplies is the name.
 """
 
 from __future__ import annotations
 
 from slife2.tui.theme import GLYPHS
+
+#: The two glyphs every arrival and departure wears, named here because two
+#: channels write these lines (`slife2.a2a.mesh`, `slife2.wechat`) and a glyph
+#: spelled twice is a glyph that drifts once.
+ARRIVED = "⚡"
+GONE = GLYPHS["failed"]
 
 
 def as_turns(count: int) -> str:
@@ -58,4 +64,20 @@ def not_on_the_mesh(reason: str) -> str:
     refused to admit an agent has no way to say so to that agent's window, and a
     window that waited for one would report a successful join as a silence.
     """
-    return f"{GLYPHS['failed']} not on the mesh: {reason}"
+    return f"{GONE} not on the mesh: {reason}"
+
+
+def online(name: str) -> str:
+    """`⚡ jill online` — a peer, or a channel's link, is up.
+
+    `name` is whatever arrived: a peer's agent name (`slife2.a2a.mesh`) or the
+    channel whose link came up (`slife2.wechat`, which says `wechat`).  One
+    sentence for both, because to the person reading a transcript they are the
+    same news — something this conversation can now reach.
+    """
+    return f"{ARRIVED} {name} online"
+
+
+def offline(name: str) -> str:
+    """`✗ jill offline` — and nothing reaches this conversation any more."""
+    return f"{GONE} {name} offline"

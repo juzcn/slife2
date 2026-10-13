@@ -2505,10 +2505,10 @@ async def test_a_pushed_note_is_drawn_and_does_not_wait_for_a_turn() -> None:
 async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> None:
     """The window is the enrollment: joining is the call, leaving is its cancel.
 
-    Nothing is asserted about a line here, and that is the design rather than an
-    omission: the `⚡ jack online` line is the *plugin's* (`format_presence_line`,
-    drawn through the same `note` tool as a peer's arrival), because a call that
-    succeeds by not returning gives this side nothing to draw it from.
+    **Nothing is drawn for it**, here or at the other end: a window showing jack
+    is jack, so `⚡ jack online` in it would be the harness telling somebody what
+    they already are.  What this asserts is the lifetime — the call is held while
+    the window is up, and its cancellation is the departure.
     """
     client = FakeAgentClient(answering("ok"))
     window = FakeWindowClient()
@@ -2524,7 +2524,7 @@ async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> Non
     )
     async with app.run_test(size=SIZE) as pilot:
         assert await settled(pilot, mesh.holding.is_set), "never joined the mesh"
-        assert shown(app) == "", "the plugin draws the online line, not the window"
+        assert shown(app) == "", "arriving on the mesh is not news to yourself"
 
     # The window is gone, so the call it held is gone with it — which is what
     # publishes the offline card, and why there is no `leave` to send.

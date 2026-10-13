@@ -82,7 +82,6 @@ from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.mesh import (
     A2AMesh,
     AgentCard,
-    AgentName,
     format_presence_line,
     safe_name,
 )
@@ -804,10 +803,12 @@ def build_server(
         moment they leave.  An `a2a_*` call still joins its agent lazily, for as
         long as the task it started may be answered.
 
-        The agent's own line is the first thing anybody sees of it
-        (`format_presence_line`), drawn in the window that is joining — the same
-        words, from the same function, as the line a peer's arrival wears in that
-        window.  A window that cannot be told is not a reason to fail the join.
+        **Nobody is told that the agent itself arrived.**  A window showing *jack*
+        is jack; a line reading `⚡ jack online` in it is the harness telling
+        somebody what they already are — and the mesh's own discovery path has
+        never announced it for the same reason (`_handle_discovery` skips our own
+        topic).  What a window shows is its *peers* coming and going, which is
+        the one thing it cannot otherwise know.
 
         Raises:
             ToolError: If the mesh refused the agent — the refusal, verbatim: the
@@ -816,18 +817,6 @@ def build_server(
                 per attempt: the reason does not change between them.
         """
         session = await connected(agent, WINDOW)
-        # Announced before the hold, so the line is drawn while the window is
-        # certainly still there — and it must not be what keeps an agent off the
-        # mesh, so a line nobody could draw is logged rather than raised.
-        line = format_presence_line(
-            AgentCard(agent_name=AgentName(agent), status="online"), "online"
-        )
-        if line is not None:
-            try:
-                await note_to_window(live(), agent, line, client=window_client)
-            except Exception as exc:  # noqa: BLE001 - the mesh is up either way
-                logger.debug("a2a_join_line_failed agent=%s err=%s", agent, exc)
-
         try:
             await _hold_open(ctx)
         finally:

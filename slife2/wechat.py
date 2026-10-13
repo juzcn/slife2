@@ -82,10 +82,11 @@ import slife2.timeouts as _T
 from slife2 import ilink
 from slife2.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.config import Config
-from slife2.handover import to_window
+from slife2.handover import note_to_window, to_window
 from slife2.ilink import Http, IlinkClient
 from slife2.mcp_server import house_server, serve_plugin
 from slife2.paths import agent_dir, agents_dir
+from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,11 @@ class Session:
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
         self.qr_error: str = ""
         self.qr_task: asyncio.Task[None] | None = None
+        #: The link state a window has been told about, so a transition is
+        #: announced once and a state that has not moved is announced not at
+        #: all (`_announce`).  `""` is "nobody has been told yet", which is also
+        #: what says a link that is already down is not news — see `_announce`.
+        self.announced: str = ""
 
     @property
     def polling(self) -> bool:
@@ -405,6 +411,41 @@ def clear_session(agent: str) -> bool:
 #: seam because a test drives the whole loop without an agent server anywhere.
 Deliver = Callable[[str, str], Awaitable[None]]
 
+#: How this plugin tells a window about its own link: `(agent, line)`, drawing a
+#: harness line rather than running a turn (`slife2.tui.control`'s `note`).  A
+#: seam for `Deliver`'s reason — the whole point of these tests is that no window
+#: and no server is anywhere — and it is a second seam rather than a use of the
+#: first because the two are different things: a message the person reads as
+#: their own, and a line the harness has to say.
+Note = Callable[[str, str], Awaitable[None]]
+
+
+#: The two states a login is in, as a window is told them.  Derived from the
+#: client rather than stored (`_announce`), so there is one answer to "is the
+#: link up" and a tool call cannot leave a stale one behind.
+LINK_ONLINE = "online"
+LINK_OFFLINE = "offline"
+
+
+def format_link_line(state: str) -> str:
+    """The one line a link transition is worth, in the harness's vocabulary.
+
+    **`Wechat` is the name here**, where a peer's line carries the peer's own —
+    a channel coming up is the same news as an agent coming up, so
+    `slife2.tui.notes` spells both and this cannot drift from `⚡ jill online`.
+    The capital is the bubble's (`slife2.tui.widgets.channel_prefix`), not the
+    config key's: `Wechat> ` is what this channel is called on screen, and a
+    line about the same channel should call it the same thing.
+
+    The state is one of :data:`LINK_ONLINE` / :data:`LINK_OFFLINE` and nothing
+    finer.  A window is not where "waiting for a scan", "no login saved" and
+    "connected but not answering" are told apart: those are three different
+    pieces of advice, and `wechat_check_status` is where a model asks for them.
+    """
+    if state == LINK_ONLINE:
+        return notes.online("Wechat")
+    return notes.offline("Wechat")
+
 
 class Wechat:
     """Every agent's login, and the loop that watches each one."""
@@ -415,11 +456,13 @@ class Wechat:
         *,
         http: Http = ilink.request,
         deliver: Deliver | None = None,
+        note: Note | None = None,
         directory: Path | None = None,
     ) -> None:
         self._config = config
         self._http = http
         self._deliver = deliver or self._ask_agent
+        self._note = note or self._note_window
         self._agents = directory or agents_dir()
         self._sessions: dict[str, Session] = {}
 
@@ -598,11 +641,72 @@ class Wechat:
         if owner:
             client.last_contact = {"from_id": owner, "context_token": ""}
         session.heard_from = False
+        # **Known, and not worth saying.**  A saved login coming back is this
+        # *process* starting, not the link changing, and the poll loop it is
+        # about to start would otherwise announce it in every window of every
+        # agent that has one (`_announce`).  Marking it here is what makes the
+        # difference between "it came up while you were watching" and "it was
+        # already up when you looked" — the second is not news.
+        session.announced = LINK_ONLINE
         self.watch(session)
         logger.info("wechat %s: login resumed", session.agent)
         return True
 
     # ── Polling ──────────────────────────────────────────────────────────
+
+    async def _note_window(self, agent: str, line: str) -> None:
+        """Draw *line* in the window showing *agent*, and nowhere else.
+
+        The default behind the `note` seam, and the exact call the A2A plugin
+        makes for a peer's arrival: the window first, and **no fallback** — a
+        line about a moment has nowhere else to go, and running a turn for one
+        would spend a model call telling somebody a fact they cannot act on
+        (`slife2.handover.note_to_window`).
+        """
+        await note_to_window(self._config, agent, line)
+
+    async def _announce(self, session: Session) -> None:
+        """Tell the window showing this agent what changed about the link.
+
+        **Only a change, and never a change into *offline* from nothing.**  Both
+        halves matter: a link that is up produces one line however many polls
+        pass under it, and an agent whose WeChat was never connected — or whose
+        login was already gone when this process started — does not open a window
+        with a complaint about a channel nothing has happened to.  That is the
+        same rule the mesh states about a cold retained card
+        (`slife2.a2a.mesh._handle_discovery`), and for the same reason: a line
+        about an absence is a line about an event that did not happen.
+
+        **And a login picked up at start-up is not an event either.**  `_resume`
+        adopts a saved session with the state already marked as known, so a
+        window that opens minutes later is told nothing about a link that was up
+        before it: what a window shows is what happened *while somebody was
+        watching* — a scan landing, a token the far end refuses, an account
+        expiring, a logout.  Without that, every start of the stack would put
+        `⚡ Wechat online` in every window of every agent with a saved login,
+        which is a line about the process rather than about the link.
+
+        Called from the poll loop and from `logout`, so the state is derived here
+        rather than set at five call sites — there is one answer to "is the link
+        up", and it is the client's.
+        """
+        client = session.client
+        state = (
+            LINK_ONLINE
+            if client.is_logged_in and not client.auth_failed
+            else LINK_OFFLINE
+        )
+        was, session.announced = session.announced, state
+        if state == was or (not was and state == LINK_OFFLINE):
+            return
+        try:
+            await self._note(session.agent, format_link_line(state))
+        except Exception as exc:  # noqa: BLE001 - a line is not worth a loop
+            # A window that cannot be drawn in is not a reason to stop watching
+            # messages, and the poll loop is where this is usually called from.
+            logger.debug(
+                "wechat %s: the link line was not drawn: %s", session.agent, exc
+            )
 
     def watch(self, session: Session) -> None:
         """Start this session's poll loop, if it is not already running."""
@@ -625,6 +729,11 @@ class Wechat:
             _T.timeouts.pacing.wechat_poll,
         )
         while client.is_logged_in and not client.auth_failed:
+            # **First, before the poll blocks on the bridge**: this is where a
+            # link that has just come up says so, and `poll_updates` waits for
+            # the far end to have something to say — which, on a quiet account,
+            # is the whole of the wait.
+            await self._announce(session)
             try:
                 messages = await client.poll_updates()
                 # **A batch, not a message at a time**, because "seen" means
@@ -643,6 +752,11 @@ class Wechat:
                 else _T.timeouts.pacing.wechat_poll
             )
             await asyncio.sleep(backoff)
+        # The loop ended because the link did — a token the far end refused, or
+        # an account that expired — and that is the transition the window is
+        # owed.  A *deliberate* end (`logout`, which cancels this task) never
+        # reaches here and says so itself.
+        await self._announce(session)
         logger.info("wechat %s: polling stopped", session.agent)
 
     def _queued(
@@ -1198,6 +1312,10 @@ class Wechat:
         session.saved_at = 0.0
         session.restore_note = ""
         clear_session(session.agent)
+        # The one departure nobody has to discover: the model asked for it.  Said
+        # from here rather than from the loop's exit, because `logout` cancels
+        # that loop where it stands (`_poll`).
+        await self._announce(session)
         logger.info("wechat %s: logged out", session.agent)
         return (
             "Logged out of WeChat, and the saved login is gone. Call "
@@ -1210,15 +1328,17 @@ def build_server(
     *,
     http: Http = ilink.request,
     deliver: Deliver | None = None,
+    note: Note | None = None,
 ) -> FastMCP:
     """The server slife2 starts, wired to one :class:`Wechat`.
 
-    `http` and `deliver` are the two seams, and they are the two things that
-    reach outside this process: the bridge, and the agent server.  Both have a
-    real default and both are replaceable, so a test drives the whole login,
-    poll, delivery and reply path with neither a socket nor an agent.
+    `http`, `deliver` and `note` are the three seams, and they are the three
+    things that reach outside this process: the bridge, the agent server, and the
+    window showing this conversation.  All have a real default and all are
+    replaceable, so a test drives the whole login, poll, delivery, reply and
+    link-announcement path with neither a socket, an agent nor a terminal.
     """
-    plugin = Wechat(config, http=http, deliver=deliver)
+    plugin = Wechat(config, http=http, deliver=deliver, note=note)
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP):

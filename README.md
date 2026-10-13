@@ -725,6 +725,14 @@ Four tools, and the model uses all of them:
 | `wechat_send_message` | Send a text to a peer |
 | `wechat_logout` | Forget this agent's login |
 
+**The link's own coming and going is a line in the window**, not a turn:
+`[⚡ Wechat online]` when a scan lands, `[✗ Wechat offline]` when the login drops
+or is forgotten — the same shape as `[⚡ jill online]` from the A2A mesh, because
+both say the same thing about a conversation: what it can reach now. A login
+*picked up at start-up* says nothing, since a window shows what happened while
+you were watching rather than that the process started. The *reasons* stay in
+`wechat_check_status`, where a model asks for them.
+
 A message somebody sends arrives as a **turn of that agent's own conversation —
 in the window**. The plugin hands it to the terminal showing that conversation,
 which runs it exactly as if it had been typed there: the same queue, the same
@@ -927,13 +935,16 @@ follows a send is a reply the agent is waiting for. The ledger at
 inbound tasks a process died holding, which is what a restart needs to tell an
 orphan from an id it has never seen.
 
-**The broker is started for you if it is not there**, which is where this
-departs from v1. Point `a2a.broker` at an address; if nothing is listening there
-and it is *this* machine, `mosquitto` is started on it and left running. A
-broker that will not serve — or one named on another machine that is down — fails
-the startup, naming it and showing its log, rather than leaving you four tools
-attached to nothing. `provider: mosquitto` is the only value; anything else is a
-config error, not a silently disabled feature.
+**The broker is started for you if it is not there, and stopped when you are
+done**, which is where this departs from v1. Point `a2a.broker` at an address; if
+nothing is listening there and it is *this* machine, `mosquitto` is started on it
+— and the last `slife2` to exit stops it again (or `slife2 down`, or `slife2
+status` to see it). Only a broker *slife2 started* is ever stopped: the record
+its start wrote is the whole of the permission, so a system mosquitto or one you
+ran yourself is left alone. A broker that will not serve — or one named on
+another machine that is down — fails the startup, naming it and showing its log,
+rather than leaving you four tools attached to nothing. `provider: mosquitto` is
+the only value; anything else is a config error, not a silently disabled feature.
 
 ```yaml
 a2a:

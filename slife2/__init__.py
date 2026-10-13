@@ -26,7 +26,6 @@ import sys
 import time
 
 from slife2.config import (
-    A2A_SERVER_NAME,
     DEFAULT_AGENT,
     Config,
     ConfigError,
@@ -250,11 +249,15 @@ def mesh_url(config: Config) -> str:
     answer "this machine is not on the A2A mesh" every two seconds, which reads
     as a fault rather than as a setting.
 
-    The address itself always exists: every plugin is started and shared (§4), so
-    `servers:` carries `slife2-a2a` whether or not the section that decides what
-    it *does* is there.
+    **The key, and not the identity** — two names one word apart, and looking up
+    the wrong one is a `ConfigError` before anything starts.  `a2a` is what
+    `servers:` files this address under (`slife2.config.LOCAL_SERVERS`, and the
+    section's own name); `slife2-a2a` is what the *server* answers to, which is
+    what `slife2.tui.client` proves it reached (`open_server(name=…)`) and has
+    never been a key in that table.  `control_url` above is `"tui"` for the same
+    reason.
     """
-    return config.server(A2A_SERVER_NAME).url if config.a2a.configured else ""
+    return config.server("a2a").url if config.a2a.configured else ""
 
 
 def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
@@ -312,6 +315,23 @@ def _down(config: Config) -> int:
                 outcome.spec.url,
                 outcome.detail or str(outcome.status.value),
             )
+    # **And the broker, which is the one daemon here the launcher does not
+    # start.**  It has no module to launch and no MCP identity to check — the
+    # a2a plugin brings one up when the mesh is wanted (`slife2.a2a.broker.ensure`)
+    # — so it is not in `specs` and `stop` never sees it.  What it does have is a
+    # record of what was started, written by whoever started it, which is what
+    # makes stopping it here the same act as stopping every other daemon, and
+    # what keeps a broker *slife2 did not start* out of it: no record, no
+    # signalling.  A stack going away is exactly the moment it should, since the
+    # alternative is a machine left holding a broker nobody is using.
+    if config.a2a.configured:
+        from slife2.a2a.broker import BROKER_NAME, log_url
+        from slife2.a2a.broker import stop as stop_broker
+
+        said = stop_broker(config.a2a)
+        if said:
+            anything = True
+            _report("", BROKER_NAME, log_url(config.a2a), said)
     if not anything:
         print("nothing running")
     return 0

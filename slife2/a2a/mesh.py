@@ -79,6 +79,7 @@ import slife2.timeouts as _T
 from slife2.a2a.inbound_store import InboundStore
 from slife2.a2a.task_store import get_store
 from slife2.config import A2ASettings
+from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
@@ -191,16 +192,22 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     a peer *is* on the wire is still in the card and still decides whether this
     is a transition at all (`_handle_discovery`); it is not shown.
 
-    The one reader is the message the mesh has a window draw
-    (`slife2.tui.control`'s `note`), for a peer's transition and for the agent's
-    own arrival alike — so a window cannot spell its own line differently from
-    the line its peers' arrivals wear.
+    The sentence itself is `slife2.tui.notes`' — the same two functions a
+    channel's own link line goes through (`slife2.wechat`) — and what this adds
+    is the one thing the mesh knows: the peer's name, scrubbed by `safe_name`
+    because it came off the wire from somebody else's process.
+
+    The reader is the window the mesh has draw it (`slife2.tui.control`'s
+    `note`), and it is called for a peer's transitions only: our own card is
+    skipped before this (`_handle_discovery`), because a window showing jack is
+    jack and `⚡ jack online` in it would be the harness telling somebody what
+    they already are.
     """
     name = safe_name(card.agent_name)
     if event == "online":
-        return f"⚡ {name} online"
+        return notes.online(name)
     if event == "offline":
-        return f"✗ {name} offline"
+        return notes.offline(name)
     return None
 
 

@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 
 import slife2
-from slife2 import _parse_args, main, tui_model, tui_url
-from slife2.config import default_config, load
+from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
+from slife2.config import A2A_SERVER_NAME, A2ASettings, default_config, load
 
 pytestmark = pytest.mark.unit
 
@@ -83,6 +83,86 @@ def test_the_tui_connects_to_the_agent_server() -> None:
 
 def test_the_tui_url_can_be_overridden() -> None:
     assert tui_url(default_config(), "http://elsewhere/mcp") == "http://elsewhere/mcp"
+
+
+def test_the_mesh_url_is_the_key_the_address_is_filed_under() -> None:
+    """`a2a`, and not `slife2-a2a` — two names one word apart.
+
+    `servers:` is keyed by the short name every plugin's module calls its
+    `CONFIG_KEY`, and `slife2-a2a` is what the *server* answers to (the identity
+    `open_server(name=…)` checks, from `slife2.config.SERVER_MODULES`).  Looking
+    up the identity in the key table is a `ConfigError` before the TUI starts,
+    which is what this caught: every test of the window passed an address in by
+    hand, so nothing exercised the line that reads one out of the file.
+    """
+    config = default_config()
+    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+
+    assert mesh_url(config) == config.server("a2a").url
+    assert mesh_url(config) != A2A_SERVER_NAME
+
+
+def test_a_machine_with_no_mesh_section_has_no_mesh_url() -> None:
+    """`""`, so the window holds nothing — rather than holding a call to be told
+    every two seconds that this machine is not on the mesh."""
+    assert mesh_url(default_config()) == ""
+    assert not default_config().a2a.configured
+
+
+def test_the_take_down_is_what_stops_the_broker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The last instance out takes mosquitto with it.
+
+    The broker is the one daemon the launcher does not start — the a2a plugin
+    brings one up when the mesh is wanted, and records what it started — so it is
+    not in `specs` and `launcher.stop` never sees it.  This is where its lifetime
+    is tied to the stack's instead, and it is the same place for both ways a
+    stack goes away: `slife2 down`, and the last client exiting.
+
+    The broker's own half is stubbed (`tests/test_a2a.py` has it: the record, and
+    the refusal to signal anything the record does not prove is ours).  What is
+    asserted here is that the take-down *asks*, and repeats the answer.
+    """
+    import slife2.a2a.broker as broker
+    from slife2 import launcher
+
+    config = default_config()
+    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(
+        broker, "stop", lambda _settings: "stopped mosquitto on localhost:1883"
+    )
+
+    assert slife2._down(config) == 0
+
+    out = capsys.readouterr().out
+    assert "a2a-broker" in out
+    assert "stopped mosquitto" in out
+
+
+def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`""` from the broker is silence, not a row reading "left alone".
+
+    A machine with no broker at all is the ordinary case for someone who does not
+    use the mesh, and a take-down that announced the absence of a daemon nobody
+    asked for would be reporting a non-event on every exit.
+    """
+    import slife2.a2a.broker as broker
+    from slife2 import launcher
+
+    config = default_config()
+    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(broker, "stop", lambda _settings: "")
+
+    assert slife2._down(config) == 0
+
+    out = capsys.readouterr().out
+    assert "a2a-broker" not in out
+    assert "nothing running" in out, "and it still says the servers were not either"
 
 
 def test_agent_defaults_to_slife2() -> None:

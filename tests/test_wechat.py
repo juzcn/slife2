@@ -139,13 +139,29 @@ class Delivery:
             await self.gate.wait()
 
 
+class Notes:
+    """What the plugin drew in a window, recorded rather than rendered.
+
+    The third seam (`note=`), and the one that keeps "a line in a transcript" a
+    fact this process can assert: what is recorded is what a window would have
+    put under `ChatView.add_note`, brackets and all being the widget's.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+
+    async def __call__(self, agent: str, text: str) -> None:
+        self.lines.append((agent, text))
+
+
 @dataclass
 class Rig:
-    """One plugin, its bridge and its agent."""
+    """One plugin, its bridge, its agent and its window."""
 
     plugin: Wechat
     bridge: Bridge
     delivery: Delivery
+    notes: Notes
 
     async def close(self) -> None:
         await self.plugin.close()
@@ -158,10 +174,12 @@ def rig(monkeypatch: pytest.MonkeyPatch, *, bridge: Bridge | None = None) -> Rig
     monkeypatch.setattr(_T.timeouts.pacing, "typing_refresh", QUICK)
     made = Bridge() if bridge is None else bridge
     delivery = Delivery()
+    notes = Notes()
     return Rig(
-        plugin=Wechat(load(), http=made, deliver=delivery),
+        plugin=Wechat(load(), http=made, deliver=delivery, note=notes),
         bridge=made,
         delivery=delivery,
+        notes=notes,
     )
 
 
@@ -281,7 +299,9 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
         "ilink_bot_id": "bot-9",
     }
     made = rig(monkeypatch, bridge=bridge)
-    async with Client(served(http=bridge, deliver=made.delivery)) as client:
+    async with Client(
+        served(http=bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
         shown = await ask(client, "wechat_login")
         await until(lambda: session_path("jack").exists())
         after = await ask(client, "wechat_check_status")
@@ -295,6 +315,10 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
     # that rather than as somebody who has written — nobody has yet.
     assert "Nobody has written yet" in after
     assert "bot-user-9" in after
+    # **And the window is told, because this is a link coming up while somebody
+    # is watching** — the one arrival that is news, as against a saved login
+    # picked up at start-up (`test_a_login_resumed_at_start_up_says_nothing`).
+    assert made.notes.lines == [("jack", "⚡ Wechat online")]
 
 
 @pytest.mark.asyncio
@@ -310,7 +334,9 @@ async def test_a_login_that_exists_is_not_asked_to_scan_again(
     """
     signed_in("jack")
     made = rig(monkeypatch)
-    async with Client(served(http=made.bridge, deliver=made.delivery)) as client:
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
         answer = await ask(client, "wechat_login")
 
     assert "already connected" in answer
@@ -574,7 +600,9 @@ async def test_a_reply_carries_the_peer_and_the_conversation(
     """What the model hands back is what the bridge is given, unchanged."""
     signed_in("jack")
     made = rig(monkeypatch)
-    async with Client(served(http=made.bridge, deliver=made.delivery)) as client:
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
         answer = await ask(
             client,
             "wechat_send_message",
@@ -605,7 +633,9 @@ async def test_a_rejected_send_is_not_reported_as_sent(
     signed_in("jack")
     made = rig(monkeypatch)
     made.bridge.reject_send = True
-    async with Client(served(http=made.bridge, deliver=made.delivery)) as client:
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
         answer = await ask(
             client, "wechat_send_message", peer_wechat_id="peer-1", text="hi"
         )
@@ -622,7 +652,9 @@ async def test_nothing_is_sent_to_nobody(monkeypatch: pytest.MonkeyPatch) -> Non
     """An empty peer or an empty body is refused before anything is sent."""
     signed_in("jack")
     made = rig(monkeypatch)
-    async with Client(served(http=made.bridge, deliver=made.delivery)) as client:
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
         answer = await ask(client, "wechat_send_message", peer_wechat_id="", text="")
 
     assert "neither may be empty" in answer
@@ -731,6 +763,105 @@ async def test_logging_out_forgets_the_login_and_the_scan(
     assert session.qr_state == ""
     assert forgotten == {}, "the file goes with the login"
     assert not session_path("jack").exists()
+
+
+# --- the link, as a line in the window ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_login_resumed_at_start_up_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A saved login coming back is the *process* starting, not the link changing.
+
+    Nothing is drawn for it, which is the whole of what "a window shows what
+    happened while somebody was watching" means here: every start of the stack
+    would otherwise put `⚡ Wechat online` in the window of every agent that has
+    ever scanned a code — a line about a process, in a transcript about a
+    conversation.  The state is *known* from that moment, so the departure later
+    is still a transition and still said.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        # Several polls, with the link up throughout.
+        await until(lambda: made.bridge.paths.count("ilink/bot/getupdates") >= 3)
+    finally:
+        await made.close()
+
+    assert made.notes.lines == []
+    assert session.announced == wechat.LINK_ONLINE, "known, and not worth saying"
+
+
+@pytest.mark.asyncio
+async def test_logging_out_takes_the_line_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one departure the plugin chooses, so it is the one it says itself.
+
+    `logout` cancels the poll loop where it stands, which is why the announcement
+    cannot ride that loop's exit — see `Wechat._announce`.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: made.bridge.paths.count("ilink/bot/getupdates") >= 2)
+        await made.plugin.logout(session)
+    finally:
+        await made.close()
+
+    # The departure and not the arrival: the login was resumed at start-up, and
+    # that is not an event (`test_a_login_resumed_at_start_up_says_nothing`).
+    assert made.notes.lines == [("jack", "✗ Wechat offline")]
+
+
+@pytest.mark.asyncio
+async def test_a_token_the_far_end_refuses_takes_the_line_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link that goes down on its own is the case nobody is told about otherwise.
+
+    The loop ends because the state did, so the last thing it does is say so —
+    and a window that was open when the token was revoked finds out without
+    anybody asking `wechat_check_status`.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: made.bridge.paths.count("ilink/bot/getupdates") >= 2)
+        made.bridge.envelope = {"errno": 11000, "error": "token revoked"}
+        await until(lambda: session.poll is not None and session.poll.done())
+    finally:
+        await made.close()
+
+    assert made.notes.lines == [("jack", "✗ Wechat offline")]
+
+
+@pytest.mark.asyncio
+async def test_a_link_that_never_came_up_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold offline is not a transition, and is not drawn.
+
+    An agent that has never scanned a code — or whose login was already gone when
+    this process started — must not open a window with a complaint about a
+    channel nothing has happened to.  This is the rule the mesh states about a
+    cold retained card, and it is the same rule said about a link.
+    """
+    made = rig(monkeypatch)  # no `signed_in`: there is no login to resume
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await made.plugin.logout(session)
+    finally:
+        await made.close()
+
+    assert made.notes.lines == []
+    assert session.announced == wechat.LINK_OFFLINE, "known, and not worth saying"
 
 
 @pytest.mark.asyncio
