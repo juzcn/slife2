@@ -51,20 +51,24 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     not a heading.  A name that is genuinely new has no history, and saying
     "restored 0 turns" would be inventing an event out of one.
 
-    **A row the screen cannot read is dropped, not fatal.**  `restore` is awaited
-    before a queued message is taken off its queue (`slife2.tui.app._drain`), so
-    an exception out of here does not merely lose the history — it kills the
-    worker that runs turns, leaves the window saying "working" with the message
-    still counted as queued, and never runs or shows it.  The record is not this
-    module's to trust: `_draw_turn` reads a stored row field by field (an id it
-    parses, a tool call it decodes), and a row written by an older build or a
-    half-finished one can carry a shape none of that expects.  So the failure is
-    contained to the one turn it came from and said in the log, where the store
-    it contradicts can be looked at.
+    **A row the screen cannot read is dropped, not fatal — and said twice.**
+    `restore` is awaited before a queued message is taken off its queue
+    (`slife2.tui.app._drain`), so an exception out of here does not merely lose
+    the history — it kills the worker that runs turns, leaves the window saying
+    "working" with the message still counted as queued, and never runs or shows
+    it.  The record is not this module's to trust: `_draw_turn` reads a stored
+    row field by field (an id it parses, a tool call it decodes), and a row
+    written by an older build or a half-finished one can carry a shape none of
+    that expects.  So the failure is contained to the one turn it came from,
+    said in the log where the store it contradicts can be looked at, *and* drawn
+    as an error line — because the note below counts what was drawn, and a drop
+    nobody is told about would make `[restored N turns]` read as the whole
+    history having come back.
     """
     if not turns:
         return
 
+    drawn = 0
     # Suppressed for the length of the rebuild.  Every mounted widget follows
     # the tail on its own, and following during a rebuild means a scroll per
     # widget towards an end that is still moving — which is what made a restored
@@ -75,17 +79,25 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
             try:
                 _draw_turn(chat, turn)
             except Exception:  # noqa: BLE001 - a stored row is not ours to trust
+                # Named on the terminal, not only in the log: the count below is
+                # what came back, and the row that did not is the difference a
+                # reader has to be able to account for.  The row itself stays in
+                # the log line, where the store it contradicts can be looked at.
+                chat.add_error("a stored turn could not be drawn")
                 logger.warning(
                     "a stored turn could not be drawn: %r", turn, exc_info=True
                 )
+            else:
+                drawn += 1
 
     # One scroll, at the end, and following live again.  `jump_to_tail` rather
     # than `scroll_end` for the reason it exists: the re-arm is stated now, so a
     # token streamed into the refresh the scroll waits on does not find
     # following still off.  Both run however many rows were dropped: the history
-    # that *is* drawable has still come back.
+    # that *is* drawable has still come back — and the note counts that, not the
+    # rows asked for, so a drop does not inflate it.
     chat._autoscroll = True
-    chat.add_note(notes.restored(len(turns)))
+    chat.add_note(notes.restored(drawn))
     chat.jump_to_tail()
 
 
@@ -105,7 +117,12 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # with.  The completed side is only the assistant's, and slife2's assistant
     # blocks carry no timestamp live — so a rebuilt one does not either, and
     # looking like the live transcript is the rule that settles it.
-    asked = turn.get("created_at") or None
+    #
+    # Passed through as stored, an empty or damaged value included: `or None`
+    # here turned one into "now" at the last step, which is the stamp `_timestamp`
+    # refuses to invent (DESIGN.md §5.1).  A row that says nothing about when it
+    # ran draws no moment at all.
+    asked = turn.get("created_at") or ""
     # The turn's id, channel and span, shown beside the words that opened it.  It
     # is the *same* footnote `messages_from_turns` wraps in `[TURN:{…}]` for the
     # model — one function, two readers — and that is the point of showing it at

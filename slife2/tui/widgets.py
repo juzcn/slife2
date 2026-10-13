@@ -181,19 +181,27 @@ def channel_prefix(channel: str) -> str:
 
 
 def _timestamp(when: datetime | str | None = None) -> str:
-    """`HH:MM`, or a longer form once the day is no longer today.
+    """`HH:MM`, or a longer form once the day is no longer today; `""` for none.
 
     Accepts the ISO-8601 string a turn records its own time as, so a restored
     message can carry the moment it was sent rather than the moment the window
     was opened — which is the whole difference between a transcript that reads
     as a conversation and one that reads as a wall of text stamped now.
+
+    **A stored moment that will not parse is no moment, not this one.**  The
+    `now` a caller gets for an *absent* moment is the live path's — a message
+    that is arriving has no other moment to carry — and a damaged record was
+    falling into it, so yesterday's turns wore the moment the window opened
+    (DESIGN.md §5.1: a window that stamped everything now "would render every
+    restored conversation as one undivided block stamped now").  A string that
+    is not a moment answers `""`, which `add_user` draws as no stamp at all.
     """
-    now = datetime.now()
     if isinstance(when, str):
         try:
             when = datetime.fromisoformat(when)
         except ValueError:
-            when = None
+            return ""
+    now = datetime.now()
     moment = when or now
     if moment.date() == now.date():
         return moment.strftime("%H:%M")
@@ -439,6 +447,9 @@ class ChatView(VerticalScroll):
         is the only caller that passes one, and it is what keeps a rebuilt
         transcript honest: a conversation from yesterday that says every line
         arrived at the second the window opened is worse than no timestamps.
+        A stored moment that will not parse is drawn as no stamp at all rather
+        than as this one (`_timestamp`), so the bracket is only there when there
+        is a moment to put in it.
 
         `footnote` is the turn's id, channel and span, and restore is its only
         caller too — a live message has no turn yet to name.  It is drawn as its
@@ -468,11 +479,12 @@ class ChatView(VerticalScroll):
         self._tools.clear()
         if not is_own_channel(channel):
             text = strip_marker(text, *MARKERS)
-        line = Text.assemble(
-            (f"[{_timestamp(moment)}] ", f"dim {PALETTE['dim']}"),
-            (channel_prefix(channel), f"bold {PALETTE['amber-bold']}"),
-            (text, PALETTE["text"]),
-        )
+        line = Text()
+        stamp = _timestamp(moment)
+        if stamp:
+            line.append(f"[{stamp}] ", f"dim {PALETTE['dim']}")
+        line.append(channel_prefix(channel), f"bold {PALETTE['amber-bold']}")
+        line.append(text, PALETTE["text"])
         if footnote:
             # Inline and after the words, in the style reasoning gets: dim and
             # italic, so it reads as a note about the message rather than as
@@ -1216,7 +1228,10 @@ class ModelPicker(Static):
     `Esc` cancels, the row re-renders itself to a status line once decided, and
     the caller mounts it, focuses it and awaits the future it was handed.  The
     cursor opens on the model the conversation is already on, so a bare `Enter`
-    is a no-op rather than a surprise.
+    is a no-op rather than a surprise.  **A conversation on a model this list
+    does not offer has no such row**, so the cursor starts under nothing, the row
+    says which model is missing, and `Enter` picks nothing — rather than
+    defaulting to the first model and switching the conversation onto it.
 
     **The bindings are `priority`, and that is what makes the keys the picker's.**
     The priority pass runs before the focused widget, and the widget that would
@@ -1252,8 +1267,13 @@ class ModelPicker(Static):
         self._active = active
         self._future = future
         self._decided = False
+        # `-1` when the conversation is on a model this list does not offer —
+        # ordinary after a config edit.  A cursor defaulting to row 0 would make
+        # a bare `Enter`, documented as a no-op, switch to whichever model
+        # happened to be first, so nothing is under the cursor and the row says
+        # why (`_body`); `action_pick` then chooses nothing.
         self._cursor = next(
-            (i for i, one in enumerate(self._choices) if one.ref == active), 0
+            (i for i, one in enumerate(self._choices) if one.ref == active), -1
         )
         self.update(self._body())
 
@@ -1272,7 +1292,12 @@ class ModelPicker(Static):
             self.update(self._body())
 
     def action_pick(self) -> None:
-        """Choose the model under the cursor."""
+        """Choose the model under the cursor, or nothing when no row is under it.
+
+        `_cursor` is `-1` for a conversation running a model this list does not
+        offer, and a bare `Enter` there must pick nothing rather than the first
+        row — see `__init__`.
+        """
         if not self._decided and 0 <= self._cursor < len(self._choices):
             self._decide(self._choices[self._cursor])
 
@@ -1313,6 +1338,17 @@ class ModelPicker(Static):
             return self._decided_line()
         line = Text()
         line.append("Switch model", f"bold {PALETTE['text']}")
+        if self._cursor < 0:
+            # A conversation running a model this config no longer lists: said,
+            # so the missing cursor is not read as a broken picker, and so that
+            # `Enter` doing nothing is explained rather than felt.
+            line.append("\n")
+            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
+            line.append(
+                f"{self._active or 'the model in use'} is not one of these — "
+                f"Enter picks nothing",
+                PALETTE["red"],
+            )
         for index, choice in enumerate(self._choices):
             current = choice.ref == self._active
             line.append("\n")

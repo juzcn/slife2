@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -34,6 +35,8 @@ from urllib.parse import urlsplit
 import slife2.timeouts as _T
 from slife2.clock import now
 from slife2.paths import runtime_dir
+
+logger = logging.getLogger(__name__)
 
 #: How large a daemon's log may grow before the next start truncates it.  Logs
 #: here are diagnostics nobody is expected to read in full, so the ceiling is a
@@ -118,11 +121,19 @@ def _sub(name: str) -> Path:
 
 
 def tail_log(url: str, *, lines: int = 20) -> str:
-    """The end of a server's log, for putting a real error in a real message."""
+    """The end of a server's log, for putting a real error in a real message.
+
+    **A log that cannot be read is not a log that is empty.**  The caller pastes
+    this into a `StartFailed` text, so answering "" would say the server printed
+    nothing — a confident negative read off a file that could not be opened,
+    which is the deformation DESIGN.md §10.1 names.  The failure is named in the
+    text instead, so "it printed nothing" and "the log could not be read" do not
+    arrive as one message.
+    """
     try:
         content = log_path(url).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+    except OSError as exc:
+        return f"(the log at {log_path(url)} could not be read: {exc})"
     return "\n".join(content.splitlines()[-lines:])
 
 
@@ -175,6 +186,15 @@ def _read_json_dataclass[RecordT](
     half each caller answers for itself: which fields it needs, and which a
     release older than this one may have written without.
 
+    **This is a registered fallback, and its cost is real**: a record whose
+    damage is read as absence makes a running server look record-less, and
+    `slife2 down` then has no pid to stop.  *Gives up:* the pid a damaged record
+    held.  *Does not cover:* nothing — this is the floor, and a caller that
+    knows the file must exist (`read_claim`, `read_record`) still only learns
+    that it does not.  *Failure goes:* nowhere, which is why the process that
+    wrote the file is the one to read the warning `_write_json_atomic` logs;
+    flag for `DESIGN.md` §10.2.
+
     The broad `except` is the point rather than a shortcut, and each arm is a
     different way the file fails to be one: `read_text` raises `OSError` when it
     is not there, `json` raises `ValueError` when the text is not JSON, and
@@ -197,14 +217,26 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
     `write_claim` argues what catching the middle would cost, and it is why that
     file of all of them has to come through here.
 
-    Suppressed on the way out, because this is bookkeeping at a moment the
-    caller is not prepared to fail over: raising would turn a full disk into a
-    `status` that crashes and a start that refuses to run.
+    **The write is still allowed to fail, but not silently** — a registered
+    fallback.  Raising would turn a full disk into a `status` that crashes and a
+    start that refuses to run, so the caller is not asked to fail over; what it
+    must not do is vanish, because a server that started but whose record never
+    landed is invisible to `stop` and is then orphaned.  *Gives up:* the record,
+    at the moment it was written.  *Does not cover:* nothing — the write is
+    either complete or not attempted.  *Failure goes:* a warning naming the
+    path, so the orphan is findable in the log; flag for `DESIGN.md` §10.2.
     """
     tmp = path.with_suffix(".tmp")
-    with contextlib.suppress(OSError):
+    try:
         tmp.write_text(json.dumps(asdict(obj), indent=2), encoding="utf-8")
         os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(
+            "could not write %s (%s); whatever it records is now invisible to "
+            "`stop` and may be orphaned",
+            path,
+            exc,
+        )
 
 
 def read_record(url: str) -> ServerRecord | None:
@@ -233,9 +265,34 @@ def write_record(record: ServerRecord) -> None:
     _write_json_atomic(record_path(record.url), record)
 
 
+def _remove(path: Path) -> None:
+    """Delete a bookkeeping file, tolerating one that is already gone.
+
+    **A delete of a file that is not there is not a failure** — a second `stop`,
+    or a record `live_clients` already cleaned up on the way past, would
+    otherwise make an idempotent teardown raise.  That tolerance is the whole of
+    the fallback, and it is registered: *what it does* is treat an absent file
+    as already removed; *it gives up* the distinction between a file that was
+    there and one that was not, so a caller cannot tell it removed anything;
+    *it does not cover* an unlink that fails for another reason — permissions, a
+    directory in the way — which is logged; *the failure goes* to that warning,
+    naming the path (DESIGN.md §10.2).  Only the failed unlink is reported,
+    because otherwise the file the caller asked to remove would survive with
+    nothing said.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "could not remove %s (%s); it survives the delete that asked for it",
+            path,
+            exc,
+        )
+
+
 def clear_record(url: str) -> None:
-    with contextlib.suppress(OSError):
-        record_path(url).unlink(missing_ok=True)
+    """Remove a server's record; the tolerance for an absent one is `_remove`'s."""
+    _remove(record_path(url))
 
 
 @dataclass(frozen=True)
@@ -308,8 +365,8 @@ def write_claim(claim: AgentClaim) -> None:
 
 
 def clear_claim(name: str) -> None:
-    with contextlib.suppress(OSError):
-        agent_claim_path(name).unlink(missing_ok=True)
+    """Release an agent's claim; the tolerance for an absent one is `_remove`'s."""
+    _remove(agent_claim_path(name))
 
 
 @dataclass(frozen=True)
@@ -351,16 +408,35 @@ def _clients_dir() -> Path:
 
 
 def register_client(agent: str) -> ClientRecord:
-    """Record that this process is using the shared servers."""
+    """Record that this process is using the shared servers.
+
+    Written through `_write_json_atomic`, like the record and the claim: it is
+    the third bookkeeping file and the one that decides whether the last client
+    out stops the servers, so a reader catching a half-written file would count
+    a live client as absent.
+    """
     record = ClientRecord.now(agent)
-    with contextlib.suppress(OSError):
-        record.path.write_text(json.dumps(asdict(record), indent=2), encoding="utf-8")
+    _write_json_atomic(record.path, record)
     return record
 
 
 def unregister_client(record: ClientRecord) -> None:
-    with contextlib.suppress(OSError):
-        record.path.unlink(missing_ok=True)
+    """Stop counting a client; the tolerance for an absent record is `_remove`'s."""
+    _remove(record.path)
+
+
+def _pid_in_client_name(path: Path) -> int | None:
+    """The pid `ClientRecord.path` wrote into a client record's file name.
+
+    The name is `{pid}-{agent_key}.json`, so a record whose body is damaged
+    still says whose it is — which is the half `live_clients` needs to tell a
+    live client it cannot read from a dead client's leftover.
+    """
+    head, _, _ = path.name.partition("-")
+    try:
+        return int(head)
+    except ValueError:
+        return None
 
 
 def live_clients() -> list[ClientRecord]:
@@ -368,6 +444,13 @@ def live_clients() -> list[ClientRecord]:
 
     Records left by killed clients are removed on the way past, so a crash does
     not keep the servers alive forever.
+
+    **A record that cannot be parsed is not a client that is gone.**  Deleting
+    one makes a live client uncounted, and the count is what "the last one out
+    stops the shared servers" rests on, so a file whose body is damaged is kept
+    and counted whenever the pid in its *name* is alive (DESIGN.md §10.1).  Only
+    a dead pid is a crash to clean up, and only then is the file removed — by
+    `_remove`, so a sweep whose delete failed is logged rather than silent.
     """
     alive: list[ClientRecord] = []
     for path in _clients_dir().glob("*.json"):
@@ -378,9 +461,22 @@ def live_clients() -> list[ClientRecord]:
                 agent=str(raw.get("agent") or ""),
                 start_token=str(raw.get("start_token") or ""),
             )
-        except (OSError, ValueError, KeyError, TypeError):
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            pid = _pid_in_client_name(path)
+            if pid is not None and pid_alive(pid):
+                # The name says whose it is; the body is unreadable.  Count it
+                # with an empty token, which the rule below already takes at its
+                # word — dropping it would stop the servers under a live client.
+                logger.warning(
+                    "client record %s cannot be read (%s); counting pid %d as a "
+                    "live client rather than deleting its record",
+                    path,
+                    exc,
+                    pid,
+                )
+                alive.append(ClientRecord(pid=pid))
+                continue
+            _remove(path)
             continue
 
         # Lenient where `same_process` is strict, and deliberately: the two
@@ -398,8 +494,7 @@ def live_clients() -> list[ClientRecord]:
         ):
             alive.append(record)
         else:
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+            _remove(path)
     return alive
 
 
@@ -567,12 +662,26 @@ def same_process(record: ServerRecord) -> bool:
     return current is not None and current == record.start_token
 
 
-def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool:
-    """Whether anything accepts a connection here.
+def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool | None:
+    """Whether anything accepts a connection here, or `None` when it cannot say.
 
     A cheap gate in front of the MCP probe, so the common "nothing is there"
     case costs a quarter second instead of a full probe timeout.  It answers
     "is something there", never "is it ours" — the probe does that.
+
+    **A probe that could not be made is not a port that is closed.**  A name
+    that does not resolve means the probe never asked the question it was meant
+    to ask, and that is `None`; `open_server` names it rather than stating as
+    fact "nothing is listening" for a check it did not make (DESIGN.md §10.1).
+    Every *other* failure — a refusal, a timeout, a socket that could not be
+    created — means a connection was attempted and nothing answered within the
+    budget, which is precisely what this gate exists to ask, so it is `False`
+    and the reason is logged at debug.  The line is drawn at the failed *phase*
+    rather than at the exception, because whether a closed port reports as a
+    refusal or as a timeout depends on the host's own stack and on how long this
+    probe waits — measured here, the same closed port refuses after two seconds
+    and times out at this probe's quarter — and an answer that shifts with the
+    machine is the one thing a probe must not give.
 
     `timeout` is None by default and resolved here, not in the signature: a
     def-time default would capture the registry's value at import
@@ -582,7 +691,11 @@ def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except OSError:
+    except socket.gaierror as exc:
+        logger.warning("%s:%d: the address did not resolve (%s)", host, port, exc)
+        return None
+    except OSError as exc:
+        logger.debug("%s:%d: nothing answered the port probe (%s)", host, port, exc)
         return False
 
 
@@ -705,9 +818,12 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
     * **`CREATE_BREAKAWAY_FROM_JOB`.**  A child inherits its parent's job object
       unless it asks not to.  If the client is itself inside a kill-on-close job
       — a CI runner, some terminal and IDE task hosts — then the child dies with
-      that job, silently defeating the whole point.  Breakaway takes it out; the
-      `except` below covers a job that forbids breakaway, because losing the
-      escape hatch beats failing to start.
+      that job, silently defeating the whole point.  Breakaway takes it out; a
+      job that forbids breakaway is retried without it, and the retry is
+      **logged at warning, naming the consequence**, because the process then
+      does not survive its enclosing job.  The retry is kept rather than failing
+      the start — a machine where breakaway is forbidden at least gets a server
+      for this session — and it is a registered fallback; see `DESIGN.md` §10.2.
 
     Also `cwd` is set away from the repository: a daemon must not hold a working
     directory open.  Which config the child reads is decided by the absolute
@@ -735,9 +851,18 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
                     creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB,
                     **common,  # type: ignore[arg-type]
                 )
-            except OSError:
-                # The surrounding job forbids breakaway.  Losing the escape
-                # hatch is better than failing to start at all.
+            except OSError as exc:
+                # The surrounding job forbids breakaway (JOB_OBJECT_LIMIT_
+                # BREAKAWAY_OK is not set).  Losing the escape hatch beats
+                # failing to start, but it is not silent: the daemon does not
+                # outlive the job that would kill it.
+                logger.warning(
+                    "could not start %s with CREATE_BREAKAWAY_FROM_JOB (%s); "
+                    "starting without it, so this server will not outlive an "
+                    "enclosing kill-on-close job",
+                    argv[0],
+                    exc,
+                )
                 return subprocess.Popen(
                     argv,
                     creationflags=base,
@@ -753,10 +878,22 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
 
 
 def _truncate_if_huge(path: Path) -> None:
-    """Keep a daemon's log from growing without bound across restarts."""
-    with contextlib.suppress(OSError):
+    """Keep a daemon's log from growing without bound across restarts.
+
+    **A truncation that did not happen is not one that did.**  The stat and the
+    unlink were both suppressed, so a log that could not be read or removed grew
+    past the ceiling with nothing said.  The unlink is still best-effort — a log
+    that is already gone is fine — but a failure is now logged naming the file,
+    because the ceiling this function exists to hold is otherwise quietly
+    exceeded (DESIGN.md §10.1).
+    """
+    try:
         if path.exists() and path.stat().st_size > _LOG_KEEP_BYTES:
             path.unlink()
+    except OSError as exc:
+        logger.warning(
+            "could not truncate %s (%s); it may grow past the log ceiling", path, exc
+        )
 
 
 def _signal_tree(pid: int, sig: int) -> None:
@@ -806,6 +943,15 @@ def terminate(pid: int, *, grace: float | None = None) -> bool:
     Deliberately blunt.  These processes have no console to receive a graceful
     signal and hold no state worth flushing — they are stateless by design — so
     a kind shutdown would only be ceremony.
+
+    **A `taskkill` that failed to run does not fail the stop, and that is a
+    registered fallback.**  The Windows branch suppresses `OSError` and
+    `SubprocessError` and then polls the pid, so a `taskkill` that could not be
+    launched raises nothing out of `stop`.  *Gives up:* why the force failed —
+    the caller learns only that the process is still alive, not that `taskkill`
+    was unavailable.  *Does not cover:* a process that survives the poll, which
+    this reports as `False` and `stop` reports as a server it could not stop.
+    *Failure goes:* the still-alive pid the caller polls (DESIGN.md §10.2).
     """
     if not pid_alive(pid):
         return True

@@ -357,10 +357,21 @@ async def open_server(
     # of them, and it costs a quarter of a second only when something is
     # genuinely wrong.
     parts = urlsplit(url)
-    if parts.hostname and parts.port and not tcp_listening(parts.hostname, parts.port):
-        raise ConnectionError(
-            f"{url}: nothing is listening on {parts.hostname}:{parts.port}"
-        )
+    if parts.hostname and parts.port:
+        listening = tcp_listening(parts.hostname, parts.port)
+        if listening is False:
+            raise ConnectionError(
+                f"{url}: nothing is listening on {parts.hostname}:{parts.port}"
+            )
+        if listening is None:
+            # The probe could not be made — the name did not resolve, so it never
+            # asked the question.  "nothing is listening" here would state as
+            # fact what the check did not find, so the failure is named as
+            # itself (DESIGN.md §10.1).
+            raise ConnectionError(
+                f"{url}: cannot tell whether anything is listening on "
+                f"{parts.hostname}:{parts.port} — the address did not resolve"
+            )
 
     client: Client = Client(_Ours(str(url)), timeout=timeout)
     try:

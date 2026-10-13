@@ -10,6 +10,7 @@ exits.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 from fakes import (
@@ -1106,6 +1107,37 @@ async def test_a_restored_message_is_stamped_when_it_was_sent() -> None:
         assert "[2020-03-04 09:05] You> hello" in shown(app)
 
 
+async def test_a_stored_moment_that_will_not_parse_is_no_moment_at_all() -> None:
+    """A damaged timestamp is not the moment the window opened.
+
+    `_timestamp` accepts the ISO string a turn records so a rebuilt line can
+    carry when it was sent; a value that would not parse fell through to "now",
+    so yesterday's turns wore the moment the window opened — the transcript
+    making a claim about the record that the record contradicts (DESIGN.md
+    §5.1).  The line is drawn with no stamp rather than a false one — and the
+    live path still stamps, because an *absent* moment is this one.
+    """
+    client = answering_with(
+        stored(Message(role="user", content="hello"), asked="yesterday")
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+        restored_line = next(ln for ln in text.splitlines() if "You> hello" in ln)
+        assert restored_line.startswith("You> hello"), (
+            "a damaged moment was drawn as a moment"
+        )
+        assert "[] You> hello" not in text, "a bracket with nothing in it is a lie too"
+
+        await submit(pilot, "hi")
+        live_line = next(ln for ln in shown(app).splitlines() if "You> hi" in ln)
+        assert re.match(r"\[\d\d:\d\d\] You> hi$", live_line), (
+            "the live path lost its moment, which is the one it may show"
+        )
+
+
 async def test_a_restored_message_from_another_channel_wears_it() -> None:
     """A WeChat turn is not the person's own line, and it does not print its ids.
 
@@ -1448,8 +1480,10 @@ async def test_one_unreadable_stored_row_does_not_kill_the_drain() -> None:
     app = window(client)
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
-        # The row was dropped, so the count is still honest — the rebuild ran.
-        assert "[restored 1 turn]" in shown(app)
+        # The count is what was *drawn* — the row was dropped, so it is 0 — and
+        # the drop is named on the terminal, not only in the log.
+        assert "[restored 0 turns]" in shown(app)
+        assert "a stored turn could not be drawn" in shown(app)
         await submit(pilot, "hi")
         await settle(pilot, app)
         text = shown(app)
@@ -2021,6 +2055,47 @@ async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
         await pilot.pause()
         assert client.switches == ["local/big"]
         assert "local/big" in status(app)
+
+
+async def test_a_model_the_list_does_not_offer_is_said_so_and_enter_picks_nothing() -> (
+    None
+):
+    """No row under the cursor is not row 0.
+
+    A conversation running a model the config no longer lists is ordinary after
+    an edit.  A cursor defaulting to row 0 turns the documented no-op `Enter`
+    into a switch onto whichever model happens to be first — silently changing
+    what the conversation runs on.  The row says which model is missing, and a
+    bare `Enter` picks nothing.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/gone",
+        models=MODELS,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        listing = shown(app)
+        assert "local/gone" in listing, "the model in use is named"
+        assert "not one of these" in listing
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert client.switches == [], "a bare Enter switched a model"
+        assert isinstance(app.focused, ModelPicker), "and nothing was chosen"
+
+        # Escape still leaves, and the conversation keeps its model.
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert "local/gone" in status(app)
 
 
 async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:

@@ -164,6 +164,22 @@ async def test_a_port_with_nothing_on_it_is_refused_before_the_protocol() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_port_that_could_not_be_probed_is_not_reported_as_closed(
+    monkeypatch,
+) -> None:
+    """**A probe that could not be made is not a port that is closed.**
+
+    The gate read `tcp_listening`'s `False` as "nothing is listening", but a
+    name that would not resolve produced `None`, so the message stated as fact
+    what the check had not found.  The third answer is named instead
+    (`DESIGN.md` §10.1).
+    """
+    monkeypatch.setattr(mcp_server_module, "tcp_listening", lambda *a, **k: None)
+    with pytest.raises(ConnectionError, match="cannot tell whether"):
+        await open_server("http://127.0.0.1:9/mcp", name="slife2-context")
+
+
+@pytest.mark.asyncio
 async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
     monkeypatch,
 ) -> None:

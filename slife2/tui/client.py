@@ -50,14 +50,32 @@ def refused(answer: str) -> bool:
     return answer.startswith(REFUSAL)
 
 
+def _unreadable(what: str, answer: Any) -> ConnectionError:
+    """The loud failure a tool's answer that is not its shape raises, worded once.
+
+    Three answers here are contracts rather than data — a turn's `text`, the
+    transcript's `turns`, and the sentence `model_switch` replies with — and each
+    has an obvious empty that reads as a legitimate one: an answer with no words,
+    a conversation that never ran, a switch that worked.  So each quotes the
+    payload rather than summarising it, because a shape this build cannot read is
+    the only evidence there is that the far end is a different build (DESIGN.md
+    §10.1: a value that cannot be read is not a value that is absent).
+    """
+    return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
+
+
 def answer_of(result: Any) -> str:
     """The words a tool answered with, however the transport carried them.
 
     `model_switch` returns a plain string, which FastMCP wraps and hands back as
     `data` — so that is the first shape read, and the content-block half is the
-    fallback for a server that answered the older way.  A reply that is neither
-    is answered as empty rather than guessed at: the refusal this client acts on
-    is a prefix, and inventing text would be inventing the prefix with it.
+    fallback for a server that answered the older way.
+
+    **A reply that is neither is refused, not answered as empty.**  The refusal
+    this client acts on (`refused`) is a *prefix*, so an unreadable answer read
+    as `""` is read as a successful switch: the client adopts the ref and the bar
+    describes a model that is not the one answering.  An unknown shape raises
+    naming what came back (DESIGN.md §10.1: a failure is not a verdict).
     """
     data = getattr(result, "data", None)
     if isinstance(data, str):
@@ -68,7 +86,10 @@ def answer_of(result: Any) -> str:
         text = getattr(block, "text", None)
         if isinstance(text, str):
             return text
-    return ""
+    raise _unreadable(
+        "answer with words",
+        data if data is not None else getattr(result, "content", None),
+    )
 
 
 class AgentClient(Protocol):
@@ -113,6 +134,14 @@ class AgentClient(Protocol):
         for a new name and not a failure.  Read once, when the window opens: the
         history is the server's, so a window that failed to read it has lost
         nothing but the sight of it.
+
+        **A read that is missing `turns` is not that empty.**  A name with no
+        history is answered with a real turn list that happens to be empty
+        (`slife2.server.server.transcript`, over `restore`'s own `{"turns": []}`);
+        a payload whose `turns` cannot be read is damage, and reading it as `[]`
+        is a window that shows a blank history and marks itself restored
+        (DESIGN.md §10.1: a value that cannot be read is not a value that is
+        absent).
         """
         ...
 
@@ -127,7 +156,9 @@ class AgentClient(Protocol):
         """Run a turn, calling `on_event` as it goes.
 
         Returns the final assistant text, which is authoritative — `on_event`
-        is a display channel and its events may be dropped or delayed.
+        is a display channel and its events may be dropped or delayed.  A reply
+        without it is not an answer, and it raises rather than returning `""`,
+        which the window would draw as a question with no answer and no error.
 
         `channel` is where the message came in on.  The window passes its own for
         what the person typed, and something else when it is running a message
@@ -303,12 +334,21 @@ class MCPAgentClient:
         failure that is not the server *answering* means the connection is gone,
         and a client that kept it would look connected to a server nothing is
         talking to for the rest of the session.
+
+        A `turns` that is not a list raises rather than answering `[]`: an empty
+        read is a name with no history, and a damaged one read as empty is a
+        window that shows nothing and calls itself restored for the session.
+        The check is outside `_call_tool`, so the connection stays — the server
+        answered, and it is the answer this build cannot read.
         """
         result = await self._call_tool(
             "transcript", {"agent": self._agent, "subagent": self._subagent}
         )
-        turns = (result.data or {}).get("turns")
-        return list(turns) if isinstance(turns, list) else []
+        payload = result.data
+        turns = payload.get("turns") if isinstance(payload, dict) else None
+        if not isinstance(turns, list):
+            raise _unreadable("return a turn list", payload)
+        return list(turns)
 
     async def answer_approval(self, call_id: str, approved: bool) -> str:
         """Answer one `_approve` request.  See `AgentClient.answer_approval`."""
@@ -396,7 +436,17 @@ class MCPAgentClient:
             await self.close()
             raise
 
-        return str((result.data or {}).get("text") or "")
+        # **The turn's answer is `text`, and a payload without it is refused.**
+        # This used to read as `""`, which the window draws as a question with no
+        # answer and no error — a failed turn presented as a finished one
+        # (DESIGN.md §10.1: a value that cannot be read is not a value that is
+        # absent).  Raised here, after the `try`, so the connection stays: the
+        # server answered, and it is the answer this build cannot read.
+        payload = result.data
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str):
+            raise _unreadable("answer the turn", payload)
+        return text
 
 
 class WindowClient(Protocol):

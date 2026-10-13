@@ -301,13 +301,16 @@ async def test_a_handover_round_trips_and_foreign_lines_are_dropped() -> None:
     assert control.decode('{"t":"handover","d":"hi"}') is None
 
 
-async def test_an_old_handover_reads_as_a_turn_and_a_note_as_a_note() -> None:
-    """The kind is on the wire, and its absence is `TURN` rather than nothing.
+async def test_a_kind_this_build_has_no_word_for_is_refused_rather_than_run() -> None:
+    """The kind is on the wire, and a hand-over may only be what it says it is.
 
-    A window holding a stream from a plugin that predates notes must run what it
-    is handed — that is what every hand-over *was* — and an unknown kind is a
-    word this build has no meaning for, which is the same situation.  Dropping
-    either would lose a message somebody's turn is waiting on.
+    An absent or unknown `k` used to read as `TURN`, argued from the
+    older-plugin direction.  The direction that costs something is the other
+    one: a *newer* plugin's third kind would be executed as a conversation turn
+    instead of drawn as a line, and a line run as a turn is a model call nobody
+    asked for.  So an absent or unknown kind is refused like any other line this
+    build has no word for — `decode` answers None rather than picking the more
+    consequential branch.
     """
     turn = control.Handover(ticket=1, text="hi", channel="wechat")
     note = control.Handover(
@@ -318,12 +321,10 @@ async def test_an_old_handover_reads_as_a_turn_and_a_note_as_a_note() -> None:
     assert control.decode(control.encode(note)) == note
     assert turn.kind == control.TURN, "the default, for every existing caller"
 
-    # No `k` at all: what a hand-over was before there were two kinds.
-    old = control.decode('{"t":"handover","id":3,"d":"hi","c":"wechat"}')
-    assert old is not None and old.kind == control.TURN
+    # No `k` at all: refused, not run as the more consequential branch.
+    assert control.decode('{"t":"handover","id":3,"d":"hi","c":"wechat"}') is None
     # A kind from a future build is not a kind this one may act on.
-    future = control.decode('{"t":"handover","id":4,"d":"hi","c":"","k":"shrug"}')
-    assert future is not None and future.kind == control.TURN
+    assert control.decode('{"t":"handover","id":4,"d":"hi","c":"","k":"shrug"}') is None
 
 
 async def test_a_note_reaches_the_window_as_a_note_and_is_acknowledged() -> None:

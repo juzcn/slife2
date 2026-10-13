@@ -228,6 +228,100 @@ async def test_a_failed_turn_keeps_the_connection(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_answer_without_text_is_refused_rather_than_drawn_empty(
+    monkeypatch,
+) -> None:
+    """A turn whose answer is not `text` is a failure, not a finished one.
+
+    `send_message`'s answer is a contract — the window draws `text` as the
+    answer — and a payload without it was read as `""`: a question with no answer
+    and no error, which the window presents as a completed turn (DESIGN.md
+    §10.1: a value that cannot be read is not a value that is absent).  The
+    shape fails loudly, quoting what did come back, and the connection stays
+    because the server answered.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def no_text(name, arguments, **kwargs):
+        if name == "send_message":
+            return SimpleNamespace(data={"model": "fake/model"})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", no_text)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError) as raised:
+        await client.run_turn("hi", lambda event: None)
+
+    assert "fake/model" in str(raised.value), "the answer is quoted, not summarised"
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_without_turns_is_not_an_empty_history(monkeypatch) -> None:
+    """A blank history and a conversation that never ran are different answers.
+
+    A name with no history is answered with a real, empty `turns`; a reply whose
+    `turns` cannot be read is damage, and reading it as `[]` left the window
+    blank with `_restore` marked done for the rest of the session.  It raises
+    instead, so the retry path runs (DESIGN.md §10.1: a failure is not a
+    verdict).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def no_turns(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(data={"messages": []})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", no_turns)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError) as raised:
+        await client.transcript()
+
+    assert "messages" in str(raised.value), "the answer is quoted, not summarised"
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
+    monkeypatch,
+) -> None:
+    """`""` is not a refusal, so a shape this build cannot read is raised.
+
+    `switch_model` adopts the reference unless the answer starts with the
+    refusal prefix — so an unreadable answer read as `""` read as a *successful*
+    switch: the client moved its ref and the bar described a model that is not
+    the one answering.  The unknown shape fails, and the model in hand is kept
+    (DESIGN.md §10.1: a failure is not a verdict).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def odd_shape(name, arguments, **kwargs):
+        if name == "model_switch":
+            return SimpleNamespace(data={"switched": True})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", odd_shape)
+    client = MCPAgentClient("http://test/mcp", agent="jack", model="local/big")
+    await client.connect()
+
+    with pytest.raises(ConnectionError):
+        await client.switch_model("local/small")
+
+    await client.run_turn("hi", lambda event: None)
+    assert sent(transport, "send_message")[-1]["model"] == "local/big", (
+        "a ref was adopted from an answer nobody could read"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     monkeypatch,
 ) -> None:

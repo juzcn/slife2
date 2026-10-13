@@ -181,9 +181,14 @@ def decode(message: str) -> Handover | None:
     notification this build has no word for is a line not read, and the caller
     is a display that should stay up rather than a turn that should die.
 
-    A missing or unknown `k` reads as `TURN`, which is what a hand-over was
-    before there were two kinds — so a window holding a stream from an older
-    plugin runs what it is handed rather than dropping it.
+    **And a `k` that is not one of `KINDS` is such a line.**  An absent or
+    unknown kind used to read as `TURN`, argued from the older-plugin direction
+    — a hand-over before there were two kinds was always a turn.  But the
+    direction that costs something is the other one: a *newer* plugin's third
+    kind would be executed as a conversation turn rather than drawn as a line,
+    and a line run as a turn is a model call nobody asked for.  So the safer
+    branch is the refusal (DESIGN.md §10.1: a weaker path is not a substitute
+    for a missing capability).
     """
     try:
         payload = json.loads(message)
@@ -197,11 +202,13 @@ def decode(message: str) -> Handover | None:
     if not isinstance(text, str) or not isinstance(channel, str):
         return None
     kind = payload.get("k")
+    if kind not in KINDS:
+        return None
     return Handover(
         ticket=int(payload.get("id") or 0),
         text=text,
         channel=channel,
-        kind=kind if kind in KINDS else TURN,
+        kind=kind,
     )
 
 

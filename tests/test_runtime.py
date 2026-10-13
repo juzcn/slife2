@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import subprocess
 import sys
@@ -90,7 +91,13 @@ def test_a_missing_record_is_absent_not_an_error() -> None:
 
 
 def test_a_corrupt_record_reads_as_absent() -> None:
-    """Bookkeeping must never block a start."""
+    """Bookkeeping must never block a start.
+
+    This is the registered tolerance of `_read_json_dataclass` (`DESIGN.md`
+    §10.2): damage reads as absence, which is accepted for a *recorded pid* but
+    is why `live_clients` does not delete a damaged record while its pid is
+    alive — there the cost is a live client nobody counts.
+    """
     url = "http://127.0.0.1:8000/mcp"
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
@@ -124,6 +131,163 @@ def test_a_claim_round_trips_and_a_corrupt_one_reads_as_absent() -> None:
 
     runtime.agent_claim_path("alpha").write_text("{ not json", encoding="utf-8")
     assert runtime.read_claim("alpha") is None
+
+
+# --- the client count the shared servers rest on ------------------------------
+
+
+def test_a_client_record_that_cannot_be_parsed_but_is_alive_is_kept() -> None:
+    """**A record that cannot be parsed is not a client that is gone.**
+
+    Deleting a damaged record made a live client uncounted, and the count is
+    what "the last one out stops the shared servers" rests on.  The pid is in
+    the file's *name*, so a live client's record is kept even when its body is
+    unreadable — only a dead pid is a crash to clean up.
+    """
+    path = runtime.register_client("alpha").path
+    path.write_text("{ not json", encoding="utf-8")
+
+    live = runtime.live_clients()
+
+    assert any(record.pid == os.getpid() for record in live), (
+        "the live client was uncounted"
+    )
+    assert path.exists(), "a live client's record was deleted"
+
+
+def test_a_client_record_that_cannot_be_parsed_and_is_dead_is_cleaned_up() -> None:
+    """Only a dead pid is a crash to clean up, and then the file goes."""
+    path = runtime._clients_dir() / "999999-deadbeef.json"
+    path.write_text("{ not json", encoding="utf-8")
+
+    assert runtime.live_clients() == []
+    assert not path.exists()
+
+
+def test_a_sweep_whose_delete_failed_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A delete that failed is not a delete that happened** — here too.
+
+    `live_clients` removes a dead client's leftover under the same `_remove` the
+    three clear functions use, so a sweep whose delete failed is logged rather
+    than leaving the record to survive silently (`DESIGN.md` §10.2).
+    """
+    path = runtime._clients_dir() / "999999-deadbeef.json"
+    path.write_text("{ not json", encoding="utf-8")
+
+    def deny(self: Path, *, missing_ok: bool = False) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "unlink", deny)
+    with caplog.at_level(logging.WARNING):
+        runtime.live_clients()
+
+    assert str(path) in caplog.text
+
+
+def test_registering_a_client_writes_it_atomically() -> None:
+    """The third bookkeeping file goes through `_write_json_atomic` too, so a
+    concurrent reader never catches it half-written — the same race the record
+    and the claim are written for."""
+    record = runtime.register_client("beta")
+    assert runtime.live_clients() == [record]
+    assert not record.path.with_suffix(".tmp").exists()
+
+
+def test_a_bookkeeping_write_that_failed_is_reported(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A write that failed is not a write that happened.**
+
+    The atomic write suppressed `OSError`, so a server that started but whose
+    record never landed was invisible to `stop` and got orphaned.  The behaviour
+    is kept — the caller is not prepared to fail over — but the path is logged,
+    so the orphan is findable (`DESIGN.md` §10.2).
+    """
+    target = tmp_path / "record.json"
+
+    def deny(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runtime.os, "replace", deny)
+    with caplog.at_level(logging.WARNING):
+        runtime._write_json_atomic(target, runtime.AgentClaim.now("alpha"))
+
+    assert str(target) in caplog.text
+
+
+def test_a_delete_that_failed_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A delete that failed is not a delete that happened.**
+
+    `clear_record` — and `clear_claim` and `unregister_client` — suppressed a
+    failed unlink, so a record the code asked to remove survived with nothing
+    said.  An absent file is still tolerated; a failed unlink is logged naming
+    the path (`DESIGN.md` §10.2).
+    """
+    url = "http://127.0.0.1:8000/mcp"
+    path = runtime.record_path(url)
+
+    def deny(self: Path, *, missing_ok: bool = False) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "unlink", deny)
+    with caplog.at_level(logging.WARNING):
+        runtime.clear_record(url)
+
+    assert str(path) in caplog.text
+
+
+def test_a_delete_of_a_record_that_is_already_gone_is_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The registered tolerance: removing an absent record is not a failure."""
+    with caplog.at_level(logging.WARNING):
+        runtime.clear_record("http://127.0.0.1:9999/mcp")
+
+    assert caplog.text == ""
+
+
+def test_a_log_that_cannot_be_read_is_named_not_empty() -> None:
+    """**An unreadable log is not a log with nothing in it.**
+
+    `tail_log` is pasted into a `StartFailed` message, so answering "" said the
+    server printed nothing when the file could not be opened.  The failure is
+    named in the text instead (`DESIGN.md` §10.1).
+    """
+    url = "http://127.0.0.1:8000/mcp"
+    path = runtime.log_path(url)
+    path.mkdir()  # a directory where the log should be: reading it is an OSError
+
+    text = runtime.tail_log(url)
+
+    assert text != ""
+    assert str(path) in text
+
+
+def test_a_log_that_cannot_be_truncated_is_reported(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A truncation that did not happen is not one that did.**
+
+    `_truncate_if_huge` suppressed the stat and the unlink, so a log that could
+    not be unlinked grew past the ceiling with nothing said.  The failure is now
+    logged naming the file (`DESIGN.md` §10.1).
+    """
+    path = tmp_path / "daemon.log"
+    path.write_text("x", encoding="utf-8")
+
+    def deny(self: Path, *, missing_ok: bool = False) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "unlink", deny)
+    monkeypatch.setattr(runtime, "_LOG_KEEP_BYTES", 0)
+    with caplog.at_level(logging.WARNING):
+        runtime._truncate_if_huge(path)
+
+    assert str(path) in caplog.text
 
 
 # --- pid liveness ------------------------------------------------------------
@@ -354,6 +518,44 @@ def test_tcp_listening_is_true_for_an_open_one() -> None:
         server.close()
 
 
+def test_tcp_listening_that_cannot_resolve_is_no_answer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A probe that could not be made is not a port that is closed.**
+
+    A name that does not resolve answered `False`, so `open_server` stated as
+    fact "nothing is listening" for a check it never got to make.  The third
+    answer is `None`, and the reason is logged (`DESIGN.md` §10.1).
+    """
+    import socket
+
+    def unresolved(*args, **kwargs):
+        raise socket.gaierror("name or service not known")
+
+    monkeypatch.setattr(runtime.socket, "create_connection", unresolved)
+    with caplog.at_level(logging.WARNING):
+        assert runtime.tcp_listening("nowhere.invalid", 9) is None
+
+    assert "nowhere.invalid" in caplog.text
+
+
+def test_tcp_listening_that_answered_nothing_is_false_and_logs_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal and a timeout are both "nothing answered the probe", which is
+    the gate's question — the reason is named at debug, and neither is read as
+    an address that could not be asked about (`DESIGN.md` §10.1)."""
+
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(runtime.socket, "create_connection", timed_out)
+    with caplog.at_level(logging.DEBUG):
+        assert runtime.tcp_listening("127.0.0.1", 9) is False
+
+    assert "127.0.0.1" in caplog.text
+
+
 # --- span (the daemon requirement) -------------------------------------------
 
 
@@ -381,6 +583,41 @@ def test_a_spawned_server_gets_no_console_window(tmp_path) -> None:
 
     assert result.exists(), "the probe did not run"
     assert result.read_text().strip() == "0", "the daemon opened a console window"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="breakaway is a Windows job-object flag"
+)
+def test_a_start_without_the_job_escape_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A weaker path is not a substitute for a missing capability.**
+
+    When the enclosing job forbids `CREATE_BREAKAWAY_FROM_JOB`, the process is
+    retried without it — which is defensible, because losing the escape hatch
+    beats failing to start, but *not* silently: the server then dies with the
+    job, and that consequence is named at warning (`DESIGN.md` §10.2).
+    """
+    calls: list[int] = []
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(argv, **kwargs):
+        calls.append(kwargs.get("creationflags", 0))
+        if len(calls) == 1:
+            raise OSError("breakaway forbidden")
+        return FakeProc()
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", fake_popen)
+    with caplog.at_level(logging.WARNING):
+        proc = runtime.spawn(["true"], url="http://127.0.0.1:8079/mcp")
+
+    assert isinstance(proc, FakeProc)
+    assert len(calls) == 2, "the retry without the flag did not happen"
+    assert calls[0] & subprocess.CREATE_BREAKAWAY_FROM_JOB
+    assert not calls[1] & subprocess.CREATE_BREAKAWAY_FROM_JOB
+    assert "job" in caplog.text.lower()
 
 
 def test_a_spawned_server_outlives_its_spawner() -> None:
