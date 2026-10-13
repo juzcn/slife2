@@ -1,0 +1,10 @@
+{
+  // VSCode wraps nothing by default (`editor.wordWrap` is off for every
+  // language), and these templates are read as prose: a prompt is sentences with
+  // holes in them, and the shipped `system.j2` is one long line by the time the
+  // model reads it. `.j2` is the Jinja extension's own extension, so the
+  // language id is `jinja` and no `files.associations` entry is needed.
+  "[jinja]": {
+    "editor.wordWrap": "on"
+  }
+}
