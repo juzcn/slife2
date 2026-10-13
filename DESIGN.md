@@ -1136,7 +1136,9 @@ open for its life, so the connection, the retained card and the last will all
 end at the moment somebody stops looking, and a peer that watched it arrive
 watches it leave.  That is `attach`'s contract on the same window's inbox,
 reused because it answers the same question — is anybody there? — and it is why
-`resume` announces orphaned tasks and joins nothing.
+`resume` announces orphaned tasks and joins nothing.  A machine with nobody at a
+terminal is the case that question has a second answer for: `slife2 --headless`
+is that same window, holding the same call, with nothing drawn (§1.9).
 
 **The ledger is not the enrollment, and using it as one was the mistake.**  It
 is tempting — the file at `agents/<agent>/a2a.yaml` is already a per-agent record
@@ -1271,6 +1273,58 @@ leaves the model tools for a mesh that was silently switched off.  Mosquitto is
 the only broker this build speaks to, any other value is a `ConfigError` when
 the config is read, and adding one is adding a branch and a driver rather than
 writing a different string.
+
+### 1.9 The unattended agent, and what a window was for
+
+**What the flag is for is §1.8's enrollment, because that is the one thing only
+a window could provide.**  Everything else already works with no window at all,
+and that is an earlier decision rather than an accident: §1.2's hand-over is *the
+window first, the agent server when there is none* (`slife2.handover`), so a
+peer's task, a due scheduled run and a task's answer all reach a conversation no
+screen is showing — the turn runs, it is recorded, and the reply goes back where
+it came from.  What nothing else could do was hold `join`, and an agent nobody
+holds is simply **offline**: a machine with no terminal is a machine a peer
+cannot task, which is the gap this closes.  `--headless` is a window with no
+screen, so the enrollment is held and the agent is on the mesh — and everything
+the window was already doing, it keeps doing.
+
+**And it is the same code, which is the property worth paying for.**  "Headless
+behaves like a window" is not a resemblance a later edit has to keep: what runs
+is `SlifeApp`, with Textual's own headless driver — no input, no output, nothing
+drawn and nothing printed — and **not one branch of the window is conditional on
+it**.  The same three connections, the same queue, the same turns, the same
+prompts: the inbox is held, so a WeChat message or a due scheduled run reaches a
+headless agent exactly as it reaches one on a screen, and a tool call the model
+asks about is put to the window exactly as it is there.  Anything else would be
+a *capability* difference, and this is a mode rather than a second agent.
+
+**The unattended agent is told it is unattended, and that is the whole of the
+mechanism.**  A model is the thing that decides whether a call is safe to make
+without a person, so the difference between a watched conversation and an
+unwatched one belongs where the model reads it: the system prompt.  For a prompt
+to see it, it has to be written down — the prompt is rendered by a *server*,
+another process, which never saw the command line — so the flag rides the claim
+the client already writes (`AgentClaim.headless`, `slife2.runtime`) and
+`opening_messages` reads it back to render it into the template as `headless`.
+The claim is the right carrier for the reason it exists at all: one instance per
+name, and it is the record of *which* one.  **No instance at all** renders the
+same way, because it is the same situation — a peer tasking an agent nobody is
+running is exactly what `handover.to_agent` is for, and nobody is there either.
+
+A model that has not been told may ask for a confirmation nobody can give, and
+spend the turn it was given on the question.  That is the cost of the lever being
+a prompt rather than a rule, and it is the cost this design chooses: the
+alternative is the harness deciding which calls are safe without a person, which
+is a policy decision the operator never made.
+
+**What it costs is the output, deliberately rather than for want of it.**  A
+headless run prints nothing: no transcript, no status, no line per turn.  The
+turns are recorded either way, so a window opened later restores the whole
+conversation — §1.2's answer for a message that reached no window — and the
+presence is on the mesh, where peers see it.  `Ctrl+C` is how it stops, which is
+a headless-only path: a window reads that key itself (`SlifeApp.action_interrupt`
+cancels the turn, or quits).  A `kill` is honest too — the broker's last will
+publishes the offline card a cancelled `join` would have published.
 
 ## 2. Streaming: one pattern, used twice
 

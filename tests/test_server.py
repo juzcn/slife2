@@ -1687,6 +1687,52 @@ async def test_the_template_is_rendered_with_the_loops_own_agent_name(
 
 
 @pytest.mark.asyncio
+async def test_the_prompt_knows_whether_anybody_is_watching(
+    tmp_path, context, hub
+) -> None:
+    """Three states of one question, and the third is the interesting one.
+
+    `_approve` is a courtesy extended to somebody who is there, and the model is
+    what decides whether to use it: nothing in the machinery branches on being
+    unattended, so the prompt is where an unattended agent has to be able to find
+    out (`slife2 --headless`, DESIGN §1.9).  **And the server is what has to find
+    it out**, in a process that never saw that command line: the question is not
+    about this call (`watched`) but about who is holding the agent's name, which
+    is what the claim records.
+
+    The third case is the one a narrower reading would miss: **nobody is running
+    under that name at all** is the same situation, not a fourth thing — a peer
+    tasking an agent no window is showing is exactly what the fallback exists for
+    (`slife2.handover.to_agent`).
+    """
+    from slife2.runtime import AgentClaim, clear_claim, write_claim
+
+    body = "you are {{ agent_name }}; {{ 'nobody' if headless else 'somebody' }}"
+
+    async def prompt_with(claim: AgentClaim | None) -> str:
+        clear_claim(DEFAULT_AGENT)
+        if claim is not None:
+            write_claim(claim)
+        backend = answering("ok")
+        server = build_server(
+            config(system_prompt=template(tmp_path, body)),
+            context_client=context,
+            hub_client=hub,
+            backend=backend,
+        )
+        await send(server, "hi")
+        return backend.calls[0][0][0].content
+
+    unattended = await prompt_with(AgentClaim.now(DEFAULT_AGENT, headless=True))
+    attended = await prompt_with(AgentClaim.now(DEFAULT_AGENT))
+    nobody = await prompt_with(None)
+
+    assert unattended == f"you are {DEFAULT_AGENT}; nobody"
+    assert attended == f"you are {DEFAULT_AGENT}; somebody"
+    assert nobody == f"you are {DEFAULT_AGENT}; nobody"
+
+
+@pytest.mark.asyncio
 async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
     """A prompt that will not render is a config mistake worth naming once."""
     from slife2.config import ConfigError, load

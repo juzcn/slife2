@@ -62,7 +62,7 @@ uv sync
 
 ```
 slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
-       [--keep-servers]                  ensure the servers, then run the TUI
+       [--keep-servers] [--headless]     ensure the servers, then run the TUI
 slife2 status                            what is running, and where
 slife2 down                              stop the servers this config names
 ```
@@ -71,6 +71,16 @@ slife2 down                              stop the servers this config names
 bare provider, meaning its first model); without it the config's `default` is
 used. `--url` overrides the agent server's endpoint, for the case where it is
 already running somewhere this config does not name.
+
+**`--headless` runs that window with no terminal.** The same servers, the same
+connections, the same turns, run by the same code — and nothing drawn and nothing
+printed. What it is for is a machine nobody is sitting in front of: the window
+holds **the agent's place on the A2A mesh**, so a peer can task it and be
+answered, where a machine nobody had opened a window on would leave that agent
+simply offline. Nothing else about the agent changes — it is a window with no
+screen rather than a second kind of agent — and what tells a *model* that nobody
+is there is its system prompt (`headless` in the template a prompt is written
+in), which is the lever for how it behaves. **Ctrl+C** is the way out.
 
 **The servers are shared.** A second `slife2` — under any `--agent` — finds them
 already running and reuses them; nothing is started twice and nothing is
@@ -935,11 +945,12 @@ harness did rather than something anyone in the conversation said. Nothing runs
 and the model is not told: the roster is `a2a_list_agents`' answer, and a peer
 that wants to be answered sends a task.
 
-**An agent is on the mesh while a window is showing it.** The window holds a call
+**An agent is on the mesh while somebody is being it.** A window holds a call
 open for its agent's life, so coming online and going offline follow somebody
 actually being there — a peer that watched the agent arrive watches it leave,
-with nothing to send. One `a2a_*` call joins its agent too and keeps it: what
-follows a send is a reply the agent is waiting for. The ledger at
+with nothing to send. `slife2 --headless` holds that same call with no window at
+all, which is what an unattended machine wants. One `a2a_*` call joins its agent
+too and keeps it: what follows a send is a reply the agent is waiting for. The ledger at
 `<data>/agents/<agent>/a2a.yaml` is *not* the enrollment — what it records is the
 inbound tasks a process died holding, which is what a restart needs to tell an
 orphan from an id it has never seen.

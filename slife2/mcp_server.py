@@ -440,8 +440,15 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
     `--data-dir` comes from :mod:`slife2.paths`, which is also where the CLI's
     own parser gets it — the flag means the same thing in both, and two copies
     of its help text is how that stops being true.
+
+    `allow_abbrev=False` for the CLI's reason, which is the same flag's rule
+    twice: `--data-d` is not a spelling of anything, and a server started by a
+    process manager should fail loudly on a typo rather than come up on the
+    wrong directory.
     """
-    parser = argparse.ArgumentParser(prog=description, description=description)
+    parser = argparse.ArgumentParser(
+        prog=description, description=description, allow_abbrev=False
+    )
     add_data_dir_argument(parser)
     parser.add_argument("--host", default=None, help="override the listen address")
     parser.add_argument("--port", default=None, type=int, help="override the port")

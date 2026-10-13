@@ -242,24 +242,37 @@ def clear_record(url: str) -> None:
 class AgentClaim:
     """Who is running under an agent name right now.
 
-    Only ever used to *describe* a conflict.  Whether the name is taken is
+    Almost only used to *describe* a conflict.  Whether the name is taken is
     decided by the kernel lock, never by this file, so a stale claim produces a
-    slightly wrong pid in an error message and nothing worse.
+    slightly wrong pid in an error message and nothing worse — and the one
+    exception is the one field something *acts* on rather than reports
+    (`headless`), where the same staleness costs a model a question nobody can
+    answer.  That is the price of a prompt being rendered by a process that was
+    not there when the flag was given.
     """
 
     name: str
     pid: int
     start_token: str = ""
     started_at: str = ""
+    #: Whether the instance holding the name is running **without a terminal**
+    #: (`slife2 --headless`).  Not a fact about the conflict this record mostly
+    #: describes, but the only place it is written down: the claim already
+    #: answers "which instance is this", and one instance per name is what makes
+    #: the answer worth having.  The agent server is the reader — a system prompt
+    #: is where a model is told who it is talking to, and that process never saw
+    #: the command line (`slife2.server.opening_messages`).
+    headless: bool = False
 
     @classmethod
-    def now(cls, name: str) -> AgentClaim:
+    def now(cls, name: str, *, headless: bool = False) -> AgentClaim:
         pid = os.getpid()
         return cls(
             name=name,
             pid=pid,
             start_token=process_start_token(pid) or "",
             started_at=now(),
+            headless=headless,
         )
 
 
@@ -272,6 +285,10 @@ def read_claim(name: str) -> AgentClaim | None:
             pid=int(raw["pid"]),
             start_token=str(raw.get("start_token") or ""),
             started_at=str(raw.get("started_at") or ""),
+            # `.get`, like the two above it: a claim written by a release that
+            # did not have this field is a claim from an instance that had a
+            # terminal, which is what an absent field means.
+            headless=bool(raw.get("headless")),
         ),
     )
 

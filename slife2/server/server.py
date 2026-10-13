@@ -118,6 +118,7 @@ from slife2.mcp_server import (
 )
 from slife2.messages import Message, ToolCall
 from slife2.prompt import render as render_system_prompt
+from slife2.runtime import read_claim
 from slife2.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
 from slife2.tools import Tool, ToolRegistry
 
@@ -720,8 +721,24 @@ def build_server(
         so two agents are two names asking one process — and it is rendered from
         the config a conversation *starts* from, so a prompt edited since boot
         reaches the next one.
+
+        **And it is rendered with whether anybody is watching**, read off the
+        claim the client under that name wrote (`AgentClaim.headless`).  A
+        prompt is where a model is told who it is talking to, and an unattended
+        agent has nobody: a tool call put up for approval is granted without
+        being read, so a model that asks is spending the turn it was given.  Two
+        ways for nobody to be there, and they are one answer: the instance
+        holding the name has no terminal (`slife2 --headless`), or **no instance
+        is holding it at all** — a peer that tasks an agent nobody is running is
+        exactly the case `slife2.handover.to_agent` exists for, and it is
+        unattended for the same reason.
         """
-        system = render_system_prompt(live.agent.system_prompt, agent_name=agent)
+        claim = read_claim(agent)
+        system = render_system_prompt(
+            live.agent.system_prompt,
+            agent_name=agent,
+            headless=claim is None or claim.headless,
+        )
         return [Message(role="system", content=system)] if system else []
 
     def reap() -> None:

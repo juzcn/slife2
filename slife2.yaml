@@ -294,7 +294,12 @@ agent:
   #
   #   system_prompt: "prompts/jack.j2"
   #
-  # Inside it, `{{ agent_name }}` is the name the instance was started with.
+  # Inside it, `{{ agent_name }}` is the name the instance was started with, and
+  # `{{ headless }}` says whether anybody is watching: true when the instance
+  # holding this name was started with `slife2 --headless`, and also when no
+  # instance is holding it at all — a peer's task reaching an agent nobody is
+  # running.  The shipped template is where that is used (it tells the model
+  # there is nobody to ask), and a prompt of your own may ignore it.
 
 # ── Background tasks ──────────────────────────────────────────────────────────
 # How many agent tasks one agent may have running at once.  An **agent task** is

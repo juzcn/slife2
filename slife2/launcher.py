@@ -567,7 +567,7 @@ _HELD_NAMES: set[str] = set()
 
 
 @contextlib.contextmanager
-def claim_agent(name: str) -> Generator[None]:
+def claim_agent(name: str, *, headless: bool = False) -> Generator[None]:
     """Hold the exclusive right to run under `name` for the life of the client.
 
     The kernel owns the lock, so an instance that crashes — or is killed —
@@ -575,6 +575,11 @@ def claim_agent(name: str) -> Generator[None]:
     where a dead process still owns a name.  A client record is registered
     alongside it so other instances can tell whether anyone else is still using
     the shared servers; see :func:`others_running`.
+
+    `headless` is written into the claim rather than used here, and the claim is
+    the only place it can go: the *servers* are what render a system prompt, and
+    a prompt that says "nobody is watching" has to be able to find that out from
+    a process that was not the one asked (`slife2.runtime.AgentClaim.headless`).
 
     Raises:
         AgentInUse: If another live instance already answers to this name.
@@ -591,7 +596,7 @@ def claim_agent(name: str) -> Generator[None]:
                 # because something between the two raised is a name this
                 # process can never claim again — and "released however the
                 # body exits" is the whole point of holding it.
-                write_claim(AgentClaim.now(name))
+                write_claim(AgentClaim.now(name, headless=headless))
                 client = register_client(name)
                 try:
                     yield

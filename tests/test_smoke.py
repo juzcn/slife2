@@ -9,6 +9,8 @@ nothing has started yet and the fix is in the file being named.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 import slife2
@@ -186,6 +188,80 @@ def test_a_subcommand_is_recognised_wherever_it_is_written() -> None:
     assert _parse_args(["status", "--data-dir", "x"]).command == "status"
     assert _parse_args(["--data-dir", "x", "status"]).command == "status"
     assert _parse_args(["--data-dir", "x"]).command == "run"
+
+
+def test_headless_is_off_unless_it_is_asked_for() -> None:
+    assert _parse_args([]).headless is False
+    assert _parse_args(["--headless"]).headless is True
+    assert _parse_args(["--headless", "--agent", "jack"]).headless is True
+
+
+def test_headless_reaches_the_driver_and_the_claim(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One flag, two readers, and the second is the one that is easy to lose.
+
+    Textual's driver is the obvious one — that is what writes nothing and draws
+    nothing — and it is the *whole* of what `--headless` does to the window:
+    nothing is passed in, because an unattended agent is the same agent.  The
+    other reader is the servers: they render the system prompt
+    (`slife2.server.opening_messages`), they are a different process from the one
+    that was told `--headless`, and a prompt is exactly where a model finds out
+    that there is nobody to ask.  That is why the flag is written into the claim:
+    `AgentClaim.headless` is the shared record of who is running under a name,
+    and one instance per name is what makes reading it worth anything.
+
+    The claim is read *from inside the run*, because that is when it is true —
+    it is cleared on the way out, exactly as a window's is.
+    """
+    from slife2.config import DEFAULT_AGENT
+    from slife2.runtime import read_claim
+    from slife2.tui import app as app_module
+
+    seen: dict[str, Any] = {}
+
+    class RecordingApp:
+        """The window, stood in for: what it was handed, and how it was run."""
+
+        def __init__(self, url: str, **kwargs: object) -> None:
+            seen["url"] = url
+            seen.update(kwargs)
+
+        def run(self, *, headless: bool = False) -> None:
+            seen["ran"] = headless
+            seen["claim"] = read_claim(DEFAULT_AGENT)
+
+    monkeypatch.setattr(slife2, "_ensure", lambda config, config_path: 0)
+    monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
+
+    # `--keep-servers`, so the last-instance-out take-down does not run against
+    # a data directory with nothing in it.
+    code = main(["--data-dir", str(tmp_path), "--headless", "--keep-servers"])
+
+    assert code == 0
+    assert seen["ran"] is True, "the driver was not told to write nothing"
+    assert "headless" not in seen, "the window is the same window"
+    claim = seen["claim"]
+    assert claim is not None, "no claim was written for the running instance"
+    assert claim.headless is True, "the servers cannot read the flag"
+
+
+def test_an_abbreviated_flag_is_a_usage_error() -> None:
+    """`--headles` is a typo, and the mistake was not being told so.
+
+    argparse abbreviates long options by default: any *unambiguous prefix* is
+    taken for the flag it could become, so a missing `s` was not a misspelling
+    of anything — it was `--headless`, and the stack came up as though it had
+    been asked for.  The other half of the same default is worse than a typo:
+    an abbreviation that works today stops working the day a longer flag appears
+    beside it, and nobody who had learned to type it would be told.
+    """
+    with pytest.raises(SystemExit):
+        _parse_args(["--headles"])
+    with pytest.raises(SystemExit):
+        _parse_args(["--keep"])
+    assert _parse_args(["--headless"]).headless is True
+    assert _parse_args(["--keep-servers"]).keep_servers is True
 
 
 def test_an_unknown_command_is_a_usage_error() -> None:

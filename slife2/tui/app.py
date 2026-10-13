@@ -33,6 +33,16 @@ one display for both.  It arrives on a call this window *holds open* to
 `slife2-tui` — the plugin that owns a session per agent — and the channel rides
 along, so the line wears the right bubble and the turn is recorded with where it
 came from.
+
+**And the window can be run with no terminal** (`slife2 --headless`), which is
+the one thing this module deliberately does nothing about: there is no `headless`
+field here and no branch, because a run with nobody in front of it is not a
+different kind of window.  It is the same three connections, the same queue, the
+same turns, the same prompts; the driver writes nothing and reads nothing, and
+that is the whole of the difference.  What tells a *model* that nobody is there
+is its system prompt (`AgentClaim.headless`, rendered into the template by
+`slife2.server`), because that is the lever for how an agent behaves — a branch
+in here would be a second rule for a question the prompt already answers.
 """
 
 from __future__ import annotations

@@ -14,6 +14,15 @@ through to the agent server for exactly that reason.
     slife2 status [OPTIONS]   what is running, and where
     slife2 down [OPTIONS]     stop the servers this config names
 
+`--headless` runs that first one with **no terminal**: the same window, the same
+connections, the same servers, the same turns, and nothing drawn and nothing
+printed.  What it is for is a machine nobody is sitting in front of — the agent
+stays reachable, because its window holds the mesh open for as long as this
+process is up, so a peer can task it and be answered.  **Nothing else about the
+agent changes**: an unattended agent is the same agent, and the only thing that
+tells a *model* otherwise is its system prompt (`headless` in the template),
+which is the lever for how it behaves.  `Ctrl+C` is the way out.
+
 `--help` lists the options, and the flags may be written before or after the
 command.  `--data-dir` is the one worth knowing about on its own: it decides
 which config, which runtime state and which databases everything else reads.
@@ -55,6 +64,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
     Letting argparse own it also means an unknown command is a usage error
     naming the ones that exist, rather than a word silently treated as a flag.
+
+    **And a flag is spelled the way it is written down**, which is
+    `allow_abbrev=False` — argparse's default is the opposite, and it is worth
+    knowing exactly what it buys and costs.  A prefix of a long option is taken
+    for that option when it is unambiguous, so `--headles` (a missing `s`) was
+    not a typo anybody was told about: it *was* `--headless`, and the stack came
+    up as though it had been asked for.  The cost of refusing is that a spelling
+    somebody has got used to stops working; what it buys is that a typo is a
+    usage error naming the flags rather than a command that ran, and that an
+    abbreviation which is unambiguous **today** cannot be broken by a longer flag
+    added beside it later — `--keep` would be two flags the day anything else
+    starts with those letters, and nobody would have been told to stop typing it.
     """
     rest = list(sys.argv[1:] if argv is None else argv)
 
@@ -67,6 +88,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "Terminal AI agent. Starts the MCP servers it needs and shares any "
             "that are already running."
         ),
+        allow_abbrev=False,
     )
     parser.add_argument(
         "command",
@@ -100,6 +122,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "leave the MCP servers running after this instance exits. By "
             "default the last instance to exit stops the ones it started"
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "run without a terminal: the same window, the same servers, the "
+            "same turns, nothing drawn and nothing printed"
         ),
     )
     args = parser.parse_args(rest)
@@ -378,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         # is an identity, and two live claims on one identity is a contradiction
         # rather than a configuration.  Note what it does not do — the servers
         # stay shared with every other agent.
-        with claim_agent(args.agent):
+        with claim_agent(args.agent, headless=args.headless):
             claimed = True
             code = _ensure(config, config_path)
             if code == 0:
@@ -411,10 +441,30 @@ def main(argv: list[str] | None = None) -> int:
                     # than the plugin that was already started without it.
                     mesh_url=mesh_url(config),
                 )
-                app.run()
+                # **The whole of `--headless`, and it is the window either
+                # way.**  Nothing is passed in and nothing above changes: the
+                # same three connections, the same queue, the same turns, the
+                # same prompts — a message a channel or a peer hands this agent
+                # becomes a turn here exactly as it does on a screen.  What the
+                # flag decides is the *driver*, which writes nothing and reads
+                # nothing, and what tells a model that nobody is there is the
+                # claim it was written into (`claim_agent` above), which the
+                # agent server renders into the system prompt.
+                app.run(headless=args.headless)
     except AgentInUse as exc:
         print(f"slife2: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # **Ctrl+C, and the one path that reaches here is the headless one.**
+        # A window reads Ctrl+C as a key (`SlifeApp.action_interrupt`: cancel
+        # the turn, or quit when there is none), so the app returns by itself
+        # and this branch is never taken.  With no terminal there is no input
+        # reader and the signal reaches Python instead, which cancels the app
+        # — Textual runs its shutdown on the way out, and *that* is what closes
+        # the two held calls and takes the agent off the mesh.  All that is left
+        # here is to not print a traceback for a stop somebody asked for: the
+        # `finally` below still takes the stack down like any other exit.
+        pass
     finally:
         # The last client out stops the servers, on every exit path — a normal
         # quit, Ctrl+C, or the TUI dying.
