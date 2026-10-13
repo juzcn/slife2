@@ -111,7 +111,8 @@ async def test_an_api_is_written_as_the_spec_it_is(isolated_runtime) -> None:
     assert entry["spec"] == "https://api.example.test/openapi.yaml"
     assert entry["base_url"] == "https://api.example.test"
     assert "command" not in entry, "the expansion is the config layer's, not the file's"
-    assert "connected" in answer and "2 tool(s)" in answer
+    assert "serving" in answer and "2 operation(s)" in answer
+    assert "tool(s)" not in answer, "the other family's word for it"
 
 
 @pytest.mark.asyncio
@@ -144,7 +145,10 @@ async def test_the_credential_is_stored_as_a_name_and_never_as_a_value(
 
     assert section(isolated_runtime)["github"]["api_key"] == "${GITHUB_TOKEN}"
     assert section(isolated_runtime)["other"]["api_key"] == "${SOME_OTHER_TOKEN}"
-    assert "connected" in written_as_given
+    assert "serving" in written_as_given
+    assert "connected" not in written_as_given, (
+        "the MCP family's word, in an answer about an API"
+    )
 
 
 @pytest.mark.asyncio
@@ -348,3 +352,40 @@ async def test_removing_and_switching_behave_as_they_do_next_door(
     assert "gone from `rest-api:`" in removed
     assert "registry" not in gone, gone
     assert "No REST APIs are configured" in gone, gone
+
+
+@pytest.mark.asyncio
+async def test_both_entry_tools_describe_a_live_api_the_same_way(
+    isolated_runtime,
+) -> None:
+    """**One state, one sentence, this family's words** — and it was two.
+
+    `rest_api_set` and `rest_api_set_enabled` reach a live API by different
+    routes, and a model that got two accounts of the same connection would be
+    reading two vocabularies for one mechanism — which is the failure
+    `slife2.toolfamily.FamilyWords` exists to make impossible, and which had
+    happened anyway: the `set` answer was written out by hand with `connected`,
+    `tool(s)` and `` `set_enabled` `` hardcoded into it, so this family
+    described an API as *connected* with two *tools* and pointed at a tool that
+    does not exist (`mcp_set_enabled` is the MCP family's).  The `set_enabled`
+    answer went through `FamilyWords` and was right, which is exactly why every
+    test that touched only *it* passed.
+
+    Both are asked here in one test, because the defect was their disagreement:
+    an assertion about either one alone cannot see it.
+    """
+    async with Client(family(isolated_runtime)) as client:
+        written = await ask(
+            client,
+            "rest_api_set",
+            name="other",
+            spec="https://api.example.test/openapi.yaml",
+            base_url="https://api.example.test",
+        )
+        switched = await ask(client, "rest_api_set_enabled", name="other", enabled=True)
+
+    for answer in (written, switched):
+        assert "serving" in answer, answer
+        assert "operation(s)" in answer, answer
+        assert "connected" not in answer, answer
+        assert "tool(s)" not in answer, answer

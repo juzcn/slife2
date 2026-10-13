@@ -82,6 +82,7 @@ WORDS = FamilyWords(
     unit="operation",
     list_tool="rest_api_list",
     set_tool="rest_api_set",
+    enable_tool="rest_api_set_enabled",
     remove_log="rest_api_removed",
     present="serving",
     past="served",
@@ -247,7 +248,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         )
         if settings is None:
             return why
-        return await apply_and_report(family, settings, section=SECTION) + _unresolved(
+        return await apply_and_report(family, settings, words=WORDS) + _unresolved(
             api_key
         )
 

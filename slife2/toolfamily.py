@@ -396,7 +396,7 @@ async def settled(one: Held) -> Held:
 
 
 async def apply_and_report(
-    family: Family, settings: ToolServerSettings, *, section: str
+    family: Family, settings: ToolServerSettings, *, words: FamilyWords
 ) -> str:
     """Hold *settings* and describe what happened, in one sentence.
 
@@ -407,12 +407,21 @@ async def apply_and_report(
     would also report.  Whether it answers *later* is not a claim this can make;
     what it can say is that the catalogue learns at the next search, because the
     hub re-reads every declaration before each one.
+
+    **The sentence itself is the family's**, not this function's: `words` carries
+    every word that varies (`slife2.toolfamily.FamilyWords`), and the two answers
+    this shares with `switch_entry` are methods on it rather than text written
+    out here.  They were written out here, and the copy had `connected`,
+    `tool(s)`, `connecting` and `` `set_enabled` `` hardcoded into it — so the
+    REST API family answered in the MCP family's vocabulary, naming a tool it
+    does not have.
     """
     one = await family.put(settings)
     if not settings.enabled:
         return (
-            f"'{settings.name}' is written into `{section}:` and switched off, "
-            f"so it is not connected. Its `set_enabled` tool turns it on."
+            f"'{settings.name}' is written into `{words.section}:` and switched "
+            f"off, so this process does not connect it. Its `{words.enable_tool}` "
+            f"tool turns it on."
         )
     await settled(one)
     if one.connection.usable:
@@ -430,15 +439,10 @@ async def apply_and_report(
             if count > TOOL_LIST_LIMIT
             else ""
         )
-        return (
-            f"'{settings.name}' is connected and offers {count} tool(s); they "
-            f"are in your tool list from the next search.{expensive}"
-        )
+        return words.offers(settings.name, count, note=expensive)
     reason = one.connection.error or "it has not answered yet"
-    return (
-        f"'{settings.name}' is written into `{section}:` and connecting — "
-        f"{reason}. Its tools appear once it answers, and the hub retries before "
-        f"every search."
+    return words.coming_up(
+        settings.name, reason, because=f"written into `{words.section}:`"
     )
 
 
@@ -547,6 +551,13 @@ class FamilyWords:
     set_tool: str
     """The upsert tool's name, for the same reason."""
 
+    enable_tool: str
+    """The `*_set_enabled` tool's name.  It is *not* `set_tool`: one writes an
+    entry and the other flips a switch on one that is already written, and a
+    sentence that told a model to reach for the wrong one is the failure this
+    whole class exists to make impossible — it was hardcoded to `set_enabled`
+    for both families before this field existed."""
+
     remove_log: str
     """The `logger.info` event a removal writes."""
 
@@ -558,6 +569,42 @@ class FamilyWords:
 
     starting: str
     """A link still coming up: `connecting` or `starting`."""
+
+    def offers(self, name: str, count: int, *, note: str = "") -> str:
+        """A live link, and what it offers — the answer **both** entry tools give.
+
+        **One sentence, because there is one state.**  `mcp_set` reaches a
+        connected server by writing its entry and `mcp_set_enabled` by flipping a
+        switch on one already written, and a model that got two different accounts
+        of the same connection would be reading two vocabularies for one
+        mechanism — which is what happened: this sentence was written out twice,
+        once here and once hardcoded, and the hardcoded copy said "connected" and
+        "tool(s)" for *every* family, so `rest_api_set` described an API as
+        connected with three tools.  The words that legitimately differ are fields
+        of this class (`present`, `unit`), which is the whole of what it is for.
+
+        `note` is the one thing a caller may add: a server whose tool count
+        crosses the listing cap is worth warning about at the moment it is
+        connected, and only the caller that has just merged it knows the count.
+        """
+        return (
+            f"'{name}' is {self.present} and offers {count} {self.unit}(s); "
+            f"they are in your tool list from the next search.{note}"
+        )
+
+    def coming_up(self, name: str, reason: str, *, because: str) -> str:
+        """A link that has not answered yet — the other answer both tools give.
+
+        `because` is the hole, and it is the operation's own account of itself:
+        one caller *wrote* the entry into the file, the other *switched on* one
+        that was already there, and those are genuinely two facts.  Everything
+        after the reason is not, which is why it is here rather than in each.
+        """
+        return (
+            f"'{name}' is {because} and {self.starting} — {reason}. Its "
+            f"{self.unit}s appear once it answers, and the hub retries before "
+            f"every search."
+        )
 
 
 def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
@@ -710,12 +757,9 @@ async def switch_entry(
         return f"'{name}' is switched off; its entry stays in `{words.section}:`."
     await settled(one)
     if one.connection.usable:
-        return (
-            f"'{name}' is {words.present} and offers {len(one.rows or [])} "
-            f"{words.unit}(s); they are in your tool list from the next search."
-        )
+        return words.offers(name, len(one.rows or []))
     reason = one.connection.error or "it has not answered yet"
-    return f"'{name}' is switched on and {words.starting} — {reason}."
+    return words.coming_up(name, reason, because="switched on")
 
 
 async def list_entry_tools(

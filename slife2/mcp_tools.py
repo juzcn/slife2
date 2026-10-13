@@ -83,6 +83,7 @@ WORDS = FamilyWords(
     unit="tool",
     list_tool="mcp_list",
     set_tool="mcp_set",
+    enable_tool="mcp_set_enabled",
     remove_log="mcp_removed",
     present="connected",
     past="connected",
@@ -218,7 +219,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         )
         if settings is None:
             return why
-        return await apply_and_report(family, settings, section=SECTION)
+        return await apply_and_report(family, settings, words=WORDS)
 
     @mcp.tool(name="mcp_remove", meta=FOR_THE_MODEL)
     async def mcp_remove(name: str) -> str:
