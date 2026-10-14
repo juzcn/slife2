@@ -1609,7 +1609,7 @@ babysits. `slife2` brings up what its config needs and attaches to whatever is
 already running, so a second instance is one command and no duplicate process
 appears.
 
-Four decisions carry that:
+Five decisions carry that:
 
 **A probe decides whether a server is alive**, and what it compares is the
 server's *identity* — `Client.server_info`'s name, which the handshake carries
@@ -1631,6 +1631,19 @@ the number in a record may belong to something else. Each record carries a
 process start token, and `down` refuses to signal a pid it cannot prove is ours —
 because leaving a daemon running is a far better failure than killing whatever
 the user happened to be running.
+
+**A pid that exists is not a process that is running.** On POSIX a child that
+has exited keeps its place in the process table — the pid, the state, an exit
+status nobody has read — until whoever spawned it waits, and `os.kill(pid, 0)`
+succeeds on that zombie exactly as it does on a live process. `runtime.pid_alive`
+reads the state too, and two questions were being answered wrongly without it:
+`stop`, which asked after seventeen daemons it had just killed and was told `pid
+N did not exit` for every one of them on Linux and macOS while Windows, which has
+no zombies, passed; and `live_clients`, the count that decides whether the last
+client out stops the servers, which a killed client left as a zombie would hold
+open forever. A state that could not be read is **not** a zombie — a daemon
+reported as gone is one nobody goes looking for, and the port it still holds is
+the symptom that arrives later.
 
 **A child must escape its parent's job.** A process created without
 `CREATE_BREAKAWAY_FROM_JOB` inherits its parent's job object, and if the parent

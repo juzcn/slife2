@@ -498,8 +498,64 @@ def live_clients() -> list[ClientRecord]:
     return alive
 
 
+def _zombie_linux(pid: int) -> bool:
+    """Field 3 of `/proc/<pid>/stat`, which is `Z` for a process that has exited."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # Field 2 is the command name, in brackets, and may hold spaces or brackets
+    # of its own, so the split happens after the *last* `)` — the field after it
+    # is field 3.  `_start_token_linux` splits the same way, for the same reason.
+    try:
+        state = stat.rsplit(")", 1)[1].split()[0]
+    except IndexError:
+        return False
+    return state.startswith("Z")
+
+
+def _zombie_ps(pid: int) -> bool:
+    """`ps -o state=`, for macOS and the BSDs, which have no `/proc`.
+
+    The letter is `Z` for a process that has exited and has not been waited for;
+    every other letter is a process that is doing something.  The same call as
+    `_start_token_ps` with another column, and the same cost.
+
+    **A `ps` that could not say is not a zombie** — no output, no `ps`, a
+    deadline — which is the direction that leaves a daemon reported as running
+    rather than talked about as gone (DESIGN.md §10.1).
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_T.timeouts.ready.probe,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return result.stdout.strip().startswith("Z")
+
+
+#: One zombie check per platform, and split out for `_START_TOKEN_SOURCES`'
+#: reason: each is callable directly, which is the only way the macOS path can be
+#: tested on the other two thirds of the CI matrix.
+_ZOMBIE_SOURCES = {
+    "linux": _zombie_linux,
+}
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether `pid` names a process that has exited and not been waited for."""
+    source = _ZOMBIE_SOURCES.get(sys.platform)
+    if source is not None:
+        return source(pid)
+    return _zombie_ps(pid)  # macOS, the BSDs, anything else
+
+
 def pid_alive(pid: int) -> bool:
-    """Whether a process with this pid currently exists.
+    """Whether a *live* process with this pid currently exists.
 
     **`os.kill(pid, 0)` must not be used here.**  On Windows, Python's `os.kill`
     does not send signals: any value other than the two console events calls
@@ -509,6 +565,21 @@ def pid_alive(pid: int) -> bool:
 
     Windows therefore opens the process and waits on it with a zero timeout;
     POSIX uses the signal-0 form, where it does mean what it looks like.
+
+    **And a pid that exists is not a process that is running.**  On POSIX a child
+    that has exited keeps its place in the process table — the pid, the state, an
+    exit status nobody has read — until whoever spawned it waits, and `os.kill`
+    on that zombie succeeds exactly as it does on a live process.  Reading it as
+    alive is what made `launcher.stop` report `pid N did not exit` for every
+    daemon the end-to-end lane had just stopped, on Linux and macOS — the two
+    platforms that have zombies — while Windows, which has none, passed; and it
+    is the count `live_clients` decides "am I the last one out?" by, where a
+    killed client that stays a zombie is a client keeping the servers up forever.
+
+    The state is therefore read as well, and **a state that could not be read is
+    not a zombie**: an unanswerable question leaves the process reported as
+    running, because the other direction claims a daemon is gone that may still
+    be holding its port.
     """
     if pid <= 0:
         return False
@@ -532,8 +603,11 @@ def pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists, owned by someone else
-    return True
+        # Somebody else's process, and the state is still readable for it (`ps`
+        # for everyone, `/proc` for anyone who can see the directory), so the
+        # question below is asked rather than answered here.
+        pass
+    return not _is_zombie(pid)
 
 
 def _start_token_windows(pid: int) -> str | None:

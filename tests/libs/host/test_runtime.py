@@ -326,6 +326,40 @@ def test_pid_alive_does_not_kill_the_process_it_checks() -> None:
         child.wait()
 
 
+def test_a_child_that_exited_unwaited_is_not_a_live_process() -> None:
+    """**A pid that exists is not a process that is still running.**
+
+    On POSIX a child that has exited keeps its place in the process table — the
+    pid, the state, an exit status nobody has read — until whoever spawned it
+    waits, and `os.kill` on that zombie succeeds exactly as it does on a live
+    process.  This is the state `spawn` leaves every daemon in: it drops the
+    `Popen` it made, so nothing here ever waits on a server this process started
+    (which is `_wait_ready`'s lesson, and the reason it reaps by hand).
+
+    The failure it produced is the end-to-end lane's teardown, and it was a
+    platform split: `launcher.stop` asked after seventeen daemons it had just
+    killed, was told every one of them was still there, and reported `pid N did
+    not exit` for each — on Linux and macOS, the two platforms that have
+    zombies, while Windows, which does not, passed.
+
+    The wait is deliberately *not* done here.  Reaping the child would answer
+    the question by destroying it, and `stop` cannot do that: it is holding a
+    pid out of a record, and the process that spawned the daemon may be long
+    gone.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert runtime.pid_alive(child.pid) is True
+        child.kill()
+        time.sleep(0.5)
+        assert runtime.pid_alive(child.pid) is False
+        # And the same fact through the caller that reports it: a stopped
+        # daemon, not `did not exit`.
+        assert runtime.terminate(child.pid) is True
+    finally:
+        child.wait()
+
+
 #: Platforms with a start-token source.  The CI matrix covers all three; the
 #: guard is here so an exotic platform fails honestly rather than pretending
 #: `down` is safe there.
@@ -413,6 +447,102 @@ def test_every_platform_has_a_token_source() -> None:
     assert set(runtime._START_TOKEN_SOURCES) == {"win32", "linux"}
     # Everything else falls through to `ps`, which macOS and the BSDs have.
     assert runtime._start_token_ps is not None
+
+
+# --- a process that has exited and was never waited for ----------------------
+# The state of a pid, which is `pid_alive`'s second question and the one a
+# signal-0 test cannot ask.  Both sources are called directly, so the macOS half
+# is covered on the other two thirds of the CI matrix.
+
+
+def test_the_linux_zombie_check_reads_the_state_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Linux path, driven by a `/proc/<pid>/stat` line.
+
+    Field 2 is the command name, which may hold spaces and brackets of its own,
+    so the state is the field after the *last* `)` — the same split
+    `_start_token_linux` makes.
+    """
+
+    def reads(state: str) -> bool:
+        monkeypatch.setattr(
+            runtime.Path,
+            "read_text",
+            lambda self, **kw: f"4321 (a ) name) {state} 1 4321 1234\n",
+        )
+        return runtime._zombie_linux(4321)
+
+    assert reads("Z") is True
+    assert reads("S") is False
+    assert reads("R") is False
+
+
+def test_the_linux_zombie_check_answers_false_when_proc_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A state that could not be read is not a zombie.**
+
+    The direction matters: answering "zombie" from a read that never happened
+    would report a live daemon as stopped, and a daemon reported as stopped is
+    one nobody goes looking for.  An unanswerable question leaves it running
+    (`DESIGN.md` §10.1).
+    """
+
+    def deny(self: Path, **kw: object) -> str:
+        raise OSError("no such file or directory")
+
+    monkeypatch.setattr(runtime.Path, "read_text", deny)
+    assert runtime._zombie_linux(4321) is False
+
+
+def test_the_ps_zombie_check_reads_the_state_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The macOS path, exercised where it cannot run — `_start_token_ps`'s reason.
+
+    macOS has no `/proc`, so the state comes from `ps -o state=`, whose first
+    character is the run state and `Z` is the one a process that has exited has.
+    The letters a live process reports are here too, because the failure that
+    matters is the other direction: a daemon that is running and is reported
+    gone.
+    """
+    for output, expected in (
+        ("Z\n", True),
+        ("Z+\n", True),
+        ("S\n", False),
+        ("R\n", False),
+        ("", False),
+    ):
+        fake = FakePs(output)
+        monkeypatch.setattr(runtime.subprocess, "run", fake)
+        assert runtime._zombie_ps(4321) is expected, output
+
+    assert fake.calls[0][0] == "ps"
+    assert "state=" in fake.calls[0]
+    assert fake.calls[0][-1] == "4321"
+
+
+def test_the_ps_zombie_check_answers_false_when_ps_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `ps` on this machine is not a process that has exited."""
+
+    def missing(*args: object, **kw: object):
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(runtime.subprocess, "run", missing)
+    assert runtime._zombie_ps(4321) is False
+
+
+def test_only_linux_reads_proc_for_a_zombie() -> None:
+    """The table names Linux, and everything else POSIX falls through to `ps`.
+
+    Windows is deliberately absent: it has no zombies — a process object is
+    signalled the moment the process exits, whether or not anybody waited — and
+    `pid_alive` answers from that handle before this table is ever read.
+    """
+    assert set(runtime._ZOMBIE_SOURCES) == {"linux"}
 
 
 def test_same_process_rejects_a_record_with_no_token() -> None:

@@ -271,11 +271,17 @@ second instance is one command and no duplicate process. They are daemons: a
 client exiting never stops one — but **the last client out does** (`others_running`,
 which counts by pid liveness so a killed client cannot keep them alive).
 
-Three rules carry the lifecycle:
+Four rules carry the lifecycle:
 
 - **A probe decides whether a server is alive, never a pid**
   (`libs/host/runtime.py`). A pid can be recycled; a probe cannot be fooled by
   one. Records carry a process start token as well, for the same reason.
+- **Nor is a pid that still exists a process that is still running.** A child
+  that has exited is a zombie in the process table until whoever spawned it
+  waits, and a liveness check written as a signal-0 test reads one as alive —
+  which is a daemon reported as `did not exit` after it has stopped, and a
+  killed client holding the shared servers up. The state is read too, and a
+  state that could not be read is not a zombie.
 - **Ready is the server answering as itself**, which is what `probe` checks:
   up *and* the server we expected, not merely a port that accepts a connection.
 - **Start-up is a wave order, and the waves are a table** (`NEEDS`): everything
