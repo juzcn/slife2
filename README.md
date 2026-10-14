@@ -24,9 +24,9 @@ Two properties follow, and they are the point of the arrangement:
 **A plugin is a capability; a library is its implementation.** What holds a
 credential, an SDK or somebody else's connection is a process; what holds a
 *file* is not, because one writer is what a SQLite lock already is. So
-`slife2.db` — the turn log — is a library, imported by the plugin that owns it,
-`slife2-context`, and `slife2.catalogue` is the tool catalogue, opened in-process
-by `slife2-toolhub`. So is `slife2.index`, the machinery those two stores are
+`slife2.libs.store.db` — the turn log — is a library, imported by the plugin that owns it,
+`slife2-context`, and `slife2.libs.store.catalogue` is the tool catalogue, opened in-process
+by `slife2-toolhub`. So is `slife2.libs.store.index`, the machinery those two stores are
 *searched* by, which is the cabinet's library too. DESIGN §1.1 is the test and
 what it costs.
 
@@ -309,7 +309,7 @@ loaded, which is the section after the config:
 # and `default:` at the bottom are edited the same way by `model_set` /
 # `model_remove` / `model_switch`, which live on the agent server rather than on
 # a family plugin of their own (DESIGN.md §8).  Either way
-# the write goes through `slife2/configfile` — one writer, the file's comments
+# the write goes through `slife2.libs.host.configfile` — one writer, the file's comments
 # kept, and the loader that reads this file at every start as the judge.
 
 mcp:                                  # other people's MCP servers
@@ -388,7 +388,7 @@ honours it are one process (DESIGN.md §8). A `set` writes the
 `set_enabled` is the one that changes a single field and leaves the rest. What
 is unchanged is
 the road an edit travels: the file is written by one module
-(`slife2/configfile`) under a cross-process lock, as a document edit that keeps
+(`slife2.libs.host.configfile`) under a cross-process lock, as a document edit that keeps
 every comment, and the result is handed to the same parsers and the same loader
 a *start* uses — an entry the loader refuses is put back and the caller told
 why. So what can be written is what an operator could write, and it lands where
@@ -431,7 +431,7 @@ wanted every turn is written down as such. Everything else arrives on demand.
 
 **Every tool accepts three meta-parameters the model may add to any call.** They
 are not in any tool's schema of its own — they are added to every schema on its
-way out (`slife2.tools.advertised`), and the loop reads them off and strips them
+way out (`slife2.libs.turn.tools.advertised`), and the loop reads them off and strips them
 before dispatch, so no tool server ever sees one.
 
 ```yaml
@@ -546,7 +546,7 @@ name is one row.
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
 rule above, who may call one — and the record is a file the hub itself opens,
-`<data>/agents/tools.db` through `slife2.catalogue.ToolStore`: rows and two
+`<data>/agents/tools.db` through `slife2.libs.store.catalogue.ToolStore`: rows and two
 indexes over them, and the same machinery the turns use, because a store has one writer
 and one writer is what a SQLite file already is. It answers the questions about
 the rows — which are loaded, what one is called at the far end, and the two
@@ -1048,184 +1048,101 @@ fails at the API call where the message can name it, rather than at startup.
 
 ## Layout
 
+Four layers, and which one a module is in is a fact about what it *is*:
+
 ```
 slife2/
-├─ paths.py           # the one data directory, and what goes under it
-├─ launcher.py        # which servers are needed, and attaching to the running ones
-├─ runtime.py         # daemon records, logs, and the kernel-backed locks
-├─ clock.py           # the one timestamp format every writer uses
-├─ config.py          # slife2.yaml, the ${VAR} / keyring: chain, and the server table
-├─ prompt.py          # the Jinja2 system prompt, rendered per turn
-├─ messages.py        # the neutral message model — what crosses `stream_chat`
-├─ events.py          # the turn event vocabulary, and its progress encoding
-├─ tools.py           # the tool registry: what the loop can call, and how a
-│                     #   failure reaches the model as text
-├─ toolclient.py      # the toolhub hop from the agent's side: the wire shape,
-│                     #   a listed tool as one the loop can run, and the trim
-│                     #   the harness makes before a turn is saved
-├─ gateway.py         # the link to a server somebody else runs: connect, list,
-│                     #   call, and say whether it is answering — no catalogue,
-│                     #   no category, no config
-├─ configfile.py      # the one writer of slife2.yaml: a section edit under a
-│                     #   cross-process lock, as a document edit that keeps the
-│                     #   file's comments, judged by the loader that reads it —
-│                     #   and the top-level-scalar and locked read-modify-write
-│                     #   writers the model config needs
-├─ toolfamily.py      # the half of a "hold somebody else's servers" plugin that
-│                     #   is shared: hold, declare, route a call back, and the
-│                     #   management tools' sentences, which one `FamilyWords`
-│                     #   per section supplies the words for
-├─ mcp_tools.py       # slife2-mcp-tools: the `mcp:` section — held, declared,
-│                     #   and editable by the `mcp_*` tools
-├─ restapi_tools.py   # slife2-restapi-tools: the `rest-api:` section, likewise
-├─ wechat.py          # slife2-wechat: a WeChat login per agent, the four tools
-│                     #   the model uses, and the poll loop that turns what
-│                     #   arrives into a turn — the one plugin here that holds
-│                     #   no section and declares no rows (DESIGN §1.2)
-├─ ilink.py           # the iLink ClawBot protocol, as a library: the QR
-│                     #   handshake, the long poll, and the two envelopes that
-│                     #   mean something other than what their status says
-├─ attachments.py     # how an image reaches the model: the three kinds of
-│                     #   source, and the content parts they become
-├─ media/             # slife2-media: generation, one process for every vendor
-│  ├─ server.py       #   the four tools and the config's four-step search
-│  └─ adapters.py     #   one contract, and the vendor HTTP behind it
-├─ file_tunnel/       # slife2-file-tunnel: a public URL for a local file, and
-│  ├─ providers.py    #   the only plugin here with a second HTTP route — the
-│  │                  #   ngrok / localhost.run / cloudflared transports, their
-│  │                  #   state machine, and the health monitor that keeps one up
-│  └─ server.py       #   the token registry, `GET /share/<token>`, the tools
-├─ a2a/               # slife2-a2a: the A2A mesh over MQTT, on the published
-│  ├─ mesh.py         #   profile — one mesh per agent, because the agent name
-│  │                  #   *is* the MQTT client id and the request topic's last
-│  │                  #   segment: the two connections, the task lifecycle,
-│  │                  #   presence, and the check that refuses a taken name
-│  ├─ broker.py       #   the broker: probed, started when it is local and
-│  │                  #   absent, and a startup failure if it still will not
-│  │                  #   serve — or if it is another machine's and is down
-│  ├─ inbound_store.py#   the per-agent ledger at <agent>/a2a.yaml: tasks whose
-│  │                  #   completion bridge this process holds, which is what
-│  │                  #   tells a restart's orphans from ids never seen
-│  ├─ task_store.py   #   what this process sent, and where each send got to
-│  └─ server.py       #   the plugin: the four tools, and the hand-over that
-│                     #   puts what arrives into the conversation (DESIGN §1.8)
-├─ cabinet.py         # slife2-cabinet: notes, a diary, saved files and reports
-│                     #   as sixteen tools, and the byte half of a saved file —
-│                     #   what is copied in, what is read back, what is refused
-├─ cabinet_store.py   # the cabinet's index, as a library: one table for four
-│                     #   kinds, one FTS index, one vector index, and the
-│                     #   markdown mirror written in the same operation
-├─ toolhub.py         # slife2-toolhub: the model's tools and the *set* they
-│                     #   belong to — the naming rule, the gate, the budget, and
-│                     #   the calls, which it routes to whoever holds the source
-├─ loop.py            # AgentLoop.run_turn — the turn algorithm
-├─ textindex.py       # how a turn becomes searchable text, and how a query
-│                     #   becomes a MATCH (no I/O)
-├─ db.py              # the store, as a library: TurnStore, one SQLite file per
-│                     #   client id, with the two derived indexes over its turns
-│                     #   and the live-context list.  No server holds it: the
-│                     #   plugin that owns the turns imports it, because a file
-│                     #   already has one writer (DESIGN §1.1)
-├─ catalogue.py       # the tool catalogue, as a library: ToolStore — one row
-│                     #   per tool the model may be given, what is known about
-│                     #   it, and which of them the model has loaded — one file
-│                     #   for the whole data directory, opened by the hub
-│                     #   in-process and by nobody else
-├─ index.py           # the indexes, as a library: the FTS5 and `sqlite-vec`
-│                     #   machinery three corpora are searched by — the identity
-│                     #   that decides a rebuild, the chunk write, the keyset
-│                     #   paging and the rank fusion over the two legs — shared
-│                     #   by `db.py`'s two stores and by the cabinet's
-├─ tokens.py          # how large a piece of a conversation is, when nobody has
-│                     #   measured it — the model's own tokenizer, a script
-│                     #   measure where it cannot be fetched, and every user of
-│                     #   one estimator rather than three
-├─ embedder.py        # the client half of the embeddings server, as a library:
-│                     #   one hop, shared by the two things with an index
-├─ context.py         # a conversation's context as a pure function: the reply
-│                     #   parser, the union, the two fit rules, the turn footnote
-├─ context_server.py  # slife2-context: `remember`, `forget`, `turn_list`,
-│                     #   `turn_read`, and the two decisions — `restore` and
-│                     #   `rebuild` — which are the harness's, never the model's
-├─ mcp_server.py      # what it takes to *be* one of our MCP servers — including
-│                     #   the client id every one of them keys its state by,
-│                     #   how a client proves which one it reached, and the
-│                     #   `serve_plugin` start-up every plugin's `main` is
-├─ audience.py        # who a tool is for, and whose behalf a call is on: the
-│                     #   two `_meta` facts that keep `remember` out of a
-│                     #   model's hands and one conversation out of another's
-├─ skills.py          # the `skills/` folder: a playbook's header, its
-│                     #   `requires` block, and what `skill_use` answers with
-├─ skills_server.py   # slife2-skills: `skill_use` and the `skill_*` tools that
-│                     #   install one, plus the catalogue rows a search finds a
-│                     #   playbook by
-├─ cli_server.py      # slife2-cli: the `cli:` section as catalogue rows — one
-│                     #   per entry — and the `cli_*` tools that write it
-├─ llm/
-│  ├─ base.py                    # Chunk, Stream, LLMBackend  (no I/O)
-│  ├─ wire.py                    # Chunk <-> progress payload (no I/O)
-│  ├─ client.py                  # MCPBackend: the agent loop's only backend
-│  ├─ server_common.py           # what the model servers share, incl. tool-call
-│  │                             #   assembly
-│  ├─ embeddings_server.py       # slife2-llm-embeddings        <- imports openai
-│  ├─ openai_server.py           # slife2-llm-openai            <- imports openai
-│  ├─ openai_responses_server.py # slife2-llm-openai-responses  <- imports openai
-│  └─ anthropic_server.py        # slife2-llm-anthropic         <- imports anthropic
-├─ server/server.py   # slife2-agent: FastMCP, the conversations and the tools
-│                     #   that drive them, keyed by (agent, subagent) — plus the
-│                     #   `model_*` tools, which own `providers:` and `default:`
-├─ templates/
-│  ├─ system.j2       # the system prompt the distribution ships
-│  ├─ recall.j2       # the recall instruction, rendered per turn
-│  ├─ agent_task.j2   # what a task is told as it starts (DESIGN.md §1.3)
-│  ├─ schedule.j2     # what a task that came due is told (§1.7)
-│  └─ a2a_orphans.j2  # the inbound tasks a restart left nobody able to
-│                     #   complete, and the one reply their peers can still
-│                     #   get (§1.8)
-└─ tui/
-   ├─ app.py          # the Textual App
-   ├─ client.py       # AgentClient + WindowClient protocols, and the MCP
-   │                  #   implementations of both directions
-   ├─ control.py      # slife2-tui: the terminal's inbox, a plugin with a session
-   │                  #   per agent (`attach` for the window, `submit` for a
-   │                  #   channel) — the window is a client of it
-   ├─ restore.py      # a previous conversation, drawn back into the transcript
-   ├─ widgets.py      # ChatView, HistoryInput, StatusBar
-   ├─ theme.py        # the palette and glyphs, defined once
-   └─ app.tcss
+├─ libs/              # a library: imported, never reached over a socket
+│  ├─ host/           # the machine — the one config file and its one writer, the
+│  │                  #   data directory, the daemon records and locks, and the
+│  │                  #   launcher that brings the servers up in order
+│  ├─ plugin/         # the contract every plugin sits on: `protocol` (what it
+│  │                  #   takes to be one of our servers), `audience` (who may
+│  │                  #   call a tool), `family` (the shared half of a family)
+│  ├─ store/          # the three corpora and the machinery they share: the
+│  │                  #   turns (`db`), the tool catalogue, the FTS5 +
+│  │                  #   `sqlite-vec` index, and the text rule
+│  ├─ turn/           # what one turn is made of: the loop, the context
+│  │                  #   decision, the neutral messages, the event vocabulary,
+│  │                  #   the tool registry, the prompt and its `templates/`
+│  ├─ harness/        # what the harness puts *into* a conversation: markers,
+│  │                  #   the hand-over, the background tasks
+│  └─ model/          # the model as a wire: `Chunk`, `Stream`, `LLMBackend`
+├─ clients/           # the client half of a hop, one module per peer
+│  ├─ model.py        # MCPBackend — the agent loop's only backend
+│  ├─ toolclient.py   # the hub: its listing, its calls, the trim
+│  ├─ embedder.py     # the embeddings endpoint, shared by the two indexes
+│  └─ gateway.py      # a server somebody else runs
+├─ helpers/           # small and stateless: the clock, time grammar, timeouts
+├─ plugins/           # a process each: one directory, `server.py` inside it
+│  ├─ agent/          # slife2-agent — the loop, and the conversations it owns
+│  ├─ context/        # slife2-context — the turn log and the decision about it
+│  ├─ toolhub/        # slife2-toolhub — the model's tools and the set they are
+│  ├─ llm/            # the four model servers, one per wire protocol
+│  ├─ skills/ cli/ mcp_tools/ restapi/     # the four that own a section
+│  ├─ cabinet/ media/ file_tunnel/         # documents, generation, a public URL
+│  ├─ wechat/ a2a/ agent_task/ schedule/   # the ways work arrives
+│  └─ tui/            # slife2-tui — the terminal's inbox, a session per agent
+└─ tui/               # the terminal: Textual, and a client of the two above
+   ├─ app.py client.py widgets.py      # the window, its clients, its drawing
+   ├─ notes.py restore.py theme.py     # the harness's lines, a reopened
+   └─ app.tcss                         #   conversation, the palette
 ```
 
-The dependency direction is one-way and is what makes each layer testable alone:
-`tui/` → MCP → `server/` → `loop.py` → {`llm/base.py`, `tools.py`, `events.py`,
-`messages.py`} → `config.py`. The loop imports neither `server/` nor `tui/`, and
-it does not import `toolhub.py` or `toolclient.py` either: it is handed a
-coroutine that returns a registry, and where that registry came from is the
-agent server's business.
+A plugin directory keeps its own private libraries (`cabinet/store.py`,
+`schedule/expressions.py`, `skills/playbooks.py`, `wechat/ilink.py`,
+`media/adapters.py`, `a2a/mesh.py`): a capability goes where the plugin that
+owns it is, and `libs/` is for what *more than one* thing imports. The test tree
+mirrors this one, file for file.
 
-`mcp_server.py` is a leaf every server sits on: it holds what being one of our
-servers means — the flags, the HTTP transport, the record that says a daemon is
-here, the two conventions (`house_server`) that would otherwise be copied into
+The dependency direction is one-way, and it is what makes each layer testable
+alone: `tui/` → MCP → `plugins/agent/` → `libs/turn/loop.py` →
+{`libs/model/base.py`, `libs/turn/tools.py`, `libs/turn/events.py`,
+`libs/turn/messages.py`} → `libs/host/config.py`. The loop imports neither the
+agent server nor the terminal, and it does not import the hub or the hub's
+client either: it is handed a coroutine that returns a registry, and where that
+registry came from is the agent server's business.
+
+`libs/plugin/protocol.py` is the leaf every server sits on: what being one of
+our servers means — the flags, the HTTP transport, the record that says a daemon
+is here, the conventions (`house_server`) that would otherwise be copied into
 each server, and the whole of a plugin's `main` (`serve_plugin`), which is
 eleven lines every one of them would otherwise spell out. It is not
-LLM-specific, which is why it is not under
-`llm/`: the db server, the toolhub and the agent server are not LLM
-plugins, and the scaffold they serve on should not come out of the LLM
-package. The embeddings server is the one plugin under `llm/` that is not a
-chat backend — it speaks `/embeddings` and nothing else — and it is there
-because it is the other thing in this system that imports a provider SDK.
+LLM-specific, which is why it is not under `plugins/llm/`: the context store,
+the hub and the agent server are not LLM plugins, and the scaffold they serve on
+should not come out of the LLM package. The embeddings server is the one plugin
+under `llm/` that is not a chat backend — it speaks `/embeddings` and nothing
+else — and it is there because it is the other thing in this system that imports
+a provider SDK.
 
 ## Tests
 
+**The suite is the thing this project is changed against**, so there are two
+lanes and the default one is fast:
+
 ```bash
-uv run pytest                  # unit + integration, no network, no live model
-uv run pytest -m unit          # fast only
-uv run pytest -m integration   # the one test that binds a socket
+uv run pytest                  # unit + integration, every module, across cores
+uv run pytest -m unit          # the fast lane on its own
+uv run pytest -m integration   # the tests that bind a socket or spawn a process
+uv run pytest -m e2e           # the whole stack as processes (~75s)
 uv run ruff check . && ruff format --check .
 uv run pyright                 # a dev dependency, wired into CI
 ```
 
-Nothing in the suite needs an API key or a running server. The model is faked,
-and the servers are driven over FastMCP's **in-memory transport** — real MCP
-messages and real progress notifications, with no port bound. One `integration`
-test does bind a socket, because the in-memory transport cannot prove that
-progress notifications survive HTTP framing.
+`uv run pytest` runs the suite on every core (`-n auto`, from `addopts`) and
+leaves out `e2e`, which is the one lane that starts the real stack: seventeen
+daemons, a config on disk and a stub provider, driven end to end
+(`tests/e2e/`). Both lanes run in CI.
+
+**Nothing in the fast lane needs an API key or a running server.** The model is
+faked, and the servers are driven over FastMCP's **in-memory transport** — real
+MCP messages and real progress notifications, with no port bound. The
+`integration` tests are the ones that need a socket, and each binds an ephemeral
+port rather than a fixed one, so a suite run beside a live stack is still a
+suite that passes.
+
+The doubles live in `tests/fakes.py` and are shared: a stub model, a stub
+embedder, the fake window and mesh clients, and the small factories
+(`upstream_server`, `plugin_transports`, `config_file`) that more than one test
+module needs. A test module reaching into another one for a fixture is how two
+lanes end up disagreeing about the shape of a double.

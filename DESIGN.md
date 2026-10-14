@@ -7,6 +7,13 @@ was rejected, and — where it matters — the measurement that forced the choic
 It is written to be read before changing the code, because several of these
 decisions look arbitrary until you know what happens if you undo them.
 
+**Where this sits among the four documents.** [README.md](README.md) is the
+user's manual and, with [sdd.md](sdd.md), the *normative* pair: what the system
+offers and how it is built, both answerable to the code, and the SDD is what to
+read to find out what a subsystem *is*. This file is the argument behind those
+two — why the shape is what it is, and what each alternative cost — and
+[designer_notes.md](designer_notes.md) is the designer's own memory of intent.
+
 ---
 
 ## 1. The shape
@@ -17,7 +24,7 @@ transport, the same JSON-RPC and the same tool listing as the servers under
 `mcp:` — plus the *plugin contract*, which is the part this project adds on
 top: state keyed by a client id rather than by a session, a tool that says who
 may call it, and an identity another process checks before it reuses what it
-found (`slife2.mcp_server`). The word is worth having because "MCP server" does
+found (`slife2.libs.plugin.protocol`). The word is worth having because "MCP server" does
 not separate the servers slife2 starts from the twenty somebody else wrote, and
 that line is load-bearing everywhere below: a missing plugin fails the turn,
 where a missing entry under `mcp:` is a model with fewer tools.
@@ -39,7 +46,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                 └── HTTP 127.0.0.1:8004/mcp ──▶ slife2-llm-embeddings
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
-  │                                 │  the tool catalogue, in-process (`slife2.catalogue.ToolStore`)
+  │                                 │  the tool catalogue, in-process (`slife2.libs.store.catalogue.ToolStore`)
   │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
   │                                 │                  └── MCP ──▶ slife2-tui    (into that agent's window)
   │                                 ├── :8035/mcp ──▶ slife2-cabinet       (notes, diary, files, reports)
@@ -65,7 +72,7 @@ each terminal is is an ordinary plugin, started and shared like the rest.
 
 Two things reach the embeddings server — the context store, for a turn's
 vectors, and the hub, for a tool row's — because what needs a vector is an index
-and there are two of them. They share one *client* (`slife2.embedder`) and one
+and there are two of them. They share one *client* (`slife2.clients.embedder`) and one
 server, which is the arrangement that keeps them ranking against the same model:
 two copies of "ask and check the shape of the answer" is how the two indexes
 would come to disagree about what an embedding is.
@@ -132,9 +139,9 @@ process, because the MCP server bounds neither a body nor an event and neither
 does uvicorn.
 
 **So it is off for our own hops and on for anybody else's**, which is why
-`slife2.mcp_server` has a transport of its own rather than a setting: what the
+`slife2.libs.plugin.protocol` has a transport of its own rather than a setting: what the
 ceiling buys is keeping a *peer* from making this process buffer an unbounded
-message, and a peer is exactly what a daemon we started is not. `slife2.gateway`,
+message, and a peer is exactly what a daemon we started is not. `slife2.clients.gateway`,
 which dials the entries under `mcp:` and `rest-api:`, keeps it. FastMCP 4.0.11
 does not pass the parameter through, which is the only reason reaching the knob
 takes a class rather than an argument.
@@ -167,7 +174,7 @@ Which one a component needs is decided by **what it holds**:
 | a mechanism more than one store is made of | a **library** | a store that owns it makes every change to it a change about *its* corpus, and a copy per store is how one bug has to be found and fixed twice |
 
 So `db` is a library — it holds the turn files, and nothing else — and
-`slife2.catalogue` is the same row of that table for the other file this system
+`slife2.libs.store.catalogue` is the same row of that table for the other file this system
 keeps, one per data directory rather than one per agent. The embeddings server
 stays a plugin because it reads an
 endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
@@ -175,19 +182,19 @@ endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
 else's processes rather than at a file: `mcp:` and `rest-api:` are config
 sections, and the plugin that owns a section is the one that holds the
 connections its entries describe (§8). The gateway underneath them
-(`slife2.gateway`) is a library, and always was. **And the one *writer* of
-`slife2.yaml` is a library too** (`slife2/configfile`), which is the same row of
+(`slife2.clients.gateway`) is a library, and always was. **And the one *writer* of
+`slife2.yaml` is a library too** (`slife2.libs.host.configfile`), which is the same row of
 that table rather than a new one: it holds a file and nothing else, the four
 plugins that own the four sections import it, and the cross-process lock it
 takes is the other half of "one writer" — a SQLite lock for a database, a kernel
 mutex for a file both a human and four daemons edit.
 
-**`slife2.index` is the third row of that table, and it is the row the first two
+**`slife2.libs.store.index` is the third row of that table, and it is the row the first two
 do not predict.** It holds no file and answers no connection: what it is is the
 mechanism a store is *made of* — the FTS5 and `sqlite-vec` tables, the identity
 recorded beside them that decides a rebuild, the keyset paging, the rank fusion
 over the two legs — and three corpora are made of it: a conversation's turns,
-the tool catalogue, and the cabinet's four kinds of document. It was `slife2.db`'s
+the tool catalogue, and the cabinet's four kinds of document. It was `slife2.libs.store.db`'s
 until two things said otherwise. The cabinet was importing twenty-two names out
 of a module about turns, which made every change to the machinery a change to a
 file about something else. And a rule stated once is a rule the second copy can
@@ -223,7 +230,7 @@ the process.  These servers are shared (§4), so the same four things live in a
 `Session` keyed by the **calling agent** — the first half of the client id every
 call already carries (§3) — and a second agent that scans its own code gets its
 own file, its own poll loop and its own conversation.  This is the contract
-`slife2.mcp_server` states, at the first plugin where it costs something: a
+`slife2.libs.plugin.protocol` states, at the first plugin where it costs something: a
 process that cannot ask an operator which agent it is serving has to be told, per
 call, and a call that does not say is refused rather than guessed.
 
@@ -233,7 +240,7 @@ plugin's job ended at "here is what arrived" — and that seam was a tool named
 `__wechat_drain_incoming`.  There is no harness here, and there is something
 better than a seam: a message is handed to the terminal showing this
 conversation, which puts it in the same queue the person's own typing goes into
-(`slife2.tui.control`).  So a message sent from a phone is *visible in the
+(`slife2.plugins.tui.server`).  So a message sent from a phone is *visible in the
 terminal*, wears `Wechat> ` on screen, and is recorded as the turn it is — one
 inbox, one display, and the one path for a turn whether it was typed or arrived.
 
@@ -480,7 +487,7 @@ tool it still believes it has.
 
 **The opening message is rendered, and that is the third prompt-with-holes.**
 `slife2/templates/agent_task.j2` joins `system.j2` and `recall.j2` under the
-mechanism `slife2.prompt` already describes for both, for the same reason: it is
+mechanism `slife2.libs.turn.prompt` already describes for both, for the same reason: it is
 a prompt with holes in it, so it is a template rather than an f-string.  It is
 asked for by bare name and is therefore **shipped rather than configured** —
 which is what `recall.j2` does, and the opposite of what `agent:`'s
@@ -507,7 +514,7 @@ file and *not* there is exactly the difference between being an agent and being 
 task.  That is why it is a file, and why it is short.
 
 **The step machine is a library, and this is the sentence §1.1 was written for.**
-`slife2.loop` is a pure function over a message list: it owns no conversation,
+`slife2.libs.turn.loop` is a pure function over a message list: it owns no conversation,
 knows no provider, and does not know whether anyone is watching (§7).  It is not
 "the main agent's loop" — it is *the* loop, and the agent server is one of its
 callers.  And it is called here with nothing that has to be turned *off*:
@@ -633,7 +640,7 @@ uses, so a model never translates between two spellings of one fact — the rule
 `slife2-wechat` states for its own marker, applied to a marker whose keys are
 named after the fields the tools answer with.  A screen has the channel already,
 so it removes the marker before drawing, exactly as it does WeChat's:
-`slife2.markers.strip` takes the prefixes a caller knows about and removes
+`slife2.libs.harness.markers.strip` takes the prefixes a caller knows about and removes
 whichever it finds, which is one function for two markers and a third channel
 away from being a line in `slife2.tui.widgets.MARKERS`.  The *names* stay with
 their writers, because the module that writes a marker is the one that knows what
@@ -646,11 +653,11 @@ wrong in the way every fallback for a normal case is: it made "the window is
 gone" a state to carry on in, and the work went ahead in a conversation nobody
 was running.  An agent's window is what runs it (a terminal or `--headless`, and
 both attach), so a message with no window has no conversation to become a turn
-in, and now says so (`slife2.handover.DeliveryFailed`).
+in, and now says so (`slife2.libs.harness.handover.DeliveryFailed`).
 
 What survives that is the *classification*, and it is about retrying rather than
 about roads.  `submit` refuses when no window is showing that agent, and it looks
-the session up before it posts anything (`slife2.tui.control`) — so **that
+the session up before it posts anything (`slife2.plugins.tui.server`) — so **that
 refusal is the one answer that proves nothing was written**.  Anything else means
 the call did not come back, and the words may be down the stream already:
 repeating them is how one answer arrives *twice*, which is what treating "it
@@ -801,7 +808,7 @@ write a file, which is the same line `cabinet_store.resolve` draws.
 
 **A failure is a `ToolError` rather than an `"Error: …"` string.**  v1 returned
 the latter, which was its convention for a tool failure; here the convention is
-the exception, for the reason `slife2.skills_server` states — a refusal returned
+the exception, for the reason `slife2.plugins.skills.server` states — a refusal returned
 as text reaches the transcript as a *success*.  The three failures are told
 apart because a person does three different things about them: an adapter that
 cannot do this at all (a config choice), a provider that answered badly (worth a
@@ -836,7 +843,7 @@ that follows.
 Three things are worth saying about it, because each is a place the arrangement
 could have been got wrong:
 
-* **It needs nothing new from `slife2/mcp_server.py`.**  FastMCP has had
+* **It needs nothing new from `slife2/libs/plugin/protocol.py`.**  FastMCP has had
   `custom_route` all along and `serve()` still runs the app with
   `mcp.run(transport="http", …)`, so the route is served by the same call, on
   the same port, outside the `/mcp` prefix.  Measured against the installed
@@ -876,14 +883,14 @@ decision to make this machine reachable**, and that is the whole of what it does
 
 **Its config is a section, not a file.**  v1 kept the provider table in a
 standalone `sharefile.yaml`, which this project has no room for: there is one
-config file and one writer for it (`slife2/configfile.py`), and every other
+config file and one writer for it (`slife2/libs/host/configfile.py`), and every other
 plugin that owns entries owns a section.  So the provider table is `file-tunnel:`
 in `slife2.yaml` — a table like `providers:` or `embeddings:`, with one thing
 that makes it unlike both: **its entries are options rather than a schema.**
 What a provider needs is a binary name, a host, a protocol — vendor words that
 belong to the tunnel and not to this project — so they are kept as the mapping
 they were written as and read by the provider that understands them.  A typed
-field per option would put three vendors' vocabulary in `slife2/config.py` and
+field per option would put three vendors' vocabulary in `slife2.libs.host.config` and
 change it every time a tunnel learns a flag.
 
 **And that section is the one place this project warns instead of refusing.**
@@ -925,7 +932,7 @@ the log blames the transport.  `tunnel_status` reports the edge address and
 whether it is a synthetic one, which is the only place that shows.  It is an
 accusation and not a permission — coarsely true, because a false positive adds a
 hint that is still true of the machine and nobody grants anything through it —
-which is why `slife2/file_tunnel/providers.py` holds the ~60 lines v1 kept in a
+which is why `slife2/plugins/file_tunnel/providers.py` holds the ~60 lines v1 kept in a
 shared `slife2.net`: here there is one caller, and §1.1's rule about libraries
 is that the implementation goes where the capability is.
 
@@ -1085,7 +1092,7 @@ enabled and can never fire.  A hand-written parser that got `day_or` backwards
 would be wrong once a month and look like a clock problem.
 
 It is used the way v1 used it: **one module wraps it and nothing else imports
-it.**  `slife2.schedule` owns the timezone policy (an explicit IANA zone, else the
+it.**  `slife2.plugins.schedule.server` owns the timezone policy (an explicit IANA zone, else the
 system local one) and the error contract (`ScheduleError`), so a `ZoneInfo` that
 does not exist surfaces as the one exception a caller already catches rather than
 as a `ZoneInfoNotFoundError` escaping through it.  What that wrapper still has to
@@ -1103,10 +1110,10 @@ process learns which agents exist by listing those directories, exactly as
 half of why this is a plugin: two instances of one agent must not both fire.
 
 **Whose a ledger is comes from a row inside it, not from the directory's name**,
-and that is the one place this feature contradicts `slife2.paths`' rule that
+and that is the one place this feature contradicts `slife2.libs.host.paths`' rule that
 nothing inside an agent's directory repeats its name.  The rule is about a file
 that could be renamed out of step; this is about a *sanitised* name that is not
-the agent's — `a/b` lands in `a_b/` (`slife2.db.safe_agent_name`) — where the
+the agent's — `a/b` lands in `a_b/` (`slife2.libs.store.db.safe_agent_name`) — where the
 directory therefore cannot say whose ledger it is.  A trigger sent under the
 sanitised name would go to a conversation that is not the one that asked, and
 nothing about it would look wrong, so the row is worth the exception.  A ledger
@@ -1185,7 +1192,7 @@ the last reply arrived.
 **The plugin delivers its own turns, and the drain tool was the seam.**  v1's
 harness polled `__a2a_drain_incoming` once a second and injected what it found
 into the agent's inbox; there is no harness here.  What replaced it is exactly
-what §1.2 says replaced `__wechat_drain_incoming`: **`slife2.handover`** — the
+what §1.2 says replaced `__wechat_drain_incoming`: **`slife2.libs.harness.handover`** — the
 window showing that conversation, which is the only road, and a hard failure when
 it cannot be reached.  So the five queues become one ordering queue per session
 with one writer behind it, which is the job the queues were doing for the
@@ -1257,13 +1264,13 @@ otherwise use to write instructions into somebody's turn.
 `system_health` and no `__`-prefixed tools at all, and what it reported — the
 name, the collision, the broker, the roster — is `a2a_list_agents`' answer now,
 which is where a model would look anyway.  And `broker.py`, v1's TCP probe, is
-`slife2.runtime.tcp_listening`.
+`slife2.libs.host.runtime.tcp_listening`.
 
 **And the broker is started, which is the one place this contradicts v1.**
 v1's rule was that slife leaves mosquitto to the user and treats a listening
 broker as the feature's on/off switch; here a config that says `a2a:` has said it
 wants the mesh, so a missing broker is a missing dependency rather than a
-preference.  `slife2/a2a/broker.py` probes the configured address, starts
+preference.  `slife2/plugins/a2a/broker.py` probes the configured address, starts
 `mosquitto` on it if it can, and **fails the start** if it cannot — reported by
 the launcher with the child's own log, because the alternative is four `a2a_*`
 tools offered to a model for a mesh that is not there.  Only a **local** broker is
@@ -1337,7 +1344,7 @@ without a person, so the difference between a watched conversation and an
 unwatched one belongs where the model reads it: the system prompt.  For a prompt
 to see it, it has to be written down — the prompt is rendered by a *server*,
 another process, which never saw the command line — so the flag rides the claim
-the client already writes (`AgentClaim.headless`, `slife2.runtime`) and
+the client already writes (`AgentClaim.headless`, `slife2.libs.host.runtime`) and
 `opening_messages` reads it back to render it into the template as `headless`.
 The claim is the right carrier for the reason it exists at all: one instance per
 name, and it is the record of *which* one.  **No instance at all** renders the
@@ -1381,7 +1388,7 @@ already replaced.
 
 **There is a third use, and it inverts that rule rather than joining it.**  The
 message a channel hands a window travels down the *window's* open call as one
-progress notification (`slife2.tui.control`), and there the notification is not
+progress notification (`slife2.plugins.tui.server`), and there the notification is not
 display at all — it is the payload, and a dropped one is a turn nobody ever ran.
 So the caller's assurance cannot come from the end of the stream: it comes from
 the write. `submit` returns when the plugin has put the words down that stream,
@@ -1585,7 +1592,7 @@ about why the history cannot live on the far side of a protocol-specific hop.
 conversation.** The first cut enforced it in the server, because a caller
 arriving under a name had to be given *its* loop rather than the previous one's.
 A key is created on demand, so there is no previous one to hand over: two live
-clients under one name would now genuinely share a conversation. `slife2.launcher`
+clients under one name would now genuinely share a conversation. `slife2.libs.host.launcher`
 still refuses to start the second one (§4), and that is where the rule lives —
 one place, and the place that already had to know.
 
@@ -1634,7 +1641,7 @@ requirement is exactly inverted, and it is a requirement about *survival*, so it
 is worth knowing which way it points.
 
 **Which server waits for which is a table rather than prose, and everything the
-table says nothing about comes up at once.** `slife2.launcher.NEEDS` is that
+table says nothing about comes up at once.** `slife2.libs.host.launcher.NEEDS` is that
 table, and the shape it buys is the one the *graph* has rather than the one the
 config file lists: five waves, whose depth is the real chain — the embedder, then
 the stores that open it, then the hub, then the task server, then the clock —
@@ -1697,13 +1704,13 @@ window happened to hold.
 plugin, `slife2-context`, and this is v1's `memdb` ported: the turn log, the two
 tools a model reads it with, the live-context list, the recall, and the rebuild
 and restore that put a context together. The store underneath is a library
-(`slife2.db`), and the two indexes under *that* are a library of their own
-(`slife2.index`, §1.1) — for the reason §1.1 gives, that a file needs no process
+(`slife2.libs.store.db`), and the two indexes under *that* are a library of their own
+(`slife2.libs.store.index`, §1.1) — for the reason §1.1 gives, that a file needs no process
 — and that is v1's arrangement too, where the headless host restores a session
 straight from `SessionStore` with no MCP transport in the path.
 
 The **second** thing this system keeps in a file, and not in this module, is the
-tool catalogue (`slife2.catalogue`), which is the *other* thing a file is enough
+tool catalogue (`slife2.libs.store.catalogue`), which is the *other* thing a file is enough
 for. It sits beside the turns rather than inside them because the two have no
 name in common, and it is opened by the toolhub rather than served by anybody
 (§8.4).
@@ -1732,7 +1739,7 @@ reason.** A provider that refuses one refuses it on every request that carries
 it, and a failed turn's messages are re-sent by every turn after it — so one bad
 attachment is a conversation with no way forward at all. The agent server drops
 the pixels when a turn dies there and names what it did in the error
-(`slife2.attachments.drop`, whose note is the one the row keeps). What that buys
+(`slife2.libs.turn.attachments.drop`, whose note is the one the row keeps). What that buys
 is that the live list and the record never disagree about whether a picture is
 still in hand: the picture is live state and nothing else, on either side of the
 save.
@@ -1815,7 +1822,7 @@ one row of rank in fifteen here; and the half of it that mattered most there (a
 keywords-only call reaching the meaning leg, 23/36 to 34/36, §8) is what a single
 query already does for turns, since `recall` hands its one string to both legs
 and a recall has exactly one question for `fuse_ranked` to fuse. So the template
-and `RECALL_REPLY` say what the query is and `slife2.db` is left alone: one row
+and `RECALL_REPLY` say what the query is and `slife2.libs.store.db` is left alone: one row
 of rank is not worth a second field that every reply has to get right.
 
 **The decision is reported, because it is the one thing in a turn nobody sees.**
@@ -1912,7 +1919,7 @@ happen to agree.
 **A turn that arrived over another channel wears it on screen**, and both of the
 things that takes belong to the one call that draws the line. `add_user` is
 given the turn's `channel` and asks `channel_prefix` for the bubble (`Wechat> `
-for a WeChat turn, `You> ` for this window's own) and `slife2.wechat.
+for a WeChat turn, `You> ` for this window's own) and `slife2.plugins.wechat.server.
 strip_marker` for the text — the marker is stored, so a rebuild reads it back out
 of the row, and the two ids in it are what a *reply* needs rather than anything a
 person watching can use (§1.2). One mapping, one unwrapping, and the person's own
@@ -1924,7 +1931,7 @@ reader was looking — so it is kept on the message, and it is the one key on th
 message no provider is guaranteed to know. The way out is v1's: the neutral
 message (`Message.to_wire`) is what *we* pass a conversation around in, and each
 adapter builds its own provider request from it, so a field can be renamed or
-dropped at the edge. `slife2.llm.openai_server` renames it to DeepSeek's
+dropped at the edge. `slife2.plugins.llm.openai_server` renames it to DeepSeek's
 `reasoning_content` — including, deliberately, an *empty* one on assistant
 messages that reported no reasoning, because a reasoner that has been asked to
 think requires the field on every assistant message in the history and answers
@@ -1939,7 +1946,7 @@ record rather than a mistake in `slife2/tui/restore.py`, and it is worth closing
 in the record rather than guessed at from the text.
 
 **The real token count is not carried over, and that is a decision rather than a
-gap.** What `slife2.tokens` *sizes* with is `tiktoken`'s `o200k_base` — v1's
+gap.** What `slife2.libs.turn.tokens` *sizes* with is `tiktoken`'s `o200k_base` — v1's
 choice — and what it falls back to, when the vocabulary cannot be fetched, is the
 script-aware character measure it used to be alone. The reversal is worth stating
 because the argument for the measure was written here first and it was wrong on
@@ -1967,7 +1974,7 @@ that can never connect. A peer that goes missing *later* takes the same answer:
 the turn fails where the peer is used, rather than being answered and not
 recorded.
 
-That rule lives in one place, `slife2.mcp_server.open_server` — connect, prove the
+That rule lives in one place, `slife2.libs.plugin.protocol.open_server` — connect, prove the
 server is the one you meant, raise otherwise. It is there because it had four
 implementations and one of them was its own opposite: the LLM backend and the TUI
 each probed and raised, and the agent server's store client swallowed the
@@ -1997,7 +2004,7 @@ Two things about the daemons themselves still need care:
   the previous build still advertises `slife2-agent`, so the identity check
   passes, and then every turn fails with "unknown tool" while the log calls it
   one caller's bad data. `slife2 down` is required after that upgrade, and the
-  probe's expected tool name (`slife2.launcher.AGENT_SERVER`) has to move in the
+  probe's expected tool name (`slife2.libs.host.launcher.AGENT_SERVER`) has to move in the
   same commit as the tool or the symptom looks like a bug in the new code.
 
   Note what the identity check changed here, because it moved this edge rather
@@ -2028,7 +2035,7 @@ one.
 record and a claim all want to be comparable, and each writer spelling the format
 out is how that quietly stops being true — one `+00:00` or one microsecond among
 local seconds-precision strings breaks both lexicographic ordering and any range
-bound that falls inside the same second. So there is `slife2/clock.py` and one
+bound that falls inside the same second. So there is `slife2/helpers/clock.py` and one
 format: local time with an offset, seconds precision, which is v1's convention
 and the one a future port of its time-window queries will compare against.
 
@@ -2046,7 +2053,7 @@ answer a caller believes.
 say.** V1's store ran one process per agent, so the connection *was* the
 identity. This one is shared — one process serves every client id, the way one
 model server serves every provider — so the identity has to travel, and it
-travels in the call's `_meta` rather than in its arguments (`slife2.audience`).
+travels in the call's `_meta` rather than in its arguments (`slife2.libs.plugin.audience`).
 The agent binds the conversation it is running for when it builds the loop, the
 hub forwards what it was given without reading it, and the store answers about the
 conversation the call came from. A model that could name an agent could read
@@ -2068,7 +2075,7 @@ own docstring said it would be.** `ToolStore` is the tool catalogue — v1's
 store, the embedder, the text normalization and the vector index are already
 here, and a catalogue needs all four. **It is opened here and served by nobody**, which is §1.1's test applied: a
 store has one writer — this process — and one writer is what a SQLite lock
-already is. What the hub does with it is `slife2.toolhub.Catalogue`, a thin face
+already is. What the hub does with it is `slife2.plugins.toolhub.server.Catalogue`, a thin face
 over this, and §8.4 has the rest.
 
 **One file for the tool catalogue and one per agent for the turns**, which is
@@ -2104,8 +2111,8 @@ between a `tool_search` called those tools unusable and `func_tool_load`
 refused them as "its owner is not answering" about a server that answers. Every
 row was then written back, so a restart of the real catalogue logged `0 added,
 239 changed` about a config nobody had edited: the two halves of that are
-`slife2.toolhub.configured_sources` and a family that does not stamp a verdict
-of its own on a row (`slife2.toolfamily.Held._row`). **And a store nobody told
+`slife2.plugins.toolhub.server.configured_sources` and a family that does not stamp a verdict
+of its own on a row (`slife2.libs.plugin.family.Held._row`). **And a store nobody told
 is not a store told "none"**: `known` of `None` forgets nothing, which is the
 difference between a catalogue built without the config and one whose config
 names no sources — collapsing them deleted every `plugin`, `mcp` and `rest` row
@@ -2122,13 +2129,13 @@ the reason the sync runs before anything is served. A file this build cannot
 bring up to date is *named*, with its reasons, rather than upgraded: the
 doctrine above is that an old database is deleted rather than migrated, and
 `TurnStore.index_status` is how that stays a decision instead of a surprise.
-**The mechanism is one function** (`slife2.index.rebuild_vector_index`), because
+**The mechanism is one function** (`slife2.libs.store.index.rebuild_vector_index`), because
 the same five statements in the same order are what all three corpora ask for —
 and the order is the part that matters, since SQLite rolls a `CREATE` back and
 not a `DROP`.
 
 **The keyword leg is not a `LIKE` fallback, and the difference is the whole
-reason `slife2.textindex` exists.** FTS5's tokenizer sees a contiguous run of
+reason `slife2.libs.store.textindex` exists.** FTS5's tokenizer sees a contiguous run of
 Chinese as *one* token, so a two-character query is an exact-token lookup that
 misses the word wherever it sits inside a longer run — measured on this
 repository's own log, it matched only the turns where the word happened to sit
@@ -2179,7 +2186,7 @@ verified by running against the installed library rather than by reading:
   fallback is load-bearing rather than theoretical.) Both halves catch being
   pointed at a *different* MCP server, which a bare connection test waves
   through and which would otherwise fail halfway through a turn; the name is
-  exact, and costs no round trip. See `slife2.mcp_server.identifies`.
+  exact, and costs no round trip. See `slife2.libs.plugin.protocol.identifies`.
 - **There are no sessions, and there is no handshake to negotiate one in.**
   SEP-2567 and SEP-2575 removed `Mcp-Session-Id` and `initialize` from
   Streamable HTTP; a request carries its version and capabilities in `_meta`,
@@ -2277,8 +2284,8 @@ Three load-bearing details:
 
 **Every await that can block has a bound, and it belongs to the layer that
 awaits it.** A callee never sets a total for its caller: this is v1's
-owner-of-await rule, and it is why `slife2.gateway` holds no clock of its own
-and why `slife2.mcp_server`'s transport delegates read and write (v1's registry
+owner-of-await rule, and it is why `slife2.clients.gateway` holds no clock of its own
+and why `slife2.libs.plugin.protocol`'s transport delegates read and write (v1's registry
 spelled that line `read: None # DELEGATED — owned by the loop's tool budget`). A
 bound at a lower layer applies to *every* message that crosses it, so a number
 meant for one thing becomes the deadline for whatever the far end happens to be
@@ -2295,7 +2302,7 @@ Where a clock *is* needed and the work can legitimately be long, it is an
 silence, reset by every chunk), and the registry's comment says why the
 difference is the whole of that number.
 
-**One file is the single source of truth for the numbers**, `slife2/timeouts.py`,
+**One file is the single source of truth for the numbers**, `slife2/helpers/timeouts.py`,
 with roles that say what kind of value each one is: *budgets* bound an await,
 *cadences* say how often something runs. Consumers read them at call time
 (`_T.timeouts.ready.probe`), never into a module constant or a def-time default,
@@ -2336,7 +2343,7 @@ slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins   
                           call_tool                                   and the families that are
                           servers                                      not servers at all)
                              │
-                             └── in-process ──▶ `slife2.catalogue.ToolStore`  (the catalogue's own file)
+                             └── in-process ──▶ `slife2.libs.store.catalogue.ToolStore`  (the catalogue's own file)
 ```
 
 ### 8.1 What the hub owns, and how a tool gets into the set
@@ -2347,14 +2354,14 @@ who may call what — every one of those is a question about the *whole* list, s
 it is answered in one place or it is answered twice and differently. What the hub
 does not own any more is a *connection*: the servers under `mcp:` and
 `rest-api:` are held by the two plugins named after those sections, and the hub
-is told about them. `slife2.gateway` is the link itself — connect, list, call,
+is told about them. `slife2.clients.gateway` is the link itself — connect, list, call,
 say whether it is answering — and it knows no catalogue, no category and no
 config section, which is what lets one implementation serve the hub and both
 families.
 
 **Two ways in, and they are not the same kind of claim.** A *plugin's own tools*
 arrive by `tools/list` and have to declare themselves the model's
-(`slife2.audience`), because they belong to that plugin's code — `remember`
+(`slife2.libs.plugin.audience`), because they belong to that plugin's code — `remember`
 writes into a conversation's log and `send_message` drives another conversation,
 and those are exactly the tools a model would reach for if it could read their
 descriptions. What a plugin *holds* arrives by declaration instead, and is not
@@ -2639,8 +2646,8 @@ outage, and separating them is most of what the module's prose is about.
 **The catalogue is a file this process opens, not a plugin it asks.**  It was
 the second half of `slife2-db` and that plugin is gone, for the test in §1.1: a
 store has one writer — this process — and "one writer" is what a SQLite lock
-already is. So `Catalogue` in `slife2.toolhub` is a thin face over
-`slife2.catalogue.ToolStore` — the catalogue was `slife2.db`'s until the two
+already is. So `Catalogue` in `slife2.plugins.toolhub.server` is a thin face over
+`slife2.libs.store.catalogue.ToolStore` — the catalogue was `slife2.libs.store.db`'s until the two
 halves of that module turned out to share nothing but a logger — opened on first
 use with its indexes brought up to date,
 and what it replaces is a hop, a kept MCP client, a reconnect path and a
@@ -2884,9 +2891,9 @@ writing one is a capability — "a language model choosing a program is the same
 capability with a worse author". What that argument gets wrong is "bounded by
 what". Not the author of the bytes, but the road they travel: every one of the
 tools writes through
-`slife2.configfile`, the single writer of `slife2.yaml`, which holds the file's
+`slife2.libs.host.configfile`, the single writer of `slife2.yaml`, which holds the file's
 cross-process lock across a read-modify-write, edits the *document* so the
-file's own explanation survives, and hands the result to `slife2.config.load` as
+file's own explanation survives, and hands the result to `slife2.libs.host.config.load` as
 the judge — a file the loader refuses is put back and the caller told why. The
 parsers that decide what an entry may say are the same ones a start uses
 (`_tool_server`, `_rest_api`, `_cli_tool`), so an entry written by a model is an
@@ -2906,7 +2913,7 @@ alternative — an operator-only path — is a second way to write the same file
 therefore a second thing to keep in step. **And where families are one mechanism,
 so is their code** — in two places, because there are two mechanisms.
 
-`mcp:` and `rest-api:` hold connections, and `slife2.toolfamily`'s
+`mcp:` and `rest-api:` hold connections, and `slife2.libs.plugin.family`'s
 `build_family_server` is their server: `mcp_set` takes a command and
 `rest_api_set` a spec, so those stay apart — the parameter list *is* the schema
 the model reads — while the other four (`list`, `remove`, `set_enabled`,
@@ -2943,15 +2950,15 @@ embedded, which is the whole reason a removal is a deletion rather than a
 re-merge with an empty list.
 
 **And the writer is where the promise has to be kept, so it is worth saying what
-it is.** `slife2/configfile` edits `slife2.yaml` in four steps, and each answers
+it is.** `slife2.libs.host.configfile` edits `slife2.yaml` in four steps, and each answers
 one way the promise could break: it takes the *kernel's* lock on the file (the
-same `slife2.runtime.exclusive` the launcher uses for a cold start), so four
+same `slife2.libs.host.runtime.exclusive` the launcher uses for a cold start), so four
 daemons and a person cannot interleave a read-modify-write; it loads the file in
 ruamel's round-trip mode and edits the *document*, so every comment, quote style
 and blank line around the change is still exactly where the operator put it —
 which is not decoration in a file that is mostly explanation; it swaps the result
 in atomically, preserving the file's mode; and it hands the whole thing to
-`slife2.config.load` before the write counts, putting the old text back if the
+`slife2.libs.host.config.load` before the write counts, putting the old text back if the
 reader refuses. That last step is what makes the parsers the boundary rather than
 a convention: an entry is judged by the same `_tool_server` / `_rest_api` /
 `_cli_tool` a start uses, so "what a model may write" and "what a start accepts"
@@ -2990,7 +2997,7 @@ is fixed when it starts", seen from the other side — and each backend re-reads
 its provider table on the way into a call, dropping its cached SDK clients when a
 key or an endpoint moved. The one case a re-read cannot cover is a provider added
 for a protocol *nothing is serving*: no process can follow the file, so the tool
-starts one through `slife2.launcher`, the same call a cold start makes.
+starts one through `slife2.libs.host.launcher`, the same call a cold start makes.
 
 **`model_switch` is the one edit that is not left to the next conversation, and
 it is where the rule above pays for itself.** A model that has stopped answering
@@ -3041,7 +3048,7 @@ could pay. v2 pays it, for what the other arrangement costs *here*: the prompt i
 the operator's file (`config.agents[x].system_prompt`), so a block the harness
 appended there would be a second thing every operator's prompt had to be kept in
 step with, and a tool's contract belongs beside the tool — a model reading *that*
-tool's arguments finds it there. `slife2.tools.advertised` is the one place the
+tool's arguments finds it there. `slife2.libs.turn.tools.advertised` is the one place the
 three are added, and `Tool.spec` stays the tool's own declaration, so
 `declares_timeout` cannot mistake `_timeout` for a tool that enforces its own
 bound.
@@ -3078,7 +3085,7 @@ process's (v1's: a task belongs to the *call*), it is bounded only by a cap on
 finished entries, and a turn being cancelled does not cancel the task — which is
 the whole of what background means. What is not v1's is the delivery: a finished
 call's result is **handed back into the conversation it came from**
-(`slife2.handover`: the window, and a failure if it is not there) rather than
+(`slife2.libs.harness.handover`: the window, and a failure if it is not there) rather than
 being held for a poll, and a *cancellation* is handed back too — a
 cancellation nobody hears about leaves a panel on screen that is running forever.
 So `check_async` answers where the call **is**, and the one thing it still carries
@@ -3151,7 +3158,7 @@ cannot say all three is a wish rather than a decision.
   lands in. It is also what opens the approval question below.
 - **The tool that runs a skill's scripts.** A skill is a `SKILL.md`, and what it
   often tells the model to do is run the script sitting beside it. Nothing here
-  performs that step (`slife2/skills.py`), so the last line of a playbook is an
+  performs that step (`slife2/plugins/skills/playbooks.py`), so the last line of a playbook is an
   instruction no tool of ours carries out. It is the same shape as the `cli:`
   entry above — a model-facing tool, an argv rather than a shell — and the one
   thing that makes it skills-specific is `env:` injection: `skills:` in the
@@ -3191,7 +3198,7 @@ cannot say all three is a wish rather than a decision.
   version of this entry said FastMCP's own `auth:` key reached the SDK's browser
   flow for the rest, and it does not: `_tool_server` reads the keys it knows
   into `ToolServerSettings`, so `auth:` is dropped at load rather than handed on
-  (`slife2/gateway.py`, which also names what closing this costs — a field on
+  (`slife2/clients/gateway.py`, which also names what closing this costs — a field on
   the settings and a line in the loader). So a tool server that needs a login
   works here only if that login can be had out of band and handed over as a
   header, and headless is the case that hurts, because the browser flow has no
@@ -3224,7 +3231,7 @@ cannot say all three is a wish rather than a decision.
 - **A word to the agent about runs nobody closed.** A `missed` or `failed` run is
   recorded and findable with `schedule_runs`, and **nothing says so** (§1.7): the
   agent has to think to look. The seam is obvious and already carries one message
-  — a trigger is handed over on `schedule:<name>` by `slife2.handover`, so this is
+  — a trigger is handed over on `schedule:<name>` by `slife2.libs.harness.handover`, so this is
   one more template and one more call, from the poll that records a gap or the
   sweep that fails what a stopped process left. It is deferred because the ledger
   already holds the answer and nobody has watched a missed run go unnoticed yet.
@@ -3244,10 +3251,10 @@ cannot say all three is a wish rather than a decision.
   collects results, whether a worker is multi-turn, how deep nesting goes, and
   whether cancelling a parent cancels its children.
 - **Background work inside an agent task.** A task's loop **refuses `_async`**
-  (`slife2.loop`'s `BACKGROUND_UNAVAILABLE`) rather than running the call quietly,
+  (`slife2.libs.turn.loop`'s `BACKGROUND_UNAVAILABLE`) rather than running the call quietly,
   because a task has nowhere to hand a result back to: it runs one turn, has no
   inbox and no second turn, and the road every other background result takes —
-  the window, then the agent server (`slife2.handover`) — leads to the *agent's*
+  the window, then the agent server (`slife2.libs.harness.handover`) — leads to the *agent's*
   conversation, which is not the one that made the call. So a model working in a
   task is told to call the tool again without `_async`, and the task's registry
   carries no `check_async`/`cancel_async` either (they are one decision: a
@@ -3335,7 +3342,7 @@ survives in four places.
 
 ### 10.2 The register
 
-**A missing config file runs the built-in default.** `slife2.config.load`
+**A missing config file runs the built-in default.** `slife2.libs.host.config.load`
 answers `default_config()` — one OpenAI-compatible provider — when there is no
 `slife2.yaml`, and every other section is then absent. *Gives up:* the
 operator's sections, which is why a *write* refuses to create the file
@@ -3379,7 +3386,7 @@ turn. *Failure goes:* the turn runs on the list it has, and the store's own list
 is untouched.
 
 **A token count that cannot fetch its vocabulary falls back to the script
-measure** (§5.1, `slife2.tokens`). *Gives up:* accuracy, in both directions.
+measure** (§5.1, `slife2.libs.turn.tokens`). *Gives up:* accuracy, in both directions.
 *Does not cover:* nothing — this is the floor, and measured usage is the
 provider's own count either way. *Failure goes:* nowhere: the fallback is the
 answer, remembered once per process so the fetch is attempted once.

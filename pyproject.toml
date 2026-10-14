@@ -170,6 +170,7 @@ include = [
     "/slife2",
     "/tests",
     "/README.md",
+    "/sdd.md",
     "/DESIGN.md",
     "/LICENSE",
     "/pyproject.toml",

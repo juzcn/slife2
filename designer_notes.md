@@ -13,12 +13,17 @@ This document is designer's memory
     - 大模型的工具schema要准确、简洁表达工具是干什么的、参数是什么，不要重复大模型知道的知识，尽量少的交叉引用，交叉引用容易造成不易维护的依赖。
     - 工具名称和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。例外：_check_new_input
 
-2. LLM 的 Harness Tooks
+- 完整详尽的pytest，保障系统功能正常进化，更完善的端到端测试
+
+2. 文档
+readme 和 sdd属于规范文档，design.md是开发者文档，designer_notes.md是我的文档
+
+3. LLM 的 Harness Tooks
 
 - _check_new_input
 - _func_tool_unload
 
-3. Channel与Marker
+4. Channel与Marker
 
 - 注入到loop 的 user message的Channel和Marker 设计
 
@@ -38,7 +43,7 @@ async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(
 
 - 因为Inbox有插对机制，注入的信息插队时，无TUI处理。
 
-4. To do list
+5. To do list
 
 - subagent design
 - --a2a-broker host:port , use external broker, do not start/stop mosquitto
