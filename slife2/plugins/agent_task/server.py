@@ -71,7 +71,12 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.model import MCPBackend, open_backend
-from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
+from slife2.clients.toolclient import (
+    FUNC_TOOL_UNLOAD,
+    remote_tools,
+    trim_answer,
+    unload_tools,
+)
 from slife2.helpers.clock import now
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import (
@@ -623,38 +628,6 @@ def build_server(
         await trim_tools(task, messages)
         return result
 
-    def _trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
-        """Read a trim's answer — the names it unloaded and its sentence — or
-        refuse it.
-
-        **An answer the harness cannot read is not a trim that unloaded
-        nothing.**  `found.get("unloaded") or []` read a missing or null key as
-        the same "nothing to unload" an honest no-op produces, so no pair was
-        written and the reader went on believing the list still held the tools
-        that had gone; `found.get("text") or ""` did the same one key over,
-        writing an empty sentence where the hub's own belongs.  Both halves are
-        one answer and are read as strictly as `adopt` reads `messages` and
-        `turn_ids`: only a *readable* empty answer is a verdict, and a missing
-        key is damage (DESIGN.md §10.1: a failure is not a verdict).  Reading
-        both before either half is appended also means a refused answer can
-        never leave the half-written pair every provider rejects.
-        """
-        names = found.get("unloaded")
-        if not isinstance(names, list):
-            raise ConnectionError(
-                f"the toolhub did not return the names it unloaded (it said "
-                f"{found!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
-            )
-        text = found.get("text")
-        if not isinstance(text, str):
-            raise ConnectionError(
-                f"the toolhub did not return the trim's sentence (it said "
-                f"{found!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
-            )
-        return [str(name) for name in names], text
-
     async def trim_tools(task: AgentTask, messages: list[Message]) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
@@ -689,7 +662,7 @@ def build_server(
         """
         try:
             found = await unload_tools(await hub())
-            unloaded, text = _trim_answer(found)
+            unloaded, text = trim_answer(found)
         except Exception as exc:  # noqa: BLE001 - bookkeeping does not fail a turn
             logger.error(
                 "agent task %s: the tool list was not trimmed (%s); the loaded "
@@ -980,9 +953,11 @@ def build_server(
         mine = [task for task in tasks.values() if task.agent == agent]
         # Running first, then the most recently started — the order the question
         # "what is still going" wants, and a total order rather than a ranking.
-        mine.sort(
-            key=lambda task: (task.status != RUNNING, task.started_at), reverse=False
-        )
+        # Two sorts and not one: `sorted` here is the recency order, and the
+        # `rows.sort` below is stable, so it lifts the running ones to the front
+        # without disturbing it.  (A third sort used to precede this one, on
+        # `(status != RUNNING, started_at)`, and its list was thrown away by the
+        # `sorted(...)` on the very next line — a statement that did nothing.)
         rows = []
         for task in sorted(mine, key=lambda t: t.started_at, reverse=True):
             row = task.report()

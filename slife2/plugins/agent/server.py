@@ -78,7 +78,12 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.model import MCPBackend, open_backend
-from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, remote_tools, unload_tools
+from slife2.clients.toolclient import (
+    FUNC_TOOL_UNLOAD,
+    remote_tools,
+    trim_answer,
+    unload_tools,
+)
 from slife2.helpers.clock import now
 from slife2.libs.harness.async_tasks import Deliver, async_tools
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
@@ -302,6 +307,13 @@ class Loop:
     agent: str
     subagent: str
     model: str
+    #: **The step cap this conversation started on**, read where the model is
+    #: read — at the start, from the config as it was then — and not per turn.
+    #: `make_loop` runs on every turn, so taking it from the live config would
+    #: let an operator's edit change the terms of a turn already in flight; the
+    #: boot config was the other half of the same mistake, keeping a cap the
+    #: conversation that *should* have read the edit never saw.
+    max_steps: int
     messages: list[Message]
     lock: asyncio.Lock
     last_used: float
@@ -634,13 +646,18 @@ def build_server(
     async def make_loop(
         active: LLMBackend,
         client_id: ClientId,
+        max_steps: int,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
     ) -> AgentLoop:
         return AgentLoop(
             active,
             await registry(client_id),
-            max_steps=config.agent.max_steps,
+            # The conversation's own, taken from the config it started on
+            # (`Loop.max_steps`): a step cap somebody raises *because* a turn
+            # ran into it reaches the next conversation, which is the rule the
+            # model follows too.
+            max_steps=max_steps,
             # Handed to the loop so the list is re-read before each model call;
             # see `turn_tools`.  Bound to the key for the same reason the first
             # call is: every refresh has to hand back tools for *this*
@@ -677,7 +694,7 @@ def build_server(
         per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return await make_loop(backend, client_id, approve, deliver)
+            return await make_loop(backend, client_id, loop.max_steps, approve, deliver)
 
         reference = loop.model
         async with opening:
@@ -705,7 +722,11 @@ def build_server(
                 )
                 logger.info("model %s via %s", reference, url)
         return await make_loop(
-            model_backends[reference].with_key(*client_id), client_id, approve, deliver
+            model_backends[reference].with_key(*client_id),
+            client_id,
+            loop.max_steps,
+            approve,
+            deliver,
         )
 
     # --- the registry --------------------------------------------------------
@@ -787,6 +808,7 @@ def build_server(
                 api=provider.api,
                 model_id=settings.model,
                 accepts_images=settings.accepts_images,
+                max_steps=live.agent.max_steps,
                 messages=messages,
                 lock=asyncio.Lock(),
                 last_used=time.monotonic(),
@@ -993,38 +1015,6 @@ def build_server(
             "forget", {"agent": agent, "subagent": subagent}
         )
 
-    def _trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
-        """Read a trim's answer — the names it unloaded and its sentence — or
-        refuse it.
-
-        **An answer the harness cannot read is not a trim that unloaded
-        nothing.**  `found.get("unloaded") or []` read a missing or null key as
-        the same "nothing to unload" an honest no-op produces, so no pair was
-        written and the model went on believing it still held the tools that had
-        gone; `found.get("text") or ""` did the same one key over, writing an
-        empty sentence where the hub's own belongs.  Both halves are one answer
-        and are read as strictly as `_adopt` reads `messages` and `turn_ids`:
-        only a *readable* empty answer is a verdict, and a missing key is damage
-        (DESIGN.md §10.1: a failure is not a verdict).  Reading both before
-        either half is appended also means a refused answer can never leave the
-        half-written pair every provider rejects.
-        """
-        names = found.get("unloaded")
-        if not isinstance(names, list):
-            raise ConnectionError(
-                f"the toolhub did not return the names it unloaded (it said "
-                f"{found!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
-            )
-        text = found.get("text")
-        if not isinstance(text, str):
-            raise ConnectionError(
-                f"the toolhub did not return the trim's sentence (it said "
-                f"{found!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
-            )
-        return [str(name) for name in names], text
-
     async def trim_tools(loop: Loop) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
@@ -1066,7 +1056,7 @@ def build_server(
         """
         try:
             found = await unload_tools(await hub())
-            unloaded, text = _trim_answer(found)
+            unloaded, text = trim_answer(found)
         except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
             logger.warning(
                 "%s: the tool list was not trimmed: %s",
