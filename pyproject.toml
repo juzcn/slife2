@@ -73,13 +73,14 @@ dependencies = [
     # contract, so nothing else in this project imports it.
     "croniter>=6.2.4",
     # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
-    # per connection by `slife2.db`, which is why it is a dependency of the
+    # per connection by `slife2.index`, which is why it is a dependency of the
     # package rather than something a backend process holds.  A floor rather
     # than a pin like everything else here, but note that it is still alpha —
     # the DDL it accepts is probed at open time rather than assumed (see
-    # `slife2.db._vector_ddl`), and `distance_metric` and `float[N]` are the parts
-    # of that alpha this project depends on.  Wheels are `py3-none-*` for every
-    # platform CI builds on, so there is no interpreter-specific tag to match.
+    # `slife2.index.vector_ddl`), and `distance_metric` and `float[N]` are the
+    # parts of that alpha this project depends on.  Wheels are `py3-none-*` for
+    # every platform CI builds on, so there is no interpreter-specific tag to
+    # match.
     "sqlite-vec>=0.1.9",
     # **Never imported, and required on one platform.**  `zoneinfo` reads the
     # system's IANA database where there is one — macOS and Linux have it — and

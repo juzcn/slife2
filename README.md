@@ -25,8 +25,9 @@ Two properties follow, and they are the point of the arrangement:
 credential, an SDK or somebody else's connection is a process; what holds a
 *file* is not, because one writer is what a SQLite lock already is. So
 `slife2.db` — the turn log and the tool catalogue — is a library, imported by the
-two plugins that own its two halves, `slife2-context` and `slife2-toolhub`.
-DESIGN §1.1 is the test and what it costs.
+two plugins that own its two halves, `slife2-context` and `slife2-toolhub`. So is
+`slife2.index`, the machinery those stores are *searched* by, which is the
+cabinet's library too. DESIGN §1.1 is the test and what it costs.
 
 [DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
 
@@ -1127,6 +1128,11 @@ slife2/
 │                     #   first half, and the toolhub opens the catalogue
 │                     #   in-process, because a file already has one writer
 │                     #   (DESIGN §1.1)
+├─ index.py           # the indexes, as a library: the FTS5 and `sqlite-vec`
+│                     #   machinery three corpora are searched by — the identity
+│                     #   that decides a rebuild, the chunk write, the keyset
+│                     #   paging and the rank fusion over the two legs — shared
+│                     #   by `db.py`'s two stores and by the cabinet's
 ├─ tokens.py          # how large a piece of a conversation is, when nobody has
 │                     #   measured it — the model's own tokenizer, a script
 │                     #   measure where it cannot be fetched, and every user of

@@ -24,7 +24,8 @@ from slife2.audience import client_meta
 from slife2.config import default_config
 from slife2.context import turn_footnote, turn_note
 from slife2.context_server import build_server
-from slife2.db import MAX_PAGE, TurnStore
+from slife2.db import TurnStore
+from slife2.index import MAX_PAGE
 from slife2.paths import DATA_ENV_VAR, agent_dir
 from tests.fakes import StubEmbedder
 

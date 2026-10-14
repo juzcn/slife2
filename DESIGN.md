@@ -164,6 +164,7 @@ Which one a component needs is decided by **what it holds**:
 |---|---|---|
 | a credential, a provider SDK, somebody else's connection | a **plugin** | a library would put the key and the SDK in every importer, which is what §1's two properties forbid |
 | a file, and nothing else | a **library** | a file needs no process, and one writer is what a SQLite lock already is |
+| a mechanism more than one store is made of | a **library** | a store that owns it makes every change to it a change about *its* corpus, and a copy per store is how one bug has to be found and fixed twice |
 
 So `db` is a library — it holds the turn files and the tool catalogue, and
 nothing else — while the embeddings server stays a plugin because it reads an
@@ -178,6 +179,19 @@ that table rather than a new one: it holds a file and nothing else, the four
 plugins that own the four sections import it, and the cross-process lock it
 takes is the other half of "one writer" — a SQLite lock for a database, a kernel
 mutex for a file both a human and four daemons edit.
+
+**`slife2.index` is the third row of that table, and it is the row the first two
+do not predict.** It holds no file and answers no connection: what it is is the
+mechanism a store is *made of* — the FTS5 and `sqlite-vec` tables, the identity
+recorded beside them that decides a rebuild, the keyset paging, the rank fusion
+over the two legs — and three corpora are made of it: a conversation's turns,
+the tool catalogue, and the cabinet's four kinds of document. It was `slife2.db`'s
+until two things said otherwise. The cabinet was importing twenty-two names out
+of a module about turns, which made every change to the machinery a change to a
+file about something else. And a rule stated once is a rule the second copy can
+be missing without anything saying so: `_rowid` is the case in point, where a
+missing rowid is a fault rather than a zero, and the copy that read it as `0`
+was the one nobody had looked at.
 
 The cost of a library is the error boundary: a plugin that is gone fails the
 turn with a named peer, and a file that will not open raises where it is used.
@@ -376,7 +390,7 @@ history, inbox and lock.  Reading a task off that mechanism costs four things:
   feature.**  A task has to run on *this conversation's* context — the description
   is what the caller chose to write down, and everything else the agent already
   knows is in the log the discriminator reads from.  A `subagent` key is a
-  different file (`db.database_path`, `db.py:221`), so a task read off that
+  different file (`db.database_path`, `db.py:190`), so a task read off that
   mechanism would rebuild against a log nothing has ever written to: the
   discriminator would be paid the most expensive call a turn makes (§5.1,
   `rebuild_into` at `server.py:832`) to decide that an empty list stays empty, and
@@ -1681,8 +1695,9 @@ window happened to hold.
 plugin, `slife2-context`, and this is v1's `memdb` ported: the turn log, the two
 tools a model reads it with, the live-context list, the recall, and the rebuild
 and restore that put a context together. The store underneath is a library
-(`slife2.db`), for the reason §1.1 gives — it holds files and nothing else — and
-that is v1's arrangement too, where the headless host restores a session
+(`slife2.db`), and the two indexes under *that* are a library of their own
+(`slife2.index`, §1.1) — for the reason §1.1 gives, that a file needs no process
+— and that is v1's arrangement too, where the headless host restores a session
 straight from `SessionStore` with no MCP transport in the path.
 
 The **second** thing this module keeps is the tool catalogue, which is the
@@ -2103,6 +2118,10 @@ the reason the sync runs before anything is served. A file this build cannot
 bring up to date is *named*, with its reasons, rather than upgraded: the
 doctrine above is that an old database is deleted rather than migrated, and
 `TurnStore.index_status` is how that stays a decision instead of a surprise.
+**The mechanism is one function** (`slife2.index.rebuild_vector_index`), because
+the same five statements in the same order are what all three corpora ask for —
+and the order is the part that matters, since SQLite rolls a `CREATE` back and
+not a `DROP`.
 
 **The keyword leg is not a `LIKE` fallback, and the difference is the whole
 reason `slife2.textindex` exists.** FTS5's tokenizer sees a contiguous run of

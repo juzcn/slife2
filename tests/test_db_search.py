@@ -19,14 +19,16 @@ import pytest
 
 from slife2 import db, textindex
 from slife2.db import (
-    EMBED_CHUNK_CHARS,
     TurnStore,
+    embed_text,
+    searchable_text,
+)
+from slife2.index import (
+    EMBED_CHUNK_CHARS,
     VectorIndexUnavailable,
     embed_chunks,
-    embed_text,
     fuse_ranked,
     rows_in_order,
-    searchable_text,
 )
 from slife2.textindex import EmptyQuery
 from slife2.timeutil import InvalidTimeBound

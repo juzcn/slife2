@@ -80,8 +80,8 @@ from slife2.cabinet_store import (
     store_of,
 )
 from slife2.config import Config
-from slife2.db import Embedder
 from slife2.embedder import EmbedderConnection
+from slife2.index import Embedder
 from slife2.mcp_server import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)

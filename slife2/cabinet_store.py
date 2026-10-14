@@ -12,7 +12,7 @@ without:
 report are four *values* of `kind` in `cabinet_doc`, with the union of the
 columns they need.  That is the "four kinds are ONE corpus" rule read literally:
 the rowid **is** the corpus id, so the two legs of a search fuse on `rowid` the
-way the turns and the tool catalogue already do (`slife2.db.fuse_ranked`), where
+way the turns and the tool catalogue already do (`slife2.index.fuse_ranked`), where
 v1 had to synthesise a global id out of a per-kind offset.  Four tables also
 meant the FTS table could only be kept correct by a trigger per kind per verb;
 here the keyword text is written in the same transaction as the row that
@@ -75,13 +75,16 @@ import sqlite_vec
 
 from slife2 import textindex
 from slife2.clock import now
-from slife2.db import (
+from slife2.index import (
     MAX_PAGE,
     MAX_SQL_VARS,
     NO_SIMILARITY,
+    SYNC_BATCH,
     Embedder,
+    _marks,
+    _rowid,
     as_similarity,
-    begin_rebuild,
+    clear_vectors,
     connect_to,
     embed_chunks,
     filter_clause,
@@ -89,11 +92,12 @@ from slife2.db import (
     index_meta,
     meanings_by_cosine,
     page_limit,
+    place_vectors,
+    rebuild_vector_index,
     rows_in_order,
     set_index_meta,
     storable,
     table_exists,
-    vector_ddl,
     vector_identity,
     where_clause,
 )
@@ -123,12 +127,11 @@ INDEX_NAME = ".index.db"
 #: — `agents/jack/files/files/images/a.png` — read as nothing at all.
 CABINET_DIR = "cabinet"
 
-#: How many documents one `sync` will embed before it says it is not finished.
-#: Not a bound on correctness — every document is embedded eventually, because a
-#: document without a vector is simply missing from the index and the next open
-#: finds it again.  It is a bound on how long one call may take before it
-#: answers, which is the same reason `MAX_PAGE` exists.
-SYNC_BATCH = 64
+# `SYNC_BATCH` is `slife2.index`'s, imported above, and the cabinet used to spell
+# the number a second time.  The bound it puts on one `sync` call — every
+# document is embedded eventually, because a document without a vector is simply
+# missing from the index and the next open finds it again — is the same bound
+# `MAX_PAGE` puts on a page, read off the one request an `embed` call is.
 
 
 @dataclass(frozen=True)
@@ -412,7 +415,7 @@ _SCHEMA = f"""
 -- rather than absent.
 --
 -- **The rowid is the corpus id**, which is what lets a search fuse its two legs
--- on it (`slife2.db.fuse_ranked`) exactly as the turns and the catalogue do.
+-- on it (`slife2.index.fuse_ranked`) exactly as the turns and the catalogue do.
 --
 -- `mirror` is stored rather than derived, so that today's row keeps pointing at
 -- today's file whatever `mirror_path` decides later: the path a row was written
@@ -454,7 +457,7 @@ CREATE INDEX IF NOT EXISTS idx_cabinet_created ON cabinet_doc(kind, created_at);
 -- agree about where a word ends.
 CREATE VIRTUAL TABLE IF NOT EXISTS cabinet_fts USING fts5(
     search,
-    tokenize='unicode61 remove_diacritics 2'
+    {textindex.FTS_TOKENIZE}
 );
 
 -- Which document a vector belongs to.  A row here is a *chunk*, not a document
@@ -544,35 +547,26 @@ class CabinetStore:
         problems: list[str] = []
         with self._connect() as connection:
             recorded = index_meta(connection)
-            index_stale = recorded.get("vector_identity", "") != identity
             text_stale = recorded.get("text_version", "") != textindex.RULES_VERSION
-
-        if index_stale:
-            # The vectors are a function of the model *and* of the text they
-            # were made from, so a change to either makes every stored vector
-            # the wrong vector for its row.  Dropped rather than kept beside
-            # the new ones: two models' vectors cannot be ranked against each
-            # other, which is the same reason the embeddings server rebuilds
-            # the turn index whole.
+            # The vectors are a function of the model *and* of the text they were
+            # made from, so a change to either makes every stored vector the
+            # wrong vector for its row.  Dropped rather than kept beside the new
+            # ones: two models' vectors cannot be ranked against each other.
             #
-            # **The `DROP` and the `CREATE` are inside one transaction**
-            # (`begin_rebuild`), because SQLite rolls a `CREATE` back and not a
-            # `DROP`: a rebuild that failed here used to leave `cabinet_vec`
-            # dropped and the `DELETE`s and the recorded identity rolled back —
-            # a file with chunk rows and no vectors, and a fingerprint asserting
-            # it was whole, which is a state nothing can detect or repair.
-            logger.info("cabinet %s: rebuilding the vector index", self.path)
-            with self._connect() as connection:
-                begin_rebuild(connection)
-                connection.execute("DROP TABLE IF EXISTS cabinet_vec")
-                connection.execute("DELETE FROM cabinet_chunk")
-                connection.execute("DELETE FROM cabinet_embedded")
-                connection.execute(vector_ddl(embedder.dimension, table="cabinet_vec"))
-                set_index_meta(
-                    connection,
-                    vector_identity=identity,
-                    vector_dim=str(embedder.dimension),
-                )
+            # `slife2.index.rebuild_vector_index` is where that happens — the
+            # same call the turn store and the catalogue make, with the one thing
+            # this corpus adds to it: `cabinet_embedded` goes with the vectors,
+            # because a rowid a `vec0` table has freed is reused and a document
+            # that took an old id would read as one already tried.
+            if rebuild_vector_index(
+                connection,
+                vec_table="cabinet_vec",
+                chunk_table="cabinet_chunk",
+                dimension=embedder.dimension,
+                identity=identity,
+                also_delete=("cabinet_embedded",),
+            ):
+                logger.info("cabinet %s: rebuilding the vector index", self.path)
         if text_stale:
             self._rebuild_text_index()
 
@@ -742,13 +736,9 @@ class CabinetStore:
         halfway would otherwise leave the row with a third of its vectors and no
         sign of it.
 
-        **A chunk's vector goes with the chunk**, in that order, and this is not
-        tidiness: a `vec0` row carries a rowid of its own, so a vector left
-        behind is a row the next document's chunk can collide with — measured
-        here as a `UNIQUE constraint failed on cabinet_vec primary key` on the
-        *second* write of one diary day.  The vector table may not exist yet (it
-        is created with a width, which only an embedder knows), and nothing to
-        clear is not an error.
+        The clear and the write are `slife2.index`'s, with the marker this
+        corpus keeps in between them — see below, and `place_vectors` for why a
+        chunk's vector goes with the chunk and in that order.
 
         **The document is marked as tried either way**, because this is every
         path that reaches the model — so it is also what `sync` reads to decide
@@ -758,18 +748,15 @@ class CabinetStore:
         connection.execute(
             "INSERT OR REPLACE INTO cabinet_embedded (doc_id) VALUES (?)", (doc_id,)
         )
-        for index, vector in enumerate(vectors):
-            placed = connection.execute(
-                "INSERT INTO cabinet_chunk (doc_id, chunk_index) VALUES (?, ?)",
-                (doc_id, index),
-            )
-            connection.execute(
-                "INSERT INTO cabinet_vec (rowid, embedding) VALUES (?, ?)",
-                (
-                    int(placed.lastrowid or 0),
-                    sqlite_vec.serialize_float32(list(vector)),
-                ),
-            )
+        place_vectors(
+            connection,
+            chunk_table="cabinet_chunk",
+            vec_table="cabinet_vec",
+            key_column="doc_id",
+            row_key=doc_id,
+            vectors=vectors,
+            what=f"a chunk of document {doc_id}",
+        )
 
     @staticmethod
     def _clear_vectors(connection: sqlite3.Connection, doc_id: int) -> None:
@@ -777,16 +764,18 @@ class CabinetStore:
 
         The marker goes with them because a deleted rowid is reused: without
         this, a new document taking the old id would be read as one the vector
-        pass had already finished with, and would never be embedded.
+        pass had already finished with, and would never be embedded.  That is
+        the `also_delete` `slife2.index.clear_vectors` takes, and this is its
+        only caller that has one.
         """
-        if table_exists(connection, "cabinet_vec"):
-            connection.execute(
-                "DELETE FROM cabinet_vec WHERE rowid IN"
-                " (SELECT id FROM cabinet_chunk WHERE doc_id = ?)",
-                (doc_id,),
-            )
-        connection.execute("DELETE FROM cabinet_chunk WHERE doc_id = ?", (doc_id,))
-        connection.execute("DELETE FROM cabinet_embedded WHERE doc_id = ?", (doc_id,))
+        clear_vectors(
+            connection,
+            chunk_table="cabinet_chunk",
+            vec_table="cabinet_vec",
+            key_column="doc_id",
+            keys=[doc_id],
+            also_delete=(("cabinet_embedded", "doc_id"),),
+        )
 
     def count(self) -> int:
         with self._connect() as connection:
@@ -990,7 +979,7 @@ class CabinetStore:
             ):
                 raise
             return None
-        return int(placed.lastrowid or 0)
+        return _rowid(placed, what=f"the {row.get('kind')} {row.get('key')!r}")
 
     def _index(self, connection: sqlite3.Connection, row: Mapping[str, Any]) -> None:
         """Write the row's keyword text, replacing what was there.
@@ -1172,7 +1161,7 @@ class CabinetStore:
     ) -> tuple[list[str], list[Any]]:
         """A since/until window on **this kind's** time axis.
 
-        Not `slife2.db.time_window`, which is spelled for a `created_at` column
+        Not `slife2.index.time_window`, which is spelled for a `created_at` column
         because both of its callers have one; a cabinet's kinds have four
         different axes and v1 made the same distinction.  The bound grammar is
         the shared one (`slife2.timeutil`), so a model writes `yesterday` here
@@ -1450,7 +1439,7 @@ class CabinetStore:
     ) -> list[sqlite3.Row]:
         """The fused order, as rows — **in that order**, and filtered.
 
-        `slife2.db.rows_in_order`, which is where the ordering, the re-applied
+        `slife2.index.rows_in_order`, which is where the ordering, the re-applied
         filters and the cap on the bound list are argued; this store's own part
         is the table's name and the `d` it is aliased to, because the filters it
         passes are written against that alias.
@@ -1478,7 +1467,7 @@ class CabinetStore:
         """
         if not page or not expression:
             return set()
-        placeholders = ",".join("?" * len(page))
+        placeholders = _marks(page)
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT id, title, key, body, summary FROM cabinet_doc"

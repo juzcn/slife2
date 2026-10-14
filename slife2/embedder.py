@@ -24,7 +24,7 @@ from fastmcp import Client
 
 import slife2.timeouts as _T
 from slife2.config import EMBEDDINGS_SERVER_NAME
-from slife2.db import Embedder
+from slife2.index import Embedder
 from slife2.mcp_server import close_server, open_server, tool_payload
 
 logger = logging.getLogger(__name__)

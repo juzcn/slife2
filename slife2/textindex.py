@@ -50,16 +50,26 @@ from collections.abc import Sequence
 #: The rule set's own version, and the lever that rebuilds what it governs.
 #:
 #: Recorded beside every keyword index and folded into every vector identity —
-#: `slife2.db` stamps both of its files with it — because an index built by one
-#: version of `normalize` cannot be searched by another: the recorded version is
-#: how the index learns that it has to be built again.  Bump it with any change
-#: to what `normalize` or `terms` produces.
+#: `slife2.index` stamps all three of this system's corpora with it — because an
+#: index built by one version of `normalize` cannot be searched by another: the
+#: recorded version is how the index learns that it has to be built again.  Bump
+#: it with any change to what `normalize` or `terms` produces.
 #:
 #: This is the *only* such constant, which is the point of it being here rather
 #: than in each store: it was documented as this lever while nothing read it and
 #: both databases stamped a private copy of the same string, so bumping it
 #: rebuilt nothing and the two could drift apart silently.
 RULES_VERSION = "1"
+
+#: The FTS5 tokenizer, in the spelling a `CREATE VIRTUAL TABLE` wants.
+#:
+#: Declared once because the three keyword indexes are searched by one grammar:
+#: the tokenizer decides what a *term* is, and `match_expression` builds every
+#: query out of the same rule, so a table built by one tokenizer and queried by
+#: another's rules matches nothing at all.  **Changing this means bumping
+#: `RULES_VERSION`**, which is the only thing that would make the index build
+#: itself again.
+FTS_TOKENIZE = "tokenize='unicode61 remove_diacritics 2'"
 
 #: CJK Unified Ideographs and its Extension A — the two ranges v1 split on —
 #: widened to the scripts that are also written without spaces between words,

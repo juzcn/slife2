@@ -73,8 +73,9 @@ from slife2 import context as decisions
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.config import API_SERVER_NAMES, Config
 from slife2.context import Decision
-from slife2.db import Embedder, TurnStore, page_limit, store_for
+from slife2.db import TurnStore, store_for
 from slife2.embedder import EmbedderConnection
+from slife2.index import Embedder, page_limit
 from slife2.mcp_server import (
     close_server,
     describe,

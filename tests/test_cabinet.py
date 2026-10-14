@@ -31,7 +31,7 @@ from slife2.cabinet_store import (
     vector_text,
 )
 from slife2.config import load
-from slife2.db import table_exists
+from slife2.index import table_exists
 from slife2.paths import agent_dir, data_dir
 from tests.fakes import FailingEmbedder, StubEmbedder
 
@@ -772,11 +772,15 @@ async def test_a_failed_index_rebuild_leaves_the_vectors_table(
 ) -> None:
     """The rebuild is one transaction, because SQLite does not roll DDL back.
 
-    The `DROP TABLE` ran in autocommit with the rest of the rebuild inside the
-    transaction, so a `CREATE` that failed left `cabinet_vec` gone, the
-    `DELETE`s rolled back — chunk rows naming a table that is not there — and
-    the recorded identity still describing the old index, which is a state
+    A `DROP TABLE` in autocommit with the rest of the rebuild inside the
+    transaction leaves a `CREATE` that failed having taken `cabinet_vec` with
+    it, the `DELETE`s rolled back — chunk rows naming a table that is not there
+    — and the recorded identity still describing the old index, which is a state
     nothing can detect or repair.
+
+    The rebuild is `slife2.index.rebuild_vector_index`, shared with the turn
+    store and the catalogue, so the seam the failure is injected at is that
+    module's: `cabinet_store` no longer owns the statement that can fail.
     """
 
     def explode(*args: Any, **kwargs: Any) -> str:
@@ -786,7 +790,7 @@ async def test_a_failed_index_rebuild_leaves_the_vectors_table(
     embedder = StubEmbedder()
     await store.sync(embedder)
     await store.write(NOTE, "one", body="some text", embedder=embedder)
-    monkeypatch.setattr(cabinet_store, "vector_ddl", explode)
+    monkeypatch.setattr("slife2.index.vector_ddl", explode)
 
     with pytest.raises(RuntimeError, match="no DDL for you"):
         await store.sync(StubEmbedder(identity="stub:two"))

@@ -186,7 +186,7 @@ from fastmcp import Context, FastMCP
 import slife2.timeouts as _T
 from slife2.audience import for_the_model, forwarded_client, request_meta
 from slife2.config import Config, ToolServerSettings
-from slife2.db import Embedder, ToolStore
+from slife2.db import ToolStore
 from slife2.embedder import EmbedderConnection
 from slife2.gateway import (
     ClientFactory,
@@ -195,6 +195,7 @@ from slife2.gateway import (
     proxied_name,
     sanitise,
 )
+from slife2.index import Embedder
 from slife2.mcp_server import (
     CALL_SOURCE,
     LIST_SOURCES,

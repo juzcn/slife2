@@ -21,13 +21,13 @@ from slife2.db import (
     TOOL_RESULT_CHARS,
     ToolStore,
     TurnStore,
-    _rowid,
     compact_tool_results,
     message_text,
     safe_agent_name,
     store_for,
     strip_images,
 )
+from slife2.index import _rowid
 from slife2.paths import DATA_ENV_VAR
 from slife2.timeutil import InvalidTimeBound
 from tests.fakes import StubEmbedder

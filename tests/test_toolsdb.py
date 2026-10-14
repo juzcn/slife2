@@ -28,8 +28,8 @@ from slife2.db import (
     STATUS_ERROR,
     UNLOADED,
     ToolStore,
-    fuse_ranked,
 )
+from slife2.index import fuse_ranked
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
