@@ -1089,3 +1089,35 @@ def test_the_catalogue_is_one_file_for_the_whole_data_directory(
     # agents rather than in one.
     assert paths.catalogue_db().name == "tools.db"
     assert paths.catalogue_db().parent == paths.agents_dir()
+
+
+def test_a_keyword_search_narrows_by_its_filters(tmp_path) -> None:
+    """**The path that raised.**  A search with words *and* a filter went
+    through the keyword leg, which joined `tool_fts` to `tool`, and the filters
+    name columns both tables declare (`category`, `source_id`) — so
+    `tool_search(keywords=[...], category=...)` died with
+    `OperationalError: ambiguous column name: category` while the browse, the
+    meaning leg and the same call without a filter all worked.  A crash on the
+    documented path, found by review rather than by a test: nothing had ever
+    asked a keyword search to narrow.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers.")])
+    merge(store, "filesystem", "plugin", [tool("filesystem__read", "Read a file.")])
+
+    by_category = asyncio.run(
+        store.search(embedder=EMBEDDER, keywords=["papers"], category="mcp")
+    )
+    assert [row["name"] for row in by_category["results"]] == ["arxiv__search"]
+
+    by_source = asyncio.run(
+        store.search(embedder=EMBEDDER, keywords=["file"], source_id="filesystem")
+    )
+    assert [row["name"] for row in by_source["results"]] == ["filesystem__read"]
+
+    # The filter narrows and never decides: a source nothing came from is an
+    # empty page, not a wider one.
+    nothing = asyncio.run(
+        store.search(embedder=EMBEDDER, keywords=["papers"], source_id="nobody")
+    )
+    assert nothing["results"] == []

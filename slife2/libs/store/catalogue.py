@@ -53,6 +53,7 @@ from slife2.libs.store.index import (
     _table_ddl,
     as_similarity,
     begin_rebuild,
+    chunks,
     clear_vectors,
     connect_to,
     filter_clause,
@@ -66,7 +67,6 @@ from slife2.libs.store.index import (
     set_index_meta,
     storable,
     vector_identity,
-    where_clause,
 )
 
 logger = logging.getLogger(__name__)
@@ -894,14 +894,20 @@ class ToolStore:
         """
         if not names:
             return
-        marks = _marks(names)
-        _clear_vectors(connection, names)
-        connection.execute(
-            f"DELETE FROM tool_fts WHERE rowid IN"
-            f" (SELECT rowid FROM tool WHERE name IN ({marks}))",
-            list(names),
-        )
-        connection.execute(f"DELETE FROM tool WHERE name IN ({marks})", list(names))
+        # Chunked like every other statement that binds a caller-sized list
+        # (`slife2.libs.store.index.chunks`): `forget_source` and `reset` hand
+        # this *every* name of a source, and an `mcp:` entry can carry four
+        # figures of tools — an `IN (…)` with more values than SQLite accepts
+        # raises `OperationalError` and leaves the source's rows in place.
+        for chunk in chunks(names):
+            marks = _marks(chunk)
+            _clear_vectors(connection, chunk)
+            connection.execute(
+                f"DELETE FROM tool_fts WHERE rowid IN"
+                f" (SELECT rowid FROM tool WHERE name IN ({marks}))",
+                list(chunk),
+            )
+            connection.execute(f"DELETE FROM tool WHERE name IN ({marks})", list(chunk))
 
     def set_source_state(self, source: str, state: str) -> int:
         """Record the verdict on one source: `enabled`, `error` or `disabled`.
@@ -1397,9 +1403,14 @@ class ToolStore:
             # asked for — not whichever sentence happened to be looked at first.
             for rowid, measured in hits:
                 meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-        if keyword_hits is not None and not shortlist:
-            # Words with no sentence are one question with one view.
-            shortlist = list(dict.fromkeys(keyword_hits))
+        # (A `if keyword_hits is not None and not shortlist` fallback stood
+        # here, assigning the keyword list when the fusion had produced nothing.
+        # It could not: the words are always *some* question's other leg — a
+        # keywords-only call is routed into `sentences` above — so every keyword
+        # id is already in `shortlist` by the time this line is reached.  The
+        # byte-identical line in `slife2.plugins.cabinet.store` is live, because
+        # that corpus does not do the routing; this copy was the one that
+        # outlived its reason.)
         # **The union is capped, and each question may bring `over` ids of its
         # own.**  Nothing a caller passes bounds this list: every sentence
         # contributes its meaning leg's ids plus the keyword leg's, so forty
@@ -1544,14 +1555,24 @@ class ToolStore:
         The filters are applied in SQL rather than to the fused answer, which is
         the one place they can be exact: `rank` orders *every* match, so cutting
         to the limit afterwards still returns the best rows inside the filter.
+
+        **And they are the *rows*', not the match's.**  `_tool_filters` builds
+        unqualified clauses naming columns of `tool`, and `tool_fts` declares two
+        of those names itself (`name`, `source_id`, `category`, `schema`), so a
+        `JOIN tool` that put both tables in scope made every filtered keyword
+        search fail with `ambiguous column name: category` — a crash, on the
+        documented path ("a search with a category is about that category"),
+        whose working siblings are the browse and the meaning leg.  A subquery
+        keeps one table in scope for the `MATCH` and one for the filters, which
+        is also the whole of what the join was for.
         """
         weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
-        where = where_clause(clauses)
+        where = filter_clause(clauses)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT f.rowid AS rowid FROM tool_fts f"
-                f" JOIN tool t ON t.rowid = f.rowid"
-                f" WHERE tool_fts MATCH ? {where}"
+                f"SELECT rowid FROM tool_fts"
+                f" WHERE tool_fts MATCH ?"
+                f" AND rowid IN (SELECT rowid FROM tool {where})"
                 f" ORDER BY bm25(tool_fts, {weights}) LIMIT ?",
                 (expression, *values, limit),
             ).fetchall()

@@ -58,7 +58,7 @@ import array
 import math
 import re
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,6 +108,21 @@ _OVERFETCH = 4
 #: the failure when one of them is wrong is an `OperationalError` about too many
 #: variables raised by whichever store nobody tested at that size.
 MAX_SQL_VARS = 900
+
+
+def chunks(values: Sequence[Any]) -> Iterator[Sequence[Any]]:
+    """`values` in the pieces one statement may bind (`MAX_SQL_VARS`).
+
+    **The cap, where the binding happens.**  Four places bind a list whose
+    length the caller decided, and two of them had written this loop out and two
+    had not: a `DELETE … WHERE name IN (…)` over a whole source's tools is a
+    statement SQLite's default 999-variable limit refuses, and the corpus it
+    refuses on is the one nobody tests at that size (`github`'s 1239 tools, the
+    number `slife2.libs.plugin.family` cites).  A rule about a limit belongs beside
+    the limit.
+    """
+    for start in range(0, len(values), MAX_SQL_VARS):
+        yield values[start : start + MAX_SQL_VARS]
 
 
 #: What a row carries before anything has measured it, while a page's
@@ -521,9 +536,7 @@ def rebuild_vector_index(
     for table in also_delete:
         connection.execute(f"DELETE FROM {table}")
     connection.execute(vector_ddl(dimension, vec_table))
-    set_index_meta(
-        connection, meta_table, vector_identity=identity, vector_dim=str(dimension)
-    )
+    set_index_meta(connection, meta_table, vector_identity=identity)
     return True
 
 
@@ -554,20 +567,25 @@ def clear_vectors(
     """
     if not keys:
         return
-    marks = _marks(keys)
-    if table_exists(connection, vec_table):
+    # Chunked, for `rows_in_order`'s reason and by the same rule: `keys` is
+    # whatever the caller is removing — a whole source's name list, in the
+    # catalogue's case, which is four figures for `github` — and a statement
+    # binding more values than SQLite accepts raises instead of deleting.
+    for chunk in chunks(keys):
+        marks = _marks(chunk)
+        if table_exists(connection, vec_table):
+            connection.execute(
+                f"DELETE FROM {vec_table} WHERE rowid IN"
+                f" (SELECT id FROM {chunk_table} WHERE {key_column} IN ({marks}))",
+                tuple(chunk),
+            )
         connection.execute(
-            f"DELETE FROM {vec_table} WHERE rowid IN"
-            f" (SELECT id FROM {chunk_table} WHERE {key_column} IN ({marks}))",
-            tuple(keys),
+            f"DELETE FROM {chunk_table} WHERE {key_column} IN ({marks})", tuple(chunk)
         )
-    connection.execute(
-        f"DELETE FROM {chunk_table} WHERE {key_column} IN ({marks})", tuple(keys)
-    )
-    for table, column in also_delete:
-        connection.execute(
-            f"DELETE FROM {table} WHERE {column} IN ({marks})", tuple(keys)
-        )
+        for table, column in also_delete:
+            connection.execute(
+                f"DELETE FROM {table} WHERE {column} IN ({marks})", tuple(chunk)
+            )
 
 
 def place_vectors(

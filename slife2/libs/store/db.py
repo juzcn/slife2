@@ -82,7 +82,7 @@ from typing import Any
 import sqlite_vec
 
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import TURNS_DB, agent_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -194,8 +194,8 @@ def database_path(agent: str, subagent: str = "") -> Path:
         # written at all — `Loop.records` — so this file is a schema and nothing
         # more, and the name it carries is the worker's because a directory
         # cannot carry it for two stores.)
-        return directory / f"{safe_agent_name(subagent)}.turns.db"
-    return directory / "turns.db"
+        return directory / f"{safe_agent_name(subagent)}.{TURNS_DB}"
+    return directory / TURNS_DB
 
 
 @dataclass(frozen=True)
