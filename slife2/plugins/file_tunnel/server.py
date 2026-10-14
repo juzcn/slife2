@@ -50,12 +50,12 @@ from starlette.responses import Response, StreamingResponse
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import Config
-from slife2.plugins.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
     TunnelProvider,
     create_provider,
 )
-from slife2.plugins.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -516,7 +516,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         return f"Stopped serving {wanted}. That URL no longer works."
 
     # ── Not for the model ────────────────────────────────────────────────
-    # No `meta`, so the hub withholds it (slife2/plugins/audience.py).  It is here
+    # No `meta`, so the hub withholds it (slife2/libs/plugin/audience.py).  It is here
     # because the tunnel's state is otherwise invisible: `starting` and
     # `failed` look identical from the outside, and `reachable` is the
     # difference between a URL and a working URL.

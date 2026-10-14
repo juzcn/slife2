@@ -25,6 +25,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import default_config, load
 from slife2.libs.host.configfile import read_section
+from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.plugins.cli.server import (
     CONFIG_KEY,
     SERVER_NAME,
@@ -32,7 +33,6 @@ from slife2.plugins.cli.server import (
     build_server,
     rows,
 )
-from slife2.plugins.protocol import LIST_SOURCES
 
 pytestmark = pytest.mark.unit
 

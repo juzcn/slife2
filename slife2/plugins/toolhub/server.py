@@ -25,7 +25,7 @@ the servers under `mcp:` and `rest-api:` are held by `slife2-mcp-tools` and
 process asks.  The credential story is unchanged — a tool server's key lives in
 the process that reaches it, and the agent loop never sees one — but the process
 that holds it is the plugin that owns the config section, not this one.
-`slife2.clients.gateway` is the link itself; `slife2.plugins.family` is the half that the two
+`slife2.clients.gateway` is the link itself; `slife2.libs.plugin.family` is the half that the two
 "hold somebody else's servers" plugins share.
 
 **The set is decided here and remembered there.**  Which tools exist, what they
@@ -39,7 +39,7 @@ the next thing that needs the catalogue can have it.
 Two ways in, and they are not the same kind of claim
 ----------------------------------------------------
 **A plugin's own tools** arrive by `tools/list` and have to declare themselves
-the model's (`slife2.plugins.audience`), because they belong to that plugin's code:
+the model's (`slife2.libs.plugin.audience`), because they belong to that plugin's code:
 `remember` writes into any agent's database and `send_message` drives another
 conversation, and those are exactly the tools a model would reach for if it
 could read their descriptions.  **What a plugin holds** arrives by declaration
@@ -59,7 +59,7 @@ liveness is read, and why a plugin that holds sources and cannot answer for them
 fails the list rather than quietly contributing none.
 
 Which source a tool came from is not what decides who may call it — which
-*caller* it is for does, and that is said on the tool itself (`slife2.plugins.audience`)
+*caller* it is for does, and that is said on the tool itself (`slife2.libs.plugin.audience`)
 rather than in its name, in this file, or in the config.  **A plugin's tools
 belong to that plugin's own code until one of them says otherwise**, so
 `remember` stays where it was and `now` carries the mark, while a declared row
@@ -125,7 +125,7 @@ REST APIs are not a second mechanism
 A `rest-api:` entry is expanded *by the config layer* into the stdio command that
 serves it (`slife2.libs.host.config._rest_api`), so what arrives at `slife2-restapi-tools`
 is an ordinary stdio server — the same kind of thing a `mcp:` entry describes,
-held by the same code (`slife2.plugins.family`) and declared to this process the same
+held by the same code (`slife2.libs.plugin.family`) and declared to this process the same
 way.  Nothing outside the config layer knows what REST is, which is the point:
 there is one kind of thing to connect to, and the wrapper people publish for
 OpenAPI is just how a REST API becomes one.
@@ -195,24 +195,24 @@ from slife2.clients.gateway import (
 from slife2.clients.toolclient import UpstreamTool
 from slife2.libs.host.config import Config, ToolServerSettings
 from slife2.libs.host.paths import catalogue_db, data_dir
-from slife2.libs.store.catalogue import ToolStore
-from slife2.libs.store.index import Embedder
-from slife2.libs.store.textindex import terms
-from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
-from slife2.plugins.audience import for_the_model, forwarded_client, request_meta
-from slife2.plugins.family import settle_attempts
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
+from slife2.libs.plugin.family import settle_attempts
+from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     LIST_SOURCES,
     house_server,
     serve_plugin,
 )
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.protocol import (
     CLI_SOURCE as _CLI_SOURCE,
 )
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
+from slife2.libs.store.catalogue import ToolStore
+from slife2.libs.store.index import Embedder
+from slife2.libs.store.textindex import terms
+from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +286,7 @@ SKILL_USE = "skill_use"
 #: Re-exported rather than defined here: the two declaring plugins and the
 #: two family plugins need these names too, and a plugin reaching into this
 #: one for a string is how `slife2-mcp-tools` came to import the whole hub.
-#: See `slife2.plugins.protocol.SKILLS_SOURCE`.
+#: See `slife2.libs.plugin.protocol.SKILLS_SOURCE`.
 SKILLS_SOURCE = _SKILLS_SOURCE
 CLI_SOURCE = _CLI_SOURCE
 
@@ -1023,7 +1023,7 @@ class Upstream:
         """The tools of one listing the model may be given.
 
         **Ours have to ask, and the answer is no until they do**
-        (`slife2.plugins.audience`).  A plugin's tools belong to that plugin's own code
+        (`slife2.libs.plugin.audience`).  A plugin's tools belong to that plugin's own code
         until one says otherwise, because the ones that would leak —
         `remember`, which writes into any agent's database, `send_message`,
         which drives another conversation — are exactly the ones a model would
@@ -2439,7 +2439,7 @@ def build_server(
     async def settle() -> None:
         """Let the attempts this process started finish, briefly.
 
-        `slife2.plugins.family.settle_attempts` is the wait and the rule behind it
+        `slife2.libs.plugin.family.settle_attempts` is the wait and the rule behind it
         ("wait, never cancel") — this half is only *which* attempts: the links to
         the plugins, where the family's is the entries of one config section.
 
@@ -2536,7 +2536,7 @@ def build_server(
         holding a set it cannot change.
 
         A plugin's tools are left out unless they declare themselves the
-        model's (`slife2.plugins.audience`); a tool server's are all offered, because the
+        model's (`slife2.libs.plugin.audience`); a tool server's are all offered, because the
         operator put the server in the config.  Both were decided when the
         listing was merged, so nothing in this answer says which is which — by
         the time a tool is listed, the question has been answered.

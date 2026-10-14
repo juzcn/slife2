@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FileTunnelSettings, load
-from slife2.plugins.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
 from slife2.plugins.file_tunnel.server import (
     Exposed,

@@ -156,7 +156,7 @@ def real_dialer(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
     """
 
     def restore(module: str) -> None:
-        real = importlib.import_module("slife2.plugins.protocol").open_server
+        real = importlib.import_module("slife2.libs.plugin.protocol").open_server
         monkeypatch.setattr(importlib.import_module(module), "open_server", real)
 
     return restore

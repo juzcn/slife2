@@ -24,8 +24,8 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import EMBEDDINGS_SERVER_NAME
+from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.store.index import Embedder
-from slife2.plugins.protocol import close_server, open_server, tool_payload
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class EmbedderConnection:
     connection before there is a loop to open one on — so what is handed round is
     this object, and whoever asks first pays.
 
-    **Opening one is what `slife2.plugins.protocol.open_server` decides about a missing
+    **Opening one is what `slife2.libs.plugin.protocol.open_server` decides about a missing
     peer** — it raises, and it is meant to: a store with no embedder is a store
     that can write nothing, since a turn is written with its vector in one
     transaction.  `close` is the other half, for a lifespan that owns one.

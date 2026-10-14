@@ -542,7 +542,7 @@ async def test_a_refresh_that_fails_ends_the_turn() -> None:
 
     A model called with the previous step's tool list is a silently wrong
     request; a turn that fails is a visible one.  See
-    `slife2.plugins.protocol.open_server`.
+    `slife2.libs.plugin.protocol.open_server`.
     """
 
     async def broken() -> ToolRegistry:

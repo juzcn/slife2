@@ -308,7 +308,7 @@ def storable(text: str) -> str:
     Surrogates cannot be encoded to UTF-8, so binding one raises
     `UnicodeEncodeError` — which is a failed write, and a failed write now fails
     the turn outright rather than losing it quietly (see
-    `slife2.plugins.protocol.open_server`). Neither is something an emoji in somebody's
+    `slife2.libs.plugin.protocol.open_server`). Neither is something an emoji in somebody's
     answer should be able to bring about, which is why the surrogate is dealt
     with here rather than the failure being handled there.
 

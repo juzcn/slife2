@@ -55,7 +55,7 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.plugins.protocol import close_server, open_server
+from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.plugins.tui import server as control
 from slife2.plugins.tui.server import NOTE
 

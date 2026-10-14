@@ -152,7 +152,7 @@ def request_client(ctx: Any) -> tuple[str, str] | None:
 #: sentence with two holes**, because five plugins say it — a task, a schedule, a
 #: cabinet, a login, a mesh — and the only words that change are the thing that is
 #: missing and the thing that is the agent's.  That is the same arrangement
-#: `slife2.plugins.family.FamilyWords` exists for, and for the same reason: two copies
+#: `slife2.libs.plugin.family.FamilyWords` exists for, and for the same reason: two copies
 #: of a sentence are two chances for a model to be taught two vocabularies for
 #: one mechanism.
 #:

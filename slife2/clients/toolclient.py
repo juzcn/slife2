@@ -44,11 +44,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.protocol import tool_payload
 from slife2.libs.turn.messages import ToolSpec
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 from slife2.libs.turn.tools import Tool, ToolFailed
-from slife2.plugins.audience import client_meta
-from slife2.plugins.protocol import tool_payload
 
 logger = logging.getLogger(__name__)
 

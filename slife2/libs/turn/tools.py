@@ -63,7 +63,7 @@ first is the one the mark answers; the mistake to avoid is reading it as an
 answer to the other three:
 
 * **who calls it** — :data:`HARNESS_PREFIX`;
-* **may the model be given it** — `slife2.plugins.audience` for ours, and the operator's
+* **may the model be given it** — `slife2.libs.plugin.audience` for ours, and the operator's
   config for everybody else's;
 * **may the model unload it** — `slife2.plugins.toolhub.server.ALWAYS_LOADED`;
 * **does a screen draw it** — `slife2.tui.restore`.

@@ -45,7 +45,8 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
-from slife2.plugins.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.media.adapters import (
     MediaAdapter,
     MediaAdapterError,
@@ -53,7 +54,6 @@ from slife2.plugins.media.adapters import (
     media_dir,
     merge_params,
 )
-from slife2.plugins.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 

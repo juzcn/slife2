@@ -103,7 +103,7 @@ async def context():
     Sending **cannot happen without it**: a store that is not there is a broken
     system rather than a degraded one, so `send_message` fails before anything is
     spent on a model call.  See
-    `slife2.plugins.protocol.open_server`.
+    `slife2.libs.plugin.protocol.open_server`.
 
     The real server rather than a stub, so what these tests exercise is the
     plugin the agent server actually talks to — the one test that is *about*

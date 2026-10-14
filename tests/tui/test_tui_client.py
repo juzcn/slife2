@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from fastmcp.exceptions import ToolError
 
-from slife2.plugins import protocol as mcp_server_module
+from slife2.libs.plugin import protocol as protocol_module
 from slife2.plugins.tui.server import ATTACH, Handover, encode
 from slife2.tui.client import MCPAgentClient, MCPWindowClient
 
@@ -69,12 +69,12 @@ class FakeTransport:
 def install(monkeypatch, transport: FakeTransport | FakeWindowTransport) -> None:
     """Point the client at a stubbed transport instead of a URL.
 
-    Patched in `slife2.plugins.protocol` rather than here: the client no longer builds
+    Patched in `slife2.libs.plugin.protocol` rather than here: the client no longer builds
     its own `Client` — `open_server` does, for every plugin in this system —
     so that module is where the construction happens and therefore where a test
     has to stand in for it.
     """
-    monkeypatch.setattr(mcp_server_module, "Client", lambda *a, **k: transport)
+    monkeypatch.setattr(protocol_module, "Client", lambda *a, **k: transport)
 
 
 def sent(transport: FakeTransport, tool: str) -> list[dict[str, Any]]:

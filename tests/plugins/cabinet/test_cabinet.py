@@ -19,8 +19,8 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.host.paths import agent_dir, data_dir
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.libs.store.index import table_exists
-from slife2.plugins.audience import client_meta, for_the_model
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
     build_server,

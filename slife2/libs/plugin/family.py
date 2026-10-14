@@ -47,8 +47,8 @@ from slife2.clients.gateway import ClientFactory, Connection, mcp_config, proxie
 from slife2.libs.host import configfile
 from slife2.libs.host.config import Config, ConfigError, ToolServerSettings
 from slife2.libs.host.paths import data_dir
-from slife2.plugins.audience import forwarded_client, request_meta
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.audience import forwarded_client, request_meta
+from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     CLI_SOURCE,
     LIST_SOURCES,
@@ -409,7 +409,7 @@ async def apply_and_report(
     hub re-reads every declaration before each one.
 
     **The sentence itself is the family's**, not this function's: `words` carries
-    every word that varies (`slife2.plugins.family.FamilyWords`), and the two answers
+    every word that varies (`slife2.libs.plugin.family.FamilyWords`), and the two answers
     this shares with `switch_entry` are methods on it rather than text written
     out here.  They were written out here, and the copy had `connected`,
     `tool(s)`, `connecting` and `` `set_enabled` `` hardcoded into it — so the
@@ -924,7 +924,7 @@ def build_family_server(
     model, and neither should be — the model is given the tools of the *entries*,
     merged by the hub, and never these.  What the model gets from this process is
     what `management` registers, which is a different surface with a different
-    reader (see `slife2.plugins.family`'s own note on `refusal`, and DESIGN.md §8).
+    reader (see `slife2.libs.plugin.family`'s own note on `refusal`, and DESIGN.md §8).
 
     `transports` and `client_factory` are the same two seams the hub has and for
     the same reason: a test drives the whole thing over in-memory servers, with

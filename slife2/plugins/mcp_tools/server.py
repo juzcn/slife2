@@ -10,7 +10,7 @@ config section belongs to the thing that owns it, and the hub's job is the tool
 **What it serves is `list_sources` and `call_source`**, and nothing else: the
 model never sees this server.  Each entry is declared as a source, the hub merges
 its rows and enforces the naming rule, and a call comes back here to be run.  The
-whole arrangement is `slife2.plugins.family`'s, which is also `restapi-tools`'s — the
+whole arrangement is `slife2.libs.plugin.family`'s, which is also `restapi-tools`'s — the
 two differ in which section they read and nothing else, which is the honest
 consequence of REST being an MCP server behind a proxy.
 """
@@ -30,8 +30,8 @@ from slife2.libs.host.config import (
     _tool_server,
     load,
 )
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.family import (
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.family import (
     Family,
     FamilyWords,
     apply_and_report,
@@ -43,7 +43,7 @@ from slife2.plugins.family import (
     state_word,
     switch_entry,
 )
-from slife2.plugins.protocol import serve_plugin
+from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ INSTRUCTIONS = (
     "themselves reach the model through the hub."
 )
 
-#: What this family calls things, for the sentences `slife2.plugins.family` writes
+#: What this family calls things, for the sentences `slife2.libs.plugin.family` writes
 #: once for both connection families.  Every word here is one a model reads
 #: back: `a server` here is `an API` next door, over one road underneath.
 WORDS = FamilyWords(

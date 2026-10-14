@@ -41,9 +41,9 @@ handler behind it, which is the detach.
 
 **Three tools, and none of them is the model's.**  `submit` is a channel's,
 `note` is the harness's, `attach` is a window's; all three are addressed by an
-agent name.  Nothing here carries `slife2.plugins.audience.FOR_THE_MODEL`, so the hub
+agent name.  Nothing here carries `slife2.libs.plugin.audience.FOR_THE_MODEL`, so the hub
 leaves all of it out of the tool set, and the plugin serves no `list_sources` —
-it declares no rows, and is therefore asked for none (`slife2.plugins.protocol`).
+it declares no rows, and is therefore asked for none (`slife2.libs.plugin.protocol`).
 
 **Returning is the acknowledgement, and it is the write.**  A caller whose
 `submit` came back knows the words are on their way down a stream a window is
@@ -71,7 +71,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.plugins.protocol import house_server, serve_plugin
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +323,7 @@ class Windows:
         """The session a message for *agent* should go to, if a window holds one.
 
         A peer that is not there is this system's broken-system answer rather than
-        a degraded one (`slife2.plugins.protocol.open_server`), which for this plugin
+        a degraded one (`slife2.libs.plugin.protocol.open_server`), which for this plugin
         means the same thing it has always meant: nobody is showing that
         conversation, so there is nowhere for the words to be typed.
         """
@@ -376,7 +376,7 @@ async def _push(ctx: Context, session: WindowSession) -> None:
 def build_server(_config: Config | None = None) -> FastMCP:
     """The window, as an MCP server: a session per agent, and no state of its own.
 
-    The config is accepted and unread, because `slife2.plugins.protocol.serve_plugin`
+    The config is accepted and unread, because `slife2.libs.plugin.protocol.serve_plugin`
     hands every plugin the config it read and this one reads no section: the
     address it is reached at is the launcher's business rather than its own.
     """

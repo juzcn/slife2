@@ -25,9 +25,9 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import TUI_SERVER_NAME
+from slife2.libs.plugin.audience import for_the_model
 from slife2.libs.turn.events import TextDelta, TurnFinished
 from slife2.libs.turn.messages import Usage
-from slife2.plugins.audience import for_the_model
 from slife2.plugins.tui import server as control
 from slife2.tui.app import SlifeApp
 from slife2.tui.widgets import ChatView
@@ -256,7 +256,7 @@ async def test_nothing_here_is_offered_to_the_model() -> None:
 
     None carries the audience mark, and the plugin declares no sources — so it
     contributes no catalogue rows either, which is what makes it one of the
-    plugins the hub has no reason to ask (`slife2.plugins.protocol.LIST_SOURCES`).
+    plugins the hub has no reason to ask (`slife2.libs.plugin.protocol.LIST_SOURCES`).
     """
     server = control.build_server()
 
@@ -272,7 +272,7 @@ async def test_nothing_here_is_offered_to_the_model() -> None:
 
 
 async def test_the_surface_answers_to_the_name_it_advertises() -> None:
-    """`slife2.plugins.protocol.open_server` proves who it reached before handing over.
+    """`slife2.libs.plugin.protocol.open_server` proves who it reached before handing over.
 
     A record or an address is never evidence (§4): what a caller trusts is the
     name the handshake reports, which is why every server here has one.
@@ -441,7 +441,7 @@ async def served(mcp: Any) -> AsyncGenerator[str]:
     """Serve a built server on a real port, and yield its URL.
 
     The tests own this rather than the plugin, because serving is no longer
-    something the window does: `slife2.plugins.protocol.serve` is how a plugin is
+    something the window does: `slife2.libs.plugin.protocol.serve` is how a plugin is
     served in production, and a unit test binding a socket would be exercising
     that rather than the window.
     """

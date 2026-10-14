@@ -24,7 +24,7 @@ question in both directions.
 
 **A hard failure is the launcher's, and it is the right one.**  `slife2` starts
 every plugin together and refuses to start at all if one of them will not come
-up (`slife2.plugins.protocol.open_server`), reporting the child's own log tail — so
+up (`slife2.libs.plugin.protocol.open_server`), reporting the child's own log tail — so
 raising here arrives as a named server, a reason, and mosquitto's last twenty
 lines.  The alternative, starting anyway with a mesh that is not on the mesh, is
 the failure this project keeps choosing against: the model would be handed four

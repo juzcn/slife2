@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 #:
 #: `plugin` is ours, and it is the only one of the three that is: a plugin is a
 #: server slife2 starts and therefore one that carries the plugin contract
-#: (`slife2.plugins.protocol`), while `mcp` and `rest` are somebody else's process,
+#: (`slife2.libs.plugin.protocol`), while `mcp` and `rest` are somebody else's process,
 #: reached as a client.  The word is chosen for what it keeps apart in a
 #: sentence — a plugin *is* an MCP server, so calling ours "MCP servers" would
 #: distinguish them from the twenty under `mcp:` not at all — and the

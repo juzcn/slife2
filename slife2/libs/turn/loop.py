@@ -164,7 +164,7 @@ class AgentLoop:
         A refresh that fails is deliberately *not* swallowed: the tool list is
         what the call is made with, and calling a model with last step's list
         because the hub is unreachable would be a silently wrong request rather
-        than a failed turn.  `slife2.plugins.protocol.open_server` is where that rule
+        than a failed turn.  `slife2.libs.plugin.protocol.open_server` is where that rule
         is argued.
         """
         if self._refresh is not None:

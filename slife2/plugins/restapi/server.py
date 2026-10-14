@@ -10,7 +10,7 @@ the two: the section, and the shape an entry is written in.
 an operator's mental model is the section: `rest-api:` entries are a shorter way
 to say the same thing, not a second mechanism, and a family that owns its config
 is a family whose next change has somewhere to land.  The machinery is shared —
-see `slife2.plugins.family` — so this costs a module and a port, not a second
+see `slife2.libs.plugin.family` — so this costs a module and a port, not a second
 implementation.
 """
 
@@ -32,8 +32,8 @@ from slife2.libs.host.config import (
     load,
     resolve_secret,
 )
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.family import (
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.family import (
     Family,
     FamilyWords,
     apply_and_report,
@@ -45,7 +45,7 @@ from slife2.plugins.family import (
     state_word,
     switch_entry,
 )
-from slife2.plugins.protocol import serve_plugin
+from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ INSTRUCTIONS = (
     "connections, and the tools themselves reach the model through the hub."
 )
 
-#: What this family calls things, for the sentences `slife2.plugins.family` writes
+#: What this family calls things, for the sentences `slife2.libs.plugin.family` writes
 #: once for both connection families.  An API is *served* where a server is
 #: *connected*, and it exposes *operations* where one of ours exposes tools —
 #: the same mechanism under the two names a person already uses for them.

@@ -89,6 +89,15 @@ from slife2.helpers.timeutil import InvalidTimeBound, normalize_bound
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import AGENT_TASK_SERVER_NAME, Config, load_cached
 from slife2.libs.host.paths import schedule_dbs
+from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
+from slife2.libs.plugin.protocol import (
+    agent_reader,
+    close_server,
+    house_server,
+    open_server,
+    serve_plugin,
+    tool_payload,
+)
 from slife2.libs.turn.prompt import render
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_LIST,
@@ -99,15 +108,6 @@ from slife2.plugins.agent_task.server import (
 )
 from slife2.plugins.agent_task.server import (
     RUNNING as TASK_RUNNING,
-)
-from slife2.plugins.audience import FOR_THE_MODEL, client_meta
-from slife2.plugins.protocol import (
-    agent_reader,
-    close_server,
-    house_server,
-    open_server,
-    serve_plugin,
-    tool_payload,
 )
 from slife2.plugins.schedule import expressions
 from slife2.plugins.schedule.store import (
@@ -420,7 +420,7 @@ async def dispatch(
             # The identity rides in `_meta` because a task is *an agent's*, and
             # this process serves every agent: without it the peer would have to
             # guess whose loop to start, and would refuse with its own
-            # unaddressed answer (`slife2.plugins.audience.UNADDRESSED`).
+            # unaddressed answer (`slife2.libs.plugin.audience.UNADDRESSED`).
             meta=client_meta(store.agent),
             timeout=_T.timeouts.transport.tasks,
         )

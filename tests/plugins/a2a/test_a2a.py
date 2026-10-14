@@ -41,6 +41,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings, default_config
 from slife2.libs.host.paths import a2a_inbound_path, a2a_inbound_paths
 from slife2.libs.host.runtime import read_record
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.a2a import broker
 from slife2.plugins.a2a import server as a2a_server
 from slife2.plugins.a2a.inbound_store import InboundStore
@@ -82,7 +83,6 @@ from slife2.plugins.a2a.server import (
     marker,
 )
 from slife2.plugins.a2a.task_store import TaskStore, get_store
-from slife2.plugins.audience import client_meta, for_the_model
 from slife2.tui.client import MCPMeshClient
 
 pytestmark = pytest.mark.unit

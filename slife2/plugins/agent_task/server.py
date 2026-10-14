@@ -82,12 +82,8 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
-from slife2.libs.turn.messages import Message
-from slife2.libs.turn.prompt import render
-from slife2.libs.turn.tools import ToolRegistry
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.protocol import (
     ClientId,
     agent_reader,
     close_server,
@@ -96,6 +92,10 @@ from slife2.plugins.protocol import (
     serve_plugin,
     tool_payload,
 )
+from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
+from slife2.libs.turn.messages import Message
+from slife2.libs.turn.prompt import render
+from slife2.libs.turn.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 

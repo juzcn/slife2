@@ -18,9 +18,9 @@ import pytest
 from fastmcp import Client
 
 from slife2.libs.host.config import EmbeddingProviderSettings, default_config
-from slife2.plugins.audience import for_the_model
+from slife2.libs.plugin.audience import for_the_model
+from slife2.libs.plugin.protocol import tool_payload
 from slife2.plugins.llm.embeddings_server import EmbeddingClient, build_server
-from slife2.plugins.protocol import tool_payload
 
 pytestmark = pytest.mark.unit
 

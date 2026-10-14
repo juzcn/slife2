@@ -37,6 +37,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -46,7 +47,6 @@ from slife2.plugins.agent_task.server import (
     MARKER_PREFIX,
     build_server,
 )
-from slife2.plugins.audience import client_meta, for_the_model
 from slife2.plugins.tui import server as control
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -231,7 +231,7 @@ async def ask(
     """One call, named the way every server in this system is named.
 
     The identity rides in `_meta` rather than in an argument
-    (`slife2.plugins.audience`), because a process that serves every agent cannot guess
+    (`slife2.libs.plugin.audience`), because a process that serves every agent cannot guess
     whose task a call is for — which is `UNADDRESSED`'s whole subject.
     """
     result = await client.call_tool(tool, arguments or {}, meta=client_meta(AGENT))

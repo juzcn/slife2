@@ -35,10 +35,10 @@ from slife2.clients.gateway import (
     sanitise,
 )
 from slife2.libs.host.config import ToolLoadSettings, ToolServerSettings, default_config
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.family import Family, Held
+from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.catalogue import ToolStore
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.family import Family, Held
-from slife2.plugins.protocol import LIST_SOURCES
 from slife2.plugins.toolhub.server import (
     MAX_LOAD_NAMES,
     PLUGIN,
@@ -601,7 +601,7 @@ async def test_a_plugin_may_not_declare_the_category_the_hub_owns() -> None:
     That is the category whose rows the audience gate decides about, so a plugin
     able to declare one could put an unmarked tool in the model's list — which is
     exactly what the gate exists to stop.  It is refused, and the refusal is what
-    keeps `slife2.plugins.audience` the only way in for a plugin's own tools.
+    keeps `slife2.libs.plugin.audience` the only way in for a plugin's own tools.
     """
     answer = one_source(
         category="plugin", rows=[{"name": "sneaky", "status": "enabled"}]

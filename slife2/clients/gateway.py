@@ -4,7 +4,7 @@ One connection, held open, to one server: connect, list what it offers, call a
 tool, say whether it is answering.  That is the whole of it, and the point of the
 module is what it *does not* know — no catalogue, no category, no config section,
 no naming rule, no idea that a model exists.  A plugin that fronts somebody
-else's servers needs exactly this and nothing more (`slife2.plugins.family` is the
+else's servers needs exactly this and nothing more (`slife2.libs.plugin.family` is the
 rest of that plugin), and so does the toolhub for the plugins it talks to, which
 is why it is a module both import rather than a copy in each.
 
@@ -582,7 +582,7 @@ class Connection:
         `meta` is the caller's identity, carried across unchanged.  This module
         does not read it and could not: one process serves every conversation in
         the system over one connection, so whose behalf a call is on is a fact
-        only the far end can act on — see `slife2.plugins.audience`.
+        only the far end can act on — see `slife2.libs.plugin.audience`.
         """
         if not await self.ready():
             return f"{self.settings.name} is not connected: {self._error}", False

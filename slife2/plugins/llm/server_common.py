@@ -8,7 +8,7 @@ except that difference, so adding a backend means writing an adapter and a
 
 Serving a server at all — the flags, the HTTP transport, the record that says a
 daemon is here — is *not* here, because it is not an LLM concern: it lives in
-`slife2.plugins.protocol`, alongside the other things every server in this system
+`slife2.libs.plugin.protocol`, alongside the other things every server in this system
 agrees about.
 
 It is also where **tool-call fragments are reassembled**, and that placement is
@@ -40,18 +40,18 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.model.wire import encode_chunk
+from slife2.libs.plugin.protocol import (
+    configure_logging,
+    house_server,
+    parse_serve_args,
+    serve,
+)
 from slife2.libs.turn.messages import (
     Message,
     StreamChatResult,
     ToolCall,
     ToolSpec,
     Usage,
-)
-from slife2.plugins.protocol import (
-    configure_logging,
-    house_server,
-    parse_serve_args,
-    serve,
 )
 
 logger = logging.getLogger(__name__)

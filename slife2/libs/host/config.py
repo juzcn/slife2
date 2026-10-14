@@ -177,7 +177,7 @@ DEFAULT_AGENT = "slife2"
 
 #: The MCP names the servers in this system advertise, as `Client.server_info`
 #: reports them.  A client proves it reached the server it meant by comparing
-#: against these; see `slife2.plugins.protocol.identifies`.
+#: against these; see `slife2.libs.plugin.protocol.identifies`.
 #:
 #: Spelled out rather than read off the modules, because reading them means
 #: importing them: the TUI and the agent loop must not pull in a server, and the
@@ -1290,7 +1290,7 @@ def default_config() -> Config:
             # in `<data>/skills/` (`slife2.plugins.skills.server`) and the programs the
             # config's `cli:` section records as installed (`slife2.plugins.cli.server`).
             # They declare catalogue rows rather than tools, and the hub is what
-            # merges them — see `slife2.plugins.protocol.LIST_SOURCES`.
+            # merges them — see `slife2.libs.plugin.protocol.LIST_SOURCES`.
             "skills-server": ServerSettings(port=8031),
             "cli-server": ServerSettings(port=8032),
             # And the two whose whole job is somebody else's servers: the

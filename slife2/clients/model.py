@@ -23,8 +23,8 @@ from fastmcp import Client
 import slife2.helpers.timeouts as _T
 from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.model.wire import decode_chunk
+from slife2.libs.plugin.protocol import open_server
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
-from slife2.plugins.protocol import open_server
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +207,7 @@ async def open_backend(
     or a server reached by a URL nobody configured — wants.
 
     Connecting, probing and the policy on failure are all
-    `slife2.plugins.protocol.open_server`'s; what is left here is the LLM half, which
+    `slife2.libs.plugin.protocol.open_server`'s; what is left here is the LLM half, which
     is wrapping the client in the backend that speaks this wire format.
 
     `timeout` is None by default, which means **no clock on one model call** —

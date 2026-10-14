@@ -10,7 +10,7 @@ The decision that everything else follows from: **a probe is the only authority
 on whether a server is running.**  A listening port proves something is there; a
 record proves something was there once.  Only a server that answers *as itself*
 proves that *our* server is up — its advertised name, from the handshake, or a
-tool it certainly serves when it reports no name (`slife2.plugins.protocol.identifies`)
+tool it certainly serves when it reports no name (`slife2.libs.plugin.protocol.identifies`)
 — which is why the record is never consulted for liveness and a stale one can
 never wedge a start.
 """
@@ -77,12 +77,12 @@ from slife2.libs.host.runtime import (
     unregister_client,
     write_claim,
 )
-from slife2.plugins.protocol import identifies
+from slife2.libs.plugin.protocol import identifies
 
 #: The plugins that are not model backends, keyed by the name the config's
 #: `servers:` section uses for each: the module that serves it, the MCP name
 #: that module advertises, and the tool that identifies it for a server that
-#: reports no name at all.  See `slife2.plugins.protocol.identifies` for why both are
+#: reports no name at all.  See `slife2.libs.plugin.protocol.identifies` for why both are
 #: needed.
 #:
 #: In code rather than in the config.  Letting an operator name an arbitrary
@@ -152,7 +152,7 @@ FILE_TUNNEL_SERVER = (
 #: by `attach` — the call a window holds open for as long as it is showing a
 #: conversation, which is served before any window exists and so is the state
 #: this plugin starts in.  The probe only looks for the name in `tools/list`
-#: (`slife2.plugins.protocol.identifies`), so naming a tool that blocks is safe.
+#: (`slife2.libs.plugin.protocol.identifies`), so naming a tool that blocks is safe.
 TUI_SERVER = ("slife2.plugins.tui.server", TUI_SERVER_NAME, "attach")
 #: The background tasks: one loop of the calling agent's own per task, answered
 #: by a message.  A second agent server in the only sense that matters — what it
@@ -267,7 +267,7 @@ class ServerSpec:
     #: The MCP name the server advertises, which is what proves it is ours.
     expected_name: str
     #: The tool that identifies it when it advertises no name — see
-    #: `slife2.plugins.protocol.identifies`.
+    #: `slife2.libs.plugin.protocol.identifies`.
     expected_tool: str
 
 
@@ -371,7 +371,7 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
     Identity comes from the handshake, which is what makes this better than a
     connection test: it catches the port being held by a different MCP server,
     which a connect would wave through and which would then fail in the middle
-    of a turn.  See `slife2.plugins.protocol.identifies`.
+    of a turn.  See `slife2.libs.plugin.protocol.identifies`.
 
     Takes the whole spec rather than a URL and a name so the two cannot be
     paired up wrongly at a call site — there are five of them, and a mismatched

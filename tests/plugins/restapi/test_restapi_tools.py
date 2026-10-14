@@ -363,7 +363,7 @@ async def test_both_entry_tools_describe_a_live_api_the_same_way(
     `rest_api_set` and `rest_api_set_enabled` reach a live API by different
     routes, and a model that got two accounts of the same connection would be
     reading two vocabularies for one mechanism — which is the failure
-    `slife2.plugins.family.FamilyWords` exists to make impossible, and which had
+    `slife2.libs.plugin.family.FamilyWords` exists to make impossible, and which had
     happened anyway: the `set` answer was written out by hand with `connected`,
     `tool(s)` and `` `set_enabled` `` hardcoded into it, so this family
     described an API as *connected* with two *tools* and pointed at a tool that

@@ -17,7 +17,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
-from slife2.plugins.protocol import LIST_SOURCES
+from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.plugins.skills.playbooks import USE_TOOL
 from slife2.plugins.skills.server import build_server
 

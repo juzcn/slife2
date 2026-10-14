@@ -30,9 +30,9 @@ from slife2.libs.host.config import (
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
+from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.plugins.a2a.server import JOIN
-from slife2.plugins.protocol import close_server, open_server
 from slife2.plugins.tui.server import ATTACH, Handover
 from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
@@ -256,7 +256,7 @@ class MCPAgentClient:
 
         The URL is in the error because "connection refused" without an address
         is the least useful thing a terminal can say, and so is a bare timeout.
-        Both come from `slife2.plugins.protocol.open_server`, which is where every
+        Both come from `slife2.libs.plugin.protocol.open_server`, which is where every
         client in this system connects to a peer and where the rule about what
         to do when one is missing lives.
         """
@@ -515,7 +515,7 @@ class MCPWindowClient:
 
         The named-peer check is the point: a `tui:` address pointed at anything
         else fails here, by name, rather than as a window that silently receives
-        nothing (`slife2.plugins.protocol.identifies`).
+        nothing (`slife2.libs.plugin.protocol.identifies`).
         """
         if self._client is not None:
             return
@@ -592,7 +592,7 @@ class MCPMeshClient:
         The named-peer check is the point here too: an `a2a:` address pointed at
         something else — a stale port, another plugin — fails by name rather than
         as a window whose agent silently never appears on the mesh
-        (`slife2.plugins.protocol.identifies`).
+        (`slife2.libs.plugin.protocol.identifies`).
         """
         if self._client is not None:
             return

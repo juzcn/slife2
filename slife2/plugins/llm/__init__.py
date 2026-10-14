@@ -36,7 +36,7 @@ about what it has to do.
 Serving a server at all — the flags, the HTTP transport, the record that says a
 daemon is here — is deliberately *not* in this package.  It is not an LLM
 concern, and every other server needs it too, so it lives in
-:mod:`slife2.plugins.protocol`.  Neither the protocol nor the model wire should
+:mod:`slife2.libs.plugin.protocol`.  Neither the protocol nor the model wire should
 have to import `slife2.plugins.llm` to be a server.
 
 Nothing is re-exported here on purpose: importing `slife2.plugins.llm` should not pull

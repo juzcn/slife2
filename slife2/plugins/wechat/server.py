@@ -9,9 +9,9 @@ message into a turn, and the four tools the model uses to log in and reply.
 changed in the port.  v1 ran one wechat child per agent, so its module globals
 *were* that agent's: `_client`, `_pending`, `_seen_keys` were one login, one
 queue and one dedup window because there was exactly one agent in the process.
-slife2's plugins are shared (`slife2.plugins.protocol`), so those four things live in
+slife2's plugins are shared (`slife2.libs.plugin.protocol`), so those four things live in
 a :class:`Session` keyed by the calling agent — the first half of the client id
-every call already carries (`slife2.plugins.audience`).  A second agent that scans its
+every call already carries (`slife2.libs.plugin.audience`).  A second agent that scans its
 own QR gets its own session file, its own poll loop and its own conversation,
 and neither can see the other's.
 
@@ -82,8 +82,8 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host.config import Config
 from slife2.libs.host.paths import agent_dir, agents_dir
-from slife2.plugins.audience import FOR_THE_MODEL, request_client, unaddressed
-from slife2.plugins.protocol import house_server, serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat.ilink import Http, IlinkClient
 from slife2.tui import notes

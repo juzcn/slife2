@@ -65,9 +65,10 @@ from fastmcp.exceptions import ToolError
 
 from slife2.clients.embedder import EmbedderConnection
 from slife2.libs.host.config import Config
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
-from slife2.plugins.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.plugins.cabinet.store import (
     DIARY,
     FILE,
@@ -82,7 +83,6 @@ from slife2.plugins.cabinet.store import (
     resolve,
     store_of,
 )
-from slife2.plugins.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 

@@ -188,7 +188,7 @@ def test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row(
 ) -> None:
     """The re-enable is the *reconnect*, and not an update to a row that moved.
 
-    A `mcp:` entry's rows carry no verdict of their own (`slife2.plugins.family`),
+    A `mcp:` entry's rows carry no verdict of their own (`slife2.libs.plugin.family`),
     because the runtime is the only thing that can say whether a connection is
     answering — so a source that recovers puts back what the verdict withdrew
     through `_apply`'s reconnect, and the merge answers `updated: []` because

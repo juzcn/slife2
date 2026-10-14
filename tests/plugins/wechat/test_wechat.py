@@ -34,7 +34,7 @@ from slife2.libs.harness import handover, markers
 from slife2.libs.harness.handover import DeliveryFailed
 from slife2.libs.host.config import TUI_SERVER_NAME, Config, load
 from slife2.libs.host.paths import agent_dir
-from slife2.plugins.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat import server as wechat
 from slife2.plugins.wechat.server import (

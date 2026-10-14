@@ -24,7 +24,7 @@ for is `list_sources`: a search reads the catalogue, so an entry nobody wrote a
 row for is a command only a model that already knew its name could reach.
 
 **This process does not write the catalogue.**  It answers `list_sources` and
-the hub merges the answer — the arrangement `slife2.plugins.protocol` describes — so
+the hub merges the answer — the arrangement `slife2.libs.plugin.protocol` describes — so
 that the hub remains the only writer of the tool table, the only process holding
 a connection to the db, and the only place two sources' claim on one name is
 settled.  What belongs here is the *section*: parsing it is `slife2.libs.host.config`'s
@@ -49,10 +49,10 @@ from slife2.libs.host.config import (
     ConfigError,
     _cli_tool,
 )
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.family import Documents, build_document_server
-from slife2.plugins.protocol import CLI_SOURCE as _SOURCE
-from slife2.plugins.protocol import serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.family import Documents, build_document_server
+from slife2.libs.plugin.protocol import CLI_SOURCE as _SOURCE
+from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ CONFIG_KEY = "cli-server"
 #: why their `status` is the config's to write and nothing else's.
 #: Re-exported from the plugin contract, because three other places need the
 #: same word: the hub files under it, and the two family plugins refuse a
-#: name that would collide with it.  See `slife2.plugins.protocol.SKILLS_SOURCE`.
+#: name that would collide with it.  See `slife2.libs.plugin.protocol.SKILLS_SOURCE`.
 SOURCE = _SOURCE
 
 #: The category, and the namespace the row names carry (`cli:yt-dlp`).  The

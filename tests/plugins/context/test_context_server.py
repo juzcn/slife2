@@ -22,10 +22,10 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import default_config
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
-from slife2.plugins.audience import client_meta
 from slife2.plugins.context.server import build_server
 from tests.fakes import StubEmbedder
 
@@ -162,7 +162,7 @@ async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
     An `agent` argument would make "read my history" into "read anybody's", with
     nothing between the model and somebody else's turns but a sentence it was
     told to obey.  The identity reaches the server on the call instead
-    (`slife2.plugins.audience`), so there is no argument to get wrong — and this is the
+    (`slife2.libs.plugin.audience`), so there is no argument to get wrong — and this is the
     check that none comes back.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))

@@ -28,7 +28,7 @@ from slife2.libs.host.config import (
     load,
 )
 from slife2.libs.host.paths import agent_dir
-from slife2.plugins.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.media import adapters
 from slife2.plugins.media.adapters import (
     DashScopeAIGCAdapter,

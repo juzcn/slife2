@@ -402,11 +402,11 @@ async def test_the_four_tools_are_marked_for_the_model(isolated_runtime) -> None
     that a unit test can check about the hub.
 
     A plugin's own tools arrive by `tools/list` and are offered to the model only
-    if they declare themselves the model's (`slife2.plugins.audience`) — `_check_new_input`
+    if they declare themselves the model's (`slife2.libs.plugin.audience`) — `_check_new_input`
     is the precedent, and the agent server is one of `Config.plugins()`, so these
     four arrive by exactly the same road.
     """
-    from slife2.plugins.audience import for_the_model
+    from slife2.libs.plugin.audience import for_the_model
 
     async with Client(server_for(isolated_runtime)) as client:
         tools = {one.name: one for one in await client.list_tools()}

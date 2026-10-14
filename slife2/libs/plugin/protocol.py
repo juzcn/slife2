@@ -87,7 +87,7 @@ from slife2.libs.host.runtime import (
     tcp_listening,
     write_record,
 )
-from slife2.plugins.audience import request_client, unaddressed
+from slife2.libs.plugin.audience import request_client, unaddressed
 
 logger = logging.getLogger(__name__)
 
@@ -156,15 +156,15 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
     helper that takes the words as arguments would have rewritten all of those
     calls to repeat two strings; this hands back the same one-argument function
     they had, so what each plugin declares is exactly the part that is its own:
-    the two words its refusal varies by (`slife2.plugins.audience.UNADDRESSED`), named
+    the two words its refusal varies by (`slife2.libs.plugin.audience.UNADDRESSED`), named
     once, at the top of the plugin that says them.
 
-    That is `slife2.plugins.family.FamilyWords`'s arrangement one level down: the
+    That is `slife2.libs.plugin.family.FamilyWords`'s arrangement one level down: the
     sentence lives where the mechanism lives and the vocabulary lives with the
     plugin, so a wording change is one edit rather than five.
 
     A server that answers with a refusal *sentence* rather than an error — the
-    cabinet, the login — calls `slife2.plugins.audience.unaddressed` directly.  The
+    cabinet, the login — calls `slife2.libs.plugin.audience.unaddressed` directly.  The
     sentence is one place either way, which is the half that matters.
     """
 

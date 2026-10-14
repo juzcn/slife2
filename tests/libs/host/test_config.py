@@ -173,9 +173,9 @@ def test_a_document_source_has_one_spelling() -> None:
     standing in for a language feature.  Now the copies are *aliases*, and what
     is asserted is that nothing has quietly grown a fourth.
     """
+    from slife2.libs.plugin.protocol import CLI_SOURCE as CONTRACT_CLI
+    from slife2.libs.plugin.protocol import SKILLS_SOURCE as CONTRACT_SKILLS
     from slife2.plugins.cli.server import SOURCE as CLI_SOURCE
-    from slife2.plugins.protocol import CLI_SOURCE as CONTRACT_CLI
-    from slife2.plugins.protocol import SKILLS_SOURCE as CONTRACT_SKILLS
     from slife2.plugins.skills.server import SOURCE as SKILLS_SOURCE
     from slife2.plugins.toolhub.server import CLI_SOURCE as HUB_CLI
     from slife2.plugins.toolhub.server import SKILLS_SOURCE as HUB_SKILLS

@@ -72,6 +72,14 @@ import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
 from slife2.libs.host.config import API_SERVER_NAMES, Config
 from slife2.libs.host.paths import agents_dir, turn_dbs
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.protocol import (
+    close_server,
+    describe,
+    house_server,
+    open_server,
+    serve_plugin,
+)
 from slife2.libs.store.db import TurnStore, store_for
 from slife2.libs.store.index import Embedder, page_limit
 from slife2.libs.store.textindex import terms
@@ -79,14 +87,6 @@ from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
 from slife2.libs.turn.messages import StreamChatResult
 from slife2.libs.turn.tokens import estimate_turn_tokens
-from slife2.plugins.audience import FOR_THE_MODEL, request_client
-from slife2.plugins.protocol import (
-    close_server,
-    describe,
-    house_server,
-    open_server,
-    serve_plugin,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +354,7 @@ def build_server(
             raise ValueError(
                 "this tool reads one conversation's memory and the call did not "
                 "say whose; it is called through the toolhub, which forwards the "
-                "caller's identity (`slife2.plugins.audience`)"
+                "caller's identity (`slife2.libs.plugin.audience`)"
             )
         return found
 

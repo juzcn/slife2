@@ -44,13 +44,13 @@ from slife2.libs.host.config import (
     find_config_path,
     load,
 )
-from slife2.plugins.llm.server_common import unresolved_key
-from slife2.plugins.protocol import (
+from slife2.libs.plugin.protocol import (
     configure_logging,
     house_server,
     parse_serve_args,
     serve,
 )
+from slife2.plugins.llm.server_common import unresolved_key
 
 logger = logging.getLogger(__name__)
 

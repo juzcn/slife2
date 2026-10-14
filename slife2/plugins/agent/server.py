@@ -96,6 +96,18 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.protocol import (
+    ClientId,
+    close_server,
+    configure_logging,
+    describe,
+    house_server,
+    open_server,
+    parse_serve_args,
+    serve,
+    tool_payload,
+)
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import turn_note, with_note
 from slife2.libs.turn.events import (
@@ -109,18 +121,6 @@ from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.prompt import render as render_system_prompt
 from slife2.libs.turn.tools import Tool, ToolRegistry
-from slife2.plugins.audience import FOR_THE_MODEL, request_client
-from slife2.plugins.protocol import (
-    ClientId,
-    close_server,
-    configure_logging,
-    describe,
-    house_server,
-    open_server,
-    parse_serve_args,
-    serve,
-    tool_payload,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +465,7 @@ def build_server(
         per turn.
 
         A context plugin that is not there **raises**, like every other peer in
-        this system.  `slife2.plugins.protocol.open_server` is where that rule lives
+        this system.  `slife2.libs.plugin.protocol.open_server` is where that rule lives
         and why; what matters here is that this plugin is not the exception
         to it — and it is the peer whose absence is felt soonest, since a turn
         whose context cannot be restored is a turn that should not be run.
@@ -583,7 +583,7 @@ def build_server(
         conversation in the transcript that the database has never heard of.
 
         A store that is *gone* fails the turn, and that is the system's rule
-        rather than this function's — `slife2.plugins.protocol.open_server` is where a
+        rather than this function's — `slife2.libs.plugin.protocol.open_server` is where a
         missing peer is decided to be a broken system rather than a degraded
         one.  A `ToolError` is left alone, and it is a different thing: it means
         the db server answered and refused *this* request — an agent name

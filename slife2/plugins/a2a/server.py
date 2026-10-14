@@ -80,6 +80,8 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import DeliveryFailed, hand_over, note_to_window
 from slife2.libs.host.config import A2A_SERVER_NAME, Config, load_cached
 from slife2.libs.host.paths import a2a_inbound_paths
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
 from slife2.libs.turn.prompt import render
 from slife2.plugins.a2a.broker import ensure as ensure_broker
 from slife2.plugins.a2a.inbound_store import InboundStore
@@ -89,8 +91,6 @@ from slife2.plugins.a2a.mesh import (
     format_presence_line,
     safe_name,
 )
-from slife2.plugins.audience import FOR_THE_MODEL
-from slife2.plugins.protocol import agent_reader, house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
 

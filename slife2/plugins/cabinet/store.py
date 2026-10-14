@@ -180,7 +180,7 @@ def cabinet_dir(agent: str) -> Path:
     """One agent's cabinet: `<data>/agents/<agent>/cabinet/`.
 
     **Per agent**, because a plugin here keys its state by the client id every
-    call carries (`slife2.plugins.protocol`) and the cabinet is the most private state
+    call carries (`slife2.libs.plugin.protocol`) and the cabinet is the most private state
     there is: a diary is one person's.  Where a v1 cabinet ends up, too: v1 also
     named its own directory after the agent (`<data>/<agent>.files/`), which is
     what makes one adoptable by copying its contents in — the level that moved

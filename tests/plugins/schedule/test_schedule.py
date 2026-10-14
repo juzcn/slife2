@@ -41,6 +41,7 @@ import slife2.helpers.timeouts as _T
 import slife2.plugins.schedule.server as schedule_server
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings, default_config
+from slife2.libs.plugin.audience import client_meta, for_the_model, request_client
 from slife2.plugins.agent_task.server import (
     FAILED as TASK_FAILED,
 )
@@ -50,7 +51,6 @@ from slife2.plugins.agent_task.server import (
 from slife2.plugins.agent_task.server import (
     RUNNING as TASK_RUNNING,
 )
-from slife2.plugins.audience import client_meta, for_the_model, request_client
 from slife2.plugins.schedule.expressions import latest_fire
 from slife2.plugins.schedule.server import (
     CHANNEL,

@@ -17,8 +17,8 @@ from types import SimpleNamespace
 import pytest
 from fastmcp import Client, FastMCP
 
-from slife2.plugins import protocol as mcp_server_module
-from slife2.plugins.protocol import house_server, identifies, open_server
+from slife2.libs.plugin import protocol as protocol_module
+from slife2.libs.plugin.protocol import house_server, identifies, open_server
 
 pytestmark = pytest.mark.unit
 
@@ -147,7 +147,7 @@ def stub(monkeypatch, transport: StubTransport) -> None:
     No port because the TCP gate runs before anything is constructed, and this
     URL is not somewhere a socket could be opened anyway.
     """
-    monkeypatch.setattr(mcp_server_module, "Client", lambda *a, **k: transport)
+    monkeypatch.setattr(protocol_module, "Client", lambda *a, **k: transport)
 
 
 @pytest.mark.asyncio
@@ -174,7 +174,7 @@ async def test_a_port_that_could_not_be_probed_is_not_reported_as_closed(
     what the check had not found.  The third answer is named instead
     (`DESIGN.md` §10.1).
     """
-    monkeypatch.setattr(mcp_server_module, "tcp_listening", lambda *a, **k: None)
+    monkeypatch.setattr(protocol_module, "tcp_listening", lambda *a, **k: None)
     with pytest.raises(ConnectionError, match="cannot tell whether"):
         await open_server("http://127.0.0.1:9/mcp", name="slife2-context")
 

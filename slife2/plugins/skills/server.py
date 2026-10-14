@@ -19,7 +19,7 @@ needs a server to be served from.
 **This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer, so the hub stays the only writer of the tool table,
 the only process holding a connection to the db, and the only place where two
-sources' claim on one name is settled (`slife2.plugins.protocol`).
+sources' claim on one name is settled (`slife2.libs.plugin.protocol`).
 
 **A credential is not a connection, and this server holds one.**  A skill whose
 header declares `requires.env` — as these skills do for other hosts — needs a
@@ -40,11 +40,11 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host import configfile
 from slife2.plugins.skills import playbooks as skills
-from slife2.plugins.audience import FOR_THE_MODEL
+from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.host.config import Config, SkillSettings
-from slife2.plugins.protocol import SKILLS_SOURCE as _SOURCE
-from slife2.plugins.protocol import serve_plugin
-from slife2.plugins.family import Documents, build_document_server
+from slife2.libs.plugin.protocol import SKILLS_SOURCE as _SOURCE
+from slife2.libs.plugin.protocol import serve_plugin
+from slife2.libs.plugin.family import Documents, build_document_server
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ CONFIG_KEY = "skills-server"
 #: documents would mark every playbook broken whenever the connection faltered —
 #: and these rows have no connection whose state a verdict could come from,
 #: which is why their `status` is the folder's to write and nothing else's.
-#: Re-exported from the plugin contract — see `slife2.plugins.protocol`.
+#: Re-exported from the plugin contract — see `slife2.libs.plugin.protocol`.
 SOURCE = _SOURCE
 
 #: The category, and the namespace the row names carry (`skill:browser-harness`).
