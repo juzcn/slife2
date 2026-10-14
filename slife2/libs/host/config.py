@@ -129,6 +129,22 @@ class ConfigError(Exception):
     """
 
 
+class WrongKindError(ConfigError):
+    """A reference that resolves, and names something of another kind.
+
+    A subclass rather than a flag because one reader has to tell it apart from
+    every other refusal: `MediaSettings.resolve` falls back to the first model of
+    the kind when the operator's `defaults:` entry has gone *stale* — that is a
+    registered fallback (DESIGN.md §10.2), and its whole scope is "the name no
+    longer resolves".  A name that resolves to a `tts` model where an `image` one
+    was wanted is not stale, it is wrong, and its own docstring says that case is
+    "refused here rather than at the provider, where it costs money".  With one
+    exception type the two were indistinguishable and the fallback swallowed
+    both, so the operator's stated default was discarded in silence and a paid
+    call went to a model named in no `defaults:` line.
+    """
+
+
 #: The wire protocols this distribution implements, and the server module that
 #: speaks each.  `api` selects one; an unknown value is a typo worth reporting
 #: rather than a provider that quietly never starts.
@@ -361,6 +377,32 @@ def resolve_secret(value: object) -> str:
         return default if default is not None else match.group(0)
 
     return _ENV_PATTERN.sub(_replace, value)
+
+
+def unresolved_reference(value: object) -> str:
+    """The reference a secret value **still is**, or `""` when it resolved.
+
+    **The other half of `resolve_secret`'s degrade, and the only place it is
+    read.**  A value that could not be resolved is left *verbatim* by the
+    function above — a `${VAR}` neither the environment nor the keyring had, or
+    a `keyring:NAME` with no credstore installed to consult it — and every
+    caller that is about to *use* the value has to answer the same question
+    about it.  Four of them answered it separately, with four different rules:
+    the model servers tested `startswith("${")` (so a bare `keyring:NAME`
+    travelled as the secret), the tunnel and the skills reader had a regex each,
+    and `rest-api`'s note had a third.  A rule that decides whether a credential
+    is real cannot be four rules, because the permissive copy is the one that
+    sends the reference to somebody else's server.
+
+    Returning the *reference* rather than a boolean is what lets a caller say
+    which one did not resolve, which is the whole of what a person needs to fix
+    it; a `401` from the far end says nothing.
+    """
+    text = str(value).strip()
+    if text.startswith("keyring:"):
+        return text
+    match = _ENV_PATTERN.search(text)
+    return match.group(0) if match else ""
 
 
 @dataclass(frozen=True)
@@ -958,6 +1000,13 @@ class MediaSettings:
         if default:
             try:
                 return self._named(default, kind)
+            except WrongKindError:
+                # ... but not *this* refusal.  A `defaults:` entry that resolves
+                # to another kind is the operator's mistake, and this is where
+                # the docstring says it is refused rather than at the provider:
+                # swallowed here, it was replaced in silence by the first model
+                # of the kind — a paid call to a model nobody had named.
+                raise
             except ConfigError:
                 # A stale `defaults:` entry falls through to the first model of
                 # the kind rather than stopping the call — the registered
@@ -1007,7 +1056,7 @@ class MediaSettings:
         reference: str,
     ) -> tuple[MediaProviderSettings, MediaModelSettings]:
         if entry.kind != kind:
-            raise ConfigError(f"{reference!r} is a {entry.kind} model, not {kind}")
+            raise WrongKindError(f"{reference!r} is a {entry.kind} model, not {kind}")
         return provider, entry
 
 
@@ -1476,6 +1525,16 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     global _latest
     path = find_config_path(explicit)
     if path is None or not path.is_file():
+        if explicit is not None:
+            # **A *named* file that is not there is an error here too.**  The
+            # cache slot below is the "this installation has no config at all"
+            # state, and it is keyed on nothing but `None`: once a config-less
+            # start had filled it, `load_cached("/tmp/typo.yaml")` answered with
+            # the built-in defaults while `load("/tmp/typo.yaml")` raised
+            # `config file not found`.  A caller that named a file is asking
+            # about *that* file, and answering with a different configuration is
+            # the silent fallback `load` refuses (DESIGN.md §10.1).
+            return load(explicit)
         # `None` in the path slot means "there was no file", so a file appearing
         # afterwards takes the reload path below rather than being missed.
         if _latest is not None and _latest[0] is None:

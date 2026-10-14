@@ -1157,3 +1157,70 @@ def test_a_stat_failure_is_not_read_as_a_fresh_load(
     monkeypatch.setattr(Path, "stat", fake_stat)
     with pytest.raises(ConfigError, match="cannot read"):
         load_cached(str(path))
+
+
+def test_a_default_of_the_wrong_kind_is_refused_rather_than_replaced(tmp_path) -> None:
+    """**The fallback was broader than its registration.**
+
+    `MediaSettings.resolve` falls through to the first model of the kind when the
+    operator's `defaults:` entry has gone *stale* — a registered fallback, scoped
+    to "the name no longer resolves".  A name that resolves to another kind is
+    not stale, it is wrong, and the docstring says it is "refused here rather
+    than at the provider, where it costs money" — but one `except ConfigError`
+    swallowed both, so the operator's stated default was discarded in silence and
+    a paid call went to a model named in no `defaults:` line.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        """
+media:
+  providers:
+    p:
+      api: openai-images
+      base_url: http://127.0.0.1:1/v1
+      api_key: k
+      models:
+        - {model: a-image, kind: image}
+        - {model: a-tts, kind: tts}
+  defaults:
+    image: p/a-tts
+""",
+        encoding="utf-8",
+    )
+    config = load(path)
+    with pytest.raises(ConfigError, match="is a tts model, not image"):
+        config.media.resolve("image")
+    # And a name that no longer resolves still falls back, which is the half
+    # the registration is for.
+    path.write_text(
+        """
+media:
+  providers:
+    p:
+      api: openai-images
+      base_url: http://127.0.0.1:1/v1
+      api_key: k
+      models:
+        - {model: a-image, kind: image}
+  defaults:
+    image: p/gone
+""",
+        encoding="utf-8",
+    )
+    _, entry = load(path).media.resolve("image")
+    assert entry.model == "a-image"
+
+
+def test_a_named_config_that_is_not_there_is_not_the_defaults(tmp_path) -> None:
+    """**`load_cached` answered a typo with the built-in config.**
+
+    Its cache slot is the "this installation has no config at all" state and is
+    keyed on nothing but `None`, so once a config-less start had filled it,
+    `load_cached("<any path>")` returned that object while
+    `load("<any path>")` raised `config file not found`.  Today's two callers
+    pass no argument, so it was latent; a caller asking about a named file is
+    asking about *that* file.
+    """
+    missing = tmp_path / "typo.yaml"
+    with pytest.raises(ConfigError, match="config file not found"):
+        load_cached(missing)

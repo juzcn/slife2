@@ -37,6 +37,7 @@ from slife2.libs.host.config import (
     find_config_path,
     load,
     load_cached,
+    unresolved_reference,
 )
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.model.wire import encode_chunk
@@ -381,15 +382,21 @@ class LiveProviders:
 def unresolved_key(server_name: str, name: str, provider: Any) -> str:
     """The provider's key, or the error naming the reference that did not resolve.
 
-    A `${VAR}` the config could not resolve is left **verbatim** rather than
-    emptied (`slife2.libs.host.config`), which is what makes the `startswith("${")` test
-    meaningful: the value reaching here is either a key or the literal
-    reference, and saying which reference is the whole of what a person needs
-    to fix it.  Handing the literal to the SDK instead produces a 401 that says
-    nothing about which `${VAR}` is missing.
+    A reference the config could not resolve is left **verbatim** rather than
+    emptied (`slife2.libs.host.config`), so the value reaching here is either a
+    key or the literal reference, and saying which reference is the whole of
+    what a person needs to fix it.  Handing the literal to the SDK instead
+    produces a 401 that says nothing about which name is missing.
+
+    **`unresolved_reference` and not `startswith("${")`**, which is what this
+    was: that test does not recognise `keyring:NAME`, so on a host with no
+    credstore installed the reference itself went out as the bearer token —
+    `Bearer keyring:DEEPSEEK_API_KEY` — which is the exact deformation the
+    config module names (DESIGN.md §10.1) and which the other three readers of
+    this same answer already refused.
     """
     key = provider.api_key
-    if key and not key.startswith("${"):
+    if key and not unresolved_reference(key):
         return key
     raise RuntimeError(
         f"{server_name}: the API key for provider {name!r} "

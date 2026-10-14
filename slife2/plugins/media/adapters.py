@@ -42,6 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 import httpx2
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.host.config import unresolved_reference
 from slife2.libs.host.paths import agent_dir
 
 logger = logging.getLogger(__name__)
@@ -155,16 +156,34 @@ class _HttpClientMixin:
         self._client_lock = asyncio.Lock()
 
     async def _ensure_client(self) -> httpx2.AsyncClient:
-        """The adapter's client, created on first use."""
+        """The adapter's client, created on first use.
+
+        **A credential that did not resolve is refused here, not sent.**  The
+        `Authorization` header used to be built from `api_key` unchecked, and
+        that value is left *verbatim* by `resolve_secret` when neither the
+        environment nor the keyring had the name — so an unset
+        `${DASHSCOPE_API_KEY}` went to the vendor as the literal text
+        `Bearer ${DASHSCOPE_API_KEY}`, and what came back was a 401 naming
+        nobody's mistake.  Every other reader of a credential in this system
+        refuses first and says which name is missing; this is the same answer,
+        one capability later (`slife2.libs.host.config.unresolved_reference`).
+        """
         if self._client is None:
             async with self._client_lock:
                 if self._client is None:
+                    key = self._config.api_key
+                    if reference := unresolved_reference(key):
+                        raise MediaAdapterError(
+                            f"media provider {self._config.name!r}: the API key "
+                            f"({reference}) did not resolve. Export it, or store "
+                            f"it with `credstore set <NAME>`."
+                        )
                     self._client = httpx2.AsyncClient(
                         timeout=httpx2.Timeout(
                             _T.timeouts.transport.media_request,
                             connect=_T.timeouts.transport.media_connect,
                         ),
-                        headers={"Authorization": f"Bearer {self._config.api_key}"},
+                        headers={"Authorization": f"Bearer {key}"},
                     )
         return self._client
 
@@ -610,10 +629,16 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         outputs_dir: Path,
         extra_params: dict[str, Any] | None = None,
     ) -> str:
-        data: dict[str, Any] = {"text": text}
+        # **The call outranks the config, as it does for the other three.**
+        # This was `data.update(extra_params)`, which put the configured
+        # `params:` last: a model entry saying `voice: longxiaochun` overrode a
+        # caller's `voice="zhiyan"`, the audio came back in the other voice, and
+        # the tool reported success — the caller's own argument silently
+        # dropped.  `merge_params` is the one place that rule is written.
+        given: dict[str, Any] = {"text": text}
         if voice:
-            data["voice"] = voice
-        data.update(extra_params or {})
+            given["voice"] = voice
+        data = merge_params(extra_params, given)
         answer = await self._request(
             "POST",
             f"{self._config.base_url}{TTS_PATH}",

@@ -457,11 +457,25 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
     under two names would make a reader wonder whether they are two things.
     """
     rows = list(one.rows or [])
-    if not one.connection.usable or not rows:
+    if not one.connection.usable:
         reason = one.connection.error or "it is not answering yet"
         return (
             f"'{name}' has no tool list to show — {reason}. The `_list` tool "
             f"reports its state."
+        )
+    if not rows:
+        # **A server that answered with nothing is not a server that is
+        # silent.**  Folding the two together made this say "it is not
+        # answering yet" about a link the `_list` tool was showing as `ready` —
+        # two answers about one source, from one plugin — and told the model to
+        # consult a tool that would contradict it.  `apply_and_report` already
+        # keeps them apart for the same reason ("a server that did not answer
+        # says so rather than reporting a count of zero"): an empty listing is
+        # `rows == []`, which is what `_listed` records when a server exposes
+        # nothing.
+        return (
+            f"'{name}' is {one.connection.state} and offers no {noun}s. The "
+            f"`_list` tool reports its state."
         )
     shown = rows[:limit]
     lines = [f"{name} — {len(rows)} {noun}(s), showing {len(shown)}:"]
