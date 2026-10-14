@@ -10,7 +10,7 @@ This document is designer's memory
 
 - Schema over prompt
 
-- 工具名称和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。
+- 工具名称和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。
 
 2. LLM 的 Harness Tooks
 
