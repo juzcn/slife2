@@ -602,13 +602,13 @@ what an arriving message is, and nothing here has to.
 **The channel is `agent-task:<name>`, and the answer wears a marker.**  A channel
 is the key a plugin runs under — `wechat`, `tui`, and this one (§1.2) — and a
 task's answer also carries the task's `name`, because the window builds the
-bubble from the channel and nothing else: `AsyncTaskResult(research)> ` is a fact the
+bubble from the channel and nothing else: `AsyncTask(research)> ` is a fact the
 channel has to carry rather than one the window could guess.  The *recorded*
 channel carries it too, which is what the `[TURN:{…}]` footnote hands the model
 (§5.1) — so a result says which task it came from outside the marker as well as
 inside it.
 
-**The marker is `[AsyncTaskResult:{…}]`, and a screen takes it off like WeChat's.**  It
+**The marker is `[AgentTaskResult:{…}]`, and a screen takes it off like WeChat's.**  It
 carries five fields — `task_id`, `name`, `status`, `started_at`, `finished_at` —
 and its reader is the model: the id is what its *next* call needs, since asking
 about a task or stopping one names it, and this is where the name is learned.
@@ -982,7 +982,7 @@ poll (30s)  → agent_task_list → finished → ran, at the task's own finished
 **A prompt that told the model to start the work *and* close the run when the
 answer came back would be asking it to remember something across turns.**  The
 answer arrives later, in whatever turn the person happens to be in, wearing
-`[AsyncTaskResult:…]` — a marker that says nothing about schedules — and a run
+`[AgentTaskResult:…]` — a marker that says nothing about schedules — and a run
 nobody closes is `pending` forever, which is the one state this ledger cannot
 account for.  Nothing ever asks again (the reconciliation below is deliberately
 not announced), so the failure is silent and permanent.  Making the *plugin* the
@@ -1046,7 +1046,7 @@ neither plugin has to know the other exists.
 
 **And that one message wears no marker, which is a decision rather than an
 omission.**  A marker exists so a *result* can be matched to what produced it —
-`[AsyncTaskResult:{…}]` carries the task's id, name and state — and the
+`[AgentTaskResult:{…}]` carries the task's id, name and state — and the
 vocabulary is per-writer precisely because each writer's marker says something
 different.  A trigger is not a result: it carries no id a caller needs back, and
 what produced it is a clock.  The two facts it does have to carry are carried by
@@ -1054,7 +1054,7 @@ other means — **the channel** says the words did not come from the person
 (`schedule:daily`, drawn as its own bubble by
 `slife2.tui.widgets.channel_prefix`), and the **template's own first line** says
 which task, exactly as `agent_task.j2` opens with `▸ Agent task: {{ name }}`.
-The answer, when it comes, wears `[AsyncTaskResult:{…}]` — because it *is* an
+The answer, when it comes, wears `[AgentTaskResult:{…}]` — because it *is* an
 agent task's answer, and that is the plugin that produced it.
 
 **The cron parser is `croniter`, which is v1's dependency and v1's decision made
@@ -1178,14 +1178,18 @@ A peer's message that reached no window is logged and dropped rather than run
 somewhere else, because a peer re-sends a task itself when it gets no answer, and
 that is the retry that knows what it is retrying.
 
-**The marker is v1's, character for character** — `[A2A:{"from": …}]`, with the
-peer under `from` and deliberately *not* `agent_name`, which every system prompt
-uses for the agent's own identity; v1 measured receivers misreading a sender as
-themselves.  The `type` field is the one envelope's classifier, and the writer
-and the reader (`marker`, `a2a_message_type`) are one pair so the vocabulary
-stays one list.  `A2A(<peer>)> ` is v1's bubble, drawn from the channel alone
-(`a2a:<peer>`) because a hand-over carries the channel and the words and nothing
-else.  A habit survives a port for the reason `[Wechat:{…}]`'s spelling does.
+**The marker is one envelope with a `type` in it** — `[PeerAgent:{"from": …}]`,
+with the peer under `from` and deliberately *not* `agent_name`, which every system
+prompt uses for the agent's own identity; v1 measured receivers misreading a
+sender as themselves.  The `type` field is the one envelope's classifier, and the
+writer and the reader (`marker`, `a2a_message_type`) are one pair so the
+vocabulary stays one list.  `PeerAgent(<peer>)> ` is the bubble, drawn from the
+channel alone (`a2a:<peer>`) because a hand-over carries the channel and the words
+and nothing else.  **The spelling is not v1's** (`[A2A:` was): it is word-shaped
+like every other marker a row carries (§1.2), and it says *peer* because a prefix
+that said only "agent" would leave open which of the two agents is which — the
+very confusion `from` exists to prevent.  The payload survives the port for the
+reason `[Wechat:{…}]`'s keys do.
 
 **A restart orphans every inbound task, and the agent is told.**  The completion
 bridge and the peer's reply topic are both process-local — the latter is read off
@@ -3041,7 +3045,7 @@ own at the call site; everything else is bounded by whoever asked for it, and
 "otherwise none" is what §8.8 says a foreground call with no stated bound gets.
 
 **`_async` hands the call to the background and the result comes back by
-itself.** The model gets a `task_id` and a marker — `[AsyncToolCallResult:{…}]`,
+itself.** The model gets a `task_id` and a marker — `[AgentToolResult:{…}]`,
 carrying the tool call's id, the tool, the task and the status — because the
 answer arrives as a message of its own, in a later turn possibly, and without the
 id in it the two are related only by the model's memory. The registry is the

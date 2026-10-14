@@ -141,7 +141,7 @@ class FIFOCache(dict):
 #
 # v1 kept this in `a2a/card.py`, apart from the mesh, because the TUI and the
 # per-turn prompt both imported it.  Neither reader survives the port — the TUI
-# draws an `A2A(<peer>)> ` bubble from the channel, and a presence *change* now
+# draws a `PeerAgent(<peer>)> ` bubble from the channel, and a presence *change* now
 # reaches the model as a message — so the two things this project actually uses,
 # the record and the scrubber, are here beside the code that produces them.
 
@@ -1273,7 +1273,7 @@ class A2AMesh:
     async def broadcast(self, event: str) -> None:
         """Publish a fire-and-forget event (QoS 0) on the unit's event topic.
 
-        Subscribers receive it as an inbound ``[A2A:…]`` event without a
+        Subscribers receive it as an inbound ``[PeerAgent:…]`` event without a
         task_id — no reply is expected, and the payload's ``sender`` lets a
         receiver filter its own echo.
         """
@@ -1376,7 +1376,7 @@ class A2AMesh:
             )
         return (
             f"Error: unknown task_id {task_id!r} — no inbound task with that "
-            f"id is awaiting a result. Check the [A2A:...] marker's task_id."
+            f"id is awaiting a result. Check the [PeerAgent:...] marker's task_id."
         )
 
     def stale_inbound(self) -> list[dict]:

@@ -28,6 +28,7 @@ from slife2.async_tasks import (
     MARKER_PREFIX,
     RUNNING,
     cancel_async,
+    channel_for,
     check_async,
     marker,
 )
@@ -57,7 +58,7 @@ def a_tool(name: str, run, **properties: Any) -> Tool:
     )
 
 
-async def collected(_text: str) -> bool:
+async def collected(_text: str, _channel: str) -> bool:
     """A hand-back that goes nowhere — for tests about the *other* half of `_async`."""
     return True
 
@@ -250,9 +251,11 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
     said.
     """
     delivered: list[str] = []
+    channels: list[str] = []
 
-    async def deliver(text: str) -> bool:
+    async def deliver(text: str, channel: str) -> bool:
         delivered.append(text)
+        channels.append(channel)
         return True
 
     async def slow(_arguments: dict[str, Any]) -> str:
@@ -271,6 +274,9 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
         await asyncio.sleep(0)
 
     assert delivered, "the result was never handed back"
+    # Which call it answers rides the channel as well as the marker, so the
+    # bubble a person sees names the tool (`slife2.async_tasks.channel_for`).
+    assert channels == [channel_for("slow")]
     fields = marker_fields(delivered[0])
     assert fields["status"] == FINISHED
     assert fields["task_id"] == task_id
@@ -292,7 +298,7 @@ async def test_an_undelivered_result_stays_readable() -> None:
     fallback road is the point of keeping the text.
     """
 
-    async def never_delivers(_text: str) -> bool:
+    async def never_delivers(_text: str, _channel: str) -> bool:
         return False
 
     async def slow(_arguments: dict[str, Any]) -> str:
@@ -348,7 +354,7 @@ async def test_a_background_task_outlives_the_turn_that_started_it() -> None:
     """
     finished = asyncio.Event()
 
-    async def deliver(_text: str) -> bool:
+    async def deliver(_text: str, _channel: str) -> bool:
         finished.set()
         return True
 
@@ -398,7 +404,7 @@ async def test_cancelling_a_background_call_hands_back_that_it_was_cancelled() -
     """A cancellation the conversation never hears about is a panel running forever."""
     handed: list[str] = []
 
-    async def deliver(text: str) -> bool:
+    async def deliver(text: str, _channel: str) -> bool:
         handed.append(text)
         return True
 

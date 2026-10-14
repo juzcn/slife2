@@ -446,8 +446,8 @@ before dispatch, so no tool server ever sees one.
   number applied to every tool is wrong for most of them.
 - **`_async`** — run it in the background. The model gets a `task_id` and the
   result is **handed back into the conversation** when it arrives, wearing
-  `[AsyncToolCallResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`; the
-  window shows it and the reply itself is a message on the `async-tool` channel.
+  `[AgentToolResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`; the
+  window shows it as a message on the `async-tool:<tool>` channel.
   `check_async` answers where the call *is* (running, finished, failed,
   cancelled), and `cancel_async` abandons it. **An agent task's own loop has no
   `_async`** — it runs one turn, so there would be nowhere to hand a result back
@@ -820,8 +820,8 @@ reply is handed back on its own, so there is nothing to poll for and no way to
 fetch one.
 
 The answer arrives on the `agent-task:<name>` channel wearing
-`[AsyncTaskResult:{…}]` — the task's id, name, state and times — so the window
-shows `AsyncTaskResult(research)> ` and the model learns the id its next call
+`[AgentTaskResult:{…}]` — the task's id, name, state and times — so the window
+shows `AsyncTask(research)> ` and the model learns the id its next call
 needs. It goes to the terminal showing that conversation, and nowhere else: with
 no window there is no conversation running, so the answer is `undelivered` and
 the log says so rather than a turn being run for nobody.
@@ -873,7 +873,7 @@ prompt, model and tools, the same context — and returns at once. Because the
 what became of it: `finished` closes the run `ran` at the task's own `finished_at`,
 a failure or a cancellation closes it `failed`, and nothing has to be remembered
 in a later turn. The answer itself is delivered back to the conversation by
-`agent-task`, wearing `[AsyncTaskResult:…]` like any other background task's.
+`agent-task`, wearing `[AgentTaskResult:…]` like any other background task's.
 
 **The ledger is the feature.** A *run* is one fire, named by the moment it was
 **due** rather than by when it ran, and it moves `pending → ran | failed | missed |
@@ -926,11 +926,11 @@ a2a_send_message(agent="jill", message="Summarise the release notes.")
 ```
 
 **Nothing waits.** A `task_request` returns an id immediately and the result
-arrives later on its own as a message wearing `[A2A:{"from": "jill", "type":
-"task_response", "task_id": "…"}]`. There is nothing to poll. `task_response`
+arrives later on its own as a message wearing `[PeerAgent:{"from": "jill",
+"type": "task_response", "task_id": "…"}]`. There is nothing to poll. `task_response`
 completes a task *you* were sent, with the `task_id` from its own marker; the
 direction is in `from`, never `agent_name`, because that word is the agent's own
-identity. Incoming messages read as `A2A(jill)> ` in the window, with the marker
+identity. Incoming messages read as `PeerAgent(jill)> ` in the window, with the marker
 taken back off.
 
 **A peer may be on this machine or on another one**, and nothing tells them

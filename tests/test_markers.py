@@ -62,10 +62,21 @@ def test_an_agent_tasks_answer_wears_the_task_it_came_from() -> None:
     has to *be* in the channel — and the bubble is deliberately not the key
     spelled again: `agent-task:research` is an address, and what a person is
     being told is who answered."""
-    assert channel_prefix(f"{CHANNEL}:research") == "AsyncTaskResult(research)> "
+    assert channel_prefix(f"{CHANNEL}:research") == "AsyncTask(research)> "
     # A key with no name is shown as it is, like any other channel this window
     # does not have a spelling for.
     assert channel_prefix(CHANNEL) == f"{CHANNEL}> "
+
+
+def test_a_background_calls_result_wears_the_tool_that_produced_it() -> None:
+    """The other half of the pair above, and built the same way: several calls of
+    one conversation can be in the background at once (`slife2.async_tasks`), so
+    the tool's name is what the channel has to carry."""
+    from slife2.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
+    from slife2.async_tasks import channel_for
+
+    assert channel_for("pdf_to_md") == f"{ASYNC_TOOL_CHANNEL}:pdf_to_md"
+    assert channel_prefix(channel_for("pdf_to_md")) == "AsyncTool(pdf_to_md)> "
 
 
 def test_a_scheduled_trigger_says_which_task_came_due() -> None:

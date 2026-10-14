@@ -25,7 +25,7 @@ The rules, and each of them is v1's:
 
 What a background call's result *is*
 ------------------------------------
-Every piece of news about a call is written as `[AsyncToolCallResult:{…}]` — the
+Every piece of news about a call is written as `[AgentToolResult:{…}]` — the
 marker shape `slife2.markers` describes — carrying the tool call's id, the tool's
 name, the task id and the status.  Three readers, and each wants a different
 half:
@@ -41,7 +41,8 @@ half:
   the same thing in words.
 
 **Finished, and pushed.**  A call that completes hands its answer to the
-conversation it was made in, on `CHANNEL`, by the road every other piece of
+conversation it was made in, on `channel_for(tool)` — `async-tool:<tool>`, so
+the bubble it draws names the call — by the road every other piece of
 background work in this system takes (`slife2.handover`: the window, and a
 failure if it is not there).  A call that is *cancelled* is handed back too —
 a cancellation the conversation never hears about would leave a panel on screen
@@ -85,15 +86,27 @@ logger = logging.getLogger(__name__)
 CHECK_ASYNC = "check_async"
 CANCEL_ASYNC = "cancel_async"
 
-#: The channel a handed-back result arrives on, so a window can label it and the
-#: model can tell it from a person's message — the same job `slife2.wechat`'s and
-#: `slife2.agent_task_server`'s channel names do.
+#: The channel a handed-back result arrives on, and the first half of what it is
+#: keyed by: `async-tool:pdf_to_md`.  The same job `slife2.wechat`'s and
+#: `slife2.agent_task_server`'s channel names do — with the tool's name in it for
+#: the reason theirs carry theirs: a hand-over carries the channel and the words
+#: and nothing else, and the window draws the bubble from the channel alone
+#: (`slife2.tui.widgets.channel_prefix`), so `AsyncTool(pdf_to_md)> ` is a fact
+#: the channel has to carry rather than one the window could guess.
 CHANNEL = "async-tool"
 
 #: What one background call wears in every result it produces.  The prefix is
 #: this module's, the way every writer names its own marker (`slife2.markers`
 #: holds the shape and no name).
-MARKER_PREFIX = "[AsyncToolCallResult:"
+#:
+#: **`AgentToolResult` rather than a name built from this process's word for
+#: backgrounding.**  The model is the reader, and what it has to recognise in a
+#: later turn is the *result of one of its own tool calls* — so the name says
+#: that, and the `tool` and `call_id` inside say which.  It reads beside
+#: `slife2.agent_task_server`'s `[AgentTaskResult:{…}]`: two results, one from a
+#: tool call and one from a task, named so that neither can be taken for the
+#: other.
+MARKER_PREFIX = "[AgentToolResult:"
 
 #: The four statuses, spelled once: the model reads them, a screen matches on
 #: them, and two spellings of "finished" would be a screen drawing a finished
@@ -103,11 +116,17 @@ FINISHED = "finished"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
-#: How one result reaches its conversation: text in, "did it land" out.  `True`
-#: means a conversation took it; `False` and `None` both mean "not provably
-#: delivered", which is what makes `check_async` offer the text instead
-#: (`slife2.handover` is where the three answers are argued).
-Deliver = Callable[[str], Awaitable[bool]]
+#: How one result reaches its conversation: the text and the channel it goes in
+#: on, "did it land" out.  `True` means a conversation took it; `False` and
+#: `None` both mean "not provably delivered", which is what makes `check_async`
+#: offer the text instead (`slife2.handover` is where the three answers are
+#: argued).
+#:
+#: **The channel travels with the words** rather than being worked out at the far
+#: end, because the far end is a server that knows which *conversation* this is
+#: and nothing about the call: the tool's name is here (`Task.tool`), and a
+#: channel is a fact about the message rather than about the transport.
+Deliver = Callable[[str, str], Awaitable[bool]]
 
 
 @dataclass
@@ -168,6 +187,18 @@ def marker(status: str, *, call_id: str = "", tool: str = "", task_id: str = "")
     """
     fields = {"call_id": call_id, "tool": tool, "task_id": task_id, "status": status}
     return f"{MARKER_PREFIX}{json.dumps(fields, ensure_ascii=False)}]"
+
+
+def channel_for(tool: str) -> str:
+    """The channel a background call's result arrives on: `async-tool:<tool>`.
+
+    The name is in it because the window draws the bubble from the channel and
+    nothing else (`slife2.tui.widgets.channel_prefix`), exactly as an agent
+    task's answer carries its task's name — and what a person watching needs is
+    the *tool*, since one conversation can have several calls in the background
+    at once.
+    """
+    return f"{CHANNEL}:{tool}"
 
 
 def started(task_id: str, call_id: str, tool: str) -> str:
@@ -304,12 +335,18 @@ async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
     A result that *did* land is dropped here: holding it would be keeping an
     answer nobody can ask for twice, which is the mistake in the other direction
     (`slife2.agent_task_server` drops its task's text for the same reason).
+
+    The channel goes with the words (`channel_for`): a cancelled call, a failed
+    one and a finished one all come back the same way, and the bubble a person
+    sees has to say which tool it was about.
     """
     if task.deliver is None:
         return
     try:
         task.delivered = bool(
-            await task.deliver(handed_back(task, task_id, status, body))
+            await task.deliver(
+                handed_back(task, task_id, status, body), channel_for(task.tool)
+            )
         )
     except Exception as exc:  # noqa: BLE001 — it is recorded, not raised
         logger.warning(
@@ -506,6 +543,7 @@ __all__ = [
     "MAX_ASYNC_TASKS",
     "async_tools",
     "cancel_async",
+    "channel_for",
     "check_async",
     "marker",
     "schedule",

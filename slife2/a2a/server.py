@@ -129,13 +129,32 @@ WINDOW = "window"
 #: The channel an inbound message arrives on, and the first half of what it is
 #: keyed by: `a2a:jill`.  The window draws a bubble from the channel alone
 #: (`slife2.tui.widgets.channel_prefix`), so the peer has to be *in* it for a
-#: person to see who spoke — and v1's bubble, `A2A(jill)> `, is what it draws.
+#: person to see who spoke — and what it draws is `PeerAgent(jill)> `, the same
+#: word the marker below opens with.
 CHANNEL = "a2a"
 
 #: What the marker opens with.  A constant because the marker is *read* as well
 #: as written: stored text carries it into a transcript, and the window takes it
 #: back off by this string rather than by a second copy of the spelling.
-MARKER_PREFIX = "[A2A:"
+#:
+#: **Word-shaped, like every other name this build writes into a row.**  v1
+#: spelled it `[A2A:`, and capitals are the convention for the *other* kind of
+#: bracket — `[TURN:{…}]`, which says "this is what the process knows about the
+#: conversation, not what was said" (`slife2.wechat`'s module docstring,
+#: DESIGN.md §1.2).  This one *is* what was said: it goes into the turn's row
+#: and comes back out of it verbatim, so v1's capitals told the model the
+#: opposite of the truth about it.  What is *not* renamed is anything that names
+#: the plugin — the `a2a` channel, its config key, `A2A_TYPES` — because those
+#: are this plugin's own name rather than a word in somebody's conversation.
+#:
+#: **`PeerAgent`, because `Agent` alone is the one word this marker must not
+#: say.**  Its `from` field is a peer and never the receiver, for the reason the
+#: marker's own docstring gives — v1 measured receivers reading the sender as
+#: themselves — and a name that says "an agent did this" reintroduces exactly
+#: that ambiguity on the line where the model is told who spoke.  `Peer` is what
+#: settles it, and it is the word the window's bubble uses too
+#: (`slife2.tui.widgets.channel_prefix`).
+MARKER_PREFIX = "[PeerAgent:"
 
 #: The `type` values an inbound message can carry — the vocabulary the marker's
 #: `type` field is drawn from, and v1's list unchanged.  `task_request` (answer
@@ -162,7 +181,7 @@ ORPHAN_TEMPLATE = "a2a_orphans.j2"
 
 #: What the orphan notice is handed over as — and **it is not a peer.**  The name
 #: is the second half of the channel `channel_for` builds (`a2a:orphans`), which
-#: the window draws on its own (`A2A(orphans)> `) rather than as somebody
+#: the window draws on its own (`PeerAgent(orphans)> `) rather than as somebody
 #: speaking, and the writer's log line names it the same way.
 ORPHAN_PEER = "orphans"
 
@@ -186,7 +205,7 @@ def marker(
 ) -> str:
     """Content prefix for ANY inbound A2A message — one envelope, a type field.
 
-    ``[A2A:{"from": …, "task_id": …, "type": …}] `` — ``from`` names the
+    ``[PeerAgent:{"from": …, "task_id": …, "type": …}] `` — ``from`` names the
     *sending* peer (never the receiver).  ``type`` tells what it is:
     ``task_request`` (an inbound task to answer, via
     ``a2a_send_message(message_type="task_response", task_id=…)`` — it may take
@@ -200,7 +219,7 @@ def marker(
     The key is ``from``, not ``agent_name`` — that word in a system prompt is
     the agent's own identity, and v1 measured the confusion it caused: receivers
     misread the sender as themselves.  The marker is machine-facing; the window
-    drops it for display (the ``A2A(<peer>)> `` bubble prefix instead).
+    drops it for display (the ``PeerAgent(<peer>)> `` bubble prefix instead).
     """
     # ``from`` — the peer's name — deliberately not ``agent_name``: that word
     # is the agent's self-identity, and reusing it here made receivers misread
@@ -225,7 +244,7 @@ def a2a_message_type(text: str) -> str | None:
     saying rather than leaving to be discovered.  v1 read the type for the
     window's turn-end line ("✓ A2A task_request from jill handled"), and this
     window labels a turn from its *channel* instead — `channel_prefix` draws
-    `A2A(jill)> ` and never looks at the words.  It stays because it is the
+    `PeerAgent(jill)> ` and never looks at the words.  It stays because it is the
     other half of :func:`marker`: the pair is what makes `A2A_TYPES` a
     vocabulary rather than a list, and a reader added later that guessed at the
     envelope instead of asking this would be the second spelling of a format
@@ -871,7 +890,7 @@ def build_server(
     #
     # The standard A2A-over-MQTT profile is async-native: a message/send is typed
     # — 'task_request' returns a task id immediately and the result delivers to
-    # the conversation later (an [A2A:…] marker of type 'task_response');
+    # the conversation later (a [PeerAgent:…] marker of type 'task_response');
     # 'task_response' completes an inbound task; 'message' is a bare
     # conversation.  No waiting, no timeout parameter.
 
@@ -887,10 +906,10 @@ def build_server(
 
         `message_type` decides what it is. 'task_request' (the default) asks for
         work and returns an id straight away — the peer answers later, and its
-        answer arrives on its own as an `[A2A:…]` of type 'task_response'. Never
+        answer arrives on its own as a `[PeerAgent:…]` of type 'task_response'. Never
         wait for it and never poll: there is nothing to poll. 'task_response'
         completes a task somebody sent you, and needs the `task_id` from that
-        task's `[A2A:…]` marker. 'message' is a plain conversation — no task, no
+        task's `[PeerAgent:…]` marker. 'message' is a plain conversation — no task, no
         completion, and the reply arrives as a message.
 
         `agent` is a peer's name, which `a2a_list_agents` gives you. A peer may
@@ -909,7 +928,7 @@ def build_server(
         if message_type == "task_response" and not task_id:
             raise ToolError(
                 "task_id is required for message_type='task_response' — it "
-                "is the [A2A:…] marker's task_id."
+                "is the [PeerAgent:…] marker's task_id."
             )
         session = await connected(who, USED)
         if message_type == "task_response":
@@ -998,7 +1017,7 @@ def build_server(
 
         Nobody answers one and it is delivered at most once, so it is for
         information a peer may act on and not for anything you need a reply to —
-        use `a2a_send_message` for that. Peers receive it as an `[A2A:…]` of type
+        use `a2a_send_message` for that. Peers receive it as a `[PeerAgent:…]` of type
         'broadcast', with no task and no completion.
         """
         who = agent_of(ctx)

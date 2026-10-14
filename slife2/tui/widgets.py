@@ -61,6 +61,7 @@ from slife2.a2a.server import CHANNEL as A2A_CHANNEL
 from slife2.a2a.server import MARKER_PREFIX as A2A_MARKER
 from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
+from slife2.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
 from slife2.markers import strip as strip_marker
 from slife2.schedule_server import CHANNEL as SCHEDULE_CHANNEL
@@ -157,7 +158,13 @@ def channel_prefix(channel: str) -> str:
         # the words and nothing else (`slife2.agent_task_server`), and the bubble
         # is deliberately *not* the key spelled again: `agent-task:research` is
         # an address, and what a person is being told is who answered.
-        return f"AsyncTaskResult({channel.split(':', 1)[1]})> "
+        return f"AsyncTask({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{ASYNC_TOOL_CHANNEL}:"):
+        # A background tool call of this conversation's own — the other half of
+        # the pair above, and named the same way: the tool is what a person
+        # needs, since several calls can be in the background at once
+        # (`slife2.async_tasks.channel_for`).
+        return f"AsyncTool({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{SCHEDULE_CHANNEL}:"):
         # The clock, and which task came due.  **There is no marker to take off
         # here** — unlike an agent task's answer, a trigger wears none, because
@@ -169,11 +176,16 @@ def channel_prefix(channel: str) -> str:
         return f"Scheduled({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{A2A_CHANNEL}:"):
         # A peer on the mesh.  The name is in the channel because a hand-over
-        # carries the channel and the words and nothing else, and v1's bubble is
-        # what it draws here — the marker beside the message is taken back off
-        # (it is what a *reply* needs, which nothing a person reads can act on),
-        # and the footnote still carries the key it really came in on.
-        return f"A2A({channel.split(':', 1)[1]})> "
+        # carries the channel and the words and nothing else — the marker beside
+        # the message is taken back off (it is what a *reply* needs, which nothing
+        # a person reads can act on), and the footnote still carries the key it
+        # really came in on.
+        #
+        # **`PeerAgent`, not the key spelled out.**  `a2a:jill` is an address —
+        # a protocol's name for a link — and what a person is being told is that
+        # another *agent* spoke, which is the same word its marker uses
+        # (`slife2.a2a.server.MARKER_PREFIX`).
+        return f"PeerAgent({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
     # this window inventing a speaker (DESIGN.md §1.3).

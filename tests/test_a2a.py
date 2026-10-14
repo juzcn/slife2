@@ -99,22 +99,37 @@ def settings(**overrides: Any) -> A2ASettings:
     return A2ASettings(**base)
 
 
-# ── the marker: v1's envelope, written and read ─────────────────────────────
+# ── the marker: one envelope, written and read ──────────────────────────────
 
 
-def test_the_marker_is_v1s_envelope_character_for_character() -> None:
+def test_the_marker_carries_from_and_not_agent_name() -> None:
     """`from`, not `agent_name` — v1 measured the confusion that caused.
 
     "agent_name" is the receiver's *own* identity, so a marker carrying it had
-    receivers misreading the sender as themselves.  The keys and the spelling
-    survive the port for the reason `[Wechat:{…}]`'s do: a habit is a thing that
-    does not have to be relearned.
+    receivers misreading the sender as themselves.  The *keys* survive the port
+    for the reason `[Wechat:{…}]`'s do: a habit is a thing that does not have to
+    be relearned.
+
+    **The spelling does not.**  v1 wrote `[A2A:`, and capitals are this build's
+    convention for the other kind of bracket — the one that says "this is what
+    the process knows, not what was said" (`[TURN:{…}]`).  This marker is
+    content, so it is word-shaped like every other one a row carries, and the
+    case now says the same thing the marker's life does.
+
+    **And it says `Peer`, not `Agent`.**  The name is read on the line that says
+    who spoke, and "an agent" is the one thing it must not leave open: the
+    receiver is an agent too, and v1's measured failure was a receiver taking the
+    sender for itself — which the `from` key prevents inside the payload and the
+    prefix must not undo in front of it.
     """
-    assert marker(PEER) == '[A2A:{"from": "jill", "type": "task_request"}] '
+    assert marker(PEER) == '[PeerAgent:{"from": "jill", "type": "task_request"}] '
     assert marker(PEER, TASK) == (
-        f'[A2A:{{"from": "jill", "type": "task_request", "task_id": "{TASK}"}}] '
+        f'[PeerAgent:{{"from": "jill", "type": "task_request", "task_id": "{TASK}"}}] '
     )
-    assert marker(PEER, None, "message") == '[A2A:{"from": "jill", "type": "message"}] '
+    assert (
+        marker(PEER, None, "message")
+        == '[PeerAgent:{"from": "jill", "type": "message"}] '
+    )
 
 
 def test_the_marker_reads_its_own_type_back() -> None:
@@ -125,12 +140,14 @@ def test_the_marker_reads_its_own_type_back() -> None:
 
 def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
     """A peer may put anything in the payload; the set is what this build knows."""
-    assert a2a_message_type('[A2A:{"from": "jill", "type": "invented"}] hi') is None
+    assert (
+        a2a_message_type('[PeerAgent:{"from": "jill", "type": "invented"}] hi') is None
+    )
     assert a2a_message_type("no marker here") is None
-    assert a2a_message_type("[A2A:{not json] hi") is None
-    assert a2a_message_type('[A2A:["a", "list"]] hi') is None
+    assert a2a_message_type("[PeerAgent:{not json] hi") is None
+    assert a2a_message_type('[PeerAgent:["a", "list"]] hi') is None
     # A bracket that never closes is a torn row: nothing is read out of it.
-    assert a2a_message_type('[A2A:{"from": "jill"') is None
+    assert a2a_message_type('[PeerAgent:{"from": "jill"') is None
 
 
 def test_the_channel_names_the_peer() -> None:
@@ -1320,7 +1337,7 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
 
 @pytest.mark.asyncio
 async def test_the_orphan_notice_lands_on_the_channels_the_window_draws_alone() -> None:
-    """The queue is what delivers it, and the bubble is v1's `A2A(orphans)> `."""
+    """The queue is what delivers it, and the bubble is `PeerAgent(orphans)> `."""
     InboundStore.open(AGENT).add(TASK, PEER)
     window = Window()
     async with Client(window.mcp) as client:

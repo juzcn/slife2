@@ -78,7 +78,6 @@ from fastmcp.exceptions import ToolError
 
 import slife2.timeouts as _T
 from slife2 import attachments, configfile
-from slife2.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.async_tasks import Deliver, async_tools
 from slife2.audience import FOR_THE_MODEL, request_client
 from slife2.clock import now
@@ -1313,7 +1312,7 @@ def build_server(
             finally:
                 loop.approvals.pop(call.id, None)
 
-        async def deliver(text: str) -> bool:
+        async def deliver(text: str, channel: str) -> bool:
             """Hand a finished background call's result back to this conversation.
 
             **A result nobody comes back for is a result lost**, which is the one
@@ -1334,13 +1333,18 @@ def build_server(
             subagent)` and hand-over names only the agent: a worker's background
             call is reported where the person is, which is the only place a
             result can be read by somebody.
+
+            **The channel is the caller's**, not this function's: which tool the
+            call was is `Task.tool`'s fact and lives in the registry that ran it
+            (`slife2.async_tasks.channel_for`), and this end knows only whose
+            conversation the result is going into.
             """
             try:
                 await hand_over(
                     current(),
                     loop.agent,
                     text,
-                    ASYNC_TOOL_CHANNEL,
+                    channel,
                     what=(
                         f"the result of a background call in "
                         f"{describe((loop.agent, loop.subagent))}"

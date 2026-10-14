@@ -190,7 +190,7 @@ META_PROPERTIES: dict[str, Any] = {
         "description": (
             "Run this call in the background and answer a task_id instead of a "
             "result. Its result is handed back to the conversation when it is "
-            "done, wearing [AsyncToolCallResult:{...}] with the call id, tool, "
+            "done, wearing [AgentToolResult:{...}] with the call id, tool, "
             "task_id and status; check_async reports status, cancel_async "
             "abandons it. Unbounded unless _timeout is given too."
         ),

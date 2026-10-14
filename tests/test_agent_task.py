@@ -891,7 +891,7 @@ async def test_a_hand_back_that_could_not_land_says_why(
     """
     import slife2.async_tasks as async_tasks
 
-    async def refuses(_message: str) -> bool:
+    async def refuses(_message: str, _channel: str) -> bool:
         raise ConnectionError("no window is showing jack's conversation")
 
     async def answers() -> tuple[str, bool]:

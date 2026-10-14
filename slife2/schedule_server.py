@@ -66,7 +66,7 @@ where it came from — and the template's own first line says which task, the wa
 vocabulary exists so a *result* can be matched to what produced it, a trigger is
 not a result, and the answer a run eventually produces — when the agent runs it
 as an agent task, which is the long case this feature is for — already arrives
-wearing `[AsyncTaskResult:{…}]`.
+wearing `[AgentTaskResult:{…}]`.
 """
 
 from __future__ import annotations

@@ -17,7 +17,27 @@ This document is designer's memory
 - _check_new_input
 - _func_tool_unload
 
-3. To do list
+3. Channel与Marker
+
+- 注入到loop 的 user message的Channel和Marker 设计
+
+channel, 注入描述，TUI显示，Marker
+
+tui, 从tui输入进入agent loop, You>, 无
+wechat, 从微信输入进入agent loop， Wechat>, [Wechat:json]
+a2a:<peer>, 从a2a消息进入loop, PeerAgent(jill)>, [PeerAgent:json]
+
+agent-task:<name>, 从Agent Task的结果中注入到当前Agent loop中， AsyncTask(reseach)>，[AgentTaskResult:json]
+
+async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(pdf_to_md)>, [AgentToolResult:json]
+
+- In memory Harness Marker
+
+[TURN:json]
+
+- 因为Inbox有插对机制，注入的信息插队时，无TUI处理。
+
+4. To do list
 
 - subagent design
 - --a2a-broker host:port , use external broker, do not start/stop mosquitto

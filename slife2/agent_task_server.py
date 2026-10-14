@@ -134,7 +134,14 @@ CHANNEL = "agent-task"
 #: row.  It is **content**, not an annotation this build derives: it goes into
 #: the stored message verbatim, which by `DESIGN.md` §1.2's convention is what
 #: the word-shaped spelling says and `[TURN:…]`'s capitals do not.
-MARKER_PREFIX = "[AsyncTaskResult:"
+#:
+#: **`AgentTaskResult`, because that is what the line is**: an agent task's
+#: result, read by the model beside `slife2.async_tasks`'s
+#: `[AgentToolResult:{…}]` — two results, one from a task and one from a tool
+#: call, named so that neither can be taken for the other.  The *bubble* a window
+#: draws is the shorter `AsyncTask(name)> ` (`slife2.tui.widgets.channel_prefix`):
+#: a person is being told which task answered.
+MARKER_PREFIX = "[AgentTaskResult:"
 
 #: The template a task is opened with.  Asked for by bare name, so it is the
 #: shipped one — this is machinery, the way this system tells a loop that nobody
@@ -250,7 +257,7 @@ def channel_for(task: AgentTask) -> str:
     """The channel a task's answer comes back on: the key, and the task's name.
 
     The name is part of it because the window draws the bubble from the channel
-    and nothing else (`slife2.tui.widgets.channel_prefix`), so `AsyncTaskResult(name)> `
+    and nothing else (`slife2.tui.widgets.channel_prefix`), so `AsyncTask(name)> `
     is a fact the channel has to carry rather than one the window could guess.
     The *recorded* channel carries it too, which is what the `[TURN:{…}]`
     footnote hands the model (§5.1) — so a result says which task it came from

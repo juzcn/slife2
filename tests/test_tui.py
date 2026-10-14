@@ -2601,7 +2601,7 @@ async def test_a_pushed_note_is_drawn_and_does_not_wait_for_a_turn() -> None:
     # The harness's own shape, applied by the widget and not by the plugin.
     assert "[⚡ jill online]" in text
     assert client.prompts == [], "a note is not a turn"
-    assert "A2A(jill)>" not in text
+    assert "PeerAgent(jill)>" not in text
 
 
 async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> None:
