@@ -452,7 +452,7 @@ def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
     the catalogue was served by a plugin and the hub asked for it over MCP.  The
     catalogue is a *file this process opens* now, so the hub holds one, and what
     is worth guarding is where the line moved to rather than that it moved:
-    `slife2.db` is a library of stores, and the hub imports the store and not the
+    `slife2.catalogue` is a store, and the hub imports the store and not the
     machinery under it.  A `sqlite3` import here would be the hub writing SQL of
     its own, which is the overlap this test exists to catch — the same failure
     it always caught, one level down.
@@ -461,5 +461,5 @@ def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
 
     source = Path(hub.__file__).read_text(encoding="utf-8")
     assert "sqlite3" not in source
-    assert "from slife2.db import" in source, "the catalogue is this process's"
-    assert "import slife2.db" not in source, "the store, not the module"
+    assert "from slife2.catalogue import" in source, "the catalogue is this process's"
+    assert "import slife2.catalogue" not in source, "the store, not the module"

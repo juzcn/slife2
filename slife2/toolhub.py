@@ -12,7 +12,7 @@ server, to a REST API, to a program that wants an API key in its environment.
                              servers                       └─ what they declare: a `mcp:` or
                              _func_tool_unload                `rest-api:` entry, held and called
                                     │                         by mcp-tools / restapi-tools
-                                    └──in-process──▶  `slife2.db.ToolStore`
+                                    └──in-process──▶  `slife2.catalogue.ToolStore`
                                                        (the catalogue's own file)
 
 **What this process owns is the set, and it owns all of it.**  Which tools
@@ -185,8 +185,8 @@ from fastmcp import Context, FastMCP
 
 import slife2.timeouts as _T
 from slife2.audience import for_the_model, forwarded_client, request_meta
+from slife2.catalogue import ToolStore
 from slife2.config import Config, ToolServerSettings
-from slife2.db import ToolStore
 from slife2.embedder import EmbedderConnection
 from slife2.gateway import (
     ClientFactory,
@@ -233,11 +233,11 @@ CONFIG_KEY = "toolhub"
 
 #: The catalogue's vocabulary, in the three words this process has to say out
 #: loud: the category — and the config `kind` — of a tool that is *ours*
-#: (`slife2.db.PLUGIN`), and the two categories nothing is connected to
-#: (`slife2.db.SKILL`, `slife2.db.CLI`).  Spelled in two modules rather than
-#: imported for the reason the config gives: the hub must not import a server,
-#: and the db is one.  They are facts about the *system* — a plugin is a server
-#: slife2 starts, a skill is a document, a command is a program already
+#: (`slife2.catalogue.PLUGIN`), and the two categories nothing is connected to
+#: (`slife2.catalogue.SKILL`, `slife2.catalogue.CLI`).  Spelled in two modules
+#: rather than imported for the reason the config gives: the hub must not import
+#: a server, and the db was one.  They are facts about the *system* — a plugin is
+#: a server slife2 starts, a skill is a document, a command is a program already
 #: installed — and `model_name` reads the first to decide whether a name carries
 #: its server or is the whole of what the model says.
 PLUGIN = "plugin"
@@ -315,7 +315,7 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 #: `skill_use`, which reads the playbooks every session is meant to reach for.
 #:
 #: **It lives in a plugin and is still on this list.**  The budget would never
-#: evict it either way (a plugin's rows are exempt, `slife2.db.evict`), so what
+#: evict it either way (a plugin's rows are exempt, `slife2.catalogue.evict`), so what
 #: this adds is the other half: the model naming it in `_func_tool_unload` and
 #: being obeyed.  One string is cheaper than a column the row would have to
 #: carry to say "the system needs me", and the name it must match is
@@ -399,7 +399,7 @@ def model_name(server: str, tool: str, category: str) -> str:
     the model read about and one reaching a stranger.
 
     `category` is the row's own word for where a tool came from
-    (`slife2.db.PLUGIN` for ours, `mcp`/`rest` for the rest), so the rule reads
+    (`slife2.catalogue.PLUGIN` for ours, `mcp`/`rest` for the rest), so the rule reads
     the same on both paths: this one names a tool on the way *in*, and the row
     keeps the name for the way back out.  Nothing else has to agree about it —
     a name is opaque to the catalogue, which is what lets a stored row mean the
@@ -419,7 +419,7 @@ class Catalogue:
     **Every database operation the hub makes goes through here.**  Which tools
     exist is this process's decision; what is known about them is the record.
     What changed is that the record is no longer a plugin: the store is
-    `slife2.db.ToolStore`, opened on first use, and every call below is a method
+    `slife2.catalogue.ToolStore`, opened on first use, and every call below is a method
     on it rather than a tool call to somebody else.
 
     That it was ever a hop is worth stating, because the reason it stopped being
@@ -510,7 +510,7 @@ class Catalogue:
         *,
         autoload: bool = False,
     ) -> dict[str, Any]:
-        """Record a source's whole tool list.  See `slife2.db.ToolStore.merge`.
+        """Record a source's whole tool list.  See `slife2.catalogue.ToolStore.merge`.
 
         `autoload` still travels with the merge for the reason it always did: it
         is the operator's `autoload: true`, which lives in the section the plugin
@@ -558,7 +558,7 @@ class Catalogue:
         source it held last time is saying the entry has been taken out of its
         section; a row for a source nobody declares is a search hit that leads
         to a refusal, so the rows go with the entry.  See
-        `slife2.db.ToolStore.forget_source` for why this deletes where an
+        `slife2.catalogue.ToolStore.forget_source` for why this deletes where an
         unreachable server's rows are only marked, and
         `ToolStore.reset` for the other moment the same thing has to happen.
 
@@ -604,7 +604,7 @@ class Catalogue:
 
         `live` is the caller's, and only the second number reads it: what a
         source *offers* is a row on disk, and what the model *holds* is a row
-        the gate would hand over — which is `slife2.db.ToolStore.source_counts`.
+        the gate would hand over — which is `slife2.catalogue.ToolStore.source_counts`.
         """
         return await self._off_loop((await self.store()).source_counts, list(live))
 
@@ -632,7 +632,7 @@ class Catalogue:
         """Mark one tool *called*, for the eviction order.  Best-effort.
 
         **The budget evicts by this and not by the load stamp** — see
-        `slife2.db.ToolStore.evict` — and this is the only place it is written,
+        `slife2.catalogue.ToolStore.evict` — and this is the only place it is written,
         so this call is what makes "the least recently used tool goes" true
         rather than merely intended.
 
@@ -1638,7 +1638,7 @@ async def unload_tools(
             # property of the store rather than a hope**: asking for `unloaded`
             # can only answer `unknown`, `no_load_state`, `already` or the move
             # itself, because `_load_outcome` reaches `disabled`/`error` for a
-            # *load* alone (`slife2.db._load_outcome`).  So this arm is the
+            # *load* alone (`slife2.catalogue._load_outcome`).  So this arm is the
             # `unloaded` one, and the `else` that used to sit here — sending
             # whatever was left to `refused` — described an outcome nothing can
             # produce.  It is how a reader came to believe a fifth existed, and
@@ -2342,7 +2342,7 @@ def build_server(
         **And one refresh at a time** (`refresh_lock`), for the same fact seen
         from the other side: two asks arriving at once would each run this, and
         two overlapping merges of one source are a race on the tool table's
-        primary key (`slife2.db.ToolStore.merge` plans and applies in two halves).
+        primary key (`slife2.catalogue.ToolStore.merge` plans and applies in two halves).
         An ask that arrives during one waits for it; what it waits for is one
         round trip to a plugin, and what it buys is not merging a source twice.
         """
@@ -2383,7 +2383,7 @@ def build_server(
 
         The operator's `autoload: true`, which the hub has to supply because the
         store cannot read the sections these sources were configured in
-        (`slife2.db.ToolStore.evict`).  **One callable for its two readers** —
+        (`slife2.catalogue.ToolStore.evict`).  **One callable for its two readers** —
         `local_tools`' `_func_tool_unload` body and this process's own
         `_func_tool_unload` tool — because a set rebuilt by hand in the second
         place is a set the first one can stop agreeing with.
@@ -2845,7 +2845,7 @@ def build_server(
         # `live_sources` goes to the counts for the reason the gate reads it:
         # what a source offers is a row, and what the model *holds* is a row this
         # process would hand over — so a server that is down must not be reported
-        # as one whose tools are loaded (`slife2.db.ToolStore.source_counts`).
+        # as one whose tools are loaded (`slife2.catalogue.ToolStore.source_counts`).
         await refresh()
 
         # **And the catalogue's own health is a field of this answer rather than

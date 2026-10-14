@@ -39,7 +39,7 @@ slife2-agent              agent loop, MCP server       (no provider key, no SDK)
   │                                 └── HTTP 127.0.0.1:8004/mcp ──▶ slife2-llm-embeddings
   │                                                                    (openai SDK, holds keys)
   ├── HTTP 127.0.0.1:8020/mcp ──▶ slife2-toolhub                (the tool set)
-  │                                 │  the tool catalogue, in-process (`slife2.db.ToolStore`)
+  │                                 │  the tool catalogue, in-process (`slife2.catalogue.ToolStore`)
   │                                 ├── :8030/mcp ──▶ slife2-wechat        (a WeChat login per agent)
   │                                 │                  └── MCP ──▶ slife2-tui    (into that agent's window)
   │                                 ├── :8035/mcp ──▶ slife2-cabinet       (notes, diary, files, reports)
@@ -166,8 +166,10 @@ Which one a component needs is decided by **what it holds**:
 | a file, and nothing else | a **library** | a file needs no process, and one writer is what a SQLite lock already is |
 | a mechanism more than one store is made of | a **library** | a store that owns it makes every change to it a change about *its* corpus, and a copy per store is how one bug has to be found and fixed twice |
 
-So `db` is a library — it holds the turn files and the tool catalogue, and
-nothing else — while the embeddings server stays a plugin because it reads an
+So `db` is a library — it holds the turn files, and nothing else — and
+`slife2.catalogue` is the same row of that table for the other file this system
+keeps, one per data directory rather than one per agent. The embeddings server
+stays a plugin because it reads an
 endpoint and a key off `embeddings:` and links `openai`. The `mcp-tools` and
 `restapi-tools` families stay plugins under the same rule, pointed at somebody
 else's processes rather than at a file: `mcp:` and `rest-api:` are config
@@ -1700,9 +1702,11 @@ and restore that put a context together. The store underneath is a library
 — and that is v1's arrangement too, where the headless host restores a session
 straight from `SessionStore` with no MCP transport in the path.
 
-The **second** thing this module keeps is the tool catalogue, which is the
-*other* thing a file is enough for. It lives here and is opened by the toolhub
-rather than served by anybody (§8).
+The **second** thing this system keeps in a file, and not in this module, is the
+tool catalogue (`slife2.catalogue`), which is the *other* thing a file is enough
+for. It sits beside the turns rather than inside them because the two have no
+name in common, and it is opened by the toolhub rather than served by anybody
+(§8.4).
 
 **Kept as it happened, and nothing else.**  The store does not summarise, does
 not decide what mattered, and until this change put nothing back into a
@@ -2332,7 +2336,7 @@ slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins   
                           call_tool                                   and the families that are
                           servers                                      not servers at all)
                              │
-                             └── in-process ──▶ `slife2.db.ToolStore`  (the catalogue's own file)
+                             └── in-process ──▶ `slife2.catalogue.ToolStore`  (the catalogue's own file)
 ```
 
 ### 8.1 What the hub owns, and how a tool gets into the set
@@ -2636,7 +2640,9 @@ outage, and separating them is most of what the module's prose is about.
 the second half of `slife2-db` and that plugin is gone, for the test in §1.1: a
 store has one writer — this process — and "one writer" is what a SQLite lock
 already is. So `Catalogue` in `slife2.toolhub` is a thin face over
-`slife2.db.ToolStore`, opened on first use with its indexes brought up to date,
+`slife2.catalogue.ToolStore` — the catalogue was `slife2.db`'s until the two
+halves of that module turned out to share nothing but a logger — opened on first
+use with its indexes brought up to date,
 and what it replaces is a hop, a kept MCP client, a reconnect path and a
 `CatalogueUnavailable` — the last of which was a class for a failure that can no
 longer happen. What is left of the old split is the one that mattered and is not

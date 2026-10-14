@@ -196,7 +196,7 @@ def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     one turn later — so the spellings are held together here rather than left to
     a comment.
     """
-    from slife2.db import MODEL_VISIBLE_HARNESS_TOOLS
+    from slife2.catalogue import MODEL_VISIBLE_HARNESS_TOOLS
     from slife2.server.server import CHECK_NEW_INPUT
     from slife2.toolhub import ALWAYS_LOADED
 

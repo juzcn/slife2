@@ -27,8 +27,8 @@ from mcp import MCPError
 
 import slife2.timeouts as _T
 from slife2.audience import FOR_THE_MODEL
+from slife2.catalogue import ToolStore
 from slife2.config import ToolLoadSettings, ToolServerSettings, default_config
-from slife2.db import ToolStore
 from slife2.gateway import (
     LINK_DOWN_CODE,
     flatten,
@@ -953,7 +953,7 @@ async def test_the_budget_spares_the_tool_the_model_called(
     order instead, which is the bug this whole arrangement exists to fix.
     """
     when = "2026-01-01T00:00:00+00:00"
-    monkeypatch.setattr("slife2.db.now", lambda: when)
+    monkeypatch.setattr("slife2.catalogue.now", lambda: when)
     entry = ToolServerSettings(name="fake", command="in-memory", autoload=False)
     async with Client(
         hub_for(
@@ -1499,7 +1499,7 @@ async def test_a_restart_does_not_read_the_configs_own_sources_as_gone() -> None
     """**The window that made a restart look like a broken server.**
 
     Opening the catalogue runs the file's boot pass, which withdraws the verdict
-    on rows whose source the config no longer names (`slife2.db.ToolStore.reset`)
+    on rows whose source the config no longer names (`slife2.catalogue.ToolStore.reset`)
     — so the set of names it is handed has to be every name the config carries,
     not the plugins alone (`slife2.toolhub.configured_sources`).  Given the
     plugins alone it read every `mcp:` entry as a source that had gone, and the
@@ -1542,7 +1542,7 @@ def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
     is the party that connects — and a family stamping `enabled` on each row
     takes that decision away from it: the merge then writes the verdict as an
     *update* rather than through the reconnect that exists for it
-    (`slife2.db.ToolStore._plan`), which rewrites the row's keyword document and
+    (`slife2.catalogue.ToolStore._plan`), which rewrites the row's keyword document and
     reports a tool nobody touched as changed.  That is the other half of what a
     restart cost: the boot pass withdrew the verdict on every row of every
     `mcp:` entry, and this stamp wrote each one back as a change — measured on
@@ -1690,7 +1690,7 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
 
     `set_load` answers one of four when it is asked for `unloaded` — the move,
     `already`, `unknown` and `no_load_state` — because `disabled`/`error` are
-    answers to a *load* (`slife2.db._load_outcome`).  The trim's last arm sent
+    answers to a *load* (`slife2.catalogue._load_outcome`).  The trim's last arm sent
     everything it did not recognise to `refused`, which made a fifth outcome look
     reachable: it put "refused (the system needs them)" — a sentence about what
     this process protects — one branch away from being said about a row.  The

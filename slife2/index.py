@@ -1,7 +1,7 @@
 """The indexes: how a corpus is found again by its words and by its meaning.
 
 Three corpora in this system are searched the same way — a conversation's turns
-(`slife2.db.TurnStore`), the tool catalogue (`slife2.db.ToolStore`) and the
+(`slife2.db.TurnStore`), the tool catalogue (`slife2.catalogue.ToolStore`) and the
 cabinet (`slife2.cabinet_store.CabinetStore`) — and what makes them searchable is
 the same mechanism in all three: an FTS5 table for the words, a `sqlite-vec`
 table for the vectors, a chunk table that says which row a chunk belongs to, and

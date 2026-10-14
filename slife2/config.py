@@ -763,7 +763,7 @@ class ToolLoadSettings:
     Eviction never touches a tool of ours (a plugin's) or a server marked
     `autoload: true`: those are loaded because the operator said so, and a
     budget that could take `turn_read` away is the failure DESIGN.md §8 is
-    about.  See `slife2.db.ToolStore.injectable`.
+    about.  See `slife2.catalogue.ToolStore.injectable`.
     """
 
     threshold: int = DEFAULT_TOOL_LOAD

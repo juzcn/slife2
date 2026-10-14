@@ -316,7 +316,7 @@ def test_the_source_is_not_the_servers_own_name(isolated_runtime: Path) -> None:
     """The rows are filed under the *family*, and the server under its key.
 
     A source's verdict is written across every row it owns
-    (`slife2.db.ToolStore.set_source_state`), so a source holding both this
+    (`slife2.catalogue.ToolStore.set_source_state`), so a source holding both this
     server's tool and its documents would mark every playbook broken whenever
     the connection faltered — and these rows have no connection whose state a
     verdict could come from.

@@ -16,10 +16,10 @@ import sqlite3
 import pytest
 
 from slife2 import attachments
+from slife2.catalogue import ToolStore
 from slife2.clock import now
 from slife2.db import (
     TOOL_RESULT_CHARS,
-    ToolStore,
     TurnStore,
     compact_tool_results,
     message_text,

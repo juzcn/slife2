@@ -24,10 +24,11 @@ Two properties follow, and they are the point of the arrangement:
 **A plugin is a capability; a library is its implementation.** What holds a
 credential, an SDK or somebody else's connection is a process; what holds a
 *file* is not, because one writer is what a SQLite lock already is. So
-`slife2.db` — the turn log and the tool catalogue — is a library, imported by the
-two plugins that own its two halves, `slife2-context` and `slife2-toolhub`. So is
-`slife2.index`, the machinery those stores are *searched* by, which is the
-cabinet's library too. DESIGN §1.1 is the test and what it costs.
+`slife2.db` — the turn log — is a library, imported by the plugin that owns it,
+`slife2-context`, and `slife2.catalogue` is the tool catalogue, opened in-process
+by `slife2-toolhub`. So is `slife2.index`, the machinery those two stores are
+*searched* by, which is the cabinet's library too. DESIGN §1.1 is the test and
+what it costs.
 
 [DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
 
@@ -545,8 +546,8 @@ name is one row.
 **Everything the model may call is a row in the tool catalogue**, the hub's own
 three included. The hub decides what tools *are* — which sources, the naming
 rule above, who may call one — and the record is a file the hub itself opens,
-`<data>/agents/tools.db` through `slife2.db.ToolStore`: rows and two indexes
-over them, and the same machinery the turns use, because a store has one writer
+`<data>/agents/tools.db` through `slife2.catalogue.ToolStore`: rows and two
+indexes over them, and the same machinery the turns use, because a store has one writer
 and one writer is what a SQLite file already is. It answers the questions about
 the rows — which are loaded, what one is called at the far end, and the two
 search legs — and nothing in it knows what a proxy name is.
@@ -1122,12 +1123,14 @@ slife2/
 │                     #   becomes a MATCH (no I/O)
 ├─ db.py              # the store, as a library: TurnStore, one SQLite file per
 │                     #   client id, with the two derived indexes over its turns
-│                     #   and the live-context list — and ToolStore, the tool
-│                     #   catalogue, one file per data directory.  No server
-│                     #   holds it: the plugin that owns the turns imports the
-│                     #   first half, and the toolhub opens the catalogue
-│                     #   in-process, because a file already has one writer
-│                     #   (DESIGN §1.1)
+│                     #   and the live-context list.  No server holds it: the
+│                     #   plugin that owns the turns imports it, because a file
+│                     #   already has one writer (DESIGN §1.1)
+├─ catalogue.py       # the tool catalogue, as a library: ToolStore — one row
+│                     #   per tool the model may be given, what is known about
+│                     #   it, and which of them the model has loaded — one file
+│                     #   for the whole data directory, opened by the hub
+│                     #   in-process and by nobody else
 ├─ index.py           # the indexes, as a library: the FTS5 and `sqlite-vec`
 │                     #   machinery three corpora are searched by — the identity
 │                     #   that decides a rebuild, the chunk write, the keyset

@@ -20,7 +20,7 @@ import sqlite3
 
 import pytest
 
-from slife2.db import (
+from slife2.catalogue import (
     LOADED,
     NA,
     STATUS_DISABLED,
@@ -56,7 +56,7 @@ def tool(
     """One row of a source's tool list, in the shape the hub sends.
 
     `extra` is for the two document families, whose rows may carry a `status`:
-    nothing else has a verdict of its own to send (`slife2.db._plan`).
+    nothing else has a verdict of its own to send (`slife2.catalogue._plan`).
     """
     return {
         "name": name,
