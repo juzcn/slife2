@@ -17,6 +17,13 @@ name: Publish to PyPI
 # matrix is six minutes of three platforms and starting seventeen daemons, and
 # what it would add is a second opinion about a commit that has one.
 #
+# **And the tag has to sit on a commit that carries this file.**  GitHub reads
+# the workflows from the ref being pushed, so the first attempt at this release
+# tagged a commit from before `publish.yml` existed and nothing ran at all: no
+# failure, no run, an empty Actions tab, and a tag that had to be moved.  The
+# order a release therefore has is the pipeline on `main` first, and the tag on
+# a commit at or after it.
+#
 # **Authentication is Trusted Publishing, so there is no secret anywhere.**  A
 # PyPI publisher (owner, repository, and this file's name) is registered on
 # PyPI's side and the job proves itself with the OIDC token its `id-token:
