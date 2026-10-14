@@ -829,12 +829,11 @@ def test_others_running_is_only_about_whose_pid_it_is(
     """The token half of the test is gone, because `live_clients` already made it.
 
     `live_clients` admits a record only when the pid is alive *and* the token
-    matches (or is absent) — the predicate `same_client` applies — so the only
-    question left for `others_running` is whose pid each surviving record bears.
-    A record naming our own pid has therefore already been proved to be this
-    process, and one naming any other pid is somebody else by definition; the
-    removed `not same_client(record)` disjunct could not have changed the answer,
-    which is why it was unreachable.
+    matches (or is absent), so the only question left for `others_running` is
+    whose pid each surviving record bears.  A record naming our own pid has
+    therefore already been proved to be this process, and one naming any other
+    pid is somebody else by definition; the removed "is this me" disjunct could
+    not have changed the answer, which is why it was unreachable.
     """
     ours = runtime.ClientRecord(pid=os.getpid(), agent="me")
     theirs = runtime.ClientRecord(pid=os.getpid() + 1, agent="other", start_token="x")

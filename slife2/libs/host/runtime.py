@@ -498,15 +498,6 @@ def live_clients() -> list[ClientRecord]:
     return alive
 
 
-def same_client(record: ClientRecord) -> bool:
-    """Whether a client record refers to this very process."""
-    if record.pid != os.getpid():
-        return False
-    return not record.start_token or record.start_token == process_start_token(
-        record.pid
-    )
-
-
 def pid_alive(pid: int) -> bool:
     """Whether a process with this pid currently exists.
 

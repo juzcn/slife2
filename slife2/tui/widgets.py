@@ -1365,12 +1365,22 @@ class ModelPicker(Static):
         Once, because the blur that follows every decided picker would
         otherwise set the same future a second time, and a resolved future
         raises rather than shrugs.
+
+        **And a future that is *gone* is not a decision to report.**  Quitting
+        while the picker is open unmounts the widget and cancels the worker
+        parked on this future, which cancels the future itself; the blur that
+        shutdown then delivers arrives with nothing to resolve it into, and
+        `set_result` on a cancelled future raises `InvalidStateError` — out of
+        the message pump, as a traceback at exit instead of a clean quit.
+        `ApprovalPrompt._decide` guards this and this did not; the two are the
+        same widget shape, so they are guarded the same way.
         """
         if self._decided:
             return
         self._decided = True
         self._chosen = choice
-        self._future.set_result(choice)
+        if not self._future.done():
+            self._future.set_result(choice)
         self.update(self._body())
 
     # --- the row -------------------------------------------------------------

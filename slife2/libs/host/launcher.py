@@ -631,7 +631,7 @@ def others_running() -> list[ClientRecord]:
     **The pid is the whole of the test, and the start token is not needed here.**
     A record that reached this far already came through `live_clients`, which
     admits one only when the pid is alive *and* the token matches (or is absent)
-    — the same predicate `same_client` applies — so a record bearing our pid has
+    — so a record bearing our pid has
     necessarily proved itself to be this process, and one bearing any other pid
     is somebody else by definition.  The token still does its work: it is what
     stops a recycled pid counting as a live *other* client inside `live_clients`.

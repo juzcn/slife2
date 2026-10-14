@@ -224,7 +224,9 @@ class SlifeApp(App[None]):
         # no per-agent port, process or config, because the servers are shared
         # infrastructure and an identity is not a piece of topology.
         self.title = f"slife2 - {agent}"
-        self._url = url
+        # (The address is *not* kept as an attribute: the client factory below
+        # closes over the parameter, so `self._url` was a second spelling of one
+        # fact that nothing ever read.)
         self._agent = agent
         self._model = model
         self._model_label = model_label or model

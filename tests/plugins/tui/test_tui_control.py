@@ -466,3 +466,24 @@ async def served(mcp: Any) -> AsyncGenerator[str]:
             timeout=5,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
         sock.close()
+
+
+async def test_a_hand_over_with_an_unreadable_ticket_is_dropped_not_raised() -> None:
+    """**The reader for the stream the window holds open.**
+
+    `decode` answers `None` for a message it cannot read rather than raising, and
+    the ticket was the one field it *cast* instead: `int("x")` and `int([1])`
+    raise, and a raise inside the window's progress callback ends the delivery of
+    every hand-over for that attachment — one malformed push from a peer on
+    another build and the path is gone for the session.  `True` also read as
+    ticket 1, which is a ticket somebody else's hand-over may hold.
+    """
+    for payload in (
+        '{"t":"handover","id":"x","d":"hi","c":"wechat","k":"note"}',
+        '{"t":"handover","id":[1],"d":"hi","c":"wechat","k":"note"}',
+        '{"t":"handover","id":true,"d":"hi","c":"wechat","k":"note"}',
+    ):
+        assert control.decode(payload) is None
+
+    good = control.decode('{"t":"handover","id":7,"d":"hi","c":"wechat","k":"note"}')
+    assert good is not None and good.ticket == 7
