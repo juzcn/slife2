@@ -180,9 +180,14 @@ include = [
 ]
 
 [build-system]
-# Unpinned, unlike slife — v1 caps hatchling below 1.27 only so `twine check`
-# accepts the Metadata-Version it emits, which is a constraint of its *publish*
-# pipeline.  slife2 has none yet; add the cap alongside the publish workflow.
+# Unpinned, unlike slife — and this was written as a promise to whatever publish
+# pipeline slife2 got, so here is the promise answered.  v1 caps hatchling below
+# 1.27 so that `twine < 7` accepts the Metadata-Version it emits, which holds
+# two versions in three files together by hand (the cap, twine's floor in
+# `publish.yml`, and the note explaining both).  slife2 publishes with
+# `uv publish` (`.github/workflows/publish.yml`), which validates the wheel
+# rather than the metadata version and has no such floor, so there is nothing to
+# cap and nothing to keep in step.
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 

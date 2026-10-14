@@ -1,0 +1,98 @@
+name: Publish to PyPI
+
+# **The tag is the release.**  A version that reaches PyPI cannot be taken back
+# — a yanked file is still there, and its number is spent — so the tag is the
+# one moment at which the version, the artifact and the commit have to be the
+# same thing, and the two checks below are what make them so rather than the
+# tagger's memory.
+#
+#   v0.1.0  ->  the version in pyproject.toml, built from the commit under it
+#
+# **A workflow of its own rather than a job in `ci.yml`, which is v1's
+# arrangement kept.**  `ci.yml` is the gate and runs on pushes to `main`; this
+# is the release and runs on tags, so the two answer to different events and
+# neither waits for the other's trigger.  What that means for a release is
+# worth stating plainly: the gate here is that the commit was already green on
+# main *before* it was tagged — nothing below repeats the matrix, because the
+# matrix is six minutes of three platforms and starting seventeen daemons, and
+# what it would add is a second opinion about a commit that has one.
+#
+# **Authentication is Trusted Publishing, so there is no secret anywhere.**  A
+# PyPI publisher (owner, repository, and this file's name) is registered on
+# PyPI's side and the job proves itself with the OIDC token its `id-token:
+# write` lets it mint.  Nothing to rotate, nothing to leak, and no repository
+# setting that could hold a key.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # the OIDC token PyPI is configured to accept
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both checks ask about something outside the tagged commit — the
+          # file's version, and whether the commit is on `main` — so the default
+          # single-commit checkout is not enough for either.
+          fetch-depth: 0
+
+      # **A tag that disagrees with the file is refused, and refused here.**
+      # PyPI rejects a second upload of the same filename, so a wheel built from
+      # a pyproject.toml the tag does not name spends the version the tag
+      # claimed and leaves the real one to be published from somewhere else.
+      #
+      # `python3` rather than `uv run`: this reads one field out of one file
+      # with `tomllib`, and a virtual environment for that would be a dependency
+      # resolution to answer a question about a literal.
+      - name: The tag names the version in the file
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python3 -c \
+            "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$version" ]; then
+            echo "::error::$GITHUB_REF_NAME names $tag; pyproject.toml says $version"
+            exit 1
+          fi
+          echo "v$version — the tag and the file agree"
+
+      # **A release comes from the branch the gate runs on.**  `ci.yml` runs on
+      # pushes to `main` only, so a tag pointing anywhere else names an artifact
+      # nothing has tested — and one PyPI will keep.
+      - name: The tag is on main
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main"
+            exit 1
+          fi
+          echo "$(git rev-parse --short HEAD) is on main"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.13'
+
+      # The command `ci.yml` installs its wheel from, and the only build path
+      # this repository has: what is uploaded is what the suite was run against.
+      - name: Build
+        run: uv build --out-dir dist
+
+      # `--trusted-publishing always` rather than the default `automatic`, so
+      # that a missing or misspelled publisher is an error naming the problem
+      # instead of a fallback that waits for a credential nobody is there to
+      # type.
+      #
+      # `--check-url` skips the files already on the index instead of failing on
+      # them, which is the only way a retry after a half-published release can
+      # work — PyPI refuses a duplicate upload, so a plain re-run would fail on
+      # the half that did land.
+      - name: Publish
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/
