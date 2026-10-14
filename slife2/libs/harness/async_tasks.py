@@ -377,6 +377,25 @@ def _status_of(task: Task, task_id: str) -> str:
     return marker(task.status, call_id=task.call_id, tool=task.tool, task_id=task_id)
 
 
+def _in_flight_reply(task: Task, task_id: str) -> str:
+    """What a task whose *call* is over and whose *delivery* is not answers.
+
+    Between `_runner` recording the ending and `hand_back` finishing, neither
+    thing `check_async` can otherwise say is true: the work is not still running,
+    and `delivered` is not yet a verdict — it is False until the hand-back
+    returns.  Answering with the finished reply in that window read a delivery
+    that was about to land as one that had failed, so the model met the same
+    result twice, and answering `cancel_async` by cancelling the handle threw a
+    completed call's answer away.
+    """
+    head = _status_of(task, task_id)
+    return (
+        f"{head}\n"
+        f"✓ Task {'failed' if task.status == FAILED else 'completed'} "
+        f"(task_id: {task_id}). Its result is on its way to the conversation."
+    )
+
+
 def _finished_reply(task: Task, task_id: str) -> str:
     """What a *finished* task's answer says, wherever it is asked from.
 
@@ -426,7 +445,7 @@ async def check_async(arguments: dict[str, Any]) -> str:
     task = _get_task(task_id)
     if task is None:
         return _not_found(task_id)
-    if task.status == RUNNING and not task.handle.done():
+    if task.status == RUNNING:
         head = _status_of(task, task_id)
         return (
             f"{head}\n"
@@ -434,6 +453,18 @@ async def check_async(arguments: dict[str, Any]) -> str:
             f"  task_id: {task_id}\n"
             f"  Try {CHECK_ASYNC} again later."
         )
+    # **Final status is not the same moment as a finished delivery.**  `_runner`
+    # records the ending before it awaits `hand_back`, so between the two the
+    # call is over and its answer is still on its way — and this asked
+    # `task.handle.done()` *instead of* the status, so that window fell into the
+    # finished branch: the model was told "its result could not be handed back"
+    # a moment before the message landed (reading the same result twice, once as
+    # a tool answer and once as a turn), the task was popped, and the next poll
+    # answered "not found".  What decides here is the status; the handle decides
+    # whether the *delivery* has an outcome yet, and popping before it has one
+    # would drop the only copy of the result if it fails.
+    if not task.handle.done():
+        return _in_flight_reply(task, task_id)
     _pop_task(task_id)
     return _finished_reply(task, task_id)
 
@@ -464,7 +495,19 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
     task = _get_task(task_id)
     if task is None:
         return _not_found(task_id)
-    if task.handle.done():
+    if task.status != RUNNING:
+        # **Nothing to cancel, and nothing to throw away.**  The work is over —
+        # and when its handle is still running, what is running is the hand-back
+        # of a result that already exists: `task.handle.cancel()` there aborted
+        # the delivery mid-flight and this answered "was cancelled, so it has no
+        # result" about a call that had completed, which is the case this
+        # function's own docstring says cannot happen.  The task is kept while
+        # that delivery is in flight, for `check_async`'s reason.
+        if not task.handle.done():
+            return (
+                f"Task {task_id!r} already completed — nothing to cancel.\n\n"
+                + _in_flight_reply(task, task_id)
+            )
         _pop_task(task_id)
         return (
             f"Task {task_id!r} already completed — nothing to cancel.\n\n"

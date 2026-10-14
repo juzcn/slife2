@@ -224,6 +224,35 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     return payload or empty
 
 
+def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
+    """Read a trim's answer — the names it unloaded and its sentence — or refuse it.
+
+    **An answer the harness cannot read is not a trim that unloaded nothing.**
+    `found.get("unloaded") or []` reads a missing or null key as the same
+    "nothing to unload" an honest no-op produces, so no pair is written and the
+    caller goes on believing it still holds the tools that have gone;
+    `found.get("text") or ""` does the same one key over, writing an empty
+    sentence where the hub's own belongs.  Both halves are one answer and are
+    read as strictly as `remote_tools` reads a listing: only a *readable* empty
+    answer is a verdict, and a missing key is damage (DESIGN.md §10.1 — a
+    failure is not a verdict).  Reading both before either half is used also
+    means a refused answer can never leave the half-written pair every provider
+    rejects.
+
+    **Here rather than in the two servers that trim**, which is where it was:
+    the agent server and the agent-task server each carried a byte-identical
+    copy of this function, down to the two messages — which are `_unreadable`'s,
+    spelled out.  The rule belongs with the call whose answer it reads.
+    """
+    names = found.get("unloaded")
+    if not isinstance(names, list):
+        raise _unreadable("return the names it unloaded", found)
+    text = found.get("text")
+    if not isinstance(text, str):
+        raise _unreadable("return the trim's sentence", found)
+    return [str(name) for name in names], text
+
+
 def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
     """A tool body that calls `name` on the far side and reports what it said.
 
@@ -271,5 +300,6 @@ __all__ = [
     "SEPARATOR",
     "UpstreamTool",
     "remote_tools",
+    "trim_answer",
     "unload_tools",
 ]

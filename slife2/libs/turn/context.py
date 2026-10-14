@@ -480,7 +480,14 @@ def with_note(content: Any, note: str) -> Any:
     footnotes are not byte-identical.
     """
     if isinstance(content, str):
-        return f"{content} {note}".strip()
+        # **The person's text is not trimmed, and only the empty case is.**
+        # `f"{content} {note}".strip()` stripped the *whole* string, so the
+        # one thing it could ever reach was the message's own leading
+        # whitespace: a turn that opened with an indented block or a blank line
+        # was stored as it was written and read back by the model with that
+        # whitespace gone — the row in the transcript and the message in the
+        # request were not the same message.
+        return f"{content} {note}" if content.strip() else note
     if isinstance(content, list):
         return [*content, {"type": "text", "text": note}]
     return note

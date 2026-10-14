@@ -135,6 +135,24 @@ class MCPBackend:
                 progress_handler=on_progress,
                 timeout=self._timeout,
             )
+            # **An answer this build cannot read is refused, not read as an
+            # empty one.**  `from_wire` tolerates a missing *field* (a server
+            # from before that field existed sends no `thinking`, and no
+            # `thinking` is the truth about a model that reasoned nothing), but
+            # a missing *result* is a different fact: FastMCP leaves
+            # `CallToolResult.data` as None whenever the far end sent no
+            # structured content, and `from_wire(None)` builds an assistant
+            # message with no text and no tool calls.  The turn then ends
+            # "successfully" with an empty answer and the model's real reply is
+            # discarded — the confident negative DESIGN.md §10.1 forbids, on the
+            # one hop that does not go through `tool_payload`.  The likely cause
+            # is a model server from another build, so the sentence says so.
+            if not isinstance(result.data, dict):
+                raise ConnectionError(
+                    f"the model server did not return a stream_chat result (it "
+                    f"said {result.data!r}); a daemon from another build does "
+                    f"this — try `slife2 down`"
+                )
             return StreamChatResult.from_wire(result.data)
         finally:
             queue.put_nowait(_DONE)

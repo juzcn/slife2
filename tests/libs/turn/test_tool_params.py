@@ -35,7 +35,12 @@ from slife2.libs.harness.async_tasks import (
 from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
 from slife2.libs.turn.loop import BACKGROUND_UNAVAILABLE, DENIED, AgentLoop
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolCall, ToolSpec
-from slife2.libs.turn.tools import Tool, ToolRegistry
+from slife2.libs.turn.tools import (
+    Tool,
+    ToolRegistry,
+    bind_timeout,
+    parse_timeout,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -561,3 +566,76 @@ def test_the_two_tools_are_offered_under_the_names_the_prompt_uses() -> None:
     names = [tool.spec.name for tool in async_tasks.async_tools()]
     assert names == [CHECK_ASYNC, "cancel_async"]
     assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")
+
+
+def test_an_endless_timeout_is_nobody_saying_one() -> None:
+    """**`1e999` is valid JSON and means "no limit", and it ended the turn.**
+
+    `float("inf")` is what it arrives as, and it is positive, so it used to pass
+    `parse_timeout` as a bound: `bind_timeout` then did `int(inf)` for a tool
+    that declares its own `timeout` and raised `OverflowError` out of the loop,
+    which is the disproportionate answer to a bad number this module exists to
+    avoid.  An unbounded wait is what `None` already means.
+    """
+    assert parse_timeout(1e999) is None
+    assert parse_timeout("inf") is None
+    assert parse_timeout(float("inf")) is None
+    # And the same through the binder, which is where the crash surfaced.
+    spec = ToolSpec(
+        name="render",
+        description="",
+        parameters={"properties": {"timeout": {"type": "integer"}}},
+    )
+    arguments: dict[str, Any] = {}
+    assert bind_timeout(arguments, spec, parse_timeout(1e999)) is None
+    assert "timeout" not in arguments
+
+
+@pytest.mark.asyncio
+async def test_a_finished_call_whose_delivery_is_in_flight_is_not_settled() -> None:
+    """**Final status is not a finished delivery**, and the window between them
+    is one a poll can land in.
+
+    `_runner` records the ending before it awaits the hand-back, so a task can be
+    `FINISHED` while its answer is still on its way.  `check_async` read that as
+    "finished, and its result could not be handed back" — telling the model a
+    delivery that was about to land had failed, and *popping* the task, so the
+    copy of the answer was gone if that delivery then failed.  `cancel_async` was
+    worse: it cancelled the handle, which aborted a completed call's delivery
+    mid-flight and reported "cancelled, so it has no result".
+    """
+    parked = asyncio.Event()
+
+    async def never_returns() -> str:
+        await parked.wait()
+        return ""
+
+    delivered: list[str] = []
+
+    async def deliver(text: str, channel: str) -> bool:
+        delivered.append(text)
+        await parked.wait()
+        return True
+
+    task = async_tasks.Task(
+        handle=asyncio.create_task(never_returns()),
+        call_id="c",
+        tool="pdf_to_md",
+        status=async_tasks.FINISHED,
+        deliver=deliver,
+        result="the text",
+    )
+    async_tasks._tasks["inflight"] = task
+    try:
+        answer = await check_async({"task_id": "inflight"})
+        assert "on its way" in answer
+        assert "could not be handed back" not in answer
+        assert async_tasks._get_task("inflight") is task, "and it was not popped"
+
+        refused = await cancel_async({"task_id": "inflight"})
+        assert "has no result" not in refused
+        assert not task.handle.cancelled(), "a delivery in flight is not cancelled"
+    finally:
+        async_tasks._pop_task("inflight")
+        parked.set()
+        task.handle.cancel()

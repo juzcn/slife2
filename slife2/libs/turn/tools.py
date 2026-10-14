@@ -88,6 +88,7 @@ three are argued.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -273,14 +274,23 @@ def split_meta(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Meta]:
 
 
 def parse_timeout(value: Any) -> float | None:
-    """A `_timeout` as a positive number of seconds, or None.
+    """A `_timeout` as a positive, **finite** number of seconds, or None.
 
-    None means "nobody said" and covers all four ways of saying nothing: the
-    argument absent, `None`, zero-or-negative, and text that is not a number.
-    v1's rule, and the reason it is a rule rather than a convenience: the tool
-    reading `timeout=0` into `wait_for(..., timeout=0)` fires *instantly*, so a
-    pass-through zero would be the exact opposite of the "0 = no bound" the
-    prompt promises.
+    None means "nobody said" and covers every way of saying nothing: the
+    argument absent, `None`, zero-or-negative, text that is not a number, and a
+    number with no end to it.  v1's rule, and the reason it is a rule rather
+    than a convenience: the tool reading `timeout=0` into `wait_for(..., timeout=0)`
+    fires *instantly*, so a pass-through zero would be the exact opposite of the
+    "0 = no bound" the prompt promises.
+
+    **And `inf` is one of those ways**, though it is the one nobody wrote down.
+    `float("inf")` is what `1e999` — valid JSON, and the natural way to write
+    "no limit" — arrives as, and it is positive, so it used to pass through as a
+    bound: `bind_timeout` then did `int(inf)` for a tool that declares its own
+    `timeout` and raised `OverflowError` out of `run_turn`, which does not catch
+    it.  A turn ended by a number meaning "no limit" is the disproportionate
+    answer `split_meta` says this module exists to avoid, and an unbounded wait
+    is exactly what None asks for.
     """
     if value is None:
         return None
@@ -289,7 +299,7 @@ def parse_timeout(value: Any) -> float | None:
     except (TypeError, ValueError):
         logger.debug("tool timeout not a number, ignored: %r", value)
         return None
-    return seconds if seconds > 0 else None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
 def declares_timeout(spec: ToolSpec | None) -> bool:

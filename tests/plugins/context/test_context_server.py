@@ -934,3 +934,21 @@ async def test_startup_reindexes_every_turn_when_the_model_changed(
             "SELECT value FROM index_meta WHERE key = 'vector_identity'"
         ).fetchone()[0]
     assert recorded.startswith("1|stub:two|"), recorded
+
+
+def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:
+    """**The strip was for the empty case and reached the person's text.**
+
+    `f"{content} {note}".strip()` strips the *whole* string, and the only end it
+    could reach was the message's own leading whitespace — so a turn that opened
+    with an indented block or a blank line was stored as it was written and read
+    back by the model with that whitespace gone.  The row in the transcript and
+    the message in the request were not the same message.
+    """
+    from slife2.libs.turn.context import with_note
+
+    assert with_note("    indented\nsecond line", "[TURN:{}]").startswith(
+        "    indented"
+    )
+    # The empty case is the one it is for: a turn with no text reads as the note.
+    assert with_note("", "[TURN:{}]") == "[TURN:{}]"
