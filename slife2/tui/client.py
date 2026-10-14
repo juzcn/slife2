@@ -23,18 +23,18 @@ from typing import Any, Protocol
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-import slife2.timeouts as _T
-from slife2.a2a.server import JOIN
-from slife2.config import (
+import slife2.helpers.timeouts as _T
+from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
-from slife2.events import TurnEvent, decode
-from slife2.mcp_server import close_server, open_server
-from slife2.tui.control import ATTACH, Handover
-from slife2.tui.control import decode as decode_handover
+from slife2.libs.turn.events import TurnEvent, decode
+from slife2.plugins.a2a.server import JOIN
+from slife2.plugins.protocol import close_server, open_server
+from slife2.plugins.tui.server import ATTACH, Handover
+from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 #: How every tool in this system says no: a sentence beginning with this, which
@@ -137,7 +137,7 @@ class AgentClient(Protocol):
 
         **A read that is missing `turns` is not that empty.**  A name with no
         history is answered with a real turn list that happens to be empty
-        (`slife2.server.server.transcript`, over `restore`'s own `{"turns": []}`);
+        (`slife2.plugins.agent.server.transcript`, over `restore`'s own `{"turns": []}`);
         a payload whose `turns` cannot be read is damage, and reading it as `[]`
         is a window that shows a blank history and marks itself restored
         (DESIGN.md §10.1: a value that cannot be read is not a value that is
@@ -234,7 +234,7 @@ class MCPAgentClient:
         self._model = model
         # None means "the registry's management patience", resolved here
         # rather than in the signature: a def-time default captures the value at
-        # import (`slife2.timeouts` states the rule).
+        # import (`slife2.helpers.timeouts` states the rule).
         self._timeout = _T.timeouts.work.management if timeout is None else timeout
         self._client: Client | None = None
         #: Serialises `connect`, which has an await between its check and its
@@ -256,7 +256,7 @@ class MCPAgentClient:
 
         The URL is in the error because "connection refused" without an address
         is the least useful thing a terminal can say, and so is a bare timeout.
-        Both come from `slife2.mcp_server.open_server`, which is where every
+        Both come from `slife2.plugins.protocol.open_server`, which is where every
         client in this system connects to a peer and where the rule about what
         to do when one is missing lives.
         """
@@ -278,7 +278,7 @@ class MCPAgentClient:
                 fallback_tool="send_message",
                 # **No clock on the connection**, because a connection-level
                 # deadline is a deadline on *every* call that crosses it — turns
-                # included (see `slife2.timeouts.work.management`).  Each call states
+                # included (see `slife2.helpers.timeouts.work.management`).  Each call states
                 # its own patience below, which is where a number that applies to
                 # one thing belongs.
                 timeout=None,
@@ -417,10 +417,10 @@ class MCPAgentClient:
                 # progress token, and `report_progress` on the server is a
                 # *silent no-op* without one.  Omitting it produces a turn that
                 # works perfectly and shows nothing until the very end — see
-                # `slife2.events`.
+                # `slife2.libs.turn.events`.
                 # **And no deadline on the call**, said explicitly rather than
                 # left to the default: this is the one call whose length is the
-                # answer's own business (`slife2.timeouts.work.management`).
+                # answer's own business (`slife2.helpers.timeouts.work.management`).
                 timeout=None,
             )
         except ToolError:
@@ -466,7 +466,7 @@ class WindowClient(Protocol):
         the person's own typing goes through.
 
         Returns, or raises, only when the window is done: a cancelled call is the
-        detach (`slife2.tui.control`).
+        detach (`slife2.plugins.tui.server`).
         """
         ...
 
@@ -482,7 +482,7 @@ class MeshClient(Protocol):
         """Put this window's agent on the mesh, and keep it there.
 
         **Does not return while the window is up**, and that is the mechanism
-        rather than an oversight: `slife2.a2a.server`'s `join` is the other end of
+        rather than an oversight: `slife2.plugins.a2a.server`'s `join` is the other end of
         it, so the mesh connection lives exactly as long as this call and
         cancelling it is the departure.  A window that quits, is killed, or loses
         the stream therefore takes its agent *offline* with nothing to send, which
@@ -515,7 +515,7 @@ class MCPWindowClient:
 
         The named-peer check is the point: a `tui:` address pointed at anything
         else fails here, by name, rather than as a window that silently receives
-        nothing (`slife2.mcp_server.identifies`).
+        nothing (`slife2.plugins.protocol.identifies`).
         """
         if self._client is not None:
             return
@@ -547,7 +547,7 @@ class MCPWindowClient:
                 # progress token, and the plugin's push is a *silent no-op*
                 # without one — a window that omitted this would be handed
                 # nothing while every `submit` still succeeded.  See
-                # `slife2.events` for the same seam on a turn's stream.
+                # `slife2.libs.turn.events` for the same seam on a turn's stream.
                 progress_handler=on_progress,
                 # A session lasts as long as the window, so this call is bounded
                 # by nothing: the default timeout would detach a window that had
@@ -569,7 +569,7 @@ class MCPMeshClient:
     """A :class:`MeshClient` backed by an MCP connection to the A2A plugin.
 
     **Held rather than opened per call**, which is the opposite of
-    `slife2.handover`'s way and deliberately so: a hand-over happens once per
+    `slife2.libs.harness.handover`'s way and deliberately so: a hand-over happens once per
     message and a connection that dropped costs one retry, where being *on* the
     mesh is a state other people can see — an agent that reconnected per message
     would be watched coming and going by every peer on it.
@@ -581,7 +581,7 @@ class MCPMeshClient:
     def __init__(self, url: str, *, agent: str = DEFAULT_AGENT):
         self._url = url
         #: Whose mesh this window is responsible for.  The name *is* the mesh
-        #: identity (`slife2.a2a.mesh`), so this is not a label: it is the MQTT
+        #: identity (`slife2.plugins.a2a.mesh`), so this is not a label: it is the MQTT
         #: client id and the last segment of the request topic a peer will use.
         self._agent = agent
         self._client: Client | None = None
@@ -592,7 +592,7 @@ class MCPMeshClient:
         The named-peer check is the point here too: an `a2a:` address pointed at
         something else — a stale port, another plugin — fails by name rather than
         as a window whose agent silently never appears on the mesh
-        (`slife2.mcp_server.identifies`).
+        (`slife2.plugins.protocol.identifies`).
         """
         if self._client is not None:
             return
@@ -615,7 +615,7 @@ class MCPMeshClient:
             # **Nothing to do, and that is not the same as nothing to have.**
             # What arrives here is the plugin's keepalive — the write that makes
             # a dead window notice-able at the other end
-            # (`slife2.a2a.server._hold_open`) — and receiving it means the mesh
+            # (`slife2.plugins.a2a.server._hold_open`) — and receiving it means the mesh
             # still counts this window as here.  A caller that sent *no* progress
             # token would get no keepalive at all, because `report_progress` is
             # then a silent no-op, and its agent would stay online until

@@ -25,7 +25,7 @@ dependencies = [
     # The TUI.  Brings `rich` transitively; we do not import it.
     "textual>=8.2.8",
     # The WeChat bridge, which is the one thing here that talks to somebody who
-    # is not a model: `slife2.ilink` makes plain HTTP requests, and this is the
+    # is not a model: `slife2.plugins.wechat.ilink` makes plain HTTP requests, and this is the
     # client FastMCP already brings — as a distribution named `httpx2`, imported
     # under that name.  Declared rather than relied on transitively, by the same
     # rule as the provider SDKs below: a module this project imports is a
@@ -56,12 +56,12 @@ dependencies = [
     # the ngrok agent as a native extension, so the `ngrok` provider needs no
     # external binary where the other two need `ssh` or `cloudflared`.  The
     # import is inside the one function that starts that tunnel
-    # (`slife2.file_tunnel.providers._import_ngrok`), by the same rule as
+    # (`slife2.plugins.file_tunnel.providers._import_ngrok`), by the same rule as
     # `qrcode` below: a build without it runs every other provider and reports
     # this one as unavailable when it is selected.
     "ngrok>=1.6.0",
     "jinja2>=3.1.0",
-    # Cron, for the scheduled tasks (`slife2.schedule`, DESIGN.md §1.7).  **v1's
+    # Cron, for the scheduled tasks (`slife2.plugins.schedule.expressions`, DESIGN.md §1.7).  **v1's
     # dependency, for v1's feature, and after v1's own argument with itself**: the
     # design notes for that feature say "no apscheduler, no croniter, hand-write
     # the parser" and the implementation used croniter anyway.  What decided it
@@ -69,15 +69,15 @@ dependencies = [
     # are not: `day_or`, the DST rule, and `strict` cross-field validation, which
     # is what rejects `0 9 31 2 *` before an enabled task that can never fire is
     # written down.  Only `get_next`, `get_prev` and `is_valid` are used, and only
-    # from one module: `slife2.schedule` owns the timezone policy and the error
+    # from one module: `slife2.plugins.schedule.expressions` owns the timezone policy and the error
     # contract, so nothing else in this project imports it.
     "croniter>=6.2.4",
     # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
-    # per connection by `slife2.index`, which is why it is a dependency of the
+    # per connection by `slife2.libs.store.index`, which is why it is a dependency of the
     # package rather than something a backend process holds.  A floor rather
     # than a pin like everything else here, but note that it is still alpha —
     # the DDL it accepts is probed at open time rather than assumed (see
-    # `slife2.index.vector_ddl`), and `distance_metric` and `float[N]` are the
+    # `slife2.libs.store.index.vector_ddl`), and `distance_metric` and `float[N]` are the
     # parts of that alpha this project depends on.  Wheels are `py3-none-*` for
     # every platform CI builds on, so there is no interpreter-specific tag to
     # match.
@@ -87,11 +87,11 @@ dependencies = [
     # has nothing to read on Windows, where this project is developed.  So
     # `ZoneInfo("Asia/Shanghai")` raises `ZoneInfoNotFoundError` on a Windows
     # machine without this package, which turns every named timezone in
-    # `slife2.schedule` into a failure nobody can reproduce from Linux.  v1's
+    # `slife2.plugins.schedule.expressions` into a failure nobody can reproduce from Linux.  v1's
     # dependency with v1's comment, kept because the reason is invisible from an
     # import that does not exist: `zoneinfo` loads it by name, from C.
     "tzdata>=2026.5",
-    # The A2A mesh (`slife2.a2a`, DESIGN.md §1.8), and **the wire is not ours**.
+    # The A2A mesh (`slife2.plugins.a2a`, DESIGN.md §1.8), and **the wire is not ours**.
     # The published A2A-over-MQTT profile *is* the SDK: the topic tree, the
     # retained agent card with presence carried by an MQTT user property, the
     # JSON-RPC 2.0 envelopes whose `ResponseTopic`/`CorrelationData` properties
@@ -100,7 +100,7 @@ dependencies = [
     # around it — v1's arrangement and v1's reason: interop with the rest of the
     # ecosystem follows from the wire being somebody else's, and a self-built
     # binding would be a second protocol wearing the name.  Imported only by
-    # `slife2/a2a/mesh.py`.
+    # `slife2/plugins/a2a/mesh.py`.
     "a2a-over-mqtt>=0.1.0",
     # The MQTT client under that SDK, imported *directly* by the same module, for
     # the one thing the SDK does not offer: its own `Requester` is
@@ -112,14 +112,14 @@ dependencies = [
     # module this project imports is a dependency this project states.  It
     # brings `paho-mqtt`, which nothing here imports.
     "aiomqtt>=2.5.0",
-    # The tokenizer `slife2.tokens` sizes a conversation with, and **the one
+    # The tokenizer `slife2.libs.turn.tokens` sizes a conversation with, and **the one
     # dependency here that is not needed to run**.  It is imported inside the
     # one function that resolves it, so a process that never estimates pays
     # nothing; and the vocabulary it needs is *not* in the wheel — `tiktoken`
     # fetches a few megabytes the first time anybody asks for an encoding, which
     # is why a failure to get one is handled rather than raised: the script
     # measure answers instead, and a machine with no network runs everything
-    # (`slife2.tokens` states the argument, including why `o200k_base` is the
+    # (`slife2.libs.turn.tokens` states the argument, including why `o200k_base` is the
     # right base for endpoints that do not use it).  Declared as a plain
     # dependency rather than an extra, because the fallback is a degradation
     # rather than an alternative — an installation that skipped it would size
@@ -142,25 +142,25 @@ classifiers = [
 # Each of these is a process that speaks MCP; `slife2` is the only client.
 [project.scripts]
 slife2 = "slife2:main"
-slife2-agent = "slife2.server.server:main"
-slife2-agent-task = "slife2.agent_task_server:main"
-slife2-schedule = "slife2.schedule_server:main"
-slife2-a2a = "slife2.a2a.server:main"
-slife2-context = "slife2.context_server:main"
-slife2-skills = "slife2.skills_server:main"
-slife2-cli = "slife2.cli_server:main"
-slife2-mcp-tools = "slife2.mcp_tools:main"
-slife2-restapi-tools = "slife2.restapi_tools:main"
-slife2-toolhub = "slife2.toolhub:main"
-slife2-wechat = "slife2.wechat:main"
-slife2-cabinet = "slife2.cabinet:main"
-slife2-media = "slife2.media.server:main"
-slife2-file-tunnel = "slife2.file_tunnel.server:main"
-slife2-tui = "slife2.tui.control:main"
-slife2-llm-openai = "slife2.llm.openai_server:main"
-slife2-llm-anthropic = "slife2.llm.anthropic_server:main"
-slife2-llm-openai-responses = "slife2.llm.openai_responses_server:main"
-slife2-llm-embeddings = "slife2.llm.embeddings_server:main"
+slife2-agent = "slife2.plugins.agent.server:main"
+slife2-agent-task = "slife2.plugins.agent_task.server:main"
+slife2-schedule = "slife2.plugins.schedule.server:main"
+slife2-a2a = "slife2.plugins.a2a.server:main"
+slife2-context = "slife2.plugins.context.server:main"
+slife2-skills = "slife2.plugins.skills.server:main"
+slife2-cli = "slife2.plugins.cli.server:main"
+slife2-mcp-tools = "slife2.plugins.mcp_tools.server:main"
+slife2-restapi-tools = "slife2.plugins.restapi.server:main"
+slife2-toolhub = "slife2.plugins.toolhub.server:main"
+slife2-wechat = "slife2.plugins.wechat.server:main"
+slife2-cabinet = "slife2.plugins.cabinet.server:main"
+slife2-media = "slife2.plugins.media.server:main"
+slife2-file-tunnel = "slife2.plugins.file_tunnel.server:main"
+slife2-tui = "slife2.plugins.tui.server:main"
+slife2-llm-openai = "slife2.plugins.llm.openai_server:main"
+slife2-llm-anthropic = "slife2.plugins.llm.anthropic_server:main"
+slife2-llm-openai-responses = "slife2.plugins.llm.openai_responses_server:main"
+slife2-llm-embeddings = "slife2.plugins.llm.embeddings_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["slife2"]

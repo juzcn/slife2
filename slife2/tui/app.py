@@ -41,7 +41,7 @@ different kind of window.  It is the same three connections, the same queue, the
 same turns, the same prompts; the driver writes nothing and reads nothing, and
 that is the whole of the difference.  What tells a *model* that nobody is there
 is its system prompt (`AgentClaim.headless`, rendered into the template by
-`slife2.server`), because that is the lever for how an agent behaves — a branch
+`slife2.plugins.agent`), because that is the lever for how an agent behaves — a branch
 in here would be a second rule for a question the prompt already answers.
 """
 
@@ -58,9 +58,9 @@ from textual.binding import Binding
 from textual.message import Message as TextualMessage
 from textual.worker import Worker
 
-import slife2.timeouts as _T
-from slife2.config import DEFAULT_AGENT, Config
-from slife2.events import (
+import slife2.helpers.timeouts as _T
+from slife2.libs.host.config import DEFAULT_AGENT, Config
+from slife2.libs.turn.events import (
     ContextChosen,
     TextDelta,
     ThinkingDelta,
@@ -70,6 +70,7 @@ from slife2.events import (
     TurnEvent,
     TurnFinished,
 )
+from slife2.plugins.tui.server import NOTE, Handover
 from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,
@@ -80,7 +81,6 @@ from slife2.tui.client import (
     WindowClient,
     refused,
 )
-from slife2.tui.control import NOTE, Handover
 from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import (
@@ -255,7 +255,7 @@ class SlifeApp(App[None]):
         #: a prompt nothing ever answers would keep the turn from ending.
         self._approval: ApprovalPrompt | None = None
         #: Where this window *attaches* so a message arriving on another channel
-        #: can be handed to it (`slife2.tui.control`) — the plugin's address, and
+        #: can be handed to it (`slife2.plugins.tui.server`) — the plugin's address, and
         #: the window is its client.  Empty means no inbox, which is what a test
         #: wants and what a window started without a config address gets.
         self._control_url = control_url
@@ -395,7 +395,7 @@ class SlifeApp(App[None]):
         """Hold this window's session open, so messages can be handed to it.
 
         A worker of its own, because the call does not return while the window is
-        up: `attach` *is* the session (`slife2.tui.control`), and what arrives on
+        up: `attach` *is* the session (`slife2.plugins.tui.server`), and what arrives on
         it goes through `deliver` — the same method the person's own typing goes
         through, which is the whole of the pass-through.
 
@@ -486,7 +486,7 @@ class SlifeApp(App[None]):
 
         A method of its own rather than `deliver` passed straight through,
         because the two say different things: this is the wire's shape arriving
-        (`slife2.tui.control`), and `deliver` is the window's one way in.
+        (`slife2.plugins.tui.server`), and `deliver` is the window's one way in.
 
         **And this is where the two kinds part.**  A message becomes a turn and
         joins the queue, so it is drawn when its turn starts like anything the
@@ -692,7 +692,7 @@ class SlifeApp(App[None]):
                 # **Nothing is read out of the prompt here.**  The `@path`
                 # markers a person types are resolved by the *agent server* now,
                 # which is what lets every caller attach an image and not only
-                # this terminal (`slife2.attachments`).  The prompt goes as it was
+                # this terminal (`slife2.libs.turn.attachments`).  The prompt goes as it was
                 # written, markers and all — and the picture arrives by way of
                 # `attach_image`, whose answer names it.
                 self._transcript.begin_assistant()

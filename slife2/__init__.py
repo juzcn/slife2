@@ -34,7 +34,7 @@ import argparse
 import sys
 import time
 
-from slife2.config import (
+from slife2.libs.host.config import (
     DEFAULT_AGENT,
     Config,
     ConfigError,
@@ -42,7 +42,7 @@ from slife2.config import (
     find_config_path,
     load,
 )
-from slife2.paths import add_data_dir_argument, apply_data_dir
+from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir
 
 __version__ = "0.1.0"
 
@@ -98,7 +98,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="what to do (default: run the TUI)",
     )
     # Shared with the servers' own parsers: the flag means the same thing in
-    # both, and `slife2.paths` is where the directory it names is defined.
+    # both, and `slife2.libs.host.paths` is where the directory it names is defined.
     add_data_dir_argument(parser)
     parser.add_argument(
         "--agent",
@@ -143,7 +143,7 @@ def _duration(seconds: float) -> str:
     The same rule the transcript uses for a tool call (`slife2.tui.widgets`),
     and deliberately not the same code: that one is handed milliseconds and
     lives in a module that imports Textual, which this one must not — the CLI
-    keeps `slife2.config` and the servers importable without pulling in a UI.
+    keeps `slife2.libs.host.config` and the servers importable without pulling in a UI.
     """
     if seconds < 1.0:
         return f"{seconds * 1000:.0f}ms"
@@ -184,7 +184,7 @@ def _ensure(config: Config, config_path) -> int:
     and a two-line explanation is strictly more useful than a terminal that can
     never connect.
     """
-    from slife2.launcher import Status, ensure_all
+    from slife2.libs.host.launcher import Status, ensure_all
 
     started = time.monotonic()
     failed = []
@@ -262,7 +262,7 @@ def control_url(config: Config) -> str:
     `tui` in both because in both cases it is the terminal that is at one end.
 
     It is a `servers:` entry rather than a section of its own
-    (`slife2.tui.control`), so it is started, probed and stopped with everything
+    (`slife2.plugins.tui.server`), so it is started, probed and stopped with everything
     else, which is what `_ensure` and `_down` get for free.
     """
     return config.server("tui").url
@@ -272,7 +272,7 @@ def mesh_url(config: Config) -> str:
     """Where the window puts its agent on the A2A mesh, or `""` for not on one.
 
     **`""` is the whole of what "not on the mesh" means here**, and it is the
-    config's own switch rather than a second one (`slife2.config.A2ASettings`: a
+    config's own switch rather than a second one (`slife2.libs.host.config.A2ASettings`: a
     machine with no `a2a:` section is a machine that is not on the mesh).  So the
     empty string is returned for an absent section and the window then holds
     nothing and draws nothing — rather than holding a call to a plugin that would
@@ -281,7 +281,7 @@ def mesh_url(config: Config) -> str:
 
     **The key, and not the identity** — two names one word apart, and looking up
     the wrong one is a `ConfigError` before anything starts.  `a2a` is what
-    `servers:` files this address under (`slife2.config.LOCAL_SERVERS`, and the
+    `servers:` files this address under (`slife2.libs.host.config.LOCAL_SERVERS`, and the
     section's own name); `slife2-a2a` is what the *server* answers to, which is
     what `slife2.tui.client` proves it reached (`open_server(name=…)`) and has
     never been a key in that table.  `control_url` above is `"tui"` for the same
@@ -312,7 +312,7 @@ def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
 
 
 def _status(config: Config) -> int:
-    from slife2.launcher import Status, statuses
+    from slife2.libs.host.launcher import Status, statuses
 
     for outcome in statuses(config):
         record = outcome.record
@@ -328,7 +328,7 @@ def _status(config: Config) -> int:
 
 
 def _down(config: Config) -> int:
-    from slife2.launcher import Status, stop
+    from slife2.libs.host.launcher import Status, stop
 
     outcomes = stop(config)
     anything = False
@@ -347,7 +347,7 @@ def _down(config: Config) -> int:
             )
     # **And the broker, which is the one daemon here the launcher does not
     # start.**  It has no module to launch and no MCP identity to check — the
-    # a2a plugin brings one up when the mesh is wanted (`slife2.a2a.broker.ensure`)
+    # a2a plugin brings one up when the mesh is wanted (`slife2.plugins.a2a.broker.ensure`)
     # — so it is not in `specs` and `stop` never sees it.  What it does have is a
     # record of what was started, written by whoever started it, which is what
     # makes stopping it here the same act as stopping every other daemon, and
@@ -355,8 +355,8 @@ def _down(config: Config) -> int:
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
     if config.a2a.configured:
-        from slife2.a2a.broker import BROKER_NAME, log_url
-        from slife2.a2a.broker import stop as stop_broker
+        from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+        from slife2.plugins.a2a.broker import stop as stop_broker
 
         said = stop_broker(config.a2a)
         if said:
@@ -395,9 +395,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "down":
         return _down(config)
 
-    # Imported here rather than at module scope so `slife2.config` and the
+    # Imported here rather than at module scope so `slife2.libs.host.config` and the
     # servers stay importable without pulling in fastmcp or Textual.
-    from slife2.launcher import AgentInUse, claim_agent, others_running
+    from slife2.libs.host.launcher import AgentInUse, claim_agent, others_running
     from slife2.tui.app import SlifeApp, configured_models
 
     code = 0
@@ -431,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
                     # start — which is what keeps the window out of the file.
                     models=configured_models(config),
                     # Where this window attaches, so another channel can hand it
-                    # a message (`slife2.tui.control`).  One address for every
+                    # a message (`slife2.plugins.tui.server`).  One address for every
                     # agent: what picks out this window is the agent name it
                     # attaches under, not a port of its own.
                     control_url=control_url(config),

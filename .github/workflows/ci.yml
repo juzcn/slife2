@@ -29,7 +29,7 @@ jobs:
       # CPython is built without `--enable-loadable-sqlite-extensions` —
       # python-build-standalone links SQLite statically — while Apple's system
       # SQLite does not support them either.  A Python that cannot load one has
-      # no index, so `slife2.db` refuses to open, so every plugin dies: not one
+      # no index, so `slife2.libs.store.db` refuses to open, so every plugin dies: not one
       # failing test but the whole product.  Windows and Linux builds have the
       # feature, which is why this is invisible anywhere but here.
       #

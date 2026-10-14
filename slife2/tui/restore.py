@@ -34,10 +34,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from slife2.context import turn_footnote
-from slife2.events import preview
-from slife2.messages import ToolCall
-from slife2.tools import is_harness
+from slife2.libs.turn.context import turn_footnote
+from slife2.libs.turn.events import preview
+from slife2.libs.turn.messages import ToolCall
+from slife2.libs.turn.tools import is_harness
 from slife2.tui import notes
 from slife2.tui.widgets import ChatView
 
@@ -226,7 +226,7 @@ def _drawn(raw: dict[str, Any]) -> bool:
     """Whether a stored call is one the transcript draws.
 
     **Today: only the model's own calls.**  The harness tools
-    (`slife2.tools`'s word, and the mark is `is_harness`) are in the record — the
+    (`slife2.libs.turn.tools`'s word, and the mark is `is_harness`) are in the record — the
     model's list carries them, which is what makes the pair legal — and nothing
     draws them, live or rebuilt.  Live because the auto-invoke raises no event;
     here because of this filter.

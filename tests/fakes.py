@@ -22,11 +22,11 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 
-from slife2.config import Config
-from slife2.events import TurnEvent
-from slife2.llm.base import Chunk, Stream
-from slife2.messages import Message, StreamChatResult, ToolSpec
-from slife2.tui.control import NOTE, Handover
+from slife2.libs.host.config import Config
+from slife2.libs.model.base import Chunk, Stream
+from slife2.libs.turn.events import TurnEvent
+from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
+from slife2.plugins.tui.server import NOTE, Handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -77,7 +77,7 @@ class ScriptedTurn:
 
 
 class FakeBackend:
-    """An :class:`~slife2.llm.base.LLMBackend` that replays a script.
+    """An :class:`~slife2.libs.model.base.LLMBackend` that replays a script.
 
     Each call to :meth:`stream` consumes the next scripted turn.  Running off
     the end raises rather than looping or returning empty: a test that makes
@@ -457,11 +457,11 @@ def plugin_transports(
     `overrides` replaces or adds a transport by name — a plugin the test
     wants to misbehave, or an entry under `mcp:` it wants wired.
     """
-    from slife2.cli_server import build_server as build_cli
-    from slife2.context_server import build_server as build_context
-    from slife2.mcp_tools import build_server as build_mcp_tools
-    from slife2.restapi_tools import build_server as build_restapi_tools
-    from slife2.skills_server import build_server as build_skills
+    from slife2.plugins.cli.server import build_server as build_cli
+    from slife2.plugins.context.server import build_server as build_context
+    from slife2.plugins.mcp_tools.server import build_server as build_mcp_tools
+    from slife2.plugins.restapi.server import build_server as build_restapi_tools
+    from slife2.plugins.skills.server import build_server as build_skills
 
     def for_plugin(name: str) -> Any:
         if name == "context":

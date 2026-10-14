@@ -26,7 +26,7 @@ from __future__ import annotations
 from slife2.tui.theme import GLYPHS
 
 #: The two glyphs every arrival and departure wears, named here because two
-#: channels write these lines (`slife2.a2a.mesh`, `slife2.wechat`) and a glyph
+#: channels write these lines (`slife2.plugins.a2a.mesh`, `slife2.plugins.wechat.server`) and a glyph
 #: spelled twice is a glyph that drifts once.
 ARRIVED = "⚡"
 GONE = GLYPHS["failed"]
@@ -70,8 +70,8 @@ def not_on_the_mesh(reason: str) -> str:
 def online(name: str) -> str:
     """`⚡ jill online` — a peer, or a channel's link, is up.
 
-    `name` is whatever arrived: a peer's agent name (`slife2.a2a.mesh`) or the
-    channel whose link came up (`slife2.wechat`, which says `wechat`).  One
+    `name` is whatever arrived: a peer's agent name (`slife2.plugins.a2a.mesh`) or the
+    channel whose link came up (`slife2.plugins.wechat.server`, which says `wechat`).  One
     sentence for both, because to the person reading a transcript they are the
     same news — something this conversation can now reach.
     """

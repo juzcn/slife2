@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from slife2 import tokens
+from slife2.libs.turn import tokens
 
 #: Every module that dials one of *our* servers, and the names it does it
 #: through.  Named as strings because importing the plugin stack — `fastmcp`,
@@ -65,13 +65,13 @@ from slife2 import tokens
 #: `test_tui_control`), and refusing it would take away the only way to exercise
 #: a stream end to end.
 _DIALERS: dict[str, tuple[str, ...]] = {
-    "slife2.handover": ("open_server",),
-    "slife2.agent_task_server": ("open_server", "open_backend"),
-    "slife2.schedule_server": ("open_server",),
-    "slife2.server.server": ("open_server", "open_backend"),
-    "slife2.context_server": ("open_server",),
-    "slife2.llm.client": ("open_server",),
-    "slife2.embedder": ("open_server",),
+    "slife2.libs.harness.handover": ("open_server",),
+    "slife2.plugins.agent_task.server": ("open_server", "open_backend"),
+    "slife2.plugins.schedule.server": ("open_server",),
+    "slife2.plugins.agent.server": ("open_server", "open_backend"),
+    "slife2.plugins.context.server": ("open_server",),
+    "slife2.clients.model": ("open_server",),
+    "slife2.clients.embedder": ("open_server",),
 }
 
 
@@ -156,7 +156,7 @@ def real_dialer(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
     """
 
     def restore(module: str) -> None:
-        real = importlib.import_module("slife2.mcp_server").open_server
+        real = importlib.import_module("slife2.plugins.protocol").open_server
         monkeypatch.setattr(importlib.import_module(module), "open_server", real)
 
     return restore
@@ -179,7 +179,7 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the suite off the network, and off a vocabulary load per worker.
 
-    `slife2.tokens` sizes a conversation with `tiktoken`'s `o200k_base` when it
+    `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base` when it
     can get it, and getting it means a few megabytes fetched over the network
     the first time anybody asks — once per *process*, which under `-n auto` is
     once per worker, from a cold cache: a dozen simultaneous downloads to answer

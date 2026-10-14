@@ -7,9 +7,8 @@ leaves it.
 **"And nothing else" is true again, and it was not for a while.**  The window
 used to *serve* an MCP server of its own — on a `tui:` section that nothing
 started — so it was a client at one end and a server at the other.  That server
-is now `slife2.tui.control`, a plugin like every other one, and the window is
-only ever its client.  The module stays in this package for the reason
-`slife2.media.server` lives in `slife2.media`: it is the one that belongs to this
-subsystem, and the client beside it names its tools and speaks its wire format
-without importing anything that renders.
+is now `slife2.plugins.tui.server`, a plugin like every other one and filed with
+every other process under `plugins/`, and the window is only ever its client:
+`slife2/tui/client.py` names its tools and speaks its wire format without
+importing anything that renders.
 """

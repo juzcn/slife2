@@ -1,0 +1,563 @@
+"""The three per-call meta-parameters, and the background they open onto.
+
+One file for `_timeout`, `_async` and `_approve`, because they are one
+mechanism: three names the loop reads off every call and strips before dispatch
+(`slife2.libs.turn.tools`), and the behaviours they select — who enforces a deadline, where
+a result goes, who is asked before a call runs.
+
+The assertions are v1's, ported where the rule is v1's: garbage `_timeout` must
+not kill a turn, `0` never means "no bound" and never reaches a tool as an
+instant kill, a tool that declares its own `timeout` is never wrapped, and a
+denied call runs nothing and mounts nothing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+import pytest
+from fakes import FakeBackend, ListObserver, ScriptedTurn, text_turn
+
+import slife2.libs.harness.async_tasks as async_tasks
+from slife2.libs.harness.async_tasks import (
+    CANCELLED,
+    CHECK_ASYNC,
+    FINISHED,
+    MARKER_PREFIX,
+    RUNNING,
+    cancel_async,
+    channel_for,
+    check_async,
+    marker,
+)
+from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
+from slife2.libs.turn.loop import BACKGROUND_UNAVAILABLE, DENIED, AgentLoop
+from slife2.libs.turn.messages import Message, StreamChatResult, ToolCall, ToolSpec
+from slife2.libs.turn.tools import Tool, ToolRegistry
+
+pytestmark = pytest.mark.unit
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def a_tool(name: str, run, **properties: Any) -> Tool:
+    """One tool, with whatever `properties` its schema should declare.
+
+    A `timeout` property is what makes a tool "native" to the loop
+    (`slife2.libs.turn.tools.declares_timeout`), so the tests that care say so here rather
+    than in a second helper.
+    """
+    parameters: dict[str, Any] = {"type": "object"}
+    if properties:
+        parameters["properties"] = properties
+    return Tool(
+        spec=ToolSpec(name=name, description="", parameters=parameters), run=run
+    )
+
+
+async def collected(_text: str, _channel: str) -> bool:
+    """A hand-back that goes nowhere — for tests about the *other* half of `_async`."""
+    return True
+
+
+def tool_turn(*calls: ToolCall) -> ScriptedTurn:
+    """A scripted response that asks for tools, then stops."""
+    return ScriptedTurn(
+        result=StreamChatResult(tool_calls=tuple(calls), stop_reason="tool_calls")
+    )
+
+
+def one(call: ToolCall, tools: list[Tool], **kwargs: Any) -> AgentLoop:
+    """A loop that calls `call` and then answers — the shortest turn there is."""
+    return AgentLoop(
+        FakeBackend(tool_turn(call), text_turn("done")),
+        ToolRegistry(tools),
+        **kwargs,
+    )
+
+
+def tool_message(messages: list[Message]) -> str:
+    """The text the model was handed for the call this turn made.
+
+    The *tool* message, not the last one: a turn that called a tool has a second
+    model call after it, so the list ends with the assistant's answer.
+    """
+    for message in reversed(messages):
+        if message.role == "tool":
+            return str(message.content or "")
+    raise AssertionError("no tool message in this turn")
+
+
+def marker_fields(text: str) -> dict[str, Any]:
+    """The JSON out of the marker a background result wears."""
+    assert text.startswith(MARKER_PREFIX), text
+    return json.loads(text[len(MARKER_PREFIX) : text.index("]")])
+
+
+@pytest.fixture(autouse=True)
+def empty_registry():
+    """A process-wide registry, emptied around every test.
+
+    `slife2.libs.harness.async_tasks` is the process's — that is the design — so a test that
+    leaves a task behind would be a task the next test can see under an id it
+    never made.
+    """
+    async_tasks._tasks.clear()  # noqa: SLF001 - the registry is the thing under test
+    yield
+    async_tasks._tasks.clear()  # noqa: SLF001
+
+
+# ── `_timeout` ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_bounds_a_call_that_has_no_bound_of_its_own() -> None:
+    """The number the model asked for is the number that fires."""
+    never = asyncio.Event()
+
+    async def hangs(_arguments: dict[str, Any]) -> str:
+        await never.wait()
+        return "never"
+
+    call = ToolCall(id="1", name="hangs", arguments={"_timeout": 0.05})
+    messages: list[Message] = []
+    await one(call, [a_tool("hangs", hangs)]).run_turn(messages, "hi")
+
+    assert tool_message(messages) == "Error: Tool 'hangs' timed out (0.05s)."
+
+
+@pytest.mark.asyncio
+async def test_garbage_timeout_never_kills_the_turn() -> None:
+    """A model that writes "5 seconds" gets its call run, not an exception.
+
+    The failure this prevents is disproportionate: a `float()` that raises
+    escapes the whole batch and ends the turn, over a number nobody needed.
+    """
+
+    async def quick(_arguments: dict[str, Any]) -> str:
+        return "ran"
+
+    for written in ("5 seconds", "x", None, 0, -1):
+        messages: list[Message] = []
+        call = ToolCall(id="1", name="quick", arguments={"_timeout": written})
+        await one(call, [a_tool("quick", quick)]).run_turn(messages, "hi")
+        assert tool_message(messages) == "ran", written
+
+
+@pytest.mark.asyncio
+async def test_a_tool_with_its_own_timeout_is_never_wrapped() -> None:
+    """Native tools self-enforce, and the loop's bound is not a second timer.
+
+    `_timeout: 7` reaches the tool as its own argument, and a `_timeout` that
+    truncates to zero is dropped rather than forwarded: the tools that read this
+    argument document "0 = your default", and one of them would fire instantly on
+    it.
+    """
+    seen: list[dict[str, Any]] = []
+
+    async def native(arguments: dict[str, Any]) -> str:
+        seen.append(dict(arguments))
+        return "ran"
+
+    tool = a_tool("native", native, timeout={"type": "integer"})
+
+    messages: list[Message] = []
+    await one(
+        ToolCall(id="1", name="native", arguments={"_timeout": 7}), [tool]
+    ).run_turn(messages, "hi")
+    assert seen[-1] == {"timeout": 7}
+
+    await one(
+        ToolCall(id="2", name="native", arguments={"_timeout": 0.4}), [tool]
+    ).run_turn(messages, "hi")
+    # Truncated to 0 → removed, so the tool's own default governs.
+    assert seen[-1] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_bare_timeout_on_a_tool_without_one_is_read_and_stripped() -> None:
+    """The model's habit of appending `timeout` is answered, not forwarded.
+
+    A tool server validates its parameters, and an argument its schema does not
+    declare makes it refuse the WHOLE call — v1 measured that.  So a bare
+    `timeout` becomes this call's bound and never reaches the tool.
+    """
+    never = asyncio.Event()
+    seen: list[dict[str, Any]] = []
+
+    async def hangs(arguments: dict[str, Any]) -> str:
+        seen.append(dict(arguments))
+        await never.wait()
+        return "never"
+
+    call = ToolCall(id="1", name="hangs", arguments={"e": "1", "timeout": 0.05})
+    messages: list[Message] = []
+    await one(call, [a_tool("hangs", hangs)]).run_turn(messages, "hi")
+
+    assert tool_message(messages) == "Error: Tool 'hangs' timed out (0.05s)."
+    assert seen and seen[0] == {"e": "1"}
+
+
+@pytest.mark.asyncio
+async def test_the_meta_parameters_reach_the_history_but_not_the_tool() -> None:
+    """The strip is a copy: what the model said is what the conversation keeps."""
+    seen: list[dict[str, Any]] = []
+
+    async def capture(arguments: dict[str, Any]) -> str:
+        seen.append(dict(arguments))
+        return "ran"
+
+    call = ToolCall(id="1", name="capture", arguments={"e": "2", "_timeout": 3})
+    messages: list[Message] = []
+    loop = one(call, [a_tool("capture", capture)])
+    await loop.run_turn(messages, "hi")
+
+    assert seen == [{"e": "2"}]
+    assistant = next(m for m in messages if m.role == "assistant" and m.tool_calls)
+    assert assistant.tool_calls[0].arguments == {"e": "2", "_timeout": 3}
+
+
+# ── `_async` ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_answers_a_marker_naming_the_call() -> None:
+    """The reply is the marker v1's sentence hangs under, naming all four things."""
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        return "the answer"
+
+    call = ToolCall(id="call-7", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    await one(call, [a_tool("slow", slow)], deliver=collected).run_turn(messages, "hi")
+
+    fields = marker_fields(tool_message(messages))
+    assert fields["call_id"] == "call-7"
+    assert fields["tool"] == "slow"
+    assert fields["status"] == RUNNING
+    assert len(fields["task_id"]) == 8
+    assert "✓ Async task started." in tool_message(messages)
+
+
+@pytest.mark.asyncio
+async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
+    """The result arrives on its own, wearing the status that says what it is.
+
+    Pushed rather than polled: the delivery is the whole point of the mode, and
+    what `check_async` answers afterwards is *where the call is*, not what it
+    said.
+    """
+    delivered: list[str] = []
+    channels: list[str] = []
+
+    async def deliver(text: str, channel: str) -> bool:
+        delivered.append(text)
+        channels.append(channel)
+        return True
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await asyncio.sleep(0)
+        return "the answer"
+
+    call = ToolCall(id="call-1", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    loop = one(call, [a_tool("slow", slow)], deliver=deliver)
+    await loop.run_turn(messages, "hi")
+
+    task_id = marker_fields(tool_message(messages))["task_id"]
+    for _ in range(50):  # the background task, not this one, is doing the work
+        if delivered:
+            break
+        await asyncio.sleep(0)
+
+    assert delivered, "the result was never handed back"
+    # Which call it answers rides the channel as well as the marker, so the
+    # bubble a person sees names the tool (`slife2.libs.harness.async_tasks.channel_for`).
+    assert channels == [channel_for("slow")]
+    fields = marker_fields(delivered[0])
+    assert fields["status"] == FINISHED
+    assert fields["task_id"] == task_id
+    assert "the answer" in delivered[0]
+
+    # And the status query says so, without repeating the result: it was already
+    # delivered, and a result read twice is a result the model keeps paying for.
+    answer = await check_async({"task_id": task_id})
+    assert marker_fields(answer)["status"] == FINISHED
+    assert "the answer" not in answer
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_result_stays_readable() -> None:
+    """A hand-back that could not land is kept, rather than lost with it.
+
+    The two "no" answers are both possible in production — a window not showing
+    that agent, an agent server that refused — and the fallback road under the
+    fallback road is the point of keeping the text.
+    """
+
+    async def never_delivers(_text: str, _channel: str) -> bool:
+        return False
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await asyncio.sleep(0)
+        return "lost unless kept"
+
+    call = ToolCall(id="call-2", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    loop = one(call, [a_tool("slow", slow)], deliver=never_delivers)
+    await loop.run_turn(messages, "hi")
+    task_id = marker_fields(tool_message(messages))["task_id"]
+
+    for _ in range(50):
+        task = async_tasks._get_task(task_id)  # noqa: SLF001 - see the fixture
+        if task is not None and task.handle.done():
+            break
+        await asyncio.sleep(0)
+
+    answer = await check_async({"task_id": task_id})
+    assert "lost unless kept" in answer
+    assert marker_fields(answer)["status"] == FINISHED
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
+    """No `deliver` means the mode is refused, in a sentence that can be acted on.
+
+    An agent task's loop is that case (DESIGN.md §9): it runs one turn and has no
+    second one for a result to arrive in, so a task id would be a promise nothing
+    could keep.  The refusal says which one line fixes it.
+    """
+    seen: list[str] = []
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        seen.append("ran")
+        return "the answer"
+
+    call = ToolCall(id="1", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    await one(call, [a_tool("slow", slow)]).run_turn(messages, "hi")
+
+    assert tool_message(messages) == BACKGROUND_UNAVAILABLE
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_background_task_outlives_the_turn_that_started_it() -> None:
+    """Cancelling the turn does not cancel the work it handed off.
+
+    The turn's cancellation reaches what the turn is *awaiting*; this it stopped
+    awaiting the moment it was scheduled, which is the whole of what background
+    means.
+    """
+    finished = asyncio.Event()
+
+    async def deliver(_text: str, _channel: str) -> bool:
+        finished.set()
+        return True
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await asyncio.sleep(0)
+        return "still here"
+
+    call = ToolCall(id="1", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    # A second model call that takes its time, so the turn is still in flight
+    # when it is cancelled — what this test is about.
+    slower_answer = text_turn("done", delay=0.2)  # timeouts: the point of this test
+    loop = AgentLoop(
+        FakeBackend(tool_turn(call), slower_answer),
+        ToolRegistry([a_tool("slow", slow)]),
+        deliver=deliver,
+    )
+    turn = asyncio.create_task(loop.run_turn(messages, "hi"))
+    # Cancelled *after* the call has been handed off — the moment that matters is
+    # the one where the turn has stopped awaiting it, which is when its tool
+    # result lands (the assistant message is written before the call runs).
+    await asyncio.wait_for(
+        _until(lambda: any(m.role == "tool" for m in messages)),
+        timeout=1.0,  # timeouts: the value this test is built around, not a budget
+    )
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    await asyncio.wait_for(
+        finished.wait(),
+        timeout=1.0,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
+
+
+async def _until(predicate) -> None:
+    """Spin until `predicate` holds — a detached hand-back has no handle to await."""
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    return
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_background_call_hands_back_that_it_was_cancelled() -> None:
+    """A cancellation the conversation never hears about is a panel running forever."""
+    handed: list[str] = []
+
+    async def deliver(text: str, _channel: str) -> bool:
+        handed.append(text)
+        return True
+
+    never = asyncio.Event()
+
+    async def hangs(_arguments: dict[str, Any]) -> tuple[str, bool]:
+        await never.wait()
+        return "never", True
+
+    task_id = async_tasks.schedule(
+        hangs({}), call_id="call-9", tool="hangs", deliver=deliver
+    )
+    await asyncio.sleep(0)
+    answer = await cancel_async({"task_id": task_id})
+
+    assert marker_fields(answer)["status"] == CANCELLED
+    await asyncio.wait_for(  # the hand-back is detached, so it is waited for here
+        _until(lambda: bool(handed)),
+        timeout=1.0,  # timeouts: the value this test is built around, not a budget
+    )
+    fields = marker_fields(handed[0])
+    assert fields["status"] == CANCELLED
+    assert fields["call_id"] == "call-9"
+
+
+# ── `_approve` ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_denied_call_runs_nothing_and_mounts_nothing() -> None:
+    """The refusal is the whole of what the model and the screen get.
+
+    No `ToolCallStarted`, and so no panel: v1's rule, and the reason is the
+    display — one that appeared and then said "denied" would have told a reader
+    the tool ran.
+    """
+    seen: list[str] = []
+
+    async def sensitive(_arguments: dict[str, Any]) -> str:
+        seen.append("ran")
+        return "did it"
+
+    async def deny(_call: ToolCall) -> bool:
+        return False
+
+    observer = ListObserver()
+    call = ToolCall(id="1", name="sensitive", arguments={"_approve": True})
+    messages: list[Message] = []
+    await one(call, [a_tool("sensitive", sensitive)], approve=deny).run_turn(
+        messages, "hi", observer
+    )
+
+    assert seen == []
+    assert tool_message(messages) == DENIED
+    started = [e for e in observer.events if isinstance(e, ToolCallStarted)]
+    finished = [e for e in observer.events if isinstance(e, ToolCallFinished)]
+    assert started == []
+    assert finished == []
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_runs_and_is_announced_once() -> None:
+    """The gate is a pause, not a second path: everything after it is ordinary."""
+    asked: list[str] = []
+
+    async def yes(call: ToolCall) -> bool:
+        asked.append(call.name)
+        return True
+
+    async def sensitive(_arguments: dict[str, Any]) -> str:
+        return "did it"
+
+    observer = ListObserver()
+    call = ToolCall(id="1", name="sensitive", arguments={"_approve": True})
+    messages: list[Message] = []
+    await one(call, [a_tool("sensitive", sensitive)], approve=yes).run_turn(
+        messages, "hi", observer
+    )
+
+    assert asked == ["sensitive"]
+    assert tool_message(messages) == "did it"
+    assert len([e for e in observer.events if isinstance(e, ToolCallStarted)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_approve_means_the_gate_is_never_asked() -> None:
+    """An approval nobody asked for is not a confirmation."""
+    asked: list[str] = []
+
+    async def yes(call: ToolCall) -> bool:
+        asked.append(call.name)
+        return True
+
+    async def plain(_arguments: dict[str, Any]) -> str:
+        return "ran"
+
+    messages: list[Message] = []
+    await one(
+        ToolCall(id="1", name="plain", arguments={}),
+        [a_tool("plain", plain)],
+        approve=yes,
+    ).run_turn(messages, "hi")
+
+    assert asked == []
+    assert tool_message(messages) == "ran"
+
+
+@pytest.mark.asyncio
+async def test_a_loop_with_nobody_to_ask_runs_the_call() -> None:
+    """v1's rule for a worker: the decision belongs to whoever is watching, and
+    nobody is — so the call runs rather than becoming one the model can never use.
+    """
+
+    async def sensitive(_arguments: dict[str, Any]) -> str:
+        return "did it"
+
+    call = ToolCall(id="1", name="sensitive", arguments={"_approve": True})
+    messages: list[Message] = []
+    await one(call, [a_tool("sensitive", sensitive)]).run_turn(messages, "hi")
+
+    assert tool_message(messages) == "did it"
+
+
+# ── the two tools, and the marker they share ──────────────────────────────────
+
+
+def test_the_marker_is_one_shape_for_every_status() -> None:
+    """Four statuses, one prefix, one JSON object — read by a model, a screen and
+    this build's own tests, which is why it is built rather than hand-spelled.
+    """
+    for status in (RUNNING, FINISHED, CANCELLED):
+        fields = marker_fields(
+            marker(status, call_id="c", tool="t", task_id="deadbeef")
+        )
+        assert fields == {
+            "call_id": "c",
+            "tool": "t",
+            "task_id": "deadbeef",
+            "status": status,
+        }
+
+
+@pytest.mark.asyncio
+async def test_check_and_cancel_name_a_task_they_do_not_have() -> None:
+    """An unknown id is an `Error` the model can read, not an exception."""
+    for tool in (check_async, cancel_async):
+        answer = await tool({"task_id": "nosuch"})
+        assert answer.startswith("Error")
+        assert "nosuch" in answer
+
+
+def test_the_two_tools_are_offered_under_the_names_the_prompt_uses() -> None:
+    """One spelling per tool, in the schema and in `check_async`'s own sentences."""
+    names = [tool.spec.name for tool in async_tasks.async_tools()]
+    assert names == [CHECK_ASYNC, "cancel_async"]
+    assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")

@@ -42,14 +42,14 @@ a signature — see below).  A test helper's ``timeout: float = 5.0`` is a fixtu
 a test helper's ``timeout: float = _T.timeouts.ready.probe`` is the capture bug
 in a file that is about to assert the registry works.
 
-Model rules behind this gate (see ``slife2/timeouts.py`` and DESIGN.md §4.7):
-  * values live in ``slife2/timeouts.py`` — consumers read them at call time
-    via ``slife2.timeouts.timeouts.<role>.<key>``;
+Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and DESIGN.md §4.7):
+  * values live in ``slife2/helpers/timeouts.py`` — consumers read them at call time
+    via ``slife2.helpers.timeouts.timeouts.<role>.<key>``;
   * budgets (``work``/``ready``/``grace``/``transport``/``storage``/
     ``deliver``) bound an await; cadences (``pacing``) set how often something
     runs.  Both are registry-owned — a cadence left as a module constant is a
     second seat for a value nobody can find;
-  * ``slife2/timeouts.py`` itself is the registry — exempt.
+  * ``slife2/helpers/timeouts.py`` itself is the registry — exempt.
 
 This is v1's gate, ported: the same rules, because the failure it prevents is
 the same one — a number nobody can find, and an outer bound nobody checked the
@@ -62,15 +62,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_DIRS = (ROOT / "slife2", ROOT / "tests")
-EXEMPT = {"slife2/timeouts.py", "tests/test_no_magic_timeouts.py"}
+EXEMPT = {"slife2/helpers/timeouts.py", "tests/test_no_magic_timeouts.py"}
 
 #: relpath → symbols that intentionally stay local.  An entry here is a claim
 #: that the value is not a time budget OR a cadence — a count, a status code, a
 #: profile shape — and the comment says which.
 ALLOWLIST: dict[str, frozenset[str]] = {
-    "slife2/wechat.py": frozenset({"BACKOFF_FACTOR"}),
-    "slife2/runtime.py": frozenset({"WAIT_TIMEOUT"}),
-    "slife2/db.py": frozenset({"MAX_AGENT_NAME"}),
+    "slife2/plugins/wechat/server.py": frozenset({"BACKOFF_FACTOR"}),
+    "slife2/libs/host/runtime.py": frozenset({"WAIT_TIMEOUT"}),
+    "slife2/libs/store/db.py": frozenset({"MAX_AGENT_NAME"}),
 }
 
 #: Name tokens that mark a number as time-valued.  Budget words and cadence
@@ -298,7 +298,7 @@ def _scan_all() -> list[str]:
 def test_no_magic_timeouts():
     violations = _scan_all()
     assert not violations, (
-        "hardcoded time values — route every value through slife2/timeouts.py:\n"
+        "hardcoded time values — route every value through slife2/helpers/timeouts.py:\n"
         + "\n".join(violations)
     )
 
@@ -408,7 +408,7 @@ def test_every_registry_key_is_consumed():
     """
     from dataclasses import fields
 
-    from slife2.timeouts import Timeouts
+    from slife2.helpers.timeouts import Timeouts
 
     mentioned: set[tuple[str, str]] = set()
     for base in SCAN_DIRS:

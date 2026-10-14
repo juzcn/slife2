@@ -1,0 +1,582 @@
+"""Writing `slife2.yaml`: the four properties an edit has to have.
+
+It is the first thing in slife2 that writes the config, so each of them is a new
+promise rather than a regression guard: comments and the rest of the file
+survive, a `set` replaces the whole entry rather than patching a field, an edit
+that changes nothing does not touch the file, and a file the loader would refuse
+is not left on disk.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from slife2.libs.host.config import ConfigError, load
+from slife2.libs.host.configfile import (
+    config_path,
+    read_scalar,
+    read_section,
+    remove,
+    set_enabled,
+    set_scalar,
+    update_entry,
+    upsert,
+)
+from slife2.libs.host.paths import DATA_ENV_VAR
+
+#: A config with everything an edit must not disturb: comments above, beside and
+#: between entries, a long single-line value, Chinese text, and quote styles that
+#: differ from line to line.
+CONFIG = """\
+# slife2.yaml — the explanation lives here, and a write must not eat it.
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    # The key is a reference; the value is in the credential store.
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+        name: 'Big one'
+        context_window: 100000
+        max_tokens: 4000
+default: local/big
+
+# ── Other people's servers ──────────────────────────────────────────────────
+mcp:
+  # Kept for a rainy day.  Not a description anybody wrote quickly.
+  slow-one:
+    command: npx
+    args:
+      - -y
+      - some-server
+    description: A very long single line of prose that ruamel would love to wrap at eighty columns and must not, because the file churns on every write if it does.
+    enabled: false
+  chinese:
+    url: https://example.test/mcp
+    description: 高德地图官方 MCP Server，提供地理编码、逆地理编码、IP定位、天气查询。
+
+# ── Commands already on this machine ────────────────────────────────────────
+cli:
+  yt-dlp:
+    command: yt-dlp
+    description: Download video.
+"""
+
+
+def added(path, name: str, section: str = "mcp") -> str:
+    """The lines a new entry occupies, so a test can read the entry it wrote.
+
+    Split out because the interesting assertions are about what is *not* in the
+    block — an empty `url`, an `enabled` the caller never mentioned — and a
+    substring search over the whole file would find the next entry's.
+    """
+    text = path.read_text(encoding="utf-8")
+    block = text.split(f"  {name}:", 1)[1]
+    return block.split("\n# ", 1)[0]
+
+
+def write(tmp_path, text: str = CONFIG):
+    """A config file at *tmp_path*, creating the directory it goes in.
+
+    The `mkdir` is for the test that writes into the data directory, which the
+    autouse fixture only *names*: it is `slife2.libs.host.paths.data_dir` that creates one,
+    and a test that writes before anything has resolved it would otherwise be
+    the thing that creates it — with a traceback instead of a config.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# --- what a write must not cost ----------------------------------------------
+
+
+def test_a_write_keeps_the_whole_file_around_it(tmp_path) -> None:
+    """**The reason the writer is a document editor and not a dict dump.**
+
+    `slife2.yaml` is mostly explanation: the file the operator reads is the
+    comments, and a rewrite that reflows the entries around the one being
+    changed is a rewrite of a file they wrote.  So what is asserted is not "the
+    comments are still there" but the stronger thing — every line that was there
+    is still there, in order, and they are all still one line each.
+    """
+    path = write(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    upsert("mcp", "newcomer", {"url": "https://new.test/mcp"}, path=path)
+
+    after = path.read_text(encoding="utf-8")
+    original = before.splitlines()
+    remaining = iter(after.splitlines())
+    assert all(line in remaining for line in original), (
+        "a line of the file the edit had nothing to do with was rewritten"
+    )
+    assert "  newcomer:\n    url: https://new.test/mcp\n" in after
+    assert after.count("description: A very long single line") == 1
+    assert "高德地图官方 MCP Server，提供地理编码" in after, "not \\uXXXX escaped"
+
+
+def test_an_update_replaces_the_entry_rather_than_patching_it(tmp_path) -> None:
+    """**The whole entry, so a `set` can say a field is gone.**
+
+    `slow-one` is written again with no `description` and no `enabled`; both were
+    facts about the *old* entry and neither survives.  This is what makes
+    switching a server from `url` to `command` possible at all — a merge would
+    keep the stale `url`, and the loader would then refuse the entry for naming
+    two transports.  What an entry written fresh does keep is the comment in the
+    section above it, because that belongs to the section and not to the fields.
+    """
+    path = write(tmp_path)
+
+    upsert("mcp", "slow-one", {"command": "uvx", "args": ["other-server"]}, path=path)
+
+    entry = load(path).mcp["slow-one"]
+    assert entry.command == "uvx"
+    assert entry.args == ("other-server",)
+    assert entry.description == "", "a field the caller did not name is gone"
+    assert entry.enabled is True, "and the switch it did not name is back to default"
+    assert "# Kept for a rainy day." in path.read_text(encoding="utf-8")
+
+
+def test_a_field_that_says_nothing_is_not_written(tmp_path) -> None:
+    """An empty value is four spellings of "no value", and none is a field.
+
+    `url: ''` in particular reads as a claim that there *is* a URL, and the
+    loader refuses an entry that names both transports — so an upsert that wrote
+    its empty arguments through would make the next entry unloadable.
+    """
+    path = write(tmp_path)
+
+    upsert(
+        "mcp",
+        "newcomer",
+        {"command": "npx", "args": [], "env": {}, "url": "", "description": None},
+        path=path,
+    )
+
+    block = added(path, "newcomer")
+    assert "command: npx" in block
+    assert "url" not in block, "an entry that names no url must not claim one"
+    assert "env" not in block
+    assert load(path).mcp["newcomer"].args == ()
+
+
+def test_enabled_is_written_only_when_it_is_false(tmp_path) -> None:
+    """Off is a decision and on is the default, so only one is a line.
+
+    Which is the file's own convention — `enabled: false` appears four times in
+    the checked-in config and `enabled: true` never — and it is what makes the
+    switch's presence in a diff mean something.
+    """
+    path = write(tmp_path)
+
+    upsert("mcp", "newcomer", {"url": "https://new.test/mcp"}, path=path)
+    # Every `set` is the whole entry, so a second one restates what it keeps —
+    # an update that named only `enabled` would replace the entry with one the
+    # loader refuses for having no transport.
+    entry = {"url": "https://new.test/mcp", "description": "d"}
+    upsert("mcp", "newcomer", {**entry, "enabled": True}, path=path)
+    assert "enabled" not in added(path, "newcomer")
+
+    upsert("mcp", "newcomer", {**entry, "enabled": False}, path=path)
+    assert "enabled: false" in added(path, "newcomer")
+
+
+# --- removal and the switch --------------------------------------------------
+
+
+def test_a_removal_takes_the_entry_and_says_whether_it_was_there(tmp_path) -> None:
+    path = write(tmp_path)
+
+    assert remove("mcp", "chinese", path=path) is True
+    assert "chinese" not in path.read_text(encoding="utf-8")
+    assert "slow-one" in path.read_text(encoding="utf-8")
+    assert remove("mcp", "chinese", path=path) is False
+
+
+def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
+    """A reader who sees the mtime move should be able to believe something did.
+
+    The removal of an entry that is not there is the case that makes this worth
+    asserting: it is a normal answer to a normal request — two callers removing
+    the same server — and it must not read as a write.
+    """
+    path = write(tmp_path)
+    before = path.read_text(encoding="utf-8")
+    stamp = path.stat().st_mtime_ns
+
+    assert remove("mcp", "nothing-here", path=path) is False
+    assert set_enabled("mcp", "nothing-here", False, path=path) is False
+
+    assert path.read_text(encoding="utf-8") == before
+    assert path.stat().st_mtime_ns == stamp
+
+
+def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
+    tmp_path,
+) -> None:
+    """**The section is a place, and emptying it does not move it.**
+
+    Found by a removal that failed every time the section had a comment inside
+    it: ruamel renders a block mapping that has become empty with a comment still
+    hanging off it as the key, that comment, then `{}` at column zero — which is
+    not YAML, so the write was refused and rolled back.  And the obvious fix —
+    drop the section — is the wrong one here, because `slife2.yaml` explains each
+    section in a comment block *above* its key: a `mcp:` that disappeared would
+    take the paragraph with it, and come back at the bottom of the file the next
+    time an entry was added.
+
+    So three things are asserted, and the third is the one that is easy to get
+    wrong: the section stays where it was, the comment that explains the
+    *section* stays above it, and the comment that described the *entry* goes
+    with the entry — a comment about something that no longer exists is the one
+    thing a comment must not be.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        "# ── REST APIs ──\n"
+        "rest-api:\n"
+        "  # Documents the entry, and the entry is going.\n"
+        "  registry:\n"
+        "    spec: https://registry.example.test/openapi.json\n",
+        encoding="utf-8",
+    )
+
+    assert remove("rest-api", "registry", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "rest-api: {}" in after, "the section is left, and left where it was"
+    assert "# ── REST APIs ──" in after, "the section's own explanation"
+    assert "Documents the entry" not in after, "and nothing about the entry"
+    assert load(path).rest_apis == {}, "the file still reads"
+
+    # And back: an entry written into the empty section lands in it, in place.
+    upsert(
+        "rest-api",
+        "registry",
+        {"spec": "https://registry.example.test/openapi.json"},
+        path=path,
+    )
+    assert "registry" in load(path).rest_apis
+    assert "rest-api: {}" not in path.read_text(encoding="utf-8")
+
+
+def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
+    """**A comment belongs to the entry under it, and a deletion moves two.**
+
+    ruamel keeps "the comment above an entry" as the *trailing* comment of the
+    entry before it (for the first entry, as the mapping's pending comment), so
+    deleting an entry from the middle of a section moves two comment blocks and
+    only one of the moves is right: the survivor's comment is destroyed along
+    with the deleted entry, and the deleted entry's own comment slides up over
+    the survivor.  Left alone, the file ends up with a comment describing
+    something that no longer exists attached to the one entry it is least true
+    of — the failure the test above names for a section's *last* entry, here for
+    a middle one.
+
+    Both positions are exercised, because they are two different ruamel slots —
+    the first key's comment lives on the mapping, every later one on its
+    predecessor — and a fix for one leaves the other wrong.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        "mcp:\n"
+        "  # Describes slow-one, and slow-one is going.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n"
+        "  # Describes tail, which stays.\n"
+        "  tail:\n"
+        "    command: tail\n",
+        encoding="utf-8",
+    )
+
+    # The first key: its comment rides on the mapping, the survivor's on it.
+    assert remove("mcp", "slow-one", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "slow-one" not in after
+    assert "Describes slow-one" not in after, "its comment goes with it"
+    assert "Describes filesystem" in after, "the survivor keeps its own"
+    assert after.index("Describes filesystem") < after.index("filesystem:"), (
+        "and it is still above the entry it describes, not stranded"
+    )
+    assert list(load(path).mcp) == ["filesystem", "tail"]
+
+    # A middle key: the same two moves, in ruamel's other slot.
+    assert remove("mcp", "filesystem", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "filesystem" not in after
+    assert "Describes filesystem" not in after
+    assert "Describes tail" in after
+    assert after.index("Describes tail") < after.index("tail:")
+    assert list(load(path).mcp) == ["tail"]
+
+
+def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:
+    """`slife2.libs.host.config` reads `enabled` off the entry, so that is where it goes."""
+    path = write(tmp_path)
+
+    assert set_enabled("mcp", "chinese", False, path=path) is True
+    assert load(path).mcp["chinese"].enabled is False
+
+    assert set_enabled("mcp", "chinese", True, path=path) is True
+    assert load(path).mcp["chinese"].enabled is True
+    assert "enabled" not in added(path, "chinese")
+
+
+# --- the two refusals --------------------------------------------------------
+
+
+def test_a_file_the_loader_refuses_is_not_left_on_disk(tmp_path) -> None:
+    """**The write is validated by the reader, and rolled back if it fails.**
+
+    An entry with neither `command` nor `url` is one `slife2.libs.host.config` refuses —
+    so the alternative to this test is an edit that reports success and takes
+    the system down at the *next* start, in a process that never saw the edit.
+    What must survive is not only "the call raised" but "the file is the file it
+    was", because a half-applied config is the one outcome worse than neither.
+    """
+    path = write(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError) as raised:
+        upsert("mcp", "broken", {"description": "neither transport"}, path=path)
+
+    assert "needs `command`" in str(raised.value)
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_section_edit_refuses_when_there_is_no_config_to_edit(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A missing file is refused, not created.**
+
+    slife2 runs with no config at all — one built-in provider — so a write that
+    created the file would replace that fallback with a file holding only the
+    section being edited: the next start would have no models, over an edit that
+    reported success.  The message has to say what to do instead.
+    """
+    missing = isolated_runtime / "slife2.yaml"
+    assert not missing.exists()
+
+    with pytest.raises(ConfigError) as raised:
+        upsert("mcp", "newcomer", {"url": "https://new.test/mcp"})
+
+    assert "no slife2.yaml" in str(raised.value)
+    assert not missing.exists(), "the refusal must not be a file it created"
+
+
+def test_the_path_is_the_one_the_loader_reads(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`config_path` and `slife2.libs.host.config` must not disagree about the file.
+
+    `--data-dir` is the knob for where an installation lives, and a writer that
+    resolved it differently would edit a file nothing reads.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(isolated_runtime))
+    write(isolated_runtime)
+
+    assert config_path() == isolated_runtime / "slife2.yaml"
+
+
+# --- the top-level scalar, and the locked update -----------------------------
+
+
+def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
+    """`default:` is not a section, so it needs a writer of its own.
+
+    And `load` accepts any string there — only `Config.resolve` knows a
+    reference from a typo — which is why the caller passes its own judge and a
+    write naming no model is rolled back like any other the reader refuses.
+    """
+    path = write(tmp_path)
+
+    set_scalar("default", "local/big", path=path)
+    assert read_scalar("default", path=path) == "local/big"
+    assert load(path).default == "local/big"
+    # Everything the one assignment had nothing to do with is untouched.
+    assert "# slife2.yaml — the explanation lives here" in path.read_text(
+        encoding="utf-8"
+    )
+
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ConfigError):
+        set_scalar(
+            "default",
+            "nobody/knows",
+            check=lambda config: config.resolve("nobody/knows"),
+            path=path,
+        )
+    assert path.read_text(encoding="utf-8") == before, "rolled back"
+
+
+def test_a_scalar_that_is_not_there_reads_as_the_default(tmp_path) -> None:
+    path = write(tmp_path)
+    assert read_scalar("nobody-wrote-this", default="?", path=path) == "?"
+
+
+def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
+    """**The whole point of `update_entry`.**  A list is read *and* written.
+
+    `upsert` writes exactly what it is handed, so a caller that read an entry's
+    list and wrote it back through `upsert` would be a read-modify-write with
+    the lock only on the write — and the cost of the interleave is silent: two
+    callers add one item to one entry, and one of them is gone.
+    """
+    path = write(tmp_path)
+
+    def add(current: dict) -> dict:
+        seen = [one for one in current.get("args", []) if isinstance(one, str)]
+        return {**current, "args": [*seen, "extra"]}
+
+    assert update_entry("mcp", "slow-one", add, path=path) is True
+
+    entry = load(path).mcp["slow-one"]
+    assert entry.args == ("-y", "some-server", "extra")
+    assert entry.command == "npx", "the caller only touched `args`"
+    assert entry.enabled is False, "and only the list moved"
+
+
+def test_an_update_that_answers_none_deletes_the_entry(tmp_path) -> None:
+    path = write(tmp_path)
+
+    assert update_entry("mcp", "slow-one", lambda current: None, path=path) is True
+    assert "slow-one" not in load(path).mcp
+    assert "chinese" in load(path).mcp, "its neighbours stay"
+
+
+def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
+    path = write(tmp_path)
+    assert (
+        update_entry("mcp", "ghost", lambda current: {"url": "u"}, path=path) is False
+    )
+    assert load(path).mcp["ghost"].url == "u"
+
+
+# --- a value that cannot be read is not a value that is absent ----------------
+#
+# DESIGN.md §10.1's first deformation, at the one place in this module where it
+# is data loss rather than a wrong answer: every path below used to answer
+# "there is nothing here" about a value it could not read, and then — on the
+# write paths — replace it with the empty one it had just invented.
+#
+# Both fixtures are **valid YAML**, which is the point: a section that is a
+# string is a mistake a person makes in a file they hand-edit, and it is not a
+# file ruamel refuses.  Written as `mcp: "oops"` above the entries it would not
+# parse at all, and the test would be measuring the parser rather than the
+# reader.
+
+#: `mcp:` as a scalar, with nothing under it.
+BROKEN_SECTION = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+        name: 'Big one'
+default: local/big
+
+mcp: "oops"
+"""
+
+#: And one entry inside a section that is a mapping.
+BROKEN_ENTRY = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SLIFE2_TEST_KEY:-none}
+    models:
+      - model: big
+        name: 'Big one'
+default: local/big
+
+mcp:
+  chinese: "oops"
+"""
+
+
+def test_a_section_that_is_not_a_mapping_is_refused_not_answered_empty(tmp_path):
+    """`mcp: "oops"` is a mistake, and a listing that answers `{}` buries it.
+
+    `slife2.libs.host.config._mapping` refuses the same shape at load, so answering empty
+    here was this reader disagreeing with the one that decides whether the
+    system starts — and disagreeing quietly, until the next start.
+    """
+    path = write(tmp_path, BROKEN_SECTION)
+
+    with pytest.raises(ConfigError) as raised:
+        read_section("mcp", path=path)
+    assert "`mcp:`" in str(raised.value)
+
+    assert read_section("a2a", path=path) == {}, "an absent section is still empty"
+
+
+def test_an_entry_that_is_not_a_mapping_is_refused_not_dropped(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+
+    with pytest.raises(ConfigError) as raised:
+        read_section("mcp", path=path)
+    assert "`mcp.chinese:`" in str(raised.value)
+
+
+def test_a_write_will_not_replace_a_section_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_SECTION)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        upsert("mcp", "new", {"command": "x"}, path=path)
+
+    assert path.read_text(encoding="utf-8") == before, "the operator's value stays"
+
+
+def test_the_switch_will_not_replace_an_entry_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        set_enabled("mcp", "chinese", False, path=path)
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_an_update_will_not_replace_an_entry_it_cannot_read(tmp_path):
+    path = write(tmp_path, BROKEN_ENTRY)
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        update_entry("mcp", "chinese", lambda current: {"url": "u"}, path=path)
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_mode_that_could_not_be_kept_is_said_rather_than_swallowed(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """**§8.7 states the swap as preserving the file's mode**, and the failure
+    was `except OSError: pass`: the config came back at `mkstemp`'s `0600`,
+    which tightens a file somebody had made group-readable — another user of
+    the machine loses the config and nothing says why.
+    """
+    path = write(tmp_path)
+
+    def refuse(*args, **kwargs):
+        raise OSError("not permitted")
+
+    monkeypatch.setattr(os, "chmod", refuse)
+    with caplog.at_level("WARNING"):
+        upsert("mcp", "new", {"command": "x"}, path=path)
+
+    assert "the file's mode was not kept" in caplog.text
+    assert load(path).mcp["new"].command == "x", "and the write still happened"

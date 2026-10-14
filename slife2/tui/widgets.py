@@ -51,23 +51,24 @@ from textual.message import Message as TextualMessage
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
+from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
+from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
+from slife2.libs.harness.markers import strip as strip_marker
+
 # Imported, never re-spelled.  The module that writes a marker is the one that
 # knows what it looks like, and a prefix typed a second time here is a copy that
 # drifts — into printing the raw marker at somebody, which is the failure these
-# imports exist to prevent.  Taking one off is `slife2.markers.strip`, which is
+# imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
-from slife2.a2a.server import CHANNEL as A2A_CHANNEL
-from slife2.a2a.server import MARKER_PREFIX as A2A_MARKER
-from slife2.agent_task_server import CHANNEL as ASYNC_TASK_CHANNEL
-from slife2.agent_task_server import MARKER_PREFIX as ASYNC_TASK_MARKER
-from slife2.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
-from slife2.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
-from slife2.markers import strip as strip_marker
-from slife2.schedule_server import CHANNEL as SCHEDULE_CHANNEL
+from slife2.plugins.a2a.server import CHANNEL as A2A_CHANNEL
+from slife2.plugins.a2a.server import MARKER_PREFIX as A2A_MARKER
+from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
+from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
+from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
+from slife2.plugins.wechat.server import CONFIG_KEY as WECHAT_CHANNEL
+from slife2.plugins.wechat.server import MARKER_PREFIX as WECHAT_MARKER
 from slife2.tui.theme import GLYPHS, PALETTE
-from slife2.wechat import CONFIG_KEY as WECHAT_CHANNEL
-from slife2.wechat import MARKER_PREFIX as WECHAT_MARKER
 
 #: Every marker this window knows how to take back off, handed to `strip_marker`
 #: together.  A marker that is not in here is one this window does not know
@@ -155,7 +156,7 @@ def channel_prefix(channel: str) -> str:
     if channel.startswith(f"{ASYNC_TASK_CHANNEL}:"):
         # An agent task's answer, wearing the name of the task that produced it.
         # The name is in the channel because a hand-over carries the channel and
-        # the words and nothing else (`slife2.agent_task_server`), and the bubble
+        # the words and nothing else (`slife2.plugins.agent_task.server`), and the bubble
         # is deliberately *not* the key spelled again: `agent-task:research` is
         # an address, and what a person is being told is who answered.
         return f"AsyncTask({channel.split(':', 1)[1]})> "
@@ -163,7 +164,7 @@ def channel_prefix(channel: str) -> str:
         # A background tool call of this conversation's own — the other half of
         # the pair above, and named the same way: the tool is what a person
         # needs, since several calls can be in the background at once
-        # (`slife2.async_tasks.channel_for`).
+        # (`slife2.libs.harness.async_tasks.channel_for`).
         return f"AsyncTool({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{SCHEDULE_CHANNEL}:"):
         # The clock, and which task came due.  **There is no marker to take off
@@ -184,7 +185,7 @@ def channel_prefix(channel: str) -> str:
         # **`PeerAgent`, not the key spelled out.**  `a2a:jill` is an address —
         # a protocol's name for a link — and what a person is being told is that
         # another *agent* spoke, which is the same word its marker uses
-        # (`slife2.a2a.server.MARKER_PREFIX`).
+        # (`slife2.plugins.a2a.server.MARKER_PREFIX`).
         return f"PeerAgent({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
@@ -1044,7 +1045,7 @@ class ToolCallWidget(VerticalScroll):
     ) -> None:
         # **The marker comes off before it is kept, not before it is drawn.**
         # A tool result may wear one — a background call's result does
-        # (`slife2.async_tasks`), and it is the same shape a handed-over message
+        # (`slife2.libs.harness.async_tasks`), and it is the same shape a handed-over message
         # wears — and the panel is a display: the marker is machinery's words for
         # other machinery, and a person reading a result should get the sentence
         # that follows it.

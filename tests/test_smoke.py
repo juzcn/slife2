@@ -15,7 +15,7 @@ import pytest
 
 import slife2
 from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
-from slife2.config import A2A_SERVER_NAME, A2ASettings, default_config, load
+from slife2.libs.host.config import A2A_SERVER_NAME, A2ASettings, default_config, load
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +25,7 @@ def test_version_is_exposed() -> None:
 
 
 def test_package_import_does_not_pull_in_textual() -> None:
-    """`slife2.config` and the servers must be importable without a TUI stack.
+    """`slife2.libs.host.config` and the servers must be importable without a TUI stack.
 
     The import is deferred inside `main` for exactly this reason: a server
     process should not pay for Textual, and CI installs the wheel with no
@@ -92,7 +92,7 @@ def test_the_mesh_url_is_the_key_the_address_is_filed_under() -> None:
 
     `servers:` is keyed by the short name every plugin's module calls its
     `CONFIG_KEY`, and `slife2-a2a` is what the *server* answers to (the identity
-    `open_server(name=…)` checks, from `slife2.config.SERVER_MODULES`).  Looking
+    `open_server(name=…)` checks, from `slife2.libs.host.config.SERVER_MODULES`).  Looking
     up the identity in the key table is a `ConfigError` before the TUI starts,
     which is what this caught: every test of the window passed an address in by
     hand, so nothing exercised the line that reads one out of the file.
@@ -126,8 +126,8 @@ def test_the_take_down_is_what_stops_the_broker(
     the refusal to signal anything the record does not prove is ours).  What is
     asserted here is that the take-down *asks*, and repeats the answer.
     """
-    import slife2.a2a.broker as broker
-    from slife2 import launcher
+    import slife2.plugins.a2a.broker as broker
+    from slife2.libs.host import launcher
 
     config = default_config()
     object.__setattr__(config, "a2a", A2ASettings(configured=True))
@@ -152,8 +152,8 @@ def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(
     use the mesh, and a take-down that announced the absence of a daemon nobody
     asked for would be reporting a non-event on every exit.
     """
-    import slife2.a2a.broker as broker
-    from slife2 import launcher
+    import slife2.plugins.a2a.broker as broker
+    from slife2.libs.host import launcher
 
     config = default_config()
     object.__setattr__(config, "a2a", A2ASettings(configured=True))
@@ -205,7 +205,7 @@ def test_headless_reaches_the_driver_and_the_claim(
     nothing — and it is the *whole* of what `--headless` does to the window:
     nothing is passed in, because an unattended agent is the same agent.  The
     other reader is the servers: they render the system prompt
-    (`slife2.server.opening_messages`), they are a different process from the one
+    (`slife2.plugins.agent.opening_messages`), they are a different process from the one
     that was told `--headless`, and a prompt is exactly where a model finds out
     that there is nobody to ask.  That is why the flag is written into the claim:
     `AgentClaim.headless` is the shared record of who is running under a name,
@@ -224,7 +224,7 @@ def test_headless_reaches_the_driver_and_the_claim(
     """
     from uuid import uuid4
 
-    from slife2.runtime import read_claim
+    from slife2.libs.host.runtime import read_claim
     from slife2.tui import app as app_module
 
     agent = f"smoke-{uuid4().hex[:8]}"
