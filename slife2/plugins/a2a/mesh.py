@@ -488,18 +488,38 @@ def _card_instance(data: dict | None) -> str:
     return ""
 
 
+#: The outcome of a send, as the one word the plugin renders and the store
+#: records.  `UNREACHABLE` is the odd one: it is not a wire state at all but the
+#: requester's own failure — the retry ladder ran out with no reply — and it is
+#: named beside the three that are so that a renderer can switch on one value
+#: rather than on a set of flags that can disagree.
+COMPLETED = "completed"
+CANCELLED = "cancelled"
+FAILED = "failed"
+UNREACHABLE = "unreachable"
+
+
 def _reply_state(data: dict) -> str:
-    """Store status implied by a terminal reply's raw wire state."""
+    """Store status implied by a terminal reply's raw wire state.
+
+    **Three of the four outcomes, and the SDK's terminal set is wider than its
+    name.**  `a2a_over_mqtt.TERMINAL_KINDS` covers `input_required` and its
+    error kinds as well as a terminal status, so a peer that answers "I need
+    more input" ends its requester ladder here; this system has no way to
+    continue an interrupted task, so such a reply is recorded as `failed` and
+    read that way — the honest ending available, and the same word the store's
+    row carries (DESIGN.md §9, "an interrupted peer task").
+    """
     result = data.get("result") or {}
     status = result.get("statusUpdate", {}).get("status", {})
     if not status:
         status = result.get("task", {}).get("status", {})
     state = (status.get("state") or "").upper()
     if state == "TASK_STATE_COMPLETED":
-        return "completed"
+        return COMPLETED
     if state == "TASK_STATE_CANCELED":
-        return "cancelled"
-    return "failed"
+        return CANCELLED
+    return FAILED
 
 
 class A2AMesh:
@@ -580,8 +600,8 @@ class A2AMesh:
 
         # Agent-side callbacks — replaced by the plugin before connect().
         self.on_inbound_task = lambda source, content, task_id, kind="task": None
-        self.on_task_completion = (
-            lambda corr_id, result, cancelled, peer, kind="task", failed=False: None
+        self.on_task_completion = lambda corr_id, result, outcome, peer, kind="task": (
+            None
         )
         self.on_agent_change = lambda card, event: None
         # A peer's CancelTask, delivered to the agent: the model is told and
@@ -1017,15 +1037,20 @@ class A2AMesh:
         if kind not in TERMINAL_KINDS:
             return
         result = self._pending.pop(task_id, "") or content
+        # **The wire's own ending, carried through as one word.**  It used to
+        # arrive at the plugin as a single `cancelled` flag, so the other two
+        # endings the same function distinguishes — `completed` and `failed` —
+        # collapsed into `completed` on the way out: a peer whose handler raised
+        # had its `TASK_STATE_FAILED` rendered to the conversation as "Peer X
+        # completed async task", in the same delivery that recorded the truth.
         state = _reply_state(data)
-        cancelled = state == "cancelled"
         if send is not None and not send.record:
             # MESSAGE conversation: no task record was created — push the
             # reply as a message, not a task completion.
             self.on_task_completion(
                 task_id,
                 result,
-                cancelled,
+                state,
                 send.agent,
                 "message",
             )
@@ -1046,9 +1071,7 @@ class A2AMesh:
                 # the send and its correlations in the tables for ever.
                 logger.warning("a2a_reply_without_record task=%s", task_id)
                 if send is not None:
-                    self.on_task_completion(
-                        task_id, result, cancelled, send.agent, "task"
-                    )
+                    self.on_task_completion(task_id, result, state, send.agent, "task")
             else:
                 if state == "cancelled":
                     get_store().record_cancel(task_id)
@@ -1059,7 +1082,7 @@ class A2AMesh:
                 self.on_task_completion(
                     task_id,
                     result,
-                    cancelled,
+                    state,
                     record.agent_name,
                     "task",
                 )
@@ -1147,10 +1170,12 @@ class A2AMesh:
                         f"it was sent {send.attempts} times over the requester "
                         f"retry ladder and never acknowledged. Send it again if "
                         f"it still matters.",
-                        False,
+                        # The one outcome no reply can produce: nobody answered
+                        # at all, so this is the *requester's* failure and the
+                        # reader is told it that way rather than as a peer's.
+                        UNREACHABLE,
                         send.agent,
                         "task" if send.record else "message",
-                        failed=True,
                     )
                     return
                 await asyncio.sleep(_backoff_delay(send.attempts - 1))
@@ -1248,12 +1273,23 @@ class A2AMesh:
         return task_id
 
     async def cancel_task(self, agent: str, task_id: str) -> str:
-        """Standard ``CancelTask``; returns the resulting status string."""
+        """Standard ``CancelTask``; returns the resulting status string.
+
+        **The withdrawal is recorded here, not only published.**  A peer that
+        finishes anyway — or answers the cancel with a failure — sends a
+        terminal reply, and `_handle_reply` records it against this task: with
+        the row left `pending`, the caller who was told "cancelled" would then
+        be pushed "Peer X completed async task" about the very task they
+        withdrew.  `TaskStore.record_result`/`record_error` are what refuse to
+        contradict a withdrawal, and they can only do it if the row says so —
+        recording it is what makes that guard reachable from this path at all.
+        """
         record = get_store().get(task_id)
         if record is None:
             return "not_found"
         if record.status in ("completed", "failed", "cancelled"):
             return record.status
+        get_store().record_cancel(task_id)
         session = uuid.uuid4().hex[:12]
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, session),

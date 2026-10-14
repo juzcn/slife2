@@ -47,6 +47,8 @@ from slife2.plugins.a2a import server as a2a_server
 from slife2.plugins.a2a.inbound_store import InboundStore
 from slife2.plugins.a2a.mesh import (
     _MAX_ATTEMPTS,
+    COMPLETED,
+    FAILED,
     A2AMesh,
     AgentCard,
     AgentName,
@@ -299,8 +301,8 @@ def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     )
 
     assert done, "the reply reached nobody"
-    task_id, _result, cancelled, agent, kind = done[0]
-    assert (task_id, cancelled, agent, kind) == (TASK, False, PEER, "task")
+    task_id, _result, outcome, agent, kind = done[0]
+    assert (task_id, outcome, agent, kind) == (TASK, COMPLETED, PEER, "task")
     assert TASK not in mesh._sends, "and the send is finished either way"
 
 
@@ -960,7 +962,7 @@ async def test_an_outbound_result_is_pushed_back_wearing_its_task_id(
     window: Window,
 ) -> None:
     session = wired(window=window)
-    session.mesh.on_task_completion(TASK, "the poem", False, PEER, "task")
+    session.mesh.on_task_completion(TASK, "the poem", COMPLETED, PEER, "task")
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
@@ -968,6 +970,31 @@ async def test_an_outbound_result_is_pushed_back_wearing_its_task_id(
     assert f'"task_id": "{TASK}"' in text
     assert "completed async task" in text
     assert "the poem" in text
+
+
+@pytest.mark.asyncio
+async def test_a_peer_that_answered_with_a_failure_does_not_read_as_completed(
+    window: Window,
+) -> None:
+    """**The peer's own word, and it is not the happy one.**
+
+    `_reply_state` distinguishes three endings, and the callback carried one of
+    them (`cancelled`) as a flag — so `TASK_STATE_FAILED`, which is what the SDK
+    publishes when a peer's handler raises, arrived at the renderer as
+    "not cancelled" and went into the conversation as "Peer X **completed**
+    async task", in the same delivery that recorded `failed` on the task's row.
+    The model was told the opposite of what happened, about a task it had asked
+    for and would now not re-send.  The store and the sentence are one verdict
+    or the sentence is a lie.
+    """
+    session = wired(window=window)
+    session.mesh.on_task_completion(TASK, "the handler raised", FAILED, PEER, "task")
+    await drain_until_idle(session, window=window)
+
+    text = window.handed[-1]["text"]
+    assert "failed async task" in text
+    assert "completed" not in text
+    assert "the handler raised" in text
 
 
 @pytest.mark.asyncio
@@ -1179,7 +1206,7 @@ async def test_a_presence_line_with_no_window_to_draw_it_goes_nowhere() -> None:
 @pytest.mark.asyncio
 async def test_an_empty_result_pushes_nothing(window: Window) -> None:
     session = wired(window=window)
-    session.mesh.on_task_completion(TASK, "", False, PEER, "task")
+    session.mesh.on_task_completion(TASK, "", COMPLETED, PEER, "task")
     await drain_until_idle(session, window=window)
     assert window.handed == []
 
@@ -1901,3 +1928,34 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     session.hold(USED)
     assert not session.release(WINDOW), "a tool is still waiting to be answered"
     assert session.release(USED), "the last reason is the one that ends it"
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Cancelling published the withdrawal and told nobody's record.**
+
+    `cancel_task` answered "cancelled" without recording it, so the row stayed
+    `pending` — which made `TaskStore.record_result`'s guard ("a result arriving
+    after the caller was told about a cancel must not flip the record back")
+    unreachable from the tool path, and a peer that finished anyway pushed "Peer
+    X completed async task" over the cancellation the model had already been
+    given.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT)
+
+    async def no_publish(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mesh, "_publish_props", no_publish)
+    get_store().record_send(TASK, PEER)
+
+    assert await mesh.cancel_task(PEER, TASK) == "cancelled"
+    assert get_store().get(TASK).status == "cancelled"
+
+    # A late answer from the peer does not rewrite it, on either ending.
+    get_store().record_result(TASK)
+    assert get_store().get(TASK).status == "cancelled"
+    get_store().record_error(TASK)
+    assert get_store().get(TASK).status == "cancelled"

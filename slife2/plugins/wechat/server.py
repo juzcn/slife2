@@ -541,11 +541,13 @@ class Wechat:
         token (`AGENT_KEY`, :func:`save_session`) and read back here, exactly as
         `slife2-schedule` reads its ledger's owner out of the ledger.
 
-        A file too old to carry one — v1's, or one written before this key — falls
-        back to the directory name, which is the best answer there is for a login
-        that predates the question and is exactly right whenever the raw name and
-        the sanitised one are the same, which is every name without a reserved
-        character in it.
+        A file too old to carry one — v1's, or one written before this key — is
+        **skipped and named in the log**, which is what `slife2-schedule` and
+        `slife2-a2a` do with a ledger whose owner is not written down.  The
+        fallback that used to be here (the directory name) looked right for the
+        names where the two are equal — every name without a reserved character
+        — and was the second-session bug for the ones where they are not, which
+        are the only names the key exists for.
 
         Never awaited in the path that serves: a bridge that cannot be reached
         must not stop the plugin from coming up, and every one of these is
@@ -553,11 +555,26 @@ class Wechat:
         """
         for path in sorted(self._agents.glob(f"*/{SESSION_NAME}")):
             saved, _ = _read_session(path)
-            # The raw name off the file, and the directory only as a fallback:
-            # the directory is a *sanitised* name and using it as the key is the
-            # second-session bug this key exists to prevent.
-            agent = str(saved.get(AGENT_KEY) or "") or path.parent.name
+            # **The raw name, or nothing.**  The directory is a *sanitised*
+            # name (`a/b` lives in `a_b/`), so resuming under it is a second key
+            # for one login: a tool call from the raw name then builds a second
+            # `Session`, adopts the same token, and starts a second poll loop —
+            # every message delivered twice, which is the bug this key exists to
+            # prevent.  The fallback that used to be here was "exactly right
+            # whenever the raw name and the sanitised one are the same, which is
+            # every name without a reserved character in it" — and it was wrong
+            # for exactly the names it mattered for, silently.  A login file
+            # from before this key existed is *skipped* and named, like the
+            # ownerless ledgers `slife2-schedule` and `slife2-a2a` refuse
+            # (`ScheduleStore.adopt`, `InboundStore`): the file is not lost, and
+            # nobody is told a session is being watched that is not.
+            agent = str(saved.get(AGENT_KEY) or "")
             if not agent:
+                logger.warning(
+                    "wechat %s: no agent name in it, so this login is not "
+                    "resumed; sign in again to rewrite it",
+                    path,
+                )
                 continue
             self._spawn(self._resume(self.session(agent)))
 

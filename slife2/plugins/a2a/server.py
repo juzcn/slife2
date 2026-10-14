@@ -83,6 +83,7 @@ from slife2.libs.host.paths import a2a_inbound_paths
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
 from slife2.libs.turn.prompt import render
+from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
 from slife2.plugins.a2a.inbound_store import InboundStore
 from slife2.plugins.a2a.mesh import (
@@ -400,14 +401,26 @@ def _wire(session: Session) -> None:
     def on_task_completion(
         corr_id: str,
         result: str,
-        cancelled: bool,
+        outcome: str,
         peer: str,
         kind: str = "task",
-        failed: bool = False,
     ) -> None:
-        if not result and not cancelled:
+        """Say what became of a send, in the send's own words.
+
+        `outcome` is one value — `mesh.COMPLETED`, `CANCELLED`, `FAILED` or
+        `UNREACHABLE` — rather than the pair of flags this took before: a
+        `cancelled` boolean and a `failed` one, of which only the second could
+        mean two different things, and of which the first could not express the
+        third ending at all.  A peer that *answered* with a failure was rendered
+        as "completed" — the confident negative DESIGN.md §10.1 forbids — because
+        the renderer had no value that said so.
+        """
+        # Nothing to say about an empty *success*.  A withdrawal, a failure and
+        # an unreachable peer are worth a line even with no words in them: the
+        # conversation is waiting for an answer that will not come.
+        if not result and outcome == mesh.COMPLETED:
             return
-        if failed:
+        if outcome == mesh.UNREACHABLE:
             # **A send that never landed is told as itself.**  The mesh's
             # requester ladder ran out with no reply at all (`_deliver`), so
             # this is not the peer answering and must not be rendered as one:
@@ -436,10 +449,12 @@ def _wire(session: Session) -> None:
                 f"Peer **{peer}** replied to your message:\n\n{result}"
             )
         else:
-            state = "cancelled" if cancelled else "completed"
+            # The peer answered, and this is what it said: `completed`,
+            # `cancelled` or `failed`, in the peer's own word.  All three are a
+            # verdict it had, which is what separates them from `UNREACHABLE`.
             text = (
                 f"{marker(peer, corr_id or None, type='task_response')}"
-                f"Peer **{peer}** {state} async task "
+                f"Peer **{peer}** {outcome} async task "
                 f"(ID: `{corr_id}`):\n\n{result}"
             )
         session.post(text, peer, f"a reply from {peer}")

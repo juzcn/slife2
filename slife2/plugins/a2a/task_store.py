@@ -86,10 +86,20 @@ class TaskStore:
         return rec
 
     def record_error(self, task_id: str) -> TaskRecord | None:
-        """Mark a task as failed."""
+        """Mark a task as failed.
+
+        **A withdrawal outranks a failure, for `record_result`'s reason.**  A
+        caller who was told `cancelled` has already acted on it, and a peer that
+        answers the cancel with `failed` — the SDK publishes exactly that when
+        its handler raises on a cancelled task — must not rewrite the ending the
+        caller saw.  The two recorders are one rule with one exception, and it
+        was only in the other one.
+        """
         rec = self._records.get(task_id)
         if rec is None:
             return None
+        if rec.status == "cancelled":
+            return rec
         rec.status = "failed"
         return rec
 
