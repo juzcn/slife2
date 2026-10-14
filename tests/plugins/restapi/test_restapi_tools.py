@@ -20,7 +20,7 @@ from fastmcp import Client, FastMCP
 from slife2.libs.host.config import load
 from slife2.libs.host.configfile import read_section
 from slife2.plugins.restapi.server import build_server
-from tests.fakes import answering
+from tests.fakes import answering, config_file
 
 pytestmark = pytest.mark.unit
 
@@ -46,11 +46,9 @@ rest-api:
 """
 
 
-def write_config(isolated_runtime: Path, text: str = CONFIG) -> Path:
-    isolated_runtime.mkdir(parents=True, exist_ok=True)
-    path = isolated_runtime / "slife2.yaml"
-    path.write_text(text, encoding="utf-8")
-    return path
+def write_config(data_dir: Path, text: str = CONFIG) -> Path:
+    """This module's config, written where the loader looks for it."""
+    return config_file(data_dir, text)
 
 
 def upstream() -> FastMCP:

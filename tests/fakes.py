@@ -18,9 +18,12 @@ import asyncio
 import operator
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import Tool
 
 from slife2.libs.host.config import Config
 from slife2.libs.model.base import Chunk, Stream
@@ -423,6 +426,55 @@ class FailingEmbedder:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         raise RuntimeError(self.message)
+
+
+def upstream_server() -> FastMCP:
+    """A stand-in for somebody else's MCP server.
+
+    **Here rather than in the module that used to own it.**  `test_toolhub.py`
+    defined it and `tests/plugins/agent/test_server.py` reached for it with a
+    bare `from test_toolhub import …` — an import that only resolves once that
+    file's *directory* has been put on `sys.path`, which pytest does when it
+    collects the module.  In a full run it always had been; in a targeted run
+    (`pytest tests/plugins/agent`) it had not, and the test died with
+    `ModuleNotFoundError`.  A double two modules need belongs where the other
+    shared ones are.
+    """
+    server = FastMCP("upstream")
+
+    @server.tool
+    def echo(text: str) -> str:
+        """Echo it back."""
+        return text
+
+    @server.tool
+    def boom() -> str:
+        """Always fails, the way a real tool refuses a request."""
+        raise ValueError("the peer said no")
+
+    # A name a provider rejects, which is what the sanitiser exists for.  A real
+    # one arrives this way: nothing in MCP stops an upstream from calling a tool
+    # whatever it likes.
+    server.add_tool(
+        Tool.from_function(lambda: "ok", name="read.file", description="Dotted.")
+    )
+    return server
+
+
+def config_file(data_dir: Path, text: str) -> Path:
+    """Write one config file where the loader will look for it.
+
+    **One copy, because four modules had one each.**  Four test modules write a
+    `slife2.yaml` into the isolated data directory before building a server over
+    it, and each had grown its own four-line function to do it (three called
+    `write_config`, one `config_on_disk`).  What each of those really owns is its
+    own `CONFIG` text, so each keeps one line — a `partial` binding that default
+    — and the writing happens here.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "slife2.yaml"
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def plugin_transports(

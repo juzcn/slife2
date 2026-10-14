@@ -67,9 +67,11 @@ jobs:
       # `dist/slife2-*.whl` through literally and uv rejects it with "The wheel
       # filename ... is invalid: Must have a Python tag".  bash is present on
       # all three runners and expands it as intended.
+      # `pytest-xdist` is not optional: `addopts` runs the suite across workers
+      # (`-n auto`), and a runner without the plugin dies at option parsing.
       - name: Install
         shell: bash
-        run: uv pip install dist/slife2-*.whl pytest pytest-asyncio
+        run: uv pip install dist/slife2-*.whl pytest pytest-asyncio pytest-xdist
 
       # The precondition the macOS step above exists for, asserted rather than
       # assumed.  Without it, a runner whose interpreter cannot load extensions
@@ -112,3 +114,12 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v --tb=short --no-header --maxfail=5
+
+      # The second lane: the whole stack as processes, against a stub provider
+      # (`tests/e2e/`, excluded from the run above by `addopts`).  It is here
+      # rather than merged into it because what it proves is different in kind —
+      # that the launcher's start order works, that a turn crosses every process
+      # boundary — and because seventeen daemons per platform on the fast lane
+      # would be paid for by every push.
+      - name: Run the end-to-end lane
+        run: uv run pytest -m e2e -v --tb=short --no-header

@@ -9,6 +9,8 @@ the truth about whether anybody wants it.
 
 from __future__ import annotations
 
+from tests.fakes import config_file
+
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +40,9 @@ default: local/big
 """
 
 
-def config_on_disk(isolated_runtime: Path, text: str = CONFIG) -> Path:
-    isolated_runtime.mkdir(parents=True, exist_ok=True)
-    path = isolated_runtime / "slife2.yaml"
-    path.write_text(text, encoding="utf-8")
-    return path
+def config_on_disk(data_dir: Path, text: str = CONFIG) -> Path:
+    """This module's config, written where the loader looks for it."""
+    return config_file(data_dir, text)
 
 
 def skill(root: Path, name: str, *, body: str = "The old body.") -> Path:

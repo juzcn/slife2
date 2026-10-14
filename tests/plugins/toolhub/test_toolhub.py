@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.tools import Tool
 from mcp import MCPError
 
 import slife2.helpers.timeouts as _T
@@ -49,35 +48,12 @@ from slife2.plugins.toolhub.server import (
 from slife2.plugins.toolhub.server import (
     build_server as build_hub,
 )
-from tests.fakes import StubEmbedder, plugin_transports
+from tests.fakes import StubEmbedder, plugin_transports, upstream_server
 
 pytestmark = pytest.mark.unit
 
 
 # --- stand-ins ----------------------------------------------------------------
-
-
-def upstream_server() -> FastMCP:
-    """A stand-in for somebody else's MCP server."""
-    server = FastMCP("upstream")
-
-    @server.tool
-    def echo(text: str) -> str:
-        """Echo it back."""
-        return text
-
-    @server.tool
-    def boom() -> str:
-        """Always fails, the way a real tool refuses a request."""
-        raise ValueError("the peer said no")
-
-    # A name a provider rejects, which is what the sanitiser exists for.  A real
-    # one arrives this way: nothing in MCP stops an upstream from calling a tool
-    # whatever it likes.
-    server.add_tool(
-        Tool.from_function(lambda: "ok", name="read.file", description="Dotted.")
-    )
-    return server
 
 
 def hub_for(

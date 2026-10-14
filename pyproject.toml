@@ -211,7 +211,19 @@ minversion = "9.1"
 testpaths = ["tests"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "module"
-addopts = "-q --tb=short --strict-markers --strict-config --no-header --color=yes --durations=10"
+# **The suite is the thing this project evolves against, so the default
+# invocation is the fast one.**  Two lanes, one command apart:
+#
+#   `uv run pytest`        unit + integration, every module, across workers
+#   `uv run pytest -m e2e` the whole stack as processes (tests/e2e/, ~75s)
+#
+# `-n auto` is xdist: the suite is ~5 minutes in one process and ~40 seconds
+# across the cores, and a gate somebody waits five minutes for is a gate that
+# gets run less often than it should.  `-m "not e2e"` keeps the lane that starts
+# seventeen daemons out of that default — a later `-m` on the command line
+# replaces this one rather than adding to it, which is what makes the second
+# command above work.
+addopts = "-q --tb=short --strict-markers --strict-config --no-header --color=yes --durations=10 -n auto -m 'not e2e'"
 filterwarnings = [
     # CPython 3.13+: unittest.mock._AsyncMockMixin creates unawaited
     # coroutine wrappers at class-definition time.  GC may collect them
@@ -224,7 +236,7 @@ markers = [
     "slow: mark a test as slow (excluded from quick test runs with -m 'not slow')",
     "unit: fast, isolated unit test (no I/O, no subprocess)",
     "integration: test requiring I/O, network, or subprocess",
-    "e2e: end-to-end test requiring a full running system",
+    "e2e: the whole stack as processes, against a stub provider; excluded from the default run, asked for with `-m e2e`",
 ]
 
 [tool.ruff]

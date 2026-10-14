@@ -1387,13 +1387,11 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     protected from the budget, so the only way to be over it is to have loaded a
     tool server's — which is the case the budget was built for.
     """
-    from test_toolhub import upstream_server
-
     from slife2.libs.host.config import ToolLoadSettings, ToolServerSettings
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
     from slife2.plugins.toolhub.server import build_server as build_hub
-    from tests.fakes import plugin_transports
+    from tests.fakes import plugin_transports, upstream_server
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     # A cap of three, so the nine slife2 ships are already over it and the two

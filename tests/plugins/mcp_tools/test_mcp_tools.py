@@ -20,7 +20,7 @@ from slife2.libs.host.config import Config, load
 from slife2.libs.host.configfile import read_section
 from slife2.plugins.mcp_tools.server import build_server
 from slife2.plugins.toolhub.server import build_server as build_hub
-from tests.fakes import StubEmbedder, answering, plugin_transports
+from tests.fakes import StubEmbedder, answering, config_file, plugin_transports
 
 pytestmark = pytest.mark.unit
 
@@ -50,11 +50,9 @@ mcp:
 """
 
 
-def write_config(isolated_runtime: Path, text: str = CONFIG) -> Path:
-    isolated_runtime.mkdir(parents=True, exist_ok=True)
-    path = isolated_runtime / "slife2.yaml"
-    path.write_text(text, encoding="utf-8")
-    return path
+def write_config(data_dir: Path, text: str = CONFIG) -> Path:
+    """This module's config, written where the loader looks for it."""
+    return config_file(data_dir, text)
 
 
 def upstream() -> FastMCP:

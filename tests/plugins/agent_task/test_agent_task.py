@@ -639,7 +639,7 @@ async def test_an_answer_with_no_window_is_undelivered_and_said(
     so, and nothing runs a turn in a conversation nobody is watching to make the
     two agree.
     """
-    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     # Nothing has attached, so `submit` refuses with the terminal's own error
     # rather than a stand-in's — and the client is connected, so that refusal is
     # the refusal being tested rather than "not connected".
@@ -669,7 +669,7 @@ async def test_a_hand_over_that_did_not_come_back_is_not_repeated(
     which the agent then acts on twice.  So the unknown case is logged and not
     repeated, and the task's answer is undelivered rather than doubled.
     """
-    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(
         text_turn("three tries"),
         hub=hub,
@@ -693,7 +693,7 @@ async def test_a_refusing_window_is_the_end_of_that_answer(
     not is exactly "carry on without the window" — so a refusal is a failed
     delivery like any other, and the task is over.
     """
-    caplog.set_level(logging.ERROR, logger="slife2.agent_task")
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(
         text_turn("three tries"),
         hub=hub,
