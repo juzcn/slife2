@@ -14,6 +14,13 @@ through to the agent server for exactly that reason.
     slife2 status [OPTIONS]   what is running, and where
     slife2 down [OPTIONS]     stop the servers this config names
 
+Starting in a data directory **makes that home** (`slife2._open_home`,
+`slife2._open_catalogue`): the directory is recorded, its `agents/` and `skills/`
+are made, and the tool catalogue it is configured for is built — `agents/tools.db`,
+by the hub, in one ask.  So a `--data-dir` an agent has been started in is a home
+rather than a directory with a config in it, and one nobody has sent a message in
+still has the tool set its `slife2.yaml` names.
+
 `--headless` runs that first one with **no terminal**: the same window, the same
 connections, the same servers, the same turns, and nothing drawn and nothing
 printed.  What it is for is a machine nobody is sitting in front of — the agent
@@ -244,6 +251,50 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
+def _open_catalogue(config: Config) -> int:
+    """Make this home's tool catalogue, and report it as one line of the start.
+
+    **A home is formed when an agent starts in it**, and `agents/tools.db` is the
+    part of that this process cannot write itself: the hub is the file's one
+    writer, so the ask that makes it is `list_tools` — the call a turn makes —
+    sent once before the window opens
+    (`slife2.libs.host.launcher.open_catalogue`).  What a `--data-dir` used to get
+    instead was nothing at all until a model turn happened to ask, so a directory
+    an agent had been started in held its config, the `agents/` and `skills/`
+    `_open_home` makes, and no tool set.
+
+    Printed for `_ensure`'s reason: this is a step that takes a second, and a
+    start-up report that goes quiet while it runs is a report that cannot say
+    which step is slow.  `_report`'s columns are the servers' and this line is
+    not one, which is what the empty prefix says.
+
+    **Failure is not degraded**, and it is the same answer as a server that would
+    not come up: a hub that cannot say what the model may call is this system come
+    apart, and a window opened against it fails its first turn instead — later,
+    and with less to go on.  Two rather than a traceback, for `_ensure`'s reason.
+    Only a `ConnectionError` is caught, so a programming error (this being called
+    with a loop already running) is still a traceback rather than a start-up
+    message about the catalogue.
+    """
+    from slife2.libs.host.launcher import open_catalogue
+    from slife2.libs.host.paths import catalogue_db
+
+    started = time.monotonic()
+    try:
+        count = open_catalogue(config)
+    except ConnectionError as exc:
+        print(f"slife2: the tool catalogue could not be built: {exc}", file=sys.stderr)
+        return 2
+    _report(
+        "",
+        "catalogue",
+        str(catalogue_db()),
+        f"{count} tool(s)",
+        time.monotonic() - started,
+    )
+    return 0
+
+
 def _open_home() -> None:
     """Make this data directory a home the whole machine can serve.
 
@@ -452,6 +503,14 @@ def main(argv: list[str] | None = None) -> int:
             # home rather than learning about it one call later.
             _open_home()
             code = _ensure(config, config_path)
+            if code == 0:
+                # **And the home is made whole before the window opens.**  One
+                # call to the hub, and it is the call a turn would have made:
+                # `agents/tools.db` is the hub's file, so asking is the only way
+                # to make it exist, and a `--data-dir` an agent is started in has
+                # its tool set from the first moment rather than from the first
+                # message.  See `_open_catalogue`.
+                code = _open_catalogue(config)
             if code == 0:
                 app = SlifeApp(
                     tui_url(config, args.url),

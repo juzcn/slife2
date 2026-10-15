@@ -1043,6 +1043,22 @@ then they share its `slife2.yaml` and its catalogue — the tool set **is** the
 config, so agents running on one config run on one set of tools. Load a tool in
 one and it is loaded for the next, in that home.
 
+**A home is made when you start an agent in it.** `slife2 --data-dir D` records
+`D`, gives it its `agents/` and `skills/` if they are not there, and builds the
+tool catalogue its config names — so `D/agents/tools.db` is there from the first
+start rather than from the first message you send. **Two data directories have
+two catalogues**, each built from its own `slife2.yaml`: a tool loaded in one is
+not loaded in the other, and neither is served the other's tools.
+
+**An external server is one server per name, however many homes name it.** A
+`mcp:` entry is a process on *this machine*, so two data directories that both
+configure `serper` — which is what copying a config produces — get one `serper`
+between them rather than one each, and its tools appear in both catalogues. Two
+homes naming one entry with different commands is a disagreement the log reports:
+the name is what makes it the same server, so the running one is used and giving
+it another name is how you run both. All of them stop when the last instance out
+takes the stack down, like everything else a plugin is holding.
+
 **Where that folder is depends on what you are running.** In a checkout it is
 the checkout itself — which is what makes the `slife2.yaml` in front of you the
 one in use — and otherwise it is `~/.slife2`, per-user and independent of

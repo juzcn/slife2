@@ -50,6 +50,11 @@ from slife2.libs.turn import tokens
 #:
 #:   * `handover` — the window, and the agent server as the fallback.  Both put
 #:     words into somebody's conversation.
+#:   * `launcher` — the hub, and only for `open_catalogue`: the ask that makes a
+#:     home's `agents/tools.db` exist.  It writes no conversation, but the file it
+#:     makes is *a home's*, so a test that reached a live hub would build a live
+#:     directory's catalogue out of a `tmp_path` config — and would leave a real
+#:     `tools.db` behind for the next run to find.
 #:   * `agent_task_server` — the hub, the context store and the model for a
 #:     task's own turn.  A forgotten `backend=` is a live, paid call.
 #:   * `schedule_server` — the agent-task plugin it dispatches a run to.
@@ -66,6 +71,7 @@ from slife2.libs.turn import tokens
 #: a stream end to end.
 _DIALERS: dict[str, tuple[str, ...]] = {
     "slife2.libs.harness.handover": ("open_server",),
+    "slife2.libs.host.launcher": ("open_server",),
     "slife2.plugins.agent_task.server": ("open_server", "open_backend"),
     "slife2.plugins.schedule.server": ("open_server",),
     "slife2.plugins.agent.server": ("open_server", "open_backend"),

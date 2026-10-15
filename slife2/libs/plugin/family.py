@@ -70,31 +70,72 @@ logger = logging.getLogger(__name__)
 TOOL_LIST_LIMIT = 20
 
 
-class Held:
-    """One configured entry: its link, and the rows it last offered.
+class Link:
+    """One external server this process is running, and the rows it last offered.
 
-    The rows are built from the listing the gateway hands over — the entry's name
-    in front of each tool's own (`proxied_name`) and the schema the far end
-    declared — because that is what the hub merges, and building them here is
-    what lets a family answer "what do you hold" without asking anybody.
+    **One per name, however many homes name it.**  That is the designer's rule and
+    the whole of why this class exists: *whether it is the same MCP server is
+    decided by the name.*  An `mcp:` entry is a process — or somebody else's
+    endpoint — and a machine is where processes live, so two data directories that
+    configure `serper` are two homes naming one server rather than two servers.
+    Without this, the second home started all of them again: `slife2-jack`'s
+    section is byte-identical to the checkout's, and that is twenty `npx`/`uvx`
+    processes for the same twenty servers.
+
+    **The rows are here and not on a binding**, because what the far end offers is
+    the *server's* listing: two homes reading it are reading one answer, and a
+    copy per home would be a second thing to keep in step.  What an entry says
+    that a server does not — the switch, the description, the autoload flag — stays
+    on `Held`, which is what lets one home switch an entry off without switching
+    it off for anybody else.
+
+    `settings` is what this link was **started** from, which is the first home's.
+    A second home naming the same entry with a different command gets this link and
+    a warning rather than a second process (`Links.acquire`), and an *edit* through
+    a management tool reconfigures it in place (`Links.reconfigure`) — one server,
+    one configuration, whichever home wrote it.
     """
 
     def __init__(
         self,
         settings: ToolServerSettings,
         *,
+        home: str,
         directory: str,
         category: str,
         transport: Callable[[ToolServerSettings], Any] | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
-        self.settings = settings
         self.category = category
+        self.settings = settings
+        #: The home that started it, named when a second one disagrees about what
+        #: this entry is: a directory is what a reader needs to go and look at.
+        self.home = home
+        #: The homes holding it, so that the last one out stops the process.  A
+        #: home with the entry switched *off* is not in here at all (`Held`) — its
+        #: switch is not a reason for somebody else's server to keep running.
+        self.holders: set[str] = set()
         #: `None` until it has answered once, and again while it is re-listing:
         #: "no rows" and "no rows *yet*" are the same thing to the hub, which is
         #: told `up: false` either way and marks the source rather than merging.
         self.rows: list[dict[str, Any]] | None = None
-        self.connection = Connection(
+        self.connection = self._connect(settings, directory, transport, client_factory)
+
+    def _connect(
+        self,
+        settings: ToolServerSettings,
+        directory: str,
+        transport: Callable[[ToolServerSettings], Any] | None,
+        client_factory: ClientFactory | None,
+    ) -> Connection:
+        """A connection wired the way this process wires its own.
+
+        `directory` is the home that first asked for the entry, and it is the one
+        thing a *shared* process cannot have per home: an entry that cares where it
+        runs names its own `cwd`, and one that does not gets the first home's
+        rather than a directory that would move under a running process.
+        """
+        return Connection(
             settings,
             transport=transport or (lambda one: mcp_config(one, cwd=directory)),
             client_factory=client_factory,
@@ -102,9 +143,34 @@ class Held:
             on_failed=self._failed,
         )
 
+    async def reconfigure(
+        self,
+        settings: ToolServerSettings,
+        *,
+        directory: str,
+        transport: Callable[[ToolServerSettings], Any] | None = None,
+        client_factory: ClientFactory | None = None,
+    ) -> None:
+        """Restart this server on *settings*, for every home that holds it.
+
+        **What a management tool means by an edit.**  The name is the identity, so
+        `mcp_set` on an entry two homes name is one server being reconfigured
+        rather than a second one appearing beside it — and the homes holding it go
+        on holding the entry they named, whose rows the restart replaces.
+
+        The new connection is in place *before* the old one is awaited, which is
+        `Family.put`'s rule one level down: a call landing in between must not find
+        this link without a connection to make it on.
+        """
+        previous = self.connection
+        self.settings = settings
+        self.rows = None
+        self.connection = self._connect(settings, directory, transport, client_factory)
+        await previous.close()
+
     async def _listed(self, tools: list[Any]) -> None:
         self.rows = [self._row(tool) for tool in tools]
-        logger.info("%s: %d tool(s) held", self.settings.name, len(self.rows))
+        logger.info("%s: %d tool(s) held", self.settings.name)
 
     def _failed(self, exc: Exception) -> None:
         # Nothing to write: a family holds no catalogue, and the hub learns this
@@ -137,21 +203,233 @@ class Held:
             "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
         }
 
+
+class Links:
+    """The external servers one plugin process runs, keyed by what names them.
+
+    **The name, and nothing else**, is what makes two configured entries the same
+    server — so a home that writes `serper` and a home that writes `serper` get
+    one process, and the second one's command is reported rather than started.
+    That is the decision this class exists to hold in one place, and it is a
+    deliberate simplification: two homes *can* disagree about what `serper` runs,
+    and the answer to that is a warning naming both (`acquire`) rather than two
+    processes nobody can tell apart — the tool names in the catalogue are the
+    entry's, so a second one would collide with the first anyway.
+
+    **One of these belongs to one server process** (`build_family_server`), like
+    `Homes` and for the same reason: a module-level pool would be shared by two
+    servers built in one test, and a family that inherited the previous one's
+    process would be a test passing for a reason that is not its own.
+
+    The lifetime is the holders': a link is built by the first home that switches
+    the entry on and closed when the last one lets go, so the process exists while
+    somebody wants it and not after — which is what makes the last-instance-out
+    take-down still take everything down (`slife2 down` stops these plugins, and
+    their links are the plugin's children).
+    """
+
+    def __init__(self) -> None:
+        self._links: dict[tuple[str, str], Link] = {}
+
+    def acquire(
+        self,
+        home: str,
+        settings: ToolServerSettings,
+        *,
+        directory: str,
+        category: str,
+        transport: Callable[[ToolServerSettings], Any] | None = None,
+        client_factory: ClientFactory | None = None,
+    ) -> Link:
+        """The link for *settings*' name, started if nobody has started it yet.
+
+        A second home naming the same server with different settings is **warned
+        about and given the running one**: the name is what makes it the same
+        server, so starting a second would be two processes whose tools the
+        catalogue could not tell apart.  A home already holding it is not warned
+        at — that is the same home re-holding the entry, which is what an edit
+        looks like from here (`Family.put` reconfigures it afterwards).
+        """
+        found = self._links.get((category, settings.name))
+        if found is None:
+            found = Link(
+                settings,
+                home=home,
+                directory=directory,
+                category=category,
+                transport=transport,
+                client_factory=client_factory,
+            )
+            self._links[(category, settings.name)] = found
+        elif found.settings != settings and home not in found.holders:
+            logger.warning(
+                "%s: %r is already running for %s, configured differently — the "
+                "running one is used, because the name is what makes it the same "
+                "server. Give it another name to run both",
+                home,
+                settings.name,
+                found.home,
+            )
+        found.holders.add(home)
+        return found
+
+    async def release(self, home: str, link: Link) -> None:
+        """One home lets go.  The last one out stops the process."""
+        link.holders.discard(home)
+        if link.holders:
+            return
+        self._links.pop((link.category, link.settings.name), None)
+        await link.connection.close()
+
+
+class Held:
+    """**One home's** binding to one configured entry: its switch, and its link.
+
+    What a home owns is what its own section says — `enabled`, `description`, the
+    autoload flag, and therefore the whole of what it declares — and what the
+    machine owns is the process and the listing (`Link`).  That split is the answer
+    to "what may two homes' sections disagree about": everything here, and nothing
+    there.
+
+    **A switched-off entry has no link.**  That is what `enabled: false` has always
+    meant — the operator's promise that a *call* is not a thing that starts it —
+    and it is also what keeps one home's switch from holding up a server that
+    another home is running.
+    """
+
+    def __init__(
+        self,
+        settings: ToolServerSettings,
+        *,
+        home: str,
+        links: Links,
+        directory: str,
+        category: str,
+        transport: Callable[[ToolServerSettings], Any] | None = None,
+        client_factory: ClientFactory | None = None,
+    ) -> None:
+        self.settings = settings
+        self.category = category
+        self._home = home
+        self._links = links
+        self.link: Link | None = (
+            links.acquire(
+                home,
+                settings,
+                directory=directory,
+                category=category,
+                transport=transport,
+                client_factory=client_factory,
+            )
+            if settings.enabled
+            else None
+        )
+
+    @property
+    def rows(self) -> list[dict[str, Any]] | None:
+        """What the server last offered, or `None` if this home holds no link."""
+        return self.link.rows if self.link is not None else None
+
+    @property
+    def connection(self) -> Connection:
+        """This entry's connection, for a caller that needs the object itself.
+
+        **Only for a home that is running it.**  A switched-off entry has no link,
+        and a question asked of one — is it up, what did it say, what is it doing —
+        is answered by `usable`, `error` and `state`, which say `off` rather than
+        raising.  Reaching *here* for a linkless entry is a caller that skipped the
+        switch it was supposed to read first, which is why this is an assertion
+        rather than a third accessor returning `None`.
+        """
+        assert self.link is not None
+        return self.link.connection
+
+    @property
+    def attempt(self) -> asyncio.Task[None] | None:
+        """The connect attempt in flight, for a caller that waits on it."""
+        return self.connection.attempt if self.link is not None else None
+
+    @property
+    def usable(self) -> bool:
+        """Whether this entry's server has answered.
+
+        `False` for a home that has the entry switched off, which is not the same
+        statement as "it is down" and is not read as one: every caller of this has
+        already asked about `enabled` (`settled`, `apply_and_report`).
+        """
+        return self.link is not None and self.link.connection.usable
+
+    @property
+    def error(self) -> str:
+        """What the server said the last time it failed, or `""`."""
+        return self.link.connection.error if self.link is not None else ""
+
+    @property
+    def state(self) -> str:
+        """One word for a report — `off` when this home runs nothing for it.
+
+        The hub's own word for a source nobody is connecting
+        (`slife2.plugins.toolhub.server._server_row`), used here for the same
+        state: `idle` would read as "it will try again", which is exactly what
+        `enabled: false` promises it will not do.
+        """
+        return self.link.connection.state if self.link is not None else "off"
+
+    def connecting(self) -> None:
+        """Start a connect attempt, unless this home has the entry switched off.
+
+        Called on every ask: a server that is starting is one this cannot answer
+        for, and an ask is the only moment there is to ask again.
+        """
+        if self.link is not None:
+            self.link.connection.connecting()
+
+    async def call(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+    ) -> tuple[str, bool]:
+        """Run one tool of this entry's server.  `(text, ok)`, never raises.
+
+        The caller has already refused a switched-off entry (`Family.call`), which
+        is the only way there is no link to run it on.
+        """
+        assert self.link is not None
+        return await self.link.connection.call(tool, arguments, meta)
+
+    async def release(self) -> None:
+        """Let go of this entry's server, closing it if this home was the last.
+
+        Idempotent, because both callers can reach a link the other has dropped:
+        a management tool replacing or removing an entry, and the lifespan letting
+        go of every one of them on the way out.
+        """
+        if self.link is None:
+            return
+        link, self.link = self.link, None
+        await self._links.release(self._home, link)
+
     def declaration(self) -> dict[str, Any]:
-        """This entry, as the hub is told about it."""
+        """This entry, as the hub is told about it.
+
+        **Per home, and the rows are not.**  What this home says is its own switch,
+        its own description and its own category; what the model may call is the
+        server's listing, which is one answer for every home naming it — and `None`
+        unless it is answering, for the module docstring's reason.
+        """
         enabled = self.settings.enabled
         # **Start the attempt and do not wait for it**, on every ask: a server
         # that is starting is one this cannot answer for, and an ask is the only
         # moment there is to ask again.
-        if enabled:
-            self.connection.connecting()
-        up = enabled and self.connection.usable
+        self.connecting()
+        up = enabled and self.link is not None and self.link.connection.usable
         return {
             "name": self.settings.name,
             "category": self.category,
             "enabled": enabled,
             "up": up,
-            "error": self.connection.error,
+            "error": self.link.connection.error if self.link is not None else "",
             "autoload": self.settings.autoload,
             "description": self.settings.description,
             "transport": self.settings.transport,
@@ -197,23 +475,29 @@ class Family:
         *,
         category: str,
         entries: Iterable[ToolServerSettings],
+        links: Links,
         transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
         self.category = category
-        #: The working directory an entry's process is started in when its own
-        #: `cwd` is left out — **the home this family was built for**, which is
-        #: the caller's: a family is built inside the call that first needed it
+        #: This home, which is two things at once and both of them here: **who
+        #: holds this family's links** (`Links`), and the working directory an
+        #: entry's process gets when its own `cwd` is left out.  One string,
+        #: because a family is built inside the call that first needed it
         #: (`Homes`), so the ambient home is already the right one.
-        self._directory = str(home_dir())
+        self._home = str(home_dir())
+        self._directory = self._home
+        self._links = links
         self._transports = dict(transports or {})
         self._client_factory = client_factory
         self._held = {entry.name: self._hold(entry) for entry in entries}
 
     def _hold(self, settings: ToolServerSettings) -> Held:
-        """A `Held` for one entry, wired the way this process wires its own."""
+        """A `Held` for one entry: this home's settings over the machine's link."""
         return Held(
             settings,
+            home=self._home,
+            links=self._links,
             directory=self._directory,
             category=self.category,
             transport=self._transports.get(settings.name),
@@ -251,10 +535,31 @@ class Family:
         previous = self._held.pop(settings.name, None)
         one = self._hold(settings)
         self._held[settings.name] = one
-        if settings.enabled:
-            one.connection.connecting()
+        # **An edit to an entry that is already running restarts the server**, for
+        # every home that holds it: the name is the identity, so there is one
+        # server here and what changed is its configuration — not a second one
+        # appearing beside it.  This is the half that keeps `mcp_set` working: a
+        # link joined without being reconfigured would ignore the edit in silence.
+        shared = (
+            previous is not None
+            and previous.link is not None
+            and previous.link is one.link
+        )
+        if shared:
+            assert one.link is not None  # `previous.link is one.link` is not None
+            await one.link.reconfigure(
+                settings,
+                directory=self._directory,
+                transport=self._transports.get(settings.name),
+                client_factory=self._client_factory,
+            )
+        one.connecting()
+        # And a link the new entry *does* hold is not let go of: the holders are
+        # keyed by home, and both `Held`s here are this home's, so releasing the
+        # old one would drop the hold the new one just took.
+        if previous is not None and not shared:
+            await previous.release()
         if previous is not None:
-            await previous.connection.close()
             logger.info("%s: replaced", settings.name)
         return one
 
@@ -263,11 +568,12 @@ class Family:
 
         The pop is what the declaration sees, so it happens first for the reason
         `put` states — except that here the disappearance is the point, and the
-        hub deleting the rows is the outcome being asked for.
+        hub deleting the rows is the outcome being asked for.  The *server* goes
+        only if this was the last home holding it (`Links.release`).
         """
         one = self._held.pop(name, None)
         if one is not None:
-            await one.connection.close()
+            await one.release()
         return one
 
     async def set_enabled(self, name: str, enabled: bool) -> Held | None:
@@ -304,7 +610,7 @@ class Family:
         `settle_attempts`', which is the one place they are stated — the hub's
         own settle over its plugin links is the same wait over a different pool.
         """
-        await settle_attempts(one.connection.attempt for one in self._held.values())
+        await settle_attempts(one.attempt for one in self._held.values())
 
     async def declare(self) -> dict[str, Any]:
         """The `list_sources` payload: everything this family holds.
@@ -348,7 +654,7 @@ class Family:
                 f"{source!r} is switched off, so nothing was run. Its "
                 f"`set_enabled` tool turns it on."
             ), False
-        return await one.connection.call(tool, arguments, meta)
+        return await one.call(tool, arguments, meta)
 
     def start(self) -> None:
         """Begin connecting to every entry that is switched on.
@@ -375,9 +681,13 @@ class Family:
         `connecting` never suspends at all.  The two writers (`put`, `remove`)
         already swap the mapping synchronously before they await anything, for
         the reason their own docstrings give.
+
+        **And what it drops is this family's *hold*, not the server**: a link
+        another home is still using outlives this one's letting go of it
+        (`Links.release`), which is the rule everywhere else here.
         """
         for one in list(self._held.values()):
-            await one.connection.close()
+            await one.release()
 
 
 async def settled(one: Held) -> Held:
@@ -399,8 +709,8 @@ async def settled(one: Held) -> Held:
     """
     if not one.settings.enabled:
         return one
-    one.connection.connecting()
-    await settle_attempts([one.connection.attempt])
+    one.connecting()
+    await settle_attempts([one.attempt])
     return one
 
 
@@ -433,7 +743,7 @@ async def apply_and_report(
             f"tool turns it on."
         )
     await settled(one)
-    if one.connection.usable:
+    if one.usable:
         count = len(one.rows or [])
         # **The count is the cost, and only the tool can say it before it is
         # paid.**  Nothing here writes the catalogue: the hub merges this
@@ -449,7 +759,7 @@ async def apply_and_report(
             else ""
         )
         return words.offers(settings.name, count, note=expensive)
-    reason = one.connection.error or "it has not answered yet"
+    reason = one.error or "it has not answered yet"
     return words.coming_up(
         settings.name, reason, because=f"written into `{words.section}:`"
     )
@@ -466,8 +776,8 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
     under two names would make a reader wonder whether they are two things.
     """
     rows = list(one.rows or [])
-    if not one.connection.usable:
-        reason = one.connection.error or "it is not answering yet"
+    if not one.usable:
+        reason = one.error or "it is not answering yet"
         return (
             f"'{name}' has no tool list to show — {reason}. The `_list` tool "
             f"reports its state."
@@ -483,7 +793,7 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
         # `rows == []`, which is what `_listed` records when a server exposes
         # nothing.
         return (
-            f"'{name}' is {one.connection.state} and offers no {noun}s. The "
+            f"'{name}' is {one.state} and offers no {noun}s. The "
             f"`_list` tool reports its state."
         )
     shown = rows[:limit]
@@ -650,7 +960,7 @@ def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
         return "off"
     if one is None:
         return "not held"
-    return one.connection.state
+    return one.state
 
 
 def prepare_entry(
@@ -779,9 +1089,9 @@ async def switch_entry(
     if not enabled:
         return f"'{name}' is switched off; its entry stays in `{words.section}:`."
     await settled(one)
-    if one.connection.usable:
+    if one.usable:
         return words.offers(name, len(one.rows or []))
-    reason = one.connection.error or "it has not answered yet"
+    reason = one.error or "it has not answered yet"
     return words.coming_up(name, reason, because="switched on")
 
 
@@ -1058,11 +1368,18 @@ def build_family_server(
     `source` is `load_cached` in production: it is what makes a section edited by
     hand, or by one of these management tools, reach the next home that asks.
     """
+    #: **One pool for the process, handed to every home's family.**  The links are
+    #: the machine's (`Links`), so this is what makes two homes naming one entry
+    #: share one process — and it is built here rather than at module level so
+    #: that two servers in one process (which is what a test builds) do not share
+    #: a pool, and a family cannot inherit a process from the previous test.
+    links = Links()
     family: Homes[Family] = Homes(
         lambda theirs: Family(
             theirs,
             category=category,
             entries=entries(theirs),
+            links=links,
             transports=transports,
             client_factory=client_factory,
         ),

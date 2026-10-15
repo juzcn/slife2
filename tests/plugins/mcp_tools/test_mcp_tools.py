@@ -16,8 +16,10 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
-from slife2.libs.host.config import Config, load
+from slife2.libs.host.config import Config, load, load_cached
 from slife2.libs.host.configfile import read_section
+from slife2.libs.host.paths import in_home
+from slife2.libs.plugin.audience import client_meta
 from slife2.plugins.mcp_tools.server import build_server
 from slife2.plugins.toolhub.server import build_server as build_hub
 from tests.fakes import StubEmbedder, answering, config_file, plugin_transports
@@ -347,3 +349,107 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
 
     assert {"mcp_list", "mcp_set", "mcp_remove", "mcp_set_enabled"} <= listed
     assert "list_sources" not in listed and "call_source" not in listed
+
+
+@pytest.mark.asyncio
+async def test_two_homes_naming_one_entry_run_one_server(
+    isolated_runtime: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The name is what makes it the same MCP server.**
+
+    An `mcp:` entry is a process, and a machine is where processes live — so two
+    data directories that both configure `existing` are two homes naming one
+    server rather than two servers.  What that cost without the rule is not
+    hypothetical: `slife2 --agent jack --data-dir D` over a *copy* of a config has
+    the same eighteen `mcp:` entries and the same two `rest-api:` ones, and every
+    one of them was started a second time — twenty `npx`/`uvx` processes for the
+    twenty servers the first home was already running.
+
+    The transport count is the assertion, because the transport is what spawns
+    the process: one factory call for two homes is one process.  The two homes'
+    *declarations* are asserted as well, and they are the other half — the rows
+    belong to the server, so both read one listing, while the switch and the
+    description stay each home's own.
+    """
+    mine, theirs = isolated_runtime, isolated_runtime.parent / "theirs"
+    write_config(mine, CONFIG)
+    write_config(theirs, CONFIG)
+
+    started: list[Any] = []
+
+    def factory(transport: Any, handler: Any) -> Any:
+        started.append(transport)
+        return Client(upstream())
+
+    server = build_server(load(), source=load_cached, client_factory=factory)
+
+    async with Client(server) as client:
+        with in_home(mine):
+            here = await client.call_tool(
+                "list_sources", {}, meta=client_meta("jack", home=str(mine))
+            )
+        with in_home(theirs):
+            there = await client.call_tool(
+                "list_sources", {}, meta=client_meta("jack", home=str(theirs))
+            )
+
+    assert len(started) == 1, f"one entry, and {len(started)} processes for it"
+    held = [one for one in here.data["sources"] if one["name"] == "existing"]
+    same = [one for one in there.data["sources"] if one["name"] == "existing"]
+    assert held and same, "both homes hold the entry"
+    assert held[0]["up"] and same[0]["up"], "and the one server answers for both"
+    assert held[0]["rows"] == same[0]["rows"], (
+        "the listing is the server's, not a home's"
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if "configured differently" in record.message
+    ], "the two homes agree, so there is nothing to report"
+
+
+@pytest.mark.asyncio
+async def test_a_second_home_naming_one_entry_differently_is_told(
+    isolated_runtime: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two homes can disagree about what a name runs, and that is *said*.
+
+    The name wins, so the second home gets the running server rather than a
+    second process — and the warning is the whole of what keeps that from being
+    silent: a reader looking at the second `slife2.yaml` would otherwise have no
+    way to learn that its `command` is not the one in use.  Both homes are named,
+    because the first one's directory is where the entry that *is* running lives.
+    """
+    mine, theirs = isolated_runtime, isolated_runtime.parent / "theirs"
+    write_config(mine, CONFIG)
+    write_config(
+        theirs, CONFIG.replace("command: in-memory", "command: something-else")
+    )
+
+    started: list[Any] = []
+
+    def factory(transport: Any, handler: Any) -> Any:
+        started.append(transport)
+        return Client(upstream())
+
+    server = build_server(load(), source=load_cached, client_factory=factory)
+
+    with caplog.at_level("WARNING"):
+        async with Client(server) as client:
+            with in_home(mine):
+                await client.call_tool(
+                    "list_sources", {}, meta=client_meta("jack", home=str(mine))
+                )
+            with in_home(theirs):
+                await client.call_tool(
+                    "list_sources", {}, meta=client_meta("jack", home=str(theirs))
+                )
+
+    assert len(started) == 1, "the name wins, so no second process"
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if "configured differently" in record.getMessage()
+    ]
+    assert len(said) == 1, caplog.text
+    assert str(theirs) in said[0] and str(mine) in said[0], said[0]

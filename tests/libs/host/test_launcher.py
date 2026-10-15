@@ -16,8 +16,10 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastmcp import Context
 
 from slife2 import _ensure
 from slife2.libs.host import launcher, runtime
@@ -512,6 +514,75 @@ async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
             SPEC,
             timeout=0.2,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
+
+
+@pytest.mark.asyncio
+async def test_open_catalogue_refuses_to_run_inside_an_event_loop() -> None:
+    """`probe`'s rule, for the other thing a client does before it has a loop.
+
+    Reached the same way and for the same reason: `asyncio.run` raises when a loop
+    is already running, and catching that turns "you called this wrong" into a
+    start-up message about the hub — a wrong answer that reads like a right one.
+    """
+    with pytest.raises(RuntimeError, match="cannot run inside an event loop"):
+        launcher.open_catalogue(default_config())
+
+
+def test_open_catalogue_asks_the_hub_for_this_homes_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The ask is a turn's ask**, made once with this process's home on it.
+
+    `agents/tools.db` is the hub's file — one writer, and the writer is the
+    process that opened it — so a home's catalogue cannot be made by writing it
+    here.  What makes it is asking the hub the question a turn asks
+    (`list_tools`), which is what `open_catalogue` is: the same call, the same
+    reader (`slife2.clients.toolclient.remote_tools`), and the count of what came
+    back.
+
+    **And the home is on it, not an agent.**  `Peer.call_tool` adds this process's
+    home to every call it makes, and that is what the hub resolves the file
+    against — so the test drives a real `Peer` and reads the `_meta` the far side
+    was handed, rather than asserting on a stub that would have agreed with
+    whatever this end sent.
+    """
+    from fastmcp import FastMCP
+
+    from slife2.libs.host.paths import data_dir
+    from slife2.libs.plugin.audience import home_of, request_meta
+    from slife2.libs.plugin.protocol import Peer
+
+    hub = FastMCP("slife2-toolhub")
+    seen: dict[str, Any] = {}
+
+    @hub.tool
+    async def list_tools(ctx: Context) -> dict[str, Any]:
+        seen["meta"] = dict(request_meta(ctx) or {})
+        return {
+            "tools": [
+                {
+                    "name": name,
+                    "server": "toolhub",
+                    "tool": name,
+                    "description": "",
+                    "parameters": {},
+                }
+                for name in ("tool_search", "func_tool_load")
+            ]
+        }
+
+    async def dial(url: str, **kwargs: Any) -> Any:
+        seen["url"] = url
+        client = Peer(hub)
+        await client.__aenter__()
+        return client
+
+    monkeypatch.setattr(launcher, "open_server", dial)
+    config = default_config()
+
+    assert launcher.open_catalogue(config) == 2
+    assert seen["url"] == config.server("toolhub").url
+    assert home_of(seen["meta"]) == str(data_dir())
 
 
 def test_a_spawned_server_is_told_where_the_data_directory_is(

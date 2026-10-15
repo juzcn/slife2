@@ -242,6 +242,11 @@ def test_headless_reaches_the_driver_and_the_claim(
             seen["claim"] = read_claim(agent)
 
     monkeypatch.setattr(slife2, "_ensure", lambda config, config_path: 0)
+    # And the catalogue step, which is one call to the hub.  `_ensure` is stubbed
+    # here, so no hub is up to answer it — and the conftest guard would refuse the
+    # dial rather than let this reach a live one.  What it does, and where it sits,
+    # is `test_the_home_is_made_before_the_window_opens`.
+    monkeypatch.setattr(slife2, "_open_catalogue", lambda config: 0)
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
     # `--keep-servers`, so the last-instance-out take-down does not run against
@@ -256,6 +261,109 @@ def test_headless_reaches_the_driver_and_the_claim(
     claim = seen["claim"]
     assert claim is not None, "no claim was written for the running instance"
     assert claim.headless is True, "the servers cannot read the flag"
+
+
+def test_the_home_is_made_before_the_window_opens(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three steps, one order, and the catalogue on the right side of the window.
+
+    **A home is made when an agent starts in it**, and these three statements are
+    the whole of that: the directory is recorded and shaped (`_open_home`) — before
+    the servers, so a daemon coming up already knows about this home — the servers
+    come up (`_ensure`), and the tool catalogue is built (`_open_catalogue`).  That
+    last one has to come *after* the servers, because `agents/tools.db` is the
+    hub's file and the hub is what writes it, and it has to come *before* the
+    window, because a window is a conversation and the file is what its first turn
+    is served from.
+    """
+    from slife2.tui import app as app_module
+
+    order: list[str] = []
+
+    def step(name: str, code: int = 0):
+        """One of the start-up steps, and a note that it ran."""
+
+        def run(*args: object, **kwargs: object) -> int:
+            order.append(name)
+            return code
+
+        return run
+
+    class RecordingApp:
+        def __init__(self, url: str, **kwargs: object) -> None:
+            order.append("window")
+
+        def run(self, *, headless: bool = False) -> None:
+            pass
+
+    monkeypatch.setattr(slife2, "_open_home", step("home"))
+    monkeypatch.setattr(slife2, "_ensure", step("servers"))
+    monkeypatch.setattr(slife2, "_open_catalogue", step("catalogue"))
+    monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
+
+    # `--keep-servers`, so the last-instance-out take-down does not run.
+    code = main(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--agent",
+            f"smoke-order-{tmp_path.name}",
+            "--keep-servers",
+        ]
+    )
+
+    assert code == 0
+    assert order == ["home", "servers", "catalogue", "window"]
+
+
+def test_a_catalogue_that_cannot_be_built_does_not_open_a_window(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**A hub that cannot say what the model may call is a system come apart.**
+
+    So the start says so and stops, like a server that would not come up — one
+    line and exit 2 — rather than opening a terminal that would fail its first
+    turn instead: later, and with less to go on.  This is the same rule as
+    `_ensure`'s and deliberately not a degraded start, which would be a window
+    nobody can use reported as success.
+    """
+    from slife2.libs.host import launcher
+    from slife2.tui import app as app_module
+
+    opened: list[str] = []
+
+    def refuse(config: object) -> int:
+        raise ConnectionError("slife2-toolhub is not answering (no answer)")
+
+    class RecordingApp:
+        def __init__(self, url: str, **kwargs: object) -> None:
+            opened.append(url)
+
+        def run(self, *, headless: bool = False) -> None:
+            pass
+
+    monkeypatch.setattr(slife2, "_open_home", lambda: None)
+    monkeypatch.setattr(slife2, "_ensure", lambda config, config_path: 0)
+    # The dial, not the step: `slife2._open_catalogue` is what turns this into a
+    # start-up message and exit 2, so patching it instead would skip the whole
+    # thing under test.
+    monkeypatch.setattr(launcher, "open_catalogue", refuse)
+    monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
+
+    code = main(
+        [
+            "--data-dir",
+            str(tmp_path),
+            "--agent",
+            f"smoke-refused-{tmp_path.name}",
+            "--keep-servers",
+        ]
+    )
+
+    assert code == 2
+    assert not opened, "a window was opened against a hub that cannot list"
+    assert "slife2-toolhub is not answering" in capsys.readouterr().err
 
 
 def test_an_abbreviated_flag_is_a_usage_error() -> None:

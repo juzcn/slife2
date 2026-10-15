@@ -32,6 +32,7 @@ from pathlib import Path
 from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
+from slife2.clients.toolclient import LIST_TOOLS, remote_tools
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
@@ -77,7 +78,7 @@ from slife2.libs.host.runtime import (
     unregister_client,
     write_claim,
 )
-from slife2.libs.plugin.protocol import identifies
+from slife2.libs.plugin.protocol import close_server, identifies, open_server
 
 #: The plugins that are not model backends, keyed by the name the config's
 #: `servers:` section uses for each: the module that serves it, the MCP name
@@ -405,6 +406,62 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
         )
     except Exception:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
         return False
+
+
+async def _open_catalogue_async(url: str) -> int:
+    """Ask the hub for this home's tool list, which is what builds its catalogue.
+
+    `remote_tools` reads the answer the way the agent server does — strictly, so
+    a hub that answered with something this build cannot read is a failure rather
+    than an empty tool set — and the tools it hands back are dropped here: what
+    this call is *for* is the hub opening the calling home's `agents/tools.db`
+    and writing the machine's tool set into it.
+    """
+    client = await open_server(url, name=TOOLHUB_SERVER_NAME, fallback_tool=LIST_TOOLS)
+    try:
+        return len(await remote_tools(client))
+    finally:
+        await close_server(client)
+
+
+def open_catalogue(config: Config) -> int:
+    """Make this home's tool catalogue, and answer how many tools it holds.
+
+    **A home is formed when an agent starts in it**, and the catalogue is the
+    part of that this process cannot write itself: `agents/tools.db` belongs to
+    the *hub*, which is its one writer (`slife2.plugins.toolhub.server.Catalogue`),
+    so the way to make it exist is to ask the hub the question a turn asks —
+    `list_tools` — once, before the window opens.  Until this existed the file
+    appeared only if a model turn happened to ask, so a data directory an agent
+    had been started in and not yet used held its `slife2.yaml`, the `agents/`
+    and `skills/` `slife2._open_home` makes, and no catalogue at all.
+
+    **And the ask names the home and nothing else.**  `Peer.call_tool` puts this
+    process's home on every call it makes (`slife2.libs.plugin.audience.with_home`),
+    which is what the hub resolves `agents/tools.db` against.  The catalogue is
+    the *home's* and not an agent's — one directory may hold several agents and
+    they share it — so no agent is named here, and the hub needs none.
+
+    Raises whatever `open_server` or `remote_tools` raises, which is a
+    `ConnectionError` naming what could not be reached or what could not be read.
+    **Deliberately not caught**: a hub that cannot say what the model may call is
+    this system come apart, and the caller's job is to say so rather than to start
+    a window that cannot run a turn.
+
+    Blocks, for `probe`'s reason and under the same rule — see there for why the
+    loop check is made *before* `asyncio.run` rather than caught below it.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass  # no loop of our own to conflict with, which is the normal case
+    else:
+        raise RuntimeError(
+            "open_catalogue() is synchronous and cannot run inside an event "
+            "loop; call it before starting one, or from a thread"
+        )
+
+    return asyncio.run(_open_catalogue_async(config.server("toolhub").url))
 
 
 def _argv(spec: ServerSpec) -> list[str]:

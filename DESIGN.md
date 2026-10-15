@@ -1787,6 +1787,51 @@ a port. The rule for which config a call is served from is one line in one place
 builds its server with one, and a server that went looking for a file instead
 would be reading a developer's own `slife2.yaml`.
 
+**An external server, though, is one server per *name* — not one per home.** The
+per-home rule above is about what a config section *says*: the entries, their
+switches, the declarations. It was also being applied to what a section *starts*,
+and that is a different kind of thing: a `mcp:` entry is a process on this machine,
+and two data directories naming it are two homes naming one server. The cost was
+concrete and immediate — `slife2 --agent jack --data-dir D` over a copy of a
+config has the same eighteen `mcp:` entries and the same two `rest-api:` ones, so
+the second home started twenty `npx`/`uvx` processes for servers the first was
+already running.
+
+So the split is by *kind of fact*, one level down from the section:
+`family.Link` is the machine's — the connection and the listing — and
+`family.Held` is the home's — the switch, the description, the autoload flag, and
+therefore the whole of what that home declares. `Links` pools the former by
+`(category, name)` per plugin process; the latter is what two homes' sections may
+disagree about, and a home with an entry switched *off* holds no link at all,
+which is what stops one home's switch from keeping another home's process up.
+
+**The designer's rule is that the name decides, and the consequences are worth
+having written down.** Two homes naming one entry with different commands is not
+two servers: the first one started wins, the second is warned about by name and
+directory, and the running link is what both homes use — because the *rows* are
+keyed by the entry's name too, so a second process would offer the same tool names
+and the catalogue would refuse one of them anyway. `Held.settings` is therefore
+not what the link is running, and the entry that *is* running is the one the first
+home named. An edit through a management tool is the exception and the reason
+`Links.reconfigure` exists: the name is the identity, so `mcp_set` on a shared
+entry is one server being reconfigured for every home holding it, rather than a
+second one appearing beside it — and without that step a shared link joined
+without being reconfigured would ignore the edit in silence.
+
+The one property a shared process cannot have per home is its **working
+directory**: an entry that cares names its own `cwd:`, and one that does not gets
+the home that first asked for it rather than a directory that would move under a
+running process. That is a wart, it is stated in the code and in `sdd.md` §10.3,
+and the alternative — a process per home — is the twenty processes this rule
+exists to stop.
+
+**And the pool belongs to the plugin process, not to the module.** Built in
+`build_family_server` and handed to every family, like `Homes`, so that two
+servers built in one *process* — which is what a test builds — do not share a pool
+and a family cannot inherit a process from the previous test. A module-level
+dictionary would have been shorter and would have made a test pass for a reason
+that is not its own.
+
 `--agent NAME` **decides everything about who an agent is, and two agents may not
 share a name.**  It titles the window, it reaches the agent server, and it creates
 no port, no process and no config section — but it is no longer "a label and
@@ -2909,6 +2954,48 @@ about processes at all: **the hub decides, the record remembers.** A refusal is
 the record saying no to *this* data (`_refused`, a `ValueError`), which is the
 calling source's own problem; anything else is the catalogue itself failing to
 work, which fails the tool list rather than quietly shortening it.
+
+**And a home's catalogue holds the *machine's* tools, not only its own
+sections.** The one thing the per-home split got wrong, and it was wrong twice
+over. `upstreams` are one set of links for every home — stated, deliberately, as
+what makes a second home cost no second stack — and yet a plugin's listing was
+merged into whichever home happened to be in front of the hub when the link came
+up (`Upstream._listed`), and the hub's own four rows once, at start-up, into the
+starting home (`start`). A second home therefore opened with its *declarations*
+and nothing else, which is not a smaller tool set but a broken one: measured
+against the real plugin set, twenty-four of twenty-eight tools missing, the hub's
+own `tool_search` and `func_tool_load` among them — so the model could neither
+search for a tool nor load one.
+
+What made it more than a slow start is the *timing* of a re-list.
+`Connection.connecting` does nothing while the listing is younger than
+`timeouts.pacing.relist_after` (five minutes), so a second home's ask cannot
+repair this by waiting for a fresh listing, and the re-list that eventually
+happens lands in whichever home asked for it. The repair is therefore not a
+re-list but a **record**: `Catalogue.remember` holds what each machine-level
+source last said and writes it into every open store, and `Catalogue.seed` writes
+the same record into a home's file as that file opens. `Upstream` still keeps no
+tool table — what is held belongs beside the writes it is the source of, where
+the "one copy" argument is about one copy *per source* rather than one per home,
+which is not a copy at all but the pending write.
+
+Two consequences worth stating rather than discovering. **The seed must not
+raise**: it runs inside a store's `__init__`-adjacent open, so a source whose rows
+cannot be recorded has to become the *state* `failure` already is — otherwise a
+name collision written into one home's file would take the hub's whole catalogue
+down and leave every home with no file at all. And **`remember` writes the
+ambient home first**: a refusal has to be attributable to a source (`_listed` is
+what turns it into that source's verdict), and only a write against a real file
+can refuse one, so a listing that is merely held and never written would move the
+collision to a home's first ask, where there is no source left to blame.
+
+**The embedder is the *file's* home's, not the caller's**, which only shows on the
+fan-out: an index placed by the asking home's model is vectors the owning home
+cannot search, and its file would go on claiming an identity its numbers do not
+have — the one failure here that looks exactly like success. So the write into a
+given store wraps the lookup in `in_home(<that store's home>)`, and `embedding_for`
+— which is keyed by `home_dir()` and already kept one connection per home — is
+asked from inside it.
 
 **The model's list is the tools it has loaded, and the rest are on demand.** This
 is the change that a catalogue buys, and it is v1's mechanism restored with one

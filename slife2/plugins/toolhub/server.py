@@ -199,7 +199,7 @@ from slife2.libs.host.config import (
     for_the_call,
     load_cached,
 )
-from slife2.libs.host.paths import catalogue_db, data_dir
+from slife2.libs.host.paths import catalogue_db, data_dir, in_home
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
 from slife2.libs.plugin.family import settle_attempts
@@ -459,6 +459,12 @@ class Catalogue:
         #: source — see `failure`, which is the only reader, and `merge`, which
         #: is where it is written.
         self._failed: dict[str, str] = {}
+        #: What the sources **this machine** reaches last said — the hub's own
+        #: rows, and every plugin's listing — by source: its category, its rows,
+        #: and whether its tools may never be evicted.  See `remember`, which is
+        #: the only writer, and `seed`, which is what a home that has not asked
+        #: yet is built from.
+        self._held: dict[str, tuple[str, list[Mapping[str, Any]], bool]] = {}
 
     @property
     def failure(self) -> str:
@@ -503,10 +509,15 @@ class Catalogue:
         Opened here rather than at start-up for the reason the whole class is
         lazy: a home is a data directory the hub may never have heard of until
         somebody in it asks something, and opening every home's catalogue when
-        the process comes up would be work for directories nobody is using.  The
-        rows a store opens with are this process's own at start-up — the hub's
-        own tools — and every home's first ask merges the rest, because
-        `refresh_declared` re-reads what every plugin holds on every listing.
+        the process comes up would be work for directories nobody is using.
+
+        **And a store opens complete**, which is `seed`'s doing and not
+        `refresh_declared`'s: the hub reaches its plugins itself, and what those
+        links last listed is a fact about *the machine*, so it goes into every
+        home's file (`remember` holds it for the homes that have not asked yet).
+        What is genuinely this home's is the declarations — the `mcp:` entries,
+        the playbooks, the commands of *this* section — and those are what a
+        per-home refresh merges.
         """
         key = str(home_dir())
         found = self._stores.get(key)
@@ -537,27 +548,136 @@ class Catalogue:
         *,
         autoload: bool = False,
     ) -> dict[str, Any]:
-        """Record a source's whole tool list.  See `slife2.libs.store.catalogue.ToolStore.merge`.
+        """Record a source's whole tool list **in this home's file**.  See
+        `slife2.libs.store.catalogue.ToolStore.merge`.
+
+        This is the *per-home* write, and the one thing that makes it per-home is
+        what it is for: a declaration is a statement about the caller's own
+        `slife2.yaml` section — the `mcp:` entries, the playbooks, the commands of
+        *that* directory — so it belongs in that directory's file and nowhere
+        else.  What the sources *the hub reaches itself* say is a fact about the
+        machine and takes `remember` instead.
 
         `autoload` still travels with the merge for the reason it always did: it
         is the operator's `autoload: true`, which lives in the section the plugin
         that holds the source owns — so the plugin says it and the hub passes it
         on, exactly as liveness is passed on.
+        """
+        store = await self.store()
+        return await self._write(
+            str(home_dir()), store, source, category, tools, autoload=autoload
+        )
+
+    async def remember(
+        self,
+        source: str,
+        category: str,
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        autoload: bool = False,
+    ) -> dict[str, Any]:
+        """Record a source **the whole machine has**, in every home's file.
+
+        **The hub's own connections are the machine's, and so are their rows.**
+        `upstreams` are one set of links for every home (`build_server`), so what
+        they list is one fact — and a fact written into only the home that
+        happened to be in front of the hub when the link came up is a fact every
+        *other* home's file is missing.  That is not a corner: a plugin's listing
+        is re-read only when the link is due (`gateway.Connection.connecting`,
+        `timeouts.pacing.relist_after`), so a second home's ask could not repair
+        it by waiting, and this is where it is repaired instead — by writing what
+        the link did list into every home, and holding it for the homes that have
+        not asked yet (`seed`).
+
+        Written to *every open store* rather than to the ambient one, and each
+        one through its own home's embedder (`_embedder_in`), because two homes
+        may be configured with two different embedding models and an index built
+        by one of them is not searchable by the other.
+
+        Reached from the two places that speak for the machine: `Upstream._listed`
+        and the hub's own rows at start-up.
+
+        **The ambient home is written first, through `store()`**, and that is not
+        politeness: a listing that cannot be recorded has to be *this source's*
+        problem, and only a write against a real file can refuse one (a name
+        another source already holds).  `_listed` is what turns that refusal into
+        the source's verdict, and it can only do so if the write happened here
+        rather than one call later, at a home's first ask.  The rows are held
+        *after* that write, so a refusal is not remembered as the truth.
+        """
+        rows = list(tools)
+        here = str(home_dir())
+        found = await self._write(
+            here,
+            await self.store(),
+            source,
+            category,
+            rows,
+            autoload=autoload,
+        )
+        self._held[source] = (category, rows, autoload)
+        for key, store in list(self._stores.items()):
+            if key != here:
+                await self._write(key, store, source, category, rows, autoload=autoload)
+        return found
+
+    async def seed(self, key: str, store: ToolStore) -> None:
+        """Write everything the machine holds into a home's freshly opened file.
+
+        **Called once, and it is what makes a store complete the moment it
+        exists** — including the hub's own tools, which the model needs before it
+        can find or load anything else.  A home whose file was built without this
+        got the declarations of its own config and nothing else: measured
+        against the real plugin set, twenty-four of twenty-eight tools missing.
+
+        Takes the store rather than reaching for it, because `store()` is holding
+        `_opening` while this runs and `asyncio.Lock` is not reentrant.
+
+        **And a source that will not go in does not stop the file opening.**
+        Writing is where a collision is caught, and a *catalogue* that cannot
+        record is a state rather than an exception — `_write` keeps it for
+        `list_tools` to fail the whole list with and for `servers` to report, and
+        raising here would instead take the store's opening down with it, leaving
+        the home with no catalogue at all rather than one carrying the reason.
+        """
+        for source, (category, rows, autoload) in list(self._held.items()):
+            try:
+                await self._write(key, store, source, category, rows, autoload=autoload)
+            except Exception as exc:  # noqa: BLE001 - kept, and the file opens
+                if not _refused(exc):
+                    continue  # `_write` has already said why, and kept it
+                logger.warning(
+                    "the catalogue at %s did not take %s: %s",
+                    store.path,
+                    source,
+                    exc,
+                )
+
+    async def _write(
+        self,
+        key: str,
+        store: ToolStore,
+        source: str,
+        category: str,
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        autoload: bool,
+    ) -> dict[str, Any]:
+        """One source's rows into one home's file, and the health of the write.
 
         **A merge is where the catalogue's own health is learned**, which is why
-        the failure is recorded here rather than at each call site: every merge
+        the failure is recorded here rather than at each call site: every write
         goes through this one, whether it came from a plugin's `tools/list`, from
         a declaration, or from this process's own rows at start-up.  A *refusal*
         is the record answering and saying no, which is the catalogue working —
         the data is not its — and only anything else is kept (`failure`).
         """
-        store = await self.store()
         try:
             found = await store.merge(
                 source,
                 category,
                 list(tools),
-                embedder=await self._embedder(),
+                embedder=await self._embedder_in(key),
                 autoload=autoload,
             )
         except Exception as exc:  # noqa: BLE001 - `_refused` is the split, below
@@ -572,6 +692,21 @@ class Catalogue:
             raise
         self._failed.pop(source, None)
         return found
+
+    async def _embedder_in(self, key: str) -> Embedder:
+        """The embedder of **the home the file belongs to**, not the caller's.
+
+        The difference only shows on the fan-out: a listing that arrives while
+        one home is asking is written into every *other* home's file as well, and
+        an index placed by the asking home's model would be vectors the owning
+        home cannot search — its file would claim an identity its numbers do not
+        have, which is the one failure here that would look like success.
+
+        `in_home` is what makes "which home" explicit for the length of one
+        lookup, which is exactly the question `embedding_for` caches on.
+        """
+        with in_home(key):
+            return await self._embedder()
 
     async def source_state(self, source: str, state: str) -> None:
         """Record the verdict on one source: `enabled` or `error`."""
@@ -856,7 +991,11 @@ class Upstream:
     **Recorded, not kept.**  An upstream holds a connection and a verdict and no
     tool table: what it last listed is a fact about the catalogue, and a second
     copy here would be a second thing to keep in step — which is what replaced
-    the snapshot this class used to keep.
+    the snapshot this class used to keep.  A listing now reaches *every* home's
+    catalogue rather than the one in front of this process
+    (`Catalogue.remember`), and what waits for a home that has not asked yet is
+    the catalogue's own record of it, beside the writes it is the source of
+    rather than in the layer that holds connections.
 
     Everything here is safe to call concurrently: the agent asks for the tool
     list while a turn that is already running is calling a tool.
@@ -965,11 +1104,15 @@ class Upstream:
     async def _listed(self, listed: list[Any]) -> None:
         """One listing, recorded — the half the gateway will not do.
 
-        **The tools go to the catalogue and are not kept here.**  What came back
+        **The tools go to the catalogues and are not kept here.**  What came back
         is the whole truth about this source, so it is merged — added, updated,
-        deleted, or left alone — and this process's own copy of it is nothing at
-        all: `list_tools` reads the catalogue and `call_tool` routes through it,
-        which is what makes the row the one place a tool is described.
+        deleted, or left alone — and this object's own copy of it is still
+        nothing at all: `list_tools` reads the catalogue and `call_tool` routes
+        through it, which is what makes the row the one place a tool is
+        described.  What differs from a declaration is *which* catalogue:
+        a plugin is the machine's, so its listing goes into every home's file
+        (`Catalogue.remember`), and `Catalogue` is the one that holds it for the
+        homes whose file does not exist yet.
 
         Both failures here end the same way for this source and differently for
         the system.  A *catalogue* that did not work is a broken system too, and
@@ -999,7 +1142,7 @@ class Upstream:
         )
         offered = self._offered(listed)
         try:
-            await self._catalogue.merge(
+            await self._catalogue.remember(
                 self.settings.name,
                 self.settings.kind,
                 [_row_of(self.settings.name, tool) for tool in offered],
@@ -2289,6 +2432,18 @@ def build_server(
             threshold=theirs.tool_load.threshold,
             known=configured_sources(theirs),
         )
+        # **Everything the machine already holds goes in before this home is
+        # asked anything**, and it is the difference between a file with this
+        # home's declarations in it and a *catalogue*: without it the home opens
+        # with the `mcp:` entries of its own section and none of the tools the
+        # plugins offer — the hub's own four among them, which are what finds and
+        # loads all the others.  See `Catalogue.remember`.
+        #
+        # The key is this process's ambient home, which is the one `store()`
+        # asked for: a store is only ever opened from inside the call that wanted
+        # it.  The sync below may therefore use the ambient embedder, and the
+        # fan-out inside a `remember` may not — there it is another home's file.
+        await catalogue.seed(str(home_dir()), store)
         status = await store.sync_indexes(await embedder_of_call())
         logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
         return store
@@ -2593,16 +2748,17 @@ def build_server(
         anything, and what each plugin *holds* is asked for once every plugin
         that answered is in hand.
 
-        **The order is load-bearing twice.**  This process's own rows go first,
-        because this has to happen before the first `list_tools` — the model's
-        first answer would otherwise be missing the tools that find and load
-        tools.  And the declarations come last, because they arrive from a
-        plugin, so they cannot be asked for until the listing that says which
-        plugins have any is in hand: `settle`'s bounded wait is what lets a
-        plugin that is still starting be one of them, and one that is not is
-        asked again by the next ask (`refresh_declared`).
+        **The order is load-bearing twice.**  This process's own rows go first —
+        *held* rather than written, because no home has asked yet — and that is
+        what makes the first `list_tools` complete: the model's first answer
+        would otherwise be missing the tools that find and load tools.  And the
+        declarations come last, because they arrive from a plugin, so they cannot
+        be asked for until the listing that says which plugins have any is in
+        hand: `settle`'s bounded wait is what lets a plugin that is still starting
+        be one of them, and one that is not is asked again by the next ask
+        (`refresh_declared`).
         """
-        await catalogue.merge(
+        await catalogue.remember(
             CONFIG_KEY, PLUGIN, [_row_of(CONFIG_KEY, one.tool) for one in local]
         )
         await refresh()

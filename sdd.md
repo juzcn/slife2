@@ -1022,10 +1022,39 @@ does (`libs/plugin/audience.py` puts it in the call's `_meta`), established for
 the length of the call (`libs/plugin/protocol.py`'s `ServeTheCallersHome`) and
 carried on every hop (`protocol.Peer`). `paths.home()` is what resolves a file
 against it; a plugin's own config, records and logs keep `paths.data_dir()`.
-Everything a plugin *derives* per home — a home's catalogue, a family's
-connections, the declarations the hub holds, the model list it resolves — is kept
-per home and built on the first ask (`libs/plugin/family.Homes`, the hub's
-`Catalogue.store`), out of that home's `slife2.yaml`.
+Everything a plugin *derives* per home — a home's catalogue, the declarations the
+hub holds, the model list it resolves — is kept per home, out of that home's
+`slife2.yaml`.
+
+**A home is made when an agent starts in it**, which is what makes "out of that
+home's `slife2.yaml`" true from the first moment rather than from the first
+message: the client records the directory, makes its `agents/` and `skills/`
+(`slife2._open_home`) and then asks the hub for this home's tool list
+(`slife2._open_catalogue` → `libs/host/launcher.open_catalogue`), which is the
+call that makes `agents/tools.db` exist — the file is the hub's, one writer, so
+asking is the only way to build it. A hub that cannot answer fails the start
+rather than opening a window that cannot run a turn.
+
+**A catalogue is complete when it is opened.** What the hub reaches *itself* is
+the machine's — one set of links to the plugins, whatever home is asking — so what
+those links last listed is one fact, and it is written into **every** home's file:
+held by the hub for the homes that have not asked yet (`Catalogue.remember`) and
+seeded into a home's store as it opens (`Catalogue.seed`). Only the *declarations*
+are per home, because a declaration is a statement about that home's own sections
+(`mcp:`, the playbooks, the commands). An index is placed by the owning home's
+embedder, never the asking one's.
+
+**A family's connections are per name, not per home.** A `mcp:` or `rest-api:`
+entry is a process on the machine, so whether two configured entries are the same
+server is decided by the **name**: the first home that switches an entry on starts
+it (`family.Link`) and every other home naming it holds that same link, reading one
+listing. What stays per home is what its own section says — `enabled`,
+`description`, and therefore the whole of what it declares (`family.Held`) — so one
+home switching an entry off does not switch it off for another. Two homes naming
+one entry with different commands is reported and the running one is used, and an
+edit through a management tool reconfigures that one server for every home holding
+it. A link is closed when the last home lets go of it, so the last-instance-out
+take-down still takes everything down.
 
 ### 10.4 Records, logs, and what a person is shown
 

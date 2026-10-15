@@ -41,7 +41,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import in_home
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
-from slife2.libs.plugin.family import Family, Held
+from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.catalogue import ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
@@ -1554,8 +1554,9 @@ def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
     `test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row`
     is the store half of the same rule.
     """
-    held = Held(
+    held = Link(
         ToolServerSettings(name="serper", command="in-memory"),
+        home=".",
         directory=".",
         category="mcp",
     )
@@ -2148,6 +2149,11 @@ async def test_the_family_teardown_survives_a_management_call() -> None:
     teardown died with "dictionary changed size during iteration" and left every
     link after the one being closed still open.  It is the last moment the
     process has to drop them, so it is the worst one to lose.
+
+    **The links are the pool's, so this holds the `Connection` objects
+    themselves** (`Links`): letting go of a hold and closing the connection are
+    two steps now, and it is the second one this is about — a teardown that
+    dropped every hold and closed one link would read as success otherwise.
     """
     gate, entered = asyncio.Event(), asyncio.Event()
     family = Family(
@@ -2157,10 +2163,16 @@ async def test_the_family_teardown_survives_a_management_call() -> None:
             ToolServerSettings(name="one", command="in-memory"),
             ToolServerSettings(name="two", command="in-memory"),
         ],
+        # One pool for this family alone, which is what a server's own `Links` is:
+        # nothing here is shared, so nothing here depends on another home.
+        links=Links(),
         client_factory=lambda transport, handler: GatedClient(gate, entered),
     )
-    await family.held("one").connection.ready()
-    await family.held("two").connection.ready()
+    one, two = family.held("one"), family.held("two")
+    assert one is not None and two is not None
+    first, second = one.connection, two.connection
+    await first.ready()
+    await second.ready()
 
     closing = asyncio.create_task(family.close())
     await asyncio.wait_for(entered.wait(), timeout=2.0)
@@ -2174,8 +2186,8 @@ async def test_the_family_teardown_survives_a_management_call() -> None:
     await closing
 
     assert family.held("three") is not None, "the management call did land"
-    assert not family.held("one").connection.usable
-    assert not family.held("two").connection.usable, "the rest of the loop ran"
+    assert not first.usable
+    assert not second.usable, "the rest of the loop ran"
 
 
 # Two tests lived here — "the catalogue reconnects when the db goes away" and
@@ -2578,3 +2590,110 @@ async def test_a_second_home_is_served_its_own_declarations(
     assert "cli:mine-only" in here
     assert "cli:theirs-only" in there
     assert "cli:theirs-only" not in missing
+
+
+@pytest.mark.asyncio
+async def test_a_second_home_holds_every_tool_the_machine_has(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A home's catalogue is complete from the moment it exists.**
+
+    The hub reaches its plugins *itself* (`upstreams`), and one set of links
+    serves every home — so what those links list is a fact about the machine, and
+    a file built from the caller's own declarations alone is missing all of it:
+    the hub's own tools, which are what finds and loads everything else, and
+    every plugin's.  Measured before this against the real plugin set, that was
+    twenty-four of twenty-eight tools missing — and a home nobody had sent a
+    message in did not get a file at all.
+
+    A listing is re-read only when the link is due (`Connection.connecting`,
+    `timeouts.pacing.relist_after`), so the second home cannot repair this by
+    waiting for one: what it is missing has to be written from what the hub
+    already holds (`Catalogue.remember`, `Catalogue.seed`).
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config_file(mine, MINE_CLI)
+    config_file(theirs, THEIRS_CLI)
+    base = default_config()
+
+    hub = build_hub(
+        base,
+        source=load_cached,
+        transports=plugin_transports(base, {}, None),
+        embedder=StubEmbedder(),
+    )
+
+    async def listed(hub_client: Client, home: Path) -> set[str]:
+        """What the model may call, asked as the caller in *home*."""
+        with in_home(home):
+            answer = await hub_client.call_tool(
+                "list_tools", {}, meta=client_meta("jack")
+            )
+        return names(answer.data)
+
+    async with Client(hub) as client:
+        here = await listed(client, mine)
+        there = await listed(client, theirs)
+
+    assert here, "the machine's plugins offer the model something"
+    assert not (here - there), f"the second home is missing {sorted(here - there)}"
+    # And the home has a catalogue of its own rather than an answer borrowed
+    # from the first one's — `catalogue_db` is `agents/tools.db`, and until this
+    # change a home that had sent no message had no such file.
+    assert (theirs / "agents" / "tools.db").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_relist_reaches_a_home_that_is_not_asking(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A re-read of a plugin belongs to every home, not to the asking one.**
+
+    A link is re-read on the ask that finds it due, and that ask belongs to one
+    home — but what the re-read found is the machine's tool set, so a home that
+    asked earlier would otherwise be holding a list the hub no longer agrees
+    with, and would keep holding it until *its* next ask happened to be the one
+    that found the link due.
+
+    Read out of the first home's file rather than asked of the hub again: asking
+    would re-list the plugin and merge the tool in on its own, which is the one
+    thing this test must not do.
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config_file(mine, "")
+    config_file(theirs, "")
+    # Every ask finds the link due, so the second home's ask is a re-read.
+    monkeypatch.setattr(_T.timeouts.pacing, "relist_after", 0.0)
+    base = default_config()
+
+    grown = FastMCP("grown")
+
+    @grown.tool(meta=FOR_THE_MODEL)
+    def first() -> str:
+        """What this plugin offered before anybody asked."""
+        return ""
+
+    transports = {**plugin_transports(base, {}, None), "media": lambda _: grown}
+    hub = build_hub(
+        base, source=load_cached, transports=transports, embedder=StubEmbedder()
+    )
+
+    async def listed(hub_client: Client, home: Path) -> None:
+        with in_home(home):
+            await hub_client.call_tool("list_tools", {}, meta=client_meta("jack"))
+
+    async with Client(hub) as client:
+        await listed(client, mine)
+
+        # The plugin grows a tool, and nothing asks in `mine` again.
+        @grown.tool(meta=FOR_THE_MODEL)
+        def second() -> str:
+            """What it grew after the first home had asked."""
+            return ""
+
+        await listed(client, theirs)
+
+    held = ToolStore(mine / "agents" / "tools.db", threshold=100)
+    assert held.route("second") is not None, "the re-read stopped at the asking home"
