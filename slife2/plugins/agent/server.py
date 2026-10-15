@@ -7,8 +7,9 @@ and a model name from the config.
 
 **This server keeps the conversations**, and it addresses each one by
 `(agent, subagent)` — the same pair every other server in this system keys its
-own state by.  `subagent=""` is the agent's own conversation; anything else is a
-worker it is running.  A caller submits a user message under that key and gets
+own state by.  `subagent=""` is the agent's own conversation; anything else is
+one of its subagents, an agent it made and owns (`subagent_set`, sdd §3.5).  A
+caller submits a user message under that key and gets
 that turn's answer back; the surface is three tools — `send_message`, `reset`,
 and `transcript`, which is what a window that has just opened asks for.  A
 fourth, `_check_new_input`, is not part of that surface: it is the name a message
@@ -65,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import shutil
 import time
 from collections import deque
 from collections.abc import (
@@ -81,6 +83,8 @@ from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.gateway import flatten
@@ -110,6 +114,7 @@ from slife2.libs.host.config import (
     load,
     load_cached,
 )
+from slife2.libs.host.paths import agent_dir, subagent_dirs, subagent_file
 from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import (
@@ -117,6 +122,7 @@ from slife2.libs.plugin.audience import (
     client_key,
     client_meta,
     request_client,
+    unaddressed,
 )
 from slife2.libs.plugin.protocol import (
     ClientId,
@@ -129,6 +135,7 @@ from slife2.libs.plugin.protocol import (
     serve,
     tool_payload,
 )
+from slife2.libs.store.db import safe_agent_name
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import turn_note, with_note
 from slife2.libs.turn.events import (
@@ -160,6 +167,18 @@ MAX_QUEUED = 32
 #: asks.  A *builder* rather than the callback, because half of what the callback
 #: needs — the backend — is decided inside `make_loop`.
 Compressor = Callable[[LLMBackend, ClientId], Compress]
+
+#: The two tools that make and unmake a subagent — the whole of what this adds to
+#: the mesh's vocabulary, and two verbs rather than four (sdd §3.5): a subagent
+#: is *made* and *unmade*, and everything else it can do, it does with the tools
+#: an agent has.
+#:
+#: **`_set` and `_remove` rather than `_add`**, because that is what this system
+#: calls membership: `mcp_set`/`rest_api_set`/`skill_set` make a thing the agent
+#: holds and `*_remove` ends it, in every family there is.  A second spelling for
+#: the same act would be a vocabulary a model has to learn twice.
+SUBAGENT_SET = "subagent_set"
+SUBAGENT_REMOVE = "subagent_remove"
 
 #: What this process holds one conversation's state under: `(home, agent,
 #: subagent)`, built by `slife2.libs.plugin.audience.client_key`.  Not `ClientId`,
@@ -470,17 +489,15 @@ class Loop:
     #: that is why it is a dict of futures rather than a queue.
     approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
 
-    @property
-    def records(self) -> bool:
-        """Whether this conversation's turns are written to the db.
-
-        A worker's are not.  A subagent is a means to an end inside one turn of
-        its parent's conversation, and recording its round trips would file them
-        under a conversation they were never part of — which is the one thing the
-        record must not do, since the whole point of it is to be readable as a
-        conversation.
-        """
-        return not self.subagent
+    #: There was a `records` property here — `not self.subagent` — and it is gone
+    #: with the thing it was about.  Its reason was written down: *a subagent is a
+    #: means to an end inside one turn of its parent's conversation*, so its round
+    #: trips were not written, and the file its store named was a schema and
+    #: nothing more.  A subagent *owns* its conversation now (sdd §3.5) — it has a
+    #: directory, a cabinet and a memory of its own, and `subagent_remove` deletes
+    #: them — so every conversation this server holds is recorded, in the store its
+    #: own key names.  The worker the old rule was for was never built: nothing in
+    #: this tree ever created a conversation with a non-empty `subagent`.
 
 
 def build_server(
@@ -792,12 +809,13 @@ def build_server(
     ) -> int | None:
         """Persist a turn, and answer with the id it was given.
 
-        **This is called for every turn of a loop that records**, cancelled
-        ones included, and `result` is None exactly when the turn did not
-        finish.  The rule is deliberately not "remember to record the cancel
-        path": a write that is conditional on how a turn ended is a write
-        somebody can forget to make, and the failure it produces is a
-        conversation in the transcript that the database has never heard of.
+        **This is called for every turn of every conversation**, cancelled ones
+        included — an agent's own and each of its subagents' — and `result` is
+        None exactly when the turn did not finish.  The rule is deliberately not
+        "remember to record the cancel path": a write that is conditional on how
+        a turn ended is a write somebody can forget to make, and the failure it
+        produces is a conversation in the transcript that the database has never
+        heard of.
 
         A store that is *gone* fails the turn, and that is the system's rule
         rather than this function's — `slife2.libs.plugin.protocol.open_server` is where a
@@ -946,7 +964,7 @@ def build_server(
 
     # --- the registry --------------------------------------------------------
 
-    def opening_messages(agent: str, live: Config) -> list[Message]:
+    def opening_messages(agent: str, subagent: str, live: Config) -> list[Message]:
         """What a conversation starts with: its system prompt, and nothing else.
 
         Rendered when the conversation starts rather than once at startup,
@@ -954,6 +972,15 @@ def build_server(
         so two agents are two names asking one process — and it is rendered from
         the config a conversation *starts* from, so a prompt edited since boot
         reaches the next one.
+
+        **A subagent is told its own name, and that nobody is watching.**  Both
+        follow from what it is: the name in the prompt is the one it answers to
+        (its maker's would be a model told it is somebody else), and a subagent
+        has no window at all — not a terminal, not a headless one — so there is
+        nobody to ask, which is the same answer `headless` gives for an instance
+        with no terminal.  Reading the *maker's* claim here instead would be the
+        one way to get that wrong: it would tell a subagent that somebody is
+        watching whenever its maker's window is open.
 
         **And it is rendered with whether anybody is watching**, read off the
         claim the client under that name wrote (`AgentClaim.headless`).  A
@@ -966,10 +993,13 @@ def build_server(
         running is told so rather than served (`slife2.libs.harness.handover`), and a turn
         that runs here anyway is unattended for the same reason.
         """
-        claim = read_claim(agent)
+        if subagent:
+            claim = None
+        else:
+            claim = read_claim(agent)
         system = render_system_prompt(
             live.agent.system_prompt,
-            agent_name=agent,
+            agent_name=subagent or agent,
             headless=claim is None or claim.headless,
         )
         return [Message(role="system", content=system)] if system else []
@@ -1020,7 +1050,7 @@ def build_server(
         if loop is None:
             live = current()
             name, provider, settings = live.resolve(model)
-            messages = opening_messages(agent, live)
+            messages = opening_messages(agent, subagent, live)
             loop = Loop(
                 agent=agent,
                 subagent=subagent,
@@ -1091,9 +1121,9 @@ def build_server(
         it.  The price is one loopback before a queued turn starts; the thing it
         buys is that `turn_ids` and `messages` are never out of step.
         """
-        if not loop.records or not outcome.messages:
-            # Nothing to record, or a caller cancelled while queued — in which
-            # case its turn never started and there is nothing to record.
+        if not outcome.messages:
+            # A caller cancelled while queued, in which case its turn never
+            # started and there is nothing to record.
             return None
         return await remember_turn(
             loop.agent,
@@ -2357,11 +2387,9 @@ def build_server(
             prompt: What the user just said.
             subagent: Which of that agent's conversations.  Empty — the default —
                 is the agent's own, the one a person is watching.  Anything else
-                is a worker the agent is running: a separate conversation, with
-                its own history and its own inbox, whose turns are **not** written
-                to the db.  A subagent is a means to an end inside one turn of its
-                parent's conversation, and filing its round trips in the record
-                would file them under a conversation they were never part of.
+                is one of its subagents: a separate conversation, with its own
+                history, its own inbox and its own directory, whose turns are
+                written to *its* store — the one `subagent_remove` deletes.
             model: Which model this conversation runs on, as `provider/model`.
                 Left out, the config's `default` is used.  Read when the
                 conversation starts — a later message naming a different model is
@@ -2381,7 +2409,7 @@ def build_server(
                 else; the caller is the only party that knows, which is why it is
                 a parameter rather than something this server infers.  It is also
                 what a turn's footnote carries, so a model reading a conversation
-                can tell a person's turn from a worker's.
+                can tell a person's turn from a subagent's.
             watched: Whether **this caller can be asked a question mid-turn and
                 will answer it**.  A turn whose model asks to be checked
                 (`_approve`) sends the request to whoever is watching and waits
@@ -2613,7 +2641,8 @@ def build_server(
                     # run would head with, so it is the honest thing to hand
                     # over rather than an empty list.
                     "messages": [
-                        m.to_wire() for m in opening_messages(agent, current())
+                        m.to_wire()
+                        for m in opening_messages(agent, subagent, current())
                     ],
                 },
             )
@@ -2663,7 +2692,197 @@ def build_server(
         )
         return {"reset": forgotten}
 
+    @mcp.tool(name=SUBAGENT_SET, meta=FOR_THE_MODEL)
+    async def subagent_set(ctx: Context, name: str, model: str = "") -> dict[str, Any]:
+        """Make a subagent: an agent of your own, named, with its own memory.
+
+        A subagent is an agent that belongs to you — the same tools, the same way
+        of working, its own conversation, and its own directory underneath yours
+        (`agents/<you>/<name>/`).  It has no window and no process: it runs when
+        something sends it a message, and from then on you address it by name.  It
+        is *made* here and *unmade* by `subagent_remove`; everything else it does,
+        it does with the tools you have.
+
+        **A subagent you already have is the same subagent** — `set` rather than
+        `add`, so naming one twice is safe.  What a second call changes is its
+        model; when it was made does not change.
+
+        Args:
+            name: What to call it.  A name is one subagent and one directory
+                inside yours, so it is also the address you send to.
+            model: Which model it runs on, as `provider/model`.  Empty — the
+                default — is *your* model, read when the subagent first runs
+                rather than now, so a `model_switch` you make in between reaches
+                it the way it reaches your own next turn.
+
+        Returns:
+            `name` (made safe to be a directory), `model`, `created_at`, and
+            `created`: whether this call was the one that made it.
+        """
+        who = request_client(ctx)
+        if who is None or not who[0]:
+            raise ToolError(unaddressed("agent to make a subagent for", "a subagent"))
+        maker, mine = who
+        if mine:
+            # The tree, and it stops at one level — not because a second level is
+            # unthinkable, but because nothing runs it: a subagent's turns are
+            # run by its maker's window, and there is no window down there (sdd
+            # §12.8 holds the rule this depends on).
+            raise ToolError(
+                f"a subagent cannot make a subagent: {describe(who)}'s turns are "
+                f"run by the window of the agent that made it, and there is "
+                f"nothing one level further down to run them. Ask your own maker "
+                f"for what you need."
+            )
+        held = subagent_dirs(maker)
+        directory = agent_dir(maker) / safe_agent_name(name)
+        created = directory not in held
+        if created and directory.exists():
+            raise ToolError(
+                f"{directory.name!r} is already something of yours that is not a "
+                f"subagent — a subagent's name is a directory of its own inside "
+                f"yours, so pick a name that is free."
+            )
+        limit = current().subagent.max_running
+        if created and len(held) >= limit:
+            raise ToolError(
+                f"{maker} already has {len(held)} subagents (the `subagent: "
+                f"max_running` cap); remove one with {SUBAGENT_REMOVE}, or raise "
+                f"it in the config."
+            )
+        made_at = now()
+        if created:
+            agent_dir(maker, directory.name)
+        record = read_subagent(maker, directory.name)
+        _write_subagent(
+            maker,
+            directory.name,
+            {
+                "name": directory.name,
+                "model": model,
+                # Kept rather than rewritten: a `set` says what a subagent runs
+                # on, and when it was made is not something a later call gets to
+                # change.
+                "created_at": record.get("created_at") or made_at,
+            },
+        )
+        logger.info(
+            "subagent %s %s (model %s)",
+            describe((maker, directory.name)),
+            "made" if created else "set",
+            model or "the maker's",
+        )
+        return {
+            "name": directory.name,
+            "model": model,
+            "created_at": record.get("created_at") or made_at,
+            "created": created,
+        }
+
+    @mcp.tool(name=SUBAGENT_REMOVE, meta=FOR_THE_MODEL)
+    async def subagent_remove(ctx: Context, name: str) -> dict[str, Any]:
+        """Unmake a subagent, and take everything it wrote with it.
+
+        The whole of one subagent: its conversation is forgotten (the loop, and
+        the list it would restore from), and its directory — turns, cabinet,
+        ledger and the record of what it was made with — is deleted.  A subagent
+        is a directory, so this is one operation rather than a list somebody has
+        to keep complete.
+
+        **Nothing else can be removed by it.**  What makes a directory a
+        subagent's is the record inside it, and a name that has no such record is
+        not one: asking for the agent's own cabinet is refused rather than
+        emptied.  A name that is not there at all is not an error — the caller
+        wanted it gone and it is gone, which is `reset`'s answer for the same
+        question.
+
+        Args:
+            name: Which of your subagents.  The same name you made it with.
+
+        Returns:
+            `name`, and `removed`: whether there was one here to remove.
+        """
+        who = request_client(ctx)
+        if who is None or not who[0]:
+            raise ToolError(unaddressed("agent to remove a subagent of", "a subagent"))
+        maker, mine = who
+        if mine:
+            raise ToolError(
+                f"a subagent cannot remove a subagent: {describe(who)} owns no "
+                f"subagents — its maker does. Ask your own maker to remove it."
+            )
+        directory = agent_dir(maker) / safe_agent_name(name)
+        if directory not in subagent_dirs(maker):
+            if directory.exists():
+                raise ToolError(
+                    f"{directory.name!r} is not a subagent of {maker}'s — it is "
+                    f"not yours to remove, and this call will not delete it."
+                )
+            return {"name": directory.name, "removed": False}
+        # The loop first — in-process, and before the files: a loop left behind
+        # writes its store again on the next message to a name that is supposed
+        # to have stopped existing.
+        #
+        # **And no `forget` against the store, which is the difference from
+        # `reset`.**  What `reset` clears is the *stored* live-context list, and
+        # that list is a table in `turns.db` — the file this is about to delete.
+        # Asking the store first would be asking it to clear a file that is on
+        # its way out, and on Windows the asking is not free: opening a store
+        # that does not exist *creates* it, and the handle that created it can
+        # hold the file against the `rmtree` that follows.
+        loops.pop(client_key(maker, directory.name), None)
+        shutil.rmtree(directory)
+        logger.info("subagent %s removed", describe((maker, directory.name)))
+        return {"name": directory.name, "removed": True}
+
     return mcp
+
+
+def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
+    """What a subagent was made with, or `{}` when there is none to read.
+
+    **A record that cannot be read is read as absent, and that is a decision
+    rather than a shrug.**  What makes a directory a subagent's is that this file
+    *exists* (`slife2.libs.host.paths.subagent_dirs`), so a torn write cannot
+    widen what `subagent_remove` deletes — the property that matters is carried by
+    the file's existence, not by its contents.  What the contents add is the model
+    and when it was made, and losing a `created_at` to a half-written file is a
+    smaller harm than a removal that refuses to happen; the log line is what says
+    a file wants looking at.
+
+    So the shape is the one `slife2.plugins.wechat.server` keeps for its login and
+    for its reason: a per-agent file whose absence is a normal state, whose
+    damage is reported where a person can read it, and which never turns into a
+    refusal of the thing the caller actually asked for.
+    """
+    path = subagent_file(agent, subagent)
+    if not path.is_file():
+        return {}
+    try:
+        loaded = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, YAMLError) as exc:
+        logger.warning("the record of %s could not be read: %s", path, exc)
+        return {}
+    if not isinstance(loaded, dict):
+        logger.warning("the record of %s is not a mapping", path)
+        return {}
+    return loaded
+
+
+def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
+    """Write a subagent's record — the file that makes its directory one.
+
+    Written whole every time, because it is one small mapping and a merge would
+    be a second rule about which keys survive a `set`.  Block style, like the two
+    neighbours this file sits beside (`wechat.yaml`, `a2a.yaml`): somebody opening
+    an agent's directory should not have to read three formats to see three
+    facts.
+    """
+    yaml = YAML()
+    yaml.default_flow_style = False
+    path = subagent_file(agent, subagent)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.dump(record, handle)
 
 
 def _reply(

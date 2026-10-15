@@ -239,7 +239,7 @@ def build_server(
         schema, and a startup pass is part of owning one.
         """
         model = await embedding.get()
-        # Every per-agent store, the agent's own and its workers'.  Named by
+        # Every per-agent store, the agent's own and its subagents'.  Named by
         # `slife2.libs.host.paths` rather than globbed here: a `*/*.db` in this directory
         # is not a description of a conversation store — `schedule.db` lives
         # beside each `turns.db` and matched it — so this pass would open the

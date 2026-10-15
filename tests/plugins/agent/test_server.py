@@ -26,6 +26,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,15 +41,25 @@ from fakes import (
 )
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
+from ruamel.yaml import YAML
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import DEFAULT_AGENT, ModelSettings, default_config
+from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
+from slife2.libs.plugin.audience import client_meta
+from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.plugins.agent.server import Pending, ProgressObserver, build_server
+from slife2.plugins.agent.server import (
+    SUBAGENT_REMOVE,
+    SUBAGENT_SET,
+    Pending,
+    ProgressObserver,
+    build_server,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -279,6 +290,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "model_switch",
         "reset",
         "send_message",
+        "subagent_remove",
+        "subagent_set",
         "transcript",
     ]
 
@@ -2223,3 +2236,241 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
 
     assert result.data["text"] == "fine"
     assert prompts_seen(backend, 1) == ["user:one", "user:two"]
+
+
+# --- subagents ---------------------------------------------------------------
+
+
+async def set_subagent(
+    server: FastMCP, name: str, *, agent: str = DEFAULT_AGENT, model: str = ""
+):
+    """Name a subagent, with the caller's client id attached — as a turn does."""
+    async with Client(server) as client:
+        return await client.call_tool(
+            SUBAGENT_SET, {"name": name, "model": model}, meta=client_meta(agent)
+        )
+
+
+async def remove_subagent(server: FastMCP, name: str, *, agent: str = DEFAULT_AGENT):
+    """Unmake one, the same way."""
+    async with Client(server) as client:
+        return await client.call_tool(
+            SUBAGENT_REMOVE, {"name": name}, meta=client_meta(agent)
+        )
+
+
+def subagent_of(agent: str, name: str) -> Path:
+    """Where a subagent's directory is, without asking the code under test."""
+    return agents_dir() / agent / name
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None:
+    """`subagent_set` makes a member: a directory, and the record that says so.
+
+    The record is what `subagent_remove` proves its blast radius with, and the
+    model is the part of a subagent's identity that is neither its conversation
+    nor its work — so both are in the file rather than in a registry somewhere.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+
+    made = await set_subagent(server, "researcher", model="deepseek/deepseek-flash")
+
+    assert made.data["created"] is True
+    assert made.data["name"] == "researcher"
+    assert made.data["model"] == "deepseek/deepseek-flash"
+    assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
+    record = subagent_file(DEFAULT_AGENT, "researcher")
+    assert record.is_file(), "the file is what makes the directory a subagent's"
+    assert YAML(typ="safe").load(record.read_text(encoding="utf-8")) == {
+        "name": "researcher",
+        "model": "deepseek/deepseek-flash",
+        "created_at": made.data["created_at"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> None:
+    """`set` rather than `add`: what a model may say twice without thinking.
+
+    The model it runs on is what a second call changes; when it was made is not
+    something a later call gets to rewrite.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+
+    first = await set_subagent(server, "researcher", model="one/one")
+    again = await set_subagent(server, "researcher", model="two/two")
+
+    assert first.data["created"] is True
+    assert again.data["created"] is False, "the same subagent, not a second one"
+    assert again.data["model"] == "two/two"
+    assert again.data["created_at"] == first.data["created_at"]
+    assert len(subagent_dirs(DEFAULT_AGENT)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
+    """The tree stops at one level, and stops by name rather than by accident.
+
+    A subagent's turns are run by its maker's window, and there is nothing one
+    level further down to run them — so this is a refusal from the tool rather
+    than a member that exists and can never answer (sdd §12.8).
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool(
+                SUBAGENT_SET,
+                {"name": "deeper"},
+                meta=client_meta(DEFAULT_AGENT, "researcher"),
+            )
+
+    assert "cannot make a subagent" in str(refused.value)
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_cap_refuses_a_subagent_past_it(context, hub) -> None:
+    """`subagent: max_running` is the bound, and it counts the maker's own."""
+    base = config()
+    server = build_server(
+        replace(base, subagent=replace(base.subagent, max_running=1)),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+
+    await set_subagent(server, "one")
+    with pytest.raises(ToolError) as refused:
+        await set_subagent(server, "two")
+
+    assert "max_running" in str(refused.value)
+    # And naming the one that is already there is not a second subagent.
+    assert (await set_subagent(server, "one")).data["created"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_agent_already_uses_is_refused(context, hub) -> None:
+    """A subagent's name is a directory inside the agent's, and some are taken.
+
+    `cabinet` is one of them — the agent's own — and a name that resolves to
+    something which is not a subagent is refused rather than adopted, so a call
+    cannot turn the cabinet into a subagent by naming it.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    cabinet = subagent_of(DEFAULT_AGENT, "cabinet")
+    cabinet.mkdir(parents=True)
+    (cabinet / "note.md").write_text("mine", encoding="utf-8")
+
+    with pytest.raises(ToolError) as refused:
+        await set_subagent(server, "cabinet")
+
+    assert "not a subagent" in str(refused.value)
+    assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
+
+
+@pytest.mark.asyncio
+async def test_removing_a_subagent_takes_its_directory_with_it(context, hub) -> None:
+    """One directory, one operation — the whole reason the nesting exists.
+
+    Idempotent, and `reset`'s answer for the same question: a caller that wanted
+    something gone and finds it gone is in the state it asked for.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await set_subagent(server, "researcher")
+    (subagent_of(DEFAULT_AGENT, "researcher") / "work.txt").write_text(
+        "something it made", encoding="utf-8"
+    )
+
+    done = await remove_subagent(server, "researcher")
+
+    assert done.data == {"name": "researcher", "removed": True}
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+    assert (await remove_subagent(server, "researcher")).data["removed"] is False
+
+
+@pytest.mark.asyncio
+async def test_removing_something_that_is_not_a_subagent_is_refused(
+    context, hub
+) -> None:
+    """The blast radius is proved by the record, not by the name.
+
+    A directory without it is not a subagent's, so the one deletion this system
+    does cannot be pointed at an agent's own cabinet by naming it.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    cabinet = subagent_of(DEFAULT_AGENT, "cabinet")
+    cabinet.mkdir(parents=True)
+    (cabinet / "note.md").write_text("mine", encoding="utf-8")
+
+    with pytest.raises(ToolError) as refused:
+        await remove_subagent(server, "cabinet")
+
+    assert "not a subagent" in str(refused.value)
+    assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> None:
+    """What a subagent owns, it owns: its conversation is written, and to itself.
+
+    This is the reversal `Loop.records` was — a subagent's turns used to be
+    deliberately unwritten — and what it means now is one file per subagent,
+    inside the subagent's own directory, which is what `subagent_remove` deletes.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("hello from the subagent")),
+    )
+
+    await send(server, "one", subagent="researcher")
+
+    own = subagent_of(DEFAULT_AGENT, "researcher") / "turns.db"
+    assert own.is_file(), "recorded, in its own store"
+    assert not (agents_dir() / DEFAULT_AGENT / "turns.db").exists(), (
+        "and not in the maker's — nobody said anything to the maker"
+    )
+    assert TurnStore(own).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
+    context, hub
+) -> None:
+    """Its prompt says who it is, and that there is no window.
+
+    The maker's name would be a model told it is somebody else, and the maker's
+    *claim* would say somebody is watching whenever the maker's window is open —
+    which is the one way to get this wrong that looks like it works.
+    """
+    backend = FakeBackend(text_turn("hello"), text_turn("hello"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one", subagent="researcher")
+    await send(server, "two")
+
+    subagent_prompt = backend.calls[0][0][0].content
+    maker_prompt = backend.calls[1][0][0].content
+    assert subagent_prompt.startswith("You are researcher,")
+    assert "Nobody is watching" in subagent_prompt
+    assert maker_prompt.startswith(f"You are {DEFAULT_AGENT},")
+    assert f"You are {DEFAULT_AGENT}," not in subagent_prompt, (
+        "its maker's name would be a model told it is somebody else"
+    )

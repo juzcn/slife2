@@ -659,6 +659,35 @@ class AgentTaskSettings:
 
 
 @dataclass(frozen=True)
+class SubagentSettings:
+    """The `subagent:` section, and the one number a maker may have.
+
+    Read by `slife2-agent`, which is where the two tools that make and unmake a
+    subagent live (`slife2.libs.host.launcher` starts no plugin for this: a
+    subagent is not a process, so it has no server and no address — sdd §3.5).
+
+    Everything else about a subagent is an agent's and comes out of `agent:`, for
+    `AgentTaskSettings`' reason one class up: a subagent is an agent that belongs
+    to another one, so a prompt or a step count that meant something different
+    for it would be two agents wearing one name.
+
+    What is left is the number only this feature has an opinion about.
+    """
+
+    #: How many subagents one agent may have — a cap, not a target.
+    #:
+    #: **A cap because nothing else bounds it.**  The tool set is the one
+    #: catalogue and nothing filters it, so a subagent may make a subagent, and
+    #: without this a model can grow a tree of them without limit.  What it costs
+    #: when it does is small per member — a subagent is a conversation in the
+    #: shared agent server, measured at ~1.5 MB against a `--headless` instance's
+    #: ~100 MB (`DESIGN §1.10`) — so the number here is about a runaway rather
+    #: than about the machine, and it is larger than the four an agent task gets
+    #: because a subagent is a thing an agent *has* rather than a run it started.
+    max_running: int = 32
+
+
+@dataclass(frozen=True)
 class ContextSettings:
     """How a conversation's context is decided.  Read by `slife2-context`.
 
@@ -1229,6 +1258,10 @@ class Config:
     #: thing it owns, since a task's prompt and step count are the agent's and
     #: come out of `agent:` above (see `AgentTaskSettings`).
     agent_task: AgentTaskSettings = field(default_factory=AgentTaskSettings)
+    #: How many subagents one agent may have, from `subagent:`.  Read by
+    #: `slife2-agent`, which owns the two tools that make and unmake one — there
+    #: is no plugin for this, because a subagent is not a process (sdd §3.5).
+    subagent: SubagentSettings = field(default_factory=SubagentSettings)
     #: How a conversation's context is decided, from `context:`.  Read by
     #: `slife2-context`, which is the plugin that owns the turn log.
     context: ContextSettings = field(default_factory=ContextSettings)
@@ -1765,6 +1798,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         skills=_skills(raw),
         agent=agent,
         agent_task=_agent_task(raw.get("agent-task"), base.agent_task),
+        subagent=_subagent(raw.get("subagent"), base.subagent),
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         tool_result=_tool_result(raw.get("tool_result"), base.tool_result),
@@ -1844,6 +1878,27 @@ def _agent_task(raw: Any, base: AgentTaskSettings) -> AgentTaskSettings:
             f"{base.max_running}"
         )
     return AgentTaskSettings(max_running=max_running)
+
+
+def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
+    """The `subagent:` section, defaulted — one number, and it has to be real.
+
+    Zero is refused, and `_agent_task` says why in the words this borrows: a cap
+    of zero is a tool the model can see, can call, and can never be answered by.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "subagent")
+    max_running = _int_or(
+        section.get("max_running"), base.max_running, "subagent.max_running"
+    )
+    if max_running < 1:
+        raise ConfigError(
+            f"subagent.max_running: {max_running} would refuse every subagent "
+            f"the model names — set at least 1, or leave the section out for "
+            f"{base.max_running}"
+        )
+    return SubagentSettings(max_running=max_running)
 
 
 def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:

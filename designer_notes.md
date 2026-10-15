@@ -94,5 +94,10 @@ Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
 如果用headless建，是不是所有机制都有了？
 
 
+subaggent 可以通过参数配置使用的llm，默认用主agent的LLM，
+
+另外增加一个参数，fork, 默认false，当为true时，共享主agent的一切，包括turns,自己的turn不落盘。
+
+
 
   

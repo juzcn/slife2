@@ -548,6 +548,52 @@ def a2a_inbound_path(agent: str) -> Path:
     return agent_dir(agent) / _A2A_INBOUND
 
 
+#: The file that makes a directory a subagent's.  Spelt once for the reason
+#: `_SCHEDULE_DB` is: one function writes it and one walk finds them by it.
+_SUBAGENT_YAML = "subagent.yaml"
+
+
+def subagent_file(agent: str, subagent: str) -> Path:
+    """The record that makes `<agent>/<subagent>/` a subagent: a file inside it.
+
+    **The file is the record and the directory is the membership.**  There is no
+    registry of subagents for the reason there is none of agents
+    (`schedule_dbs`): an agent's subagents *are* the directories underneath it,
+    and what says which directories those are is a file in each — the way
+    `wechat.yaml` says a login and `a2a.yaml` says an answer is owed.  A
+    directory without this file is not a subagent's, and that is what makes
+    `subagent_remove`'s blast radius provable: the cabinet lives in a directory
+    under the same parent as the subagents do, and what keeps a removal off it is
+    the absence of this file rather than a list of names to avoid.
+
+    What it holds is what the subagent was *made with* — the model it runs on,
+    and when it was made.  Its conversation is elsewhere (`turns.db` beside this)
+    and its work is elsewhere again; this is the part of an agent's identity that
+    is neither.
+    """
+    return agent_dir(agent, subagent) / _SUBAGENT_YAML
+
+
+def subagent_dirs(agent: str) -> list[Path]:
+    """One agent's subagents, as the directories that are theirs.
+
+    A walk of `<agent>/*/` for the file `subagent_file` writes, which is
+    `schedule_dbs`' shape and its reason: what belongs to an agent is found by
+    looking, because nothing keeps a list of it.  Sorted, so a caller that
+    answers a model with this — the count against `subagent.max_running`, a
+    roster — says the same thing twice running.
+
+    **One agent's, not every home's**, because the only readers are that agent's
+    own tools: a maker counting its subagents and a removal proving its target.
+    Every other walk here spans every home (`known_homes`) because a shared
+    daemon serves them all; this one is answering a call that already named an
+    agent, and an agent belongs to one home.
+    """
+    return [
+        path.parent for path in sorted(agent_dir(agent).glob(f"*/{_SUBAGENT_YAML}"))
+    ]
+
+
 def skills_dir() -> Path:
     """Where the skills live — one directory per skill, each with a `SKILL.md`.
 
