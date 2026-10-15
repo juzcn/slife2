@@ -99,6 +99,7 @@ read, so the TUI process never opens the OS keyring.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import re
@@ -245,6 +246,12 @@ SCHEDULE_SERVER_NAME = "slife2-schedule"
 #: request topic's last segment, so one shared process holds one mesh per agent
 #: it serves rather than one for the machine.
 A2A_SERVER_NAME = "slife2-a2a"
+
+#: Where `--a2a-broker` puts the address it was given, for the servers that have
+#: to read it.  An environment variable rather than an argument, which is
+#: `slife2.libs.host.paths.apply_data_dir`'s mechanism and its reason: the process
+#: that must end up on that broker is generally not the one that was told.
+A2A_BROKER_ENV_VAR = "SLIFE2_A2A_BROKER"
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
@@ -1221,10 +1228,75 @@ class A2ASettings:
     org: str = "default"
     unit: str = "default"
 
+    #: Whether the address above came from the command line rather than from the
+    #: file (`--a2a-broker`).  Read by the launcher, which is the only party that
+    #: can tell whether the flag was honoured: a mesh belongs to a *process*, so
+    #: a server this command did not start is on whatever broker it was started
+    #: with, and a client that asked for another one has to be told rather than
+    #: left believing it (`slife2.libs.host.launcher`).
+    overridden: bool = False
+
     @property
     def address(self) -> str:
         """`host:port`, as every log line and refusal names it."""
         return f"{self.broker_host}:{self.broker_port}"
+
+
+def add_a2a_broker_argument(parser: argparse.ArgumentParser) -> None:
+    """Add `--a2a-broker`, which is the flag `a2a.broker` is written as.
+
+    A flag rather than a config edit because the useful case is somebody else's
+    broker — a team's, a machine's, one already running — and pointing at one for
+    a session should not mean editing a file that every other session reads.
+    """
+    parser.add_argument(
+        "--a2a-broker",
+        default=None,
+        metavar="HOST:PORT",
+        help=(
+            "use this broker for the mesh instead of the one in the config — "
+            "somebody else's, or one `slife2` should not start itself"
+        ),
+    )
+
+
+def apply_a2a_broker(args: argparse.Namespace) -> None:
+    """Honour `--a2a-broker` by putting it in the environment.
+
+    The same mechanism `--data-dir` uses, for the same reason and with one more:
+    the servers a process starts must read the same address, and the *broker* is
+    the plugin's connection rather than a client's, so a value carried in an
+    argument would have to be handed to a process this one may not be starting.
+    """
+    if getattr(args, "a2a_broker", None):
+        os.environ[A2A_BROKER_ENV_VAR] = args.a2a_broker
+
+
+def broker_address(text: str) -> tuple[str, int]:
+    """`host:port` as a broker's host and port, or a `ConfigError` saying why not.
+
+    Split from the **right**, because a host may be an IPv6 address and those are
+    full of colons: `::1:1883` is `::1` on 1883, and splitting from the left
+    would read it as a host called `::1:1883`.  What is *not* checked here is the
+    address itself — a wildcard, or a name that is not this machine, is
+    `slife2.plugins.a2a.broker`'s question, and it answers it once for every way an
+    address can be written down.
+    """
+    host, _, port = text.rpartition(":")
+    if not host or not port:
+        raise ConfigError(
+            f"--a2a-broker {text!r} is not `host:port` — write it as "
+            f"`127.0.0.1:1883` or `broker.example:1883`"
+        )
+    try:
+        number = int(port)
+    except ValueError:
+        number = 0
+    if not 0 < number < 65536:
+        raise ConfigError(
+            f"--a2a-broker {text!r}: {port!r} is not a port number (1-65535)"
+        )
+    return host, number
 
 
 @dataclass(frozen=True)
@@ -1826,7 +1898,21 @@ def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
     offered to a model for a mesh that is not running.  v1 answered that case
     with a warning and `enabled = False`, which is the silence-with-tools
     outcome, so it does not port.
+
+    **`--a2a-broker` is applied here, after the file**, so the flag wins over the
+    section it is an override of and everything downstream sees one answer.  It
+    cannot *make* a mesh where the section was left out: the section's presence is
+    the switch, and a flag that turned it on would be a second way of saying the
+    same thing — so on a machine with no `a2a:` the flag is refused, by name,
+    rather than answered with a mesh nobody asked the file for.
     """
+    override = os.environ.get(A2A_BROKER_ENV_VAR, "").strip()
+    if raw is None and override:
+        raise ConfigError(
+            f"--a2a-broker {override!r} names a broker to use, but this machine "
+            f"is not on the mesh: there is no `a2a:` section, and that section "
+            f"is what being on one means"
+        )
     if raw is None:
         return base
     section = _mapping(raw, "a2a")
@@ -1847,13 +1933,19 @@ def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
         broker = {}
     broker = _mapping(broker, "a2a.broker")
 
+    host = str(broker.get("host") or base.broker_host)
+    port = _int_or(broker.get("port"), base.broker_port, "a2a.broker.port")
+    if override:
+        host, port = broker_address(override)
+
     return A2ASettings(
         provider=provider,
         configured=True,
-        broker_host=str(broker.get("host") or base.broker_host),
-        broker_port=_int_or(broker.get("port"), base.broker_port, "a2a.broker.port"),
+        broker_host=host,
+        broker_port=port,
         org=str(section.get("org") or base.org),
         unit=str(section.get("unit") or base.unit),
+        overridden=bool(override),
     )
 
 

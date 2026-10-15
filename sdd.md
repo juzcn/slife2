@@ -274,6 +274,25 @@ file's comments and its explanation of itself survive, and the *loader* is the
 judge of what was written — a `slife2.yaml` this build cannot read back is put
 back the way it was rather than left half-edited (`DESIGN §8.7`).
 
+**One flag overrides one section, and only where a section is what decides.**
+`--a2a-broker HOST:PORT` replaces the mesh's broker for the run, because the
+useful case is somebody else's broker — a team's, a machine's, one already
+running — and joining one for a session should not mean editing a file every
+session reads. It travels the way `--data-dir` does (into the environment, so a
+server this process starts reads the same address), it overrides the *address*
+and nothing else — which network this is is `org`/`unit` and stays the file's —
+and it cannot switch a mesh on: an absent `a2a:` section is still what "not on
+the mesh" means, so the flag is refused there rather than answered with a mesh
+nobody described.
+
+**A broker belongs to a process, so only the command that starts one can choose
+it.** The MQTT sessions are the a2a server's, and a server already running is on
+whatever broker it was started with; a client that asked for another one is
+therefore told and stopped (`_broker_not_honoured`), rather than left with `a2a_*`
+tools, peers that answer, and a broker nobody asked for — the failure that looks
+like success. It is the one setting in this system a flag can override and a
+running stack can refuse, and both halves are stated rather than discovered.
+
 ### 3.2 The servers are shared, and the launcher is the only thing that starts them
 
 Every server is shared infrastructure (`libs/host/launcher.py`). `slife2` brings

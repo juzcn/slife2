@@ -44,10 +44,13 @@ import sys
 import time
 
 from slife2.libs.host.config import (
+    A2A_SERVER_NAME,
     DEFAULT_AGENT,
     Config,
     ConfigError,
     ModelSettings,
+    add_a2a_broker_argument,
+    apply_a2a_broker,
     find_config_path,
     load,
 )
@@ -115,6 +118,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # Shared with the servers' own parsers: the flag means the same thing in
     # both, and `slife2.libs.host.paths` is where the directory it names is defined.
     add_data_dir_argument(parser)
+    # And the one flag that overrides a *config* value, for the one setting whose
+    # useful case is somebody else's: a broker to join for a session rather than
+    # a file to edit for every session (`slife2.libs.host.config.A2ASettings`).
+    add_a2a_broker_argument(parser)
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
@@ -149,6 +156,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     args = parser.parse_args(rest)
     apply_data_dir(args)
+    apply_a2a_broker(args)
     return args
 
 
@@ -184,6 +192,32 @@ def _report(
     print(f"  {name:<14} {url:<28} {prefix}{detail}{time_column}".rstrip())
 
 
+def _broker_not_honoured(config: Config) -> int:
+    """`--a2a-broker` named a broker this command cannot put the mesh on.
+
+    **A failure rather than a line, because the other outcome is a mesh silently
+    on the wrong broker.**  A broker is where a process's MQTT sessions point,
+    and the process holding them is the a2a server: one that is already running
+    was started with some address, and this command did not choose it.  Carrying
+    on would hand a model `a2a_*` tools that answer, peers that answer, and a
+    broker nobody asked for — the "feature that quietly does nothing" this
+    project refuses everywhere else, and the one way this flag can fail that
+    looks like success.
+
+    Two rather than a traceback, for `_ensure`'s reason: nothing has been drawn
+    yet, and the fix is one of two words in a shell.
+    """
+    print(
+        f"slife2: --a2a-broker {config.a2a.address} cannot be honoured: the a2a "
+        f"server is already running, and a mesh is on the broker it was started "
+        f"with.\n"
+        f"  Stop it with `slife2 down` and start again, or drop the flag to use "
+        f"the running one.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _ensure(config: Config, config_path) -> int:
     """Bring up what is missing, and report each server as it lands.
 
@@ -204,8 +238,19 @@ def _ensure(config: Config, config_path) -> int:
     started = time.monotonic()
     failed = []
     count = 0
+    #: Whether the mesh is answering from a process *this command* started.  A
+    #: broker is a property of a process's connection and not of a call, so a
+    #: server that was already up is on whatever broker it was started with —
+    #: and `--a2a-broker` can only be honoured by the command that starts one.
+    mesh_is_ours = True
     for outcome in ensure_all(config, config_path=config_path):
         count += 1
+        if (
+            outcome.spec.expected_name == A2A_SERVER_NAME
+            and outcome.ok
+            and outcome.status is not Status.STARTED
+        ):
+            mesh_is_ours = False
         if outcome.status is Status.STARTED:
             _report(
                 "starting -> ",
@@ -241,6 +286,9 @@ def _ensure(config: Config, config_path) -> int:
     # actually waiting for.
     plural = "" if count == 1 else "s"
     print(f"  {count} server{plural} in {_duration(time.monotonic() - started)}")
+
+    if config.a2a.overridden and not mesh_is_ours:
+        return _broker_not_honoured(config)
 
     if failed:
         print("\nslife2: could not start:", file=sys.stderr)

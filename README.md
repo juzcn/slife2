@@ -64,7 +64,8 @@ uv sync
 
 ```
 slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
-       [--keep-servers] [--headless]     ensure the servers, then run the TUI
+       [--a2a-broker HOST:PORT] [--keep-servers] [--headless]
+                                         ensure the servers, then run the TUI
 slife2 status                            what is running, and where
 slife2 down                              stop the servers this config names
 ```
@@ -73,6 +74,17 @@ slife2 down                              stop the servers this config names
 bare provider, meaning its first model); without it the config's `default` is
 used. `--url` overrides the agent server's endpoint, for the case where it is
 already running somewhere this config does not name.
+
+**`--a2a-broker` points the mesh at a broker instead of the one in the config** —
+somebody else's, a team's, one already running on another machine — so joining
+one for a session does not mean editing a file every session reads. It overrides
+`a2a.broker` and nothing else: which network this is (`org`/`unit`) is still the
+section's, and a machine with no `a2a:` section is still off the mesh, so the
+flag is refused there rather than switching one on. **A broker belongs to a
+running stack**, which is why the flag can only be honoured by the command that
+starts the mesh: if the servers are already up they are on the broker they were
+started with, and `slife2` says so and stops rather than leaving you on the
+wrong one. `slife2 down` first.
 
 **`--headless` runs that window with no terminal.** The same servers, the same
 connections, the same turns, run by the same code — and nothing drawn and nothing

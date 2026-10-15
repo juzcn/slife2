@@ -111,6 +111,103 @@ def test_a_machine_with_no_mesh_section_has_no_mesh_url() -> None:
     assert not default_config().a2a.configured
 
 
+def test_the_broker_flag_is_parsed_and_reaches_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--a2a-broker` travels the way `--data-dir` does, and for the same reason.
+
+    The process that ends up on that broker is generally not the one that was
+    told — the a2a server holds the connection — so the value goes into the
+    environment, which a spawned child inherits, rather than into an argument
+    this process may never pass on.
+
+    **The test takes the variable before the flag does**, because the setting
+    *is* the environment and the code under test writes it there with no way for
+    anyone to undo it afterwards: `monkeypatch.delenv` on a variable that is not
+    set registers nothing to restore, so the value the flag writes would outlive
+    the test and be handed to the next one — a mesh nobody asked it for.  An
+    empty value is what "no flag" means to the loader, so owning it costs
+    nothing.
+    """
+    import os
+
+    from slife2.libs.host.config import A2A_BROKER_ENV_VAR
+
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, "")
+
+    assert _parse_args([]).a2a_broker is None
+
+    _parse_args(["--a2a-broker", "broker.example:2883"])
+    assert os.environ[A2A_BROKER_ENV_VAR] == "broker.example:2883"
+
+
+def test_a_broker_the_running_mesh_was_not_started_on_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A mesh is a *process's* connection, so only the command that starts it can choose.
+
+    Carrying on would be the shape this flag fails in that looks like success: a
+    model with `a2a_*` tools, peers that answer, and a broker nobody asked for.
+    """
+    from slife2.libs.host import launcher
+    from slife2.libs.host.launcher import Outcome, ServerSpec, Status
+
+    spec = ServerSpec(
+        name="a2a",
+        module="slife2.plugins.a2a.server",
+        url="http://127.0.0.1:8040/mcp",
+        host="127.0.0.1",
+        port=8040,
+        expected_name=A2A_SERVER_NAME,
+        expected_tool="join",
+    )
+    monkeypatch.setattr(
+        launcher, "ensure_all", lambda *_a, **_k: iter([Outcome(spec, Status.RUNNING)])
+    )
+    config = default_config()
+    object.__setattr__(
+        config,
+        "a2a",
+        A2ASettings(configured=True, broker_host="other.example", overridden=True),
+    )
+
+    code = slife2._ensure(config, config_path=None)
+
+    assert code == 2
+    said = capsys.readouterr().err
+    assert "other.example:1883" in said
+    assert "slife2 down" in said
+
+
+def test_a_mesh_this_command_started_honours_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And a stack this process brings up is on the broker it was told to use."""
+    from slife2.libs.host import launcher
+    from slife2.libs.host.launcher import Outcome, ServerSpec, Status
+
+    spec = ServerSpec(
+        name="a2a",
+        module="slife2.plugins.a2a.server",
+        url="http://127.0.0.1:8040/mcp",
+        host="127.0.0.1",
+        port=8040,
+        expected_name=A2A_SERVER_NAME,
+        expected_tool="join",
+    )
+    monkeypatch.setattr(
+        launcher, "ensure_all", lambda *_a, **_k: iter([Outcome(spec, Status.STARTED)])
+    )
+    config = default_config()
+    object.__setattr__(
+        config,
+        "a2a",
+        A2ASettings(configured=True, broker_host="other.example", overridden=True),
+    )
+
+    assert slife2._ensure(config, config_path=None) == 0
+
+
 def test_the_take_down_is_what_stops_the_broker(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

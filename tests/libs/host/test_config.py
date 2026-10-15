@@ -14,6 +14,7 @@ import pytest
 
 import slife2.libs.host.config
 from slife2.libs.host.config import (
+    A2A_BROKER_ENV_VAR,
     API_BACKENDS,
     DEFAULT_TOOL_RESULT_TOKENS,
     ConfigError,
@@ -1285,3 +1286,86 @@ def test_a_named_config_that_is_not_there_is_not_the_defaults(tmp_path) -> None:
     missing = tmp_path / "typo.yaml"
     with pytest.raises(ConfigError, match="config file not found"):
         load_cached(missing)
+
+
+# --- the broker on the command line ------------------------------------------
+
+#: A config that is on the mesh: the `a2a:` section is what being on one means.
+A_MESH = (
+    A_PROVIDER
+    + """
+a2a:
+  broker:
+    host: localhost
+    port: 1883
+  org: an-org
+  unit: a-unit
+"""
+)
+
+
+def test_the_broker_flag_overrides_the_address_and_nothing_else(
+    tmp_path, monkeypatch
+) -> None:
+    """`--a2a-broker` wins over the file it is an override of — over its address.
+
+    Which network this is stays the section's: `org` and `unit` name the topic
+    namespace, and the flag names a broker to join rather than a mesh to be on.
+    """
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
+    config = load(write(tmp_path, A_MESH))
+
+    assert config.a2a.address == "broker.example:2883"
+    assert config.a2a.overridden
+    assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
+
+
+def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+    config = load(write(tmp_path, A_MESH))
+
+    assert config.a2a.address == "localhost:1883"
+    assert not config.a2a.overridden
+
+
+def test_the_broker_flag_cannot_turn_the_mesh_on(tmp_path, monkeypatch) -> None:
+    """The section's presence is the switch, and the flag is not a second one.
+
+    A machine with no `a2a:` is a machine that is not on the mesh — that is the
+    design's whole off switch (`A2ASettings`) — so a flag naming a broker is
+    refused by name rather than answered with a mesh the file never described.
+    """
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
+
+    with pytest.raises(ConfigError, match="not on the mesh"):
+        load(write(tmp_path, A_PROVIDER))
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["nonsense", "host:notaport", ":1883", "host:0", "host:70000"],
+)
+def test_a_broker_address_that_is_not_one_is_refused(
+    tmp_path, monkeypatch, written: str
+) -> None:
+    """Refused where it is written, naming the flag — not dialled and found out.
+
+    A port the operating system cannot have is a config mistake, and the failure
+    it would otherwise produce is a connect that hangs and says nothing.
+    """
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, written)
+
+    with pytest.raises(ConfigError, match="a2a-broker"):
+        load(write(tmp_path, A_MESH))
+
+
+def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -> None:
+    """`:1883` is the port even when the host is full of colons.
+
+    Splitting from the left would read `::1:1883` as a host called `::1:1883`,
+    which is not a host — and `::1` is one of the three addresses this machine
+    answers to (`slife2.plugins.a2a.broker.LOCAL_HOSTS`).
+    """
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, "::1:2883")
+
+    assert load(write(tmp_path, A_MESH)).a2a.address == "::1:2883"

@@ -94,10 +94,13 @@ Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
 如果用headless建，是不是所有机制都有了？
 
 
-subaggent 可以通过参数配置使用的llm，默认用主agent的LLM，
+subagent-set: subaggent 可以通过参数配置使用的llm，默认用主agent的LLM，
 
-另外增加一个参数，fork, 默认false，当为true时，共享主agent的一切，包括turns,自己的turn不落盘。
+另外增加2个参数，
+
+- fork, 默认false，当为true时，共享主agent的一切，包括turns,自己的turn不落盘。clone主agent的上下文到subagent.
+- role, Subagent的角色，默认为subagent
 
 
-
+A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。顺便把这个功能做了：--a2a-broker host:port , use external broker。我们可以把A2A的agent理解为Remote Agent, Suagent是一个Local Agent.
   
