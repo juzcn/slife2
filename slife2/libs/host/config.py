@@ -1542,11 +1542,23 @@ def load(explicit: str | Path | None = None) -> Config:
     return _build(raw, config_dir=path.parent)
 
 
-#: The last file read, and what it looked like: `(path, (mtime_ns, size), config)`.
-#: One slot, because there is one config file and one process per reader.  A
-#: `None` path is the *no file* state, which is a state like any other and is
-#: cached for the reason the docstring below gives.
-_latest: tuple[Path | None, tuple[int, int] | None, Config] | None = None
+#: What each file looked like when it was last read: by path, `((mtime_ns, size),
+#: config)`.
+#:
+#: **One entry per file, and not one slot, because a process serves more than one
+#: world.**  `find_config_path` resolves in the caller's world, so a daemon shared
+#: by two data directories reads two `slife2.yaml` — and one slot would thrash
+#: between them.  Thrashing is not merely wasteful here: the whole staleness test
+#: a reader makes is `config is not self._config`, so a cache that answered with
+#: a fresh object on every alternation would look to `LiveProviders`, and to
+#: every conversation, like a config that is edited between calls — rebuilding the
+#: provider table, its cached SDK clients, and the model a new conversation starts
+#: on, every single turn.
+#:
+#: A `None` key is the *no file at all* state, which is not per world: two worlds
+#: with no config have the same built-in defaults, and they are one object because
+#: they are one answer.
+_latest: dict[Path | None, tuple[tuple[int, int] | None, Config]] = {}
 
 
 def load_cached(explicit: str | Path | None = None) -> Config:
@@ -1571,6 +1583,13 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     A file that is there but cannot be *stat'd* is neither: it raises, naming
     the path, rather than being read as "changed" and quietly answered with a
     fresh object (DESIGN.md §10.1).
+
+    **And the answer follows the caller's world, like every other read a shared
+    plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.world`,
+    so a daemon serving two data directories reads two `slife2.yaml` — each
+    cached on its own file, which is what keeps "has this config changed?" the
+    one `is` comparison its readers rely on rather than a question that a second
+    world's traffic keeps answering "yes" to.
     """
     global _latest
     path = find_config_path(explicit)
@@ -1585,12 +1604,13 @@ def load_cached(explicit: str | Path | None = None) -> Config:
             # about *that* file, and answering with a different configuration is
             # the silent fallback `load` refuses (DESIGN.md §10.1).
             return load(explicit)
-        # `None` in the path slot means "there was no file", so a file appearing
+        # The `None` key is the "there was no file" state, so a file appearing
         # afterwards takes the reload path below rather than being missed.
-        if _latest is not None and _latest[0] is None:
-            return _latest[2]
+        cached = _latest.get(None)
+        if cached is not None:
+            return cached[1]
         config = load(explicit)
-        _latest = (None, None, config)
+        _latest[None] = (None, config)
         return config
     try:
         stat = path.stat()
@@ -1601,10 +1621,11 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         # (DESIGN.md §10.1).  `load` reports an unreadable file the same way.
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
-    if _latest is not None and _latest[0] == path and _latest[1] == stamp:
-        return _latest[2]
+    cached = _latest.get(path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
     config = load(path)
-    _latest = (path, stamp, config)
+    _latest[path] = (stamp, config)
     return config
 
 
