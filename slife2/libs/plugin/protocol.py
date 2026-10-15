@@ -209,13 +209,23 @@ def house_server(
     short and do not restate what the tools' own descriptions already say —
     which, as the spec's guidance puts it, is why no instructions is better than
     poorly written ones.
+
+    **`ServeTheCallersHome` is applied here rather than in `serve`**, and that is
+    the difference between a convention and a thing every process happens to do:
+    what it decides is which home's files a call is about, which is a property of
+    the *server* rather than of the transport it ends up on.  Registered here,
+    every plugin has it by construction — a server built for a test over the
+    in-memory transport included, since a test that hands a config in and a call
+    that names a home are the two halves of the same rule.
     """
-    return FastMCP(
+    mcp: FastMCP = FastMCP(
         name,
         instructions=instructions or None,
         lifespan=lifespan,
         mask_error_details=False,
     )
+    mcp.add_middleware(ServeTheCallersHome())
+    return mcp
 
 
 async def identifies(client: Client, expected_name: str, *, fallback_tool: str) -> bool:
@@ -580,7 +590,6 @@ def serve(
         version=__version__,
     )
     write_record(record)
-    mcp.add_middleware(ServeTheCallersHome())
     try:
         mcp.run(
             transport="http",

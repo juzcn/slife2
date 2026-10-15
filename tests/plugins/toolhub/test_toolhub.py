@@ -33,11 +33,18 @@ from slife2.clients.gateway import (
     proxied_name,
     sanitise,
 )
-from slife2.libs.host.config import ToolLoadSettings, ToolServerSettings, default_config
-from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.host.config import (
+    ToolLoadSettings,
+    ToolServerSettings,
+    default_config,
+    load_cached,
+)
+from slife2.libs.host.paths import in_home
+from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.family import Family, Held
 from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.catalogue import ToolStore
+from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
     MAX_LOAD_NAMES,
     PLUGIN,
@@ -48,7 +55,23 @@ from slife2.plugins.toolhub.server import (
 from slife2.plugins.toolhub.server import (
     build_server as build_hub,
 )
-from tests.fakes import StubEmbedder, plugin_transports, upstream_server
+from tests.fakes import StubEmbedder, config_file, plugin_transports, upstream_server
+
+#: Two homes' `cli:` sections, for the test that needs one process to serve
+#: both: distinct names, because the question is not which one wins.
+MINE_CLI = """
+cli:
+  mine-only:
+    command: mine
+    description: Recorded in this home.
+"""
+
+THEIRS_CLI = """
+cli:
+  theirs-only:
+    command: theirs
+    description: Recorded in the other one.
+"""
 
 pytestmark = pytest.mark.unit
 
@@ -2496,3 +2519,62 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
 
         result = await call(client, "spawned__greet", {"name": "ada"})
         assert result == {"text": "hello ada", "ok": True}
+
+
+@pytest.mark.asyncio
+async def test_a_second_home_is_served_its_own_declarations(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**One hub, one set of plugins, two homes — and two tool sets.**
+
+    What a plugin declares is its section of the *caller's* `slife2.yaml`, so a
+    hub answering two homes has two address books and two catalogues
+    (`Catalogue.store`).  Held for the process, the second home's search would
+    find the first one's commands and route its calls to servers configured in a
+    directory that home has never heard of.
+
+    The cli server is the real one, reading the caller's file (`load_cached`),
+    because that is the half under test — every other plugin here is the fixed
+    stand-in the rest of this module uses.
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config_file(mine, MINE_CLI)
+    config_file(theirs, THEIRS_CLI)
+    base = default_config()
+
+    async def search(hub: Client, home: Path, query: str) -> str:
+        """A search as the caller in *home*: the meta is what names it."""
+        with in_home(home):
+            answer = await hub.call_tool(
+                "call_tool",
+                {
+                    "name": "tool_search",
+                    "arguments": {"keywords": [query], "sentences": []},
+                },
+                meta=client_meta("jack"),
+            )
+        return str(answer.data["text"])
+
+    hub = build_hub(
+        base,
+        source=load_cached,
+        transports={
+            # The stand-ins first and the one that matters last: a dictionary
+            # spread the other way round would quietly put the fixed cli-server
+            # back and leave this testing nothing.
+            **plugin_transports(base, {}, None),
+            "cli-server": lambda settings: build_cli(base, source=load_cached),
+        },
+        embedder=StubEmbedder(),
+    )
+    async with Client(hub) as client:
+        here = await search(client, mine, "cli:mine-only")
+        there = await search(client, theirs, "cli:theirs-only")
+        # ...and neither home finds the other's, which is the half that a table
+        # keyed by nothing but the source name would get wrong.
+        missing = await search(client, mine, "cli:theirs-only")
+
+    assert "cli:mine-only" in here
+    assert "cli:theirs-only" in there
+    assert "cli:theirs-only" not in missing

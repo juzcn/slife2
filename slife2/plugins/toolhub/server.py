@@ -178,7 +178,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -193,7 +193,12 @@ from slife2.clients.gateway import (
     sanitise,
 )
 from slife2.clients.toolclient import UpstreamTool
-from slife2.libs.host.config import Config, ToolServerSettings
+from slife2.libs.host.config import (
+    Config,
+    ToolServerSettings,
+    for_the_call,
+    load_cached,
+)
 from slife2.libs.host.paths import catalogue_db, data_dir
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
@@ -760,6 +765,26 @@ def _server_row(
         #: fail over a server that was merely down".
         "required": required,
     }
+
+
+@dataclass
+class Declarations:
+    """What the plugins hold for **one home**, and the lock that guards it.
+
+    A dataclass rather than three parallel dictionaries in `build_server`,
+    because they are one fact written three ways: the sources a plugin declared,
+    which plugin holds each, and the lock that keeps two overlapping refreshes
+    from interleaving their swaps — and the hub reconciles them *per home*,
+    since each home's catalogue is a file of its own.
+    """
+
+    #: One entry per declared source, as the plugin answered.
+    held: dict[str, DeclaredSource] = field(default_factory=dict)
+    #: Who to ask for each one, which is the route a call takes.
+    holders: dict[str, Upstream] = field(default_factory=dict)
+    #: One refresh at a time for this home — see `build_server`'s
+    #: `refresh_declared`, which is the only holder.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass(frozen=True)
@@ -2170,6 +2195,7 @@ def configured_sources(config: Config) -> frozenset[str]:
 def build_server(
     config: Config,
     *,
+    source: Callable[[], Config] | None = None,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
     embedder: Embedder | None = None,
@@ -2186,6 +2212,15 @@ def build_server(
     catalogue is a *file* this process opens, and its vectors come from the
     embedding model the config names.  Injecting one is what lets a test index a
     catalogue with no endpoint behind it, exactly as it does for the turns.
+
+    `source` is what makes this hub serve *the caller's* home rather than the one
+    it was started in: `load_cached` in production, nothing at all when a test
+    hands a config in (`slife2.libs.host.config.for_the_call`).  Everything below
+    that reads the config at call time goes through `current()` — the catalogue's
+    budget and its boot pass, the embedder, and the declarations — while what the
+    *process* is built from stays machine-level on purpose: `upstreams` are the
+    plugins slife2 starts, one set of ports for every home, which is the whole
+    reason a second home costs no second stack.
 
     **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
     `_func_tool_unload` are this plugin's, and the hub merges them into the
@@ -2205,6 +2240,16 @@ def build_server(
     already (`_results_as_text`, `_load_as_text`, `_unload_as_text`).
     """
     directory = data_dir()
+
+    def current() -> Config:
+        """The config the call in front of us is served from.
+
+        Not a parameter and not read once, for `slife2.libs.host.config.for_the_call`'s
+        reason: a hub answers every conversation in the system, and the budget,
+        the source names and the embedder behind the file it opens are the
+        *caller's* home's.
+        """
+        return for_the_call(source, config)
 
     def default_transport(settings: ToolServerSettings) -> Any:
         return mcp_config(settings, cwd=str(directory))
@@ -2237,22 +2282,41 @@ def build_server(
         elsewhere sets the data directory, which is what `conftest.py` does for
         every test in this suite.
         """
+        theirs = current()
         store = await asyncio.to_thread(
             ToolStore,
             catalogue_db(),
-            threshold=config.tool_load.threshold,
-            known=configured_sources(config),
+            threshold=theirs.tool_load.threshold,
+            known=configured_sources(theirs),
         )
-        status = await store.sync_indexes(await embedding.get())
+        status = await store.sync_indexes(await embedder_of_call())
         logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
         return store
 
     #: The embedder, opened on first use: the catalogue's rows are placed in a
     #: vector index by the same model the turns are, through the same hop.
-    embedding = EmbedderConnection(config, embedder=embedder)
+    #:
+    #: **One per home**, because the width and the model come from the
+    #: embeddings plugin's `describe` — which answers for the home the call came
+    #: from — while the endpoint comes from `servers:` and is the machine's.  One
+    #: connection for the process would fix the first home's model on every other
+    #: (`EmbedderConnection` keeps what it opened), and an index built at one
+    #: width cannot be searched at another.
+    embeddings: dict[str, EmbedderConnection] = {}
+
+    def embedding_for() -> EmbedderConnection:
+        found = embeddings.get(str(home_dir()))
+        if found is None:
+            found = EmbedderConnection(current(), embedder=embedder)
+            embeddings[str(home_dir())] = found
+        return found
+
+    async def embedder_of_call() -> Embedder:
+        """The embedder of the home this call is for, opened on first use."""
+        return await embedding_for().get()
 
     #: The catalogue, and the one file it opens when something first asks.
-    catalogue = Catalogue(open_catalogue, embedding.get)
+    catalogue = Catalogue(open_catalogue, embedder_of_call)
 
     #: The plugins first, in the order slife2 starts them, and required — see
     #: `list_tools`.  The hub asks every one of them, including the ones with
@@ -2276,26 +2340,47 @@ def build_server(
         if name != CONFIG_KEY
     ]
 
-    #: Every source a plugin declared, and which plugin holds it — the hub's
-    #: address book for calls it cannot make itself.  **Rebuilt from the
+    #: Every source a plugin declared, by home, and which plugin holds it — the
+    #: hub's address book for calls it cannot make itself.  **Rebuilt from the
     #: declarations on every refresh**, because a source is not a connection this
     #: process keeps and there is nowhere else the fact could live.
-    held: dict[str, DeclaredSource] = {}
-    #: And who holds each one, which is the route a call takes.
-    holders: dict[str, Upstream] = {}
-    #: **One refresh at a time**, and this process is the one that has to say so:
-    #: the hub answers every conversation in the system, so two asks arriving
-    #: together — two turns, or a turn and a search — would otherwise declare the
-    #: same plugin twice at once.  Two things break when that happens, and the
-    #: second is why a lock and not a repair: `ToolStore.merge` *plans* its writes
-    #: and applies them in a second pass with an embed in between
-    #: (`slife2.libs.store.db`), so two overlapping merges of one source are a check-then-act
-    #: race on the tool table's primary key — and the two swaps of `held` and
-    #: `holders` can interleave, leaving a source held with the route to another
-    #: plugin's connection.  It is a small critical section: `refresh_declared`'s
-    #: body is plugin round trips and catalogues, and nothing a reader of
-    #: `live_sources` can see (the swap at the end has no await in it).
-    refresh_lock = asyncio.Lock()
+    #:
+    #: **Per home**, and that is the fact the whole hub turns on: what a plugin
+    #: holds is its section of the *caller's* `slife2.yaml` — `mcp:` entries,
+    #: playbooks, commands, and the server a home's model may call — so one table
+    #: for the process would answer one home with another's address book, and
+    #: route its calls to servers configured somewhere else.  The hub's own
+    #: connections (`upstreams`) are not in here and do not move: those are the
+    #: plugins slife2 starts, one set of ports for every home.
+    #:
+    #: `Declarations.lock` is per home for the reason the table is: the race it
+    #: serialises is two overlapping merges of one source *into one catalogue*,
+    #: and each home has its own file (`Catalogue.store`).
+    declared: dict[str, Declarations] = {}
+
+    def declarations() -> Declarations:
+        """This home's address book, made on the first ask."""
+        key = str(home_dir())
+        found = declared.get(key)
+        if found is None:
+            found = Declarations()
+            declared[key] = found
+        return found
+
+    #: **One refresh at a time, per home** (`Declarations.lock`), and this
+    #: process is the one that has to say so: the hub answers every conversation
+    #: in the system, so two asks arriving together — two turns, or a turn and a
+    #: search — would otherwise declare the same plugin twice at once.  Two
+    #: things break when that happens, and the second is why a lock and not a
+    #: repair: `ToolStore.merge` *plans* its writes and applies them in a second
+    #: pass with an embed in between (`slife2.libs.store.db`), so two overlapping merges
+    #: of one source are a check-then-act race on the tool table's primary key —
+    #: and the two swaps of the tables can interleave, leaving a source held with
+    #: the route to another plugin's connection.  It is a small critical section:
+    #: `refresh_declared`'s body is plugin round trips and catalogues, and nothing
+    #: a reader of `live_sources` can see (the swap at the end has no await in
+    #: it).  Two homes refreshing at once is not a race — each writes its own
+    #: catalogue — so they do not wait for each other.
 
     def by_source(name: str) -> Upstream | None:
         """Who to ask for one source: the connection we hold, or the plugin.
@@ -2307,7 +2392,7 @@ def build_server(
         for one in upstreams:
             if one.settings.name == name:
                 return one
-        return holders.get(name)
+        return declarations().holders.get(name)
 
     def live_sources() -> list[str]:
         """The sources whose tool lists are in hand, plus this one.
@@ -2329,7 +2414,7 @@ def build_server(
         return (
             [one.settings.name for one in upstreams if one.usable]
             + [CONFIG_KEY]
-            + [one.name for one in held.values() if one.up]
+            + [one.name for one in declarations().held.values() if one.up]
         )
 
     async def refresh_declared() -> None:
@@ -2364,14 +2449,14 @@ def build_server(
         source at all and hand its model a list missing every external tool; the
         swap has no await in it, so no reader can see a half-built set.
 
-        **And one refresh at a time** (`refresh_lock`), for the same fact seen
+        **And one refresh at a time** (`Declarations.lock`), for the same fact seen
         from the other side: two asks arriving at once would each run this, and
         two overlapping merges of one source are a race on the tool table's
         primary key (`slife2.libs.store.catalogue.ToolStore.merge` plans and applies in two halves).
         An ask that arrives during one waits for it; what it waits for is one
         round trip to a plugin, and what it buys is not merging a source twice.
         """
-        async with refresh_lock:
+        async with declarations().lock:
             begin_connecting()
             known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
             found: dict[str, DeclaredSource] = {}
@@ -2398,10 +2483,11 @@ def build_server(
                     known.add(one.name)
                     found[one.name] = one
                     owners[one.name] = upstream
-            held.clear()
-            held.update(found)
-            holders.clear()
-            holders.update(owners)
+            mine = declarations()
+            mine.held.clear()
+            mine.held.update(found)
+            mine.holders.clear()
+            mine.holders.update(owners)
 
     def autoload_sources() -> list[str]:
         """The declared sources the budget may never take back.
@@ -2413,7 +2499,7 @@ def build_server(
         `_func_tool_unload` tool — because a set rebuilt by hand in the second
         place is a set the first one can stop agreeing with.
         """
-        return [one.name for one in held.values() if one.autoload]
+        return [one.name for one in declarations().held.values() if one.autoload]
 
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
@@ -2542,7 +2628,8 @@ def build_server(
             # embedder it opened *is* a connection, and a hub that exits leaving
             # one open is a hub whose last act is a half-closed socket.
             await catalogue.close()
-            await embedding.close()
+            for one in embeddings.values():
+                await one.close()
 
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
@@ -2722,7 +2809,7 @@ def build_server(
             }
 
         remote = str(row.get("remote_name") or name)
-        if source in holders:
+        if source in declarations().holders:
             # **Declared, so somebody else holds the link.**  The hub owns the
             # set and not the connection: what it knows is which plugin to ask,
             # and the far end's own name for the tool travels with the call,
@@ -2898,7 +2985,7 @@ def build_server(
                 # often than a fault is.
                 *(
                     one.snapshot(counts.get(one.name))
-                    for one in held.values()
+                    for one in declarations().held.values()
                     if one.transport
                 ),
             ],
@@ -2912,7 +2999,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
         note=lambda config: (
             f"{len([name for name in config.plugins() if name != CONFIG_KEY])} "

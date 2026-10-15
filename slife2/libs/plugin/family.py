@@ -45,8 +45,13 @@ from fastmcp import Context, FastMCP
 import slife2.helpers.timeouts as _T
 from slife2.clients.gateway import ClientFactory, Connection, mcp_config, proxied_name
 from slife2.libs.host import configfile
-from slife2.libs.host.config import Config, ConfigError, ToolServerSettings
-from slife2.libs.host.paths import data_dir
+from slife2.libs.host.config import (
+    Config,
+    ConfigError,
+    ToolServerSettings,
+    for_the_call,
+)
+from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import forwarded_client, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -196,7 +201,11 @@ class Family:
         client_factory: ClientFactory | None = None,
     ) -> None:
         self.category = category
-        self._directory = str(data_dir())
+        #: The working directory an entry's process is started in when its own
+        #: `cwd` is left out — **the home this family was built for**, which is
+        #: the caller's: a family is built inside the call that first needed it
+        #: (`Homes`), so the ambient home is already the right one.
+        self._directory = str(home_dir())
         self._transports = dict(transports or {})
         self._client_factory = client_factory
         self._held = {entry.name: self._hold(entry) for entry in entries}
@@ -865,17 +874,87 @@ class Documents:
         self.entries.pop(name, None)
 
 
+class Homes[T]:
+    """One of `T` per home, built the first time that home asks.
+
+    **A plugin holds a family per home, and this is what makes sharing it
+    honest.**  What a family holds is its section of `slife2.yaml` — the
+    entries, their connections, their switches — and that section belongs to a
+    home (`slife2.libs.host.paths.home`).  One family for the process would serve
+    every home the entries of whichever data directory started it, connections
+    and all, which is the leak this closes.
+
+    **Built on first ask, never at start-up**, for the reason the tool
+    catalogue is (`slife2.plugins.toolhub.server.Catalogue.store`): a home is a data
+    directory this process may not hear about until somebody in it asks
+    something, and building for one nobody is using is work plus connections
+    nobody asked for.
+
+    `build` is what to make, and **`source` decides which config it is made
+    from**: the home's own file in production, the one a caller injected in a
+    test (`slife2.libs.host.config.for_the_call`).  A holder that always read the
+    file would be one that ignores a config handed to `build_server`, and every
+    test in this suite builds its server that way.  `injected` is therefore
+    required and `source` is what makes it lose: neither is optional, because
+    "which config" is the whole question this class answers.
+
+    **`current()` and not `__getattr__`.**  Forwarding attribute access to
+    whichever family is in front of us reads well at a call site and is a patch:
+    it hides, at every use, the fact that the answer depends on the call, and it
+    makes an object that is only *sometimes* a `Family` look like one.  The four
+    plugins that register management tools say `homes.current()` once per tool
+    body instead, which is one line and no surprise.
+
+    **`on_build` is the one thing the two kinds of family do differently.**  A
+    `Family` begins connecting as it is held (`Family.start`: the asks that
+    follow have a bounded wait in them, so a server that came up with this
+    process has had its start-up to answer by then), and a `Documents` mirror has
+    nothing to start at all.  Said here as a parameter rather than guessed with a
+    `getattr` at the call: which of the two this is, is known where it is built.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[Config], T],
+        source: Callable[[], Config] | None,
+        injected: Config,
+        on_build: Callable[[T], None] | None = None,
+    ) -> None:
+        self._build = build
+        self._source = source
+        self._injected = injected
+        self._on_build = on_build
+        self._held: dict[str, T] = {}
+
+    def current(self) -> T:
+        """This home's, built and started on the way out of the first ask."""
+        key = str(home_dir())
+        held = self._held.get(key)
+        if held is None:
+            held = self._build(for_the_call(self._source, self._injected))
+            self._held[key] = held
+            if self._on_build is not None:
+                self._on_build(held)
+        return held
+
+    def every(self) -> list[T]:
+        """Every home's, for the two ends of this process's life."""
+        return list(self._held.values())
+
+
 def build_document_server(
+    config: Config,
     *,
     name: str,
     instructions: str,
-    source: str,
+    catalogue_source: str,
     category: str,
     section: str,
     description: str,
-    entries: Mapping[str, Any],
+    entries: Callable[[Config], Mapping[str, Any]],
     rows: Callable[[Mapping[str, Any]], list[dict[str, Any]]],
-    management: Callable[[FastMCP, Documents], None],
+    management: Callable[[FastMCP, Homes[Documents]], None],
+    source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """One document family, as the MCP server slife2 starts.
 
@@ -890,16 +969,30 @@ def build_document_server(
     the mirror those tools mutate — so an edit is in front of the next search
     without a restart — and the declaration built from it.
 
-    `entries` is the config's own mapping for that section, copied here; `rows`
-    turns the mirror into catalogue rows, which is the one thing a family cannot
-    share because a playbook's row *is* its document and a command's is its
-    invocation.
+    `entries` is the config's own mapping for that section, taken from the
+    config of the call that first needed it (a function, for the reason
+    `build_family_server` gives: the section belongs to a home), and copied into
+    a mirror **one per home** (`Homes`); `rows` turns a mirror into catalogue
+    rows, which is the one thing a family cannot share because a playbook's row
+    *is* its document and a command's is its invocation.
+
+    A document family has nothing to start and nothing to close — the mirror is
+    a dictionary — so a home's copy is made when it is first asked for and
+    nothing else has to happen at either end of the process's life.
+
+    `catalogue_source` and not `source` is the name these rows carry, because
+    `source` here is the other thing — the live config reader this builder shares
+    with `build_family_server`.
     """
-    family = Documents(
-        source=source,
-        category=category,
-        section=section,
-        entries=dict(entries),
+    family: Homes[Documents] = Homes(
+        lambda theirs: Documents(
+            source=catalogue_source,
+            category=category,
+            section=section,
+            entries=dict(entries(theirs)),
+        ),
+        source,
+        config,
     )
 
     mcp: FastMCP = house_server(name, instructions=instructions)
@@ -914,7 +1007,8 @@ def build_document_server(
         deleted document stop being a hit — a merge reads an absent name as a row
         the source no longer has.
         """
-        return family.declare(description, rows(family.entries))
+        held = family.current()
+        return held.declare(description, rows(held.entries))
 
     management(mcp, family)
     return mcp
@@ -926,10 +1020,11 @@ def build_family_server(
     name: str,
     instructions: str,
     category: str,
-    entries: Iterable[ToolServerSettings],
+    entries: Callable[[Config], Iterable[ToolServerSettings]],
+    source: Callable[[], Config] | None = None,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
-    management: Callable[[FastMCP, Family], None] | None = None,
+    management: Callable[[FastMCP, Homes[Family]], None] | None = None,
 ) -> FastMCP:
     """One family, as the MCP server slife2 starts.
 
@@ -952,14 +1047,28 @@ def build_family_server(
     URL, and the parameter list of a tool is the schema the model reads, so it
     belongs with the section it describes rather than in the code the two
     sections share.  What is shared — the live `_held` the tools mutate, so that
-    an entry written to the file is connected in the same breath — is here.
+    an entry written to the file is connected in the same breath — is here, and
+    it is **one per home** (`Homes`): the section a family holds is the home's,
+    so the entries are read from the config of the call that first needed them
+    rather than from the one this process started with.  `entries` is therefore
+    a function of the config — `lambda theirs: theirs.mcp.values()` — and the one
+    config it is *not* a function of is an injected one, which wins
+    (`slife2.libs.host.config.for_the_call`).
+
+    `source` is `load_cached` in production: it is what makes a section edited by
+    hand, or by one of these management tools, reach the next home that asks.
     """
-    family = Family(
+    family: Homes[Family] = Homes(
+        lambda theirs: Family(
+            theirs,
+            category=category,
+            entries=entries(theirs),
+            transports=transports,
+            client_factory=client_factory,
+        ),
+        source,
         config,
-        category=category,
-        entries=entries,
-        transports=transports,
-        client_factory=client_factory,
+        on_build=Family.start,
     )
 
     @asynccontextmanager
@@ -970,11 +1079,13 @@ def build_family_server(
         the process's, and a client disconnecting is not a reason to restart
         every stdio server behind it.
         """
-        family.start()
+        for one in family.every():
+            one.start()
         try:
             yield {}
         finally:
-            await family.close()
+            for one in family.every():
+                await one.close()
 
     mcp: FastMCP = house_server(name, instructions=instructions, lifespan=lifespan)
 
@@ -996,7 +1107,7 @@ def build_family_server(
         Returns:
             `sources`: one entry per configured server, in file order.
         """
-        return await family.declare()
+        return await family.current().declare()
 
     @mcp.tool(name=CALL_SOURCE)
     async def call_source(
@@ -1013,7 +1124,7 @@ def build_family_server(
         the conversation a call is for is a fact only the far end can act on, and
         this process is a second hop on the way there rather than a reader.
         """
-        text, ok = await family.call(
+        text, ok = await family.current().call(
             source, tool, arguments, forwarded_client(request_meta(ctx))
         )
         return {"text": text, "ok": ok}

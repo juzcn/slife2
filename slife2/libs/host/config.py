@@ -102,6 +102,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1629,6 +1630,26 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     return config
 
 
+def for_the_call(source: Callable[[], Config] | None, injected: Config) -> Config:
+    """The config the call in front of us is served from.
+
+    **A shared server reads the caller's home's file; a server that was handed a
+    config keeps it.**  Those are the only two cases and they are one line apart,
+    which is why this is a function rather than each server deciding for itself:
+    what a process serves is *the world's* configuration (`slife2.libs.host.paths.home`),
+    and the one thing that outranks it is a config somebody injected — every test
+    in this suite builds its server with one, and a server that went looking for
+    a file instead would be a test that reads a developer's own `slife2.yaml`.
+
+    `source` is `load_cached` in production, which is what makes an edit to the
+    file — by a model or by hand — reach the *next* call without a restart.  It
+    is a callable rather than a flag so that the reader is resolved at the moment
+    of use: `load_cached` answers per home (`slife2.libs.host.paths.home`), so the
+    same `source` serves every home this process is asked about.
+    """
+    return injected if source is None else source()
+
+
 def _mapping(raw: Any, where: str) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -2623,6 +2644,7 @@ __all__ = [
     "ToolServerSettings",
     "default_config",
     "find_config_path",
+    "for_the_call",
     "load",
     "load_cached",
     "resolve_secret",

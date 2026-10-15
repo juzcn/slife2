@@ -33,7 +33,7 @@ what it needs is one process that knows the answer, and this is it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -41,10 +41,10 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host import configfile
 from slife2.plugins.skills import playbooks as skills
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.host.config import Config, SkillSettings
+from slife2.libs.host.config import Config, SkillSettings, load_cached
 from slife2.libs.plugin.protocol import SKILLS_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
-from slife2.libs.plugin.family import Documents, build_document_server
+from slife2.libs.plugin.family import Documents, Homes, build_document_server
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,9 @@ DESCRIPTION = (
 )
 
 
-def build_server(config: Config) -> FastMCP:
+def build_server(
+    config: Config, *, source: Callable[[], Config] | None = None
+) -> FastMCP:
     """Build the skills server.
 
     **The entries are held and the tools change them in place**, for the reason
@@ -165,27 +167,47 @@ def build_server(config: Config) -> FastMCP:
     directory in a folder, and what is *given* to one is an entry in the config —
     so neither half needs a restart, and the tool that changes either one is
     answering about a state the next search will already see.
+
+    Held **per home** (`slife2.libs.plugin.family.Homes`): `skills:` is a section of
+    the home's `slife2.yaml`, so two homes served by this process keep two
+    mirrors and neither sees the other's `env`.  `source` is where a home's
+    section comes from — `load_cached` in production, nothing when a test hands a
+    config in.
     """
     return build_document_server(
+        config,
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,
-        source=SOURCE,
+        catalogue_source=SOURCE,
         category=CATEGORY,
         section=SECTION,
         description=DESCRIPTION,
-        entries=config.skills,
+        entries=lambda theirs: theirs.skills,
+        source=source,
         rows=catalogue,
         management=register_tools,
     )
 
 
-def register_tools(mcp: FastMCP, family: Documents) -> None:
-    """The `skill_*` tools — and `skill_use`, which no other family has."""
-    entries = family.entries
+def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
+    """The `skill_*` tools — and `skill_use`, which no other family has.
+
+    **Every body resolves the home the call is for** (`home_entries`), because
+    what these read and write is one home's mirror of `skills:`.  A mirror bound
+    once when this process started would be that home's, served to every other —
+    which for a skill is the operator's `env`, the credentials a playbook is run
+    with.
+    """
+
+    def home_entries() -> dict[str, SkillSettings]:
+        """This home's `skills:`, as the mirror holds it."""
+        return homes.current().entries
 
     def supplied_for(name: str) -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""
-        return {one: dict(settings.env) for one, settings in entries.items()}
+        return {
+            one: dict(settings.env) for one, settings in home_entries().items()
+        }
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
     async def skill_use(name: str) -> str:
@@ -206,7 +228,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
         # which, so this is the same both-names lookup `catalogue` makes.
         skill = skills.find(name.strip())
         if skill is not None:
-            found = skills.entry_for(skill, entries)
+            found = skills.entry_for(skill, home_entries())
             if found is not None and not found.enabled:
                 raise ToolError(
                     f"{name!r} is switched off, so it cannot be read — its "
@@ -237,10 +259,10 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
     def _settings(name: str, skill: skills.Skill | None) -> SkillSettings | None:
         """The `skills:` entry for a skill, under either of its two names."""
         if skill is not None:
-            found = skills.entry_for(skill, entries)
+            found = skills.entry_for(skill, home_entries())
             if found is not None:
                 return found
-        return entries.get(name)
+        return home_entries().get(name)
 
     def _key_for(
         name: str, skill: skills.Skill | None, entries: Mapping[str, SkillSettings]
@@ -258,7 +280,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             skill.directory.name if skill else None,
             name,
         ):
-            if candidate and candidate in entries:
+            if candidate and candidate in home_entries():
                 return candidate
         return skill.name if skill else name
 
@@ -365,11 +387,11 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             enabled: True offers it again; False keeps it out of the way.
         """
         skill = skills.find(name.strip())
-        if skill is None and name.strip() not in entries:
+        if skill is None and name.strip() not in home_entries():
             return f"'{name}' is not installed — see `skill_list`."
-        key = _key_for(name.strip(), skill, entries)
-        if key in configfile.read_section(family.section):
-            configfile.set_enabled(family.section, key, enabled)
+        key = _key_for(name.strip(), skill, home_entries())
+        if key in configfile.read_section(SECTION):
+            configfile.set_enabled(SECTION, key, enabled)
         elif not enabled:
             # **A skill with no entry is on**, so the only fact worth writing
             # down is that it is off — and switching one back on is the absence
@@ -378,12 +400,14 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             # False for an entry that is not there, and a tool that reported
             # success over an unwritten file is the failure this whole section
             # is arranged to avoid.
-            configfile.upsert(family.section, key, {"enabled": False})
+            configfile.upsert(SECTION, key, {"enabled": False})
         # A skill with no entry at all gets one: the switch has to live
         # somewhere, and the entry it lives in is what `skill_use` reads to know
         # what the playbook is given.  A skill that *is* held keeps the rest of
         # its entry — that is the operator's `env`, and this is a switch.
-        family.switched(key, enabled, make=lambda: SkillSettings(enabled=enabled))
+        homes.current().switched(
+            key, enabled, make=lambda: SkillSettings(enabled=enabled)
+        )
         logger.info("skill_set_enabled name=%s key=%s enabled=%s", name, key, enabled)
         if enabled:
             return f"`{name}` is on again; a search finds it from your next one."
@@ -395,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 

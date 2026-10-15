@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import shlex
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastmcp import FastMCP
@@ -48,9 +48,10 @@ from slife2.libs.host.config import (
     Config,
     ConfigError,
     _cli_tool,
+    load_cached,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.plugin.family import Documents, build_document_server
+from slife2.libs.plugin.family import Documents, Homes, build_document_server
 from slife2.libs.plugin.protocol import CLI_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
 
@@ -247,7 +248,9 @@ DESCRIPTION = (
 )
 
 
-def build_server(config: Config) -> FastMCP:
+def build_server(
+    config: Config, *, source: Callable[[], Config] | None = None
+) -> FastMCP:
     """Build the cli server.
 
     **The entries are held and the tools change them in place**, which is the
@@ -255,23 +258,35 @@ def build_server(config: Config) -> FastMCP:
     `cli:` entry has no connection, so there is nothing to rebuild and nothing a
     restart is needed for — the row a search reads is derived from these entries
     on every `list_sources`, and the hub re-declares before every search.
+
+    Held **per home** (`slife2.libs.plugin.family.Homes`), like every other
+    family: `cli:` is a section of the home's `slife2.yaml`, so a process serving
+    two data directories keeps two mirrors and neither sees the other's commands.
+    `source` is what says where a home's section comes from — `load_cached` in
+    production, nothing at all when a test hands a config in.
     """
     return build_document_server(
+        config,
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,
-        source=SOURCE,
+        catalogue_source=SOURCE,
         category=CATEGORY,
         section=SECTION,
         description=DESCRIPTION,
-        entries=config.cli,
+        entries=lambda theirs: theirs.cli,
+        source=source,
         rows=rows,
         management=register_tools,
     )
 
 
-def register_tools(mcp: FastMCP, family: Documents) -> None:
-    """The `cli_*` tools, which are this family's vocabulary."""
-    entries = family.entries
+def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
+    """The `cli_*` tools, which are this family's vocabulary.
+
+    Every body opens by resolving the home the call is for: what these tools
+    read and mutate is one home's mirror, and a mirror bound once at build time
+    would be whichever home this process happened to be started in.
+    """
 
     @mcp.tool(name="cli_list", meta=FOR_THE_MODEL)
     async def cli_list() -> str:
@@ -280,7 +295,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
         Each is a command recorded as installed on this machine, and a row in
         the tool catalogue: `tool_search` finds one by what it does.
         """
-        written = configfile.read_section(family.section)
+        written = configfile.read_section(SECTION)
         if not written:
             return "No commands are recorded under `cli:` yet. `cli_set` records one."
         return "\n".join(_describe(name, raw) for name, raw in written.items())
@@ -328,7 +343,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             # Returned as ordinary text the refusal would arrive with `ok` true
             # and read as a success.
             raise ToolError(why)
-        entries[name] = settings
+        homes.current().entries[name] = settings
         logger.info("cli_set name=%s", name)
         return (
             f"`{name}` is recorded as `{command}`; a search finds it from your "
@@ -344,14 +359,14 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
         Args:
             name: The entry to forget, from `cli_list`.
         """
-        if name not in configfile.read_section(family.section):
+        if name not in configfile.read_section(SECTION):
             # **Refused by raising, for `cli_set`'s reason**: returned as
             # ordinary text this arrives with `ok` true and reads as a removal
             # that happened.  Nothing was written, so the call is a failure the
             # caller can see.
             raise ToolError(f"'{name}' is not recorded under `cli:` — see `cli_list`.")
-        configfile.remove(family.section, name)
-        family.forgotten(name)
+        configfile.remove(SECTION, name)
+        homes.current().forgotten(name)
         logger.info("cli_removed name=%s", name)
         return (
             f"`{name}` is forgotten; its row leaves the catalogue at your next search."
@@ -366,7 +381,7 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
             enabled: True records it as usable; False keeps it out of the
                 catalogue, the same switch as on a server.
         """
-        if name not in configfile.read_section(family.section):
+        if name not in configfile.read_section(SECTION):
             # The same refusal as `cli_remove`'s, and for the same reason: a
             # switch answered as ordinary text arrives with `ok` true and reads
             # as one that was set.
@@ -374,10 +389,10 @@ def register_tools(mcp: FastMCP, family: Documents) -> None:
                 f"'{name}' is not recorded under `cli:` — `cli_set` records one, "
                 f"`cli_list` shows what is there."
             )
-        configfile.set_enabled(family.section, name, enabled)
+        configfile.set_enabled(SECTION, name, enabled)
         # No `make`: an entry this process is not holding is one another instance
         # wrote, and it is the file's answer that counts until the next start.
-        family.switched(name, enabled)
+        homes.current().switched(name, enabled)
         logger.info("cli_set_enabled name=%s enabled=%s", name, enabled)
         state = "on" if enabled else "off"
         return f"`{name}` is {state}; its entry stays in `cli:`."
@@ -388,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 

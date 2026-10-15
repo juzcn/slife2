@@ -106,6 +106,7 @@ from slife2.libs.host.config import (
     Config,
     ConfigError,
     find_config_path,
+    for_the_call,
     load,
     load_cached,
 )
@@ -564,8 +565,12 @@ def build_server(
         and it does not come through here — it moves the loops it is holding,
         because a reference is not a prompt and a conversation can be pointed at
         another model without being rebuilt.
+
+        `for_the_call` is the rule itself, and the half of it that matters here
+        is `source()`: `load_cached` answers per home, so a process serving two
+        data directories reads the file of whichever one the call came from.
         """
-        return source() if source is not None else config
+        return for_the_call(source, config)
 
     #: Every conversation, by key.  One entry per conversation that has been
     #: used, which is what makes isolation a property of the key rather than a

@@ -29,11 +29,13 @@ from slife2.libs.host.config import (
     ToolServerSettings,
     _tool_server,
     load,
+    load_cached,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
     Family,
     FamilyWords,
+    Homes,
     apply_and_report,
     build_family_server,
     list_entries,
@@ -154,7 +156,7 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
     return line
 
 
-def register_management(mcp: FastMCP, family: Family) -> None:
+def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     """Serve the `mcp_*` tools on this family's server."""
 
     @mcp.tool(name="mcp_list", meta=FOR_THE_MODEL)
@@ -164,7 +166,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         Each entry as the file writes it, and whether its link is answering.
         `mcp_list_tools` shows what one offers.
         """
-        return await list_entries(family, words=WORDS, describe=_describe)
+        return await list_entries(homes.current(), words=WORDS, describe=_describe)
 
     @mcp.tool(name="mcp_set", meta=FOR_THE_MODEL)
     async def mcp_set(
@@ -219,7 +221,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         )
         if settings is None:
             return why
-        return await apply_and_report(family, settings, words=WORDS)
+        return await apply_and_report(homes.current(), settings, words=WORDS)
 
     @mcp.tool(name="mcp_remove", meta=FOR_THE_MODEL)
     async def mcp_remove(name: str) -> str:
@@ -231,7 +233,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
         Args:
             name: The server to remove, from `mcp_list`.
         """
-        return await remove_entry(family, name, words=WORDS, logger=logger)
+        return await remove_entry(homes.current(), name, words=WORDS, logger=logger)
 
     @mcp.tool(name="mcp_set_enabled", meta=FOR_THE_MODEL)
     async def mcp_set_enabled(name: str, enabled: bool) -> str:
@@ -243,7 +245,7 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The server, from `mcp_list`.
             enabled: True connects it; False stops it and keeps the entry.
         """
-        return await switch_entry(family, name, enabled, words=WORDS)
+        return await switch_entry(homes.current(), name, enabled, words=WORDS)
 
     @mcp.tool(name="mcp_list_tools", meta=FOR_THE_MODEL)
     async def mcp_list_tools(name: str, limit: int = 0) -> str:
@@ -257,22 +259,24 @@ def register_management(mcp: FastMCP, family: Family) -> None:
             name: The server, from `mcp_list`.
             limit: How many to show. Omit for the cap.
         """
-        return await list_entry_tools(family, name, limit, words=WORDS)
+        return await list_entry_tools(homes.current(), name, limit, words=WORDS)
 
 
 def build_server(
     config: Config,
     *,
+    source: Callable[[], Config] | None = None,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
 ) -> FastMCP:
     """Build the server over the `mcp:` section, in file order."""
     return build_family_server(
         config,
+        source=source,
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,
         category=CATEGORY,
-        entries=config.mcp.values(),
+        entries=lambda theirs: theirs.mcp.values(),
         transports=transports,
         client_factory=client_factory,
         management=register_management,
@@ -284,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 
