@@ -107,13 +107,10 @@ import argparse
 import contextlib
 import hashlib
 import json
-import logging
 import os
 from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
@@ -350,16 +347,22 @@ def register_home(root: Path | None = None) -> Path:
     name is the digest of the path rather than the path, which is a directory
     tree and not a name.
 
-    A failure is logged rather than raised: this is bookkeeping done on the way
-    past, and a machine that cannot write one is a machine whose homes are
-    served less well, not a machine that cannot start an agent.
+    **A write that fails is raised, not logged.**  This is the one thing a client
+    must do before it claims anything: a home nobody recorded is a home whose
+    schedules never fire, whose logins are never resumed and whose peers are never
+    answered — and every one of those looks like a feature that does not work
+    rather than like a directory that could not be written.  So the failure is the
+    client's, named where the fix is: the running server is the thing that loses
+    the file, and it must not lose it quietly.
+
+    Raises:
+        OSError: If the record cannot be written — an unwritable runtime
+            directory, a full disk.  Nothing is degraded in its place: the
+            failure is the answer.
     """
     target = (root or data_dir()).resolve()
     entry = homes_dir() / f"{_digest(str(target))}.json"
-    try:
-        entry.write_text(json.dumps({"home": str(target)}), encoding="utf-8")
-    except OSError as exc:
-        logger.warning("could not record the home at %s (%s)", target, exc)
+    entry.write_text(json.dumps({"home": str(target)}), encoding="utf-8")
     return target
 
 
@@ -371,17 +374,23 @@ def known_homes() -> list[Path]:
     a directory nothing else knows about serves that directory, exactly as it did
     before any of this — and the second is what lets one daemon serve the rest.
 
-    A registered home whose directory has been deleted is skipped, and the
-    registry keeps its entry: deleting a home is not an event this can observe,
-    and an entry is one small file rather than a directory that grows.
+    A registered home whose directory has been deleted is *skipped*, and that is
+    not a fallback: a home that is not there has nothing to serve, and the entry
+    stays because deleting a directory is not an event this can observe.
+
+    A record that cannot be **read** is the opposite case and raises.  Reading a
+    damaged file as "no home here" would drop that home's schedules, logins and
+    ledgers with nothing said — the deformation this codebase refuses everywhere
+    else (DESIGN.md §10.1: a failure is not a verdict).  One unreadable file in a
+    machine's registry is a file to look at, named in the error.
+
+    Raises:
+        OSError, ValueError: A record that cannot be read or is not the shape
+            this wrote.
     """
     found = {home().resolve()}
     for entry in sorted(homes_dir().glob("*.json")):
-        try:
-            recorded = str(json.loads(entry.read_text(encoding="utf-8"))["home"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("home record %s cannot be read (%s)", entry, exc)
-            continue
+        recorded = str(json.loads(entry.read_text(encoding="utf-8"))["home"])
         path = Path(recorded)
         if path.is_dir():
             found.add(path)
