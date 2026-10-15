@@ -187,14 +187,20 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# slife2's data directory, when it is the checkout itself.
+# slife2's home, when it is the checkout itself.
 #
-# A checkout keeps its data beside itself so the checked-in slife2.yaml is the
+# A checkout keeps its data beside itself, so the checked-in slife2.yaml is the
 # one in use and agents/ is a directory you can open.  That puts generated
 # state in the working tree, which is exactly what this keeps out of it:
-# runtime/ is a daemon's bookkeeping and agents/ is where a conversation, a
-# cabinet and a WeChat login live, and none of them belongs in a commit.  slife2.yaml and skills/ are deliberately NOT ignored —
-# both are written by a person rather than produced by a run, and neither holds
-# a secret, so both are the file the whole arrangement exists to read.
+# agents/ is where a conversation, a cabinet and a WeChat login live, and none
+# of that belongs in a commit.  slife2.yaml and skills/ are deliberately NOT
+# ignored — both are written by a person rather than produced by a run, and
+# neither holds a secret, so both are the file the whole arrangement exists to
+# read.
+#
+# The machine's runtime — records, locks, logs — is no longer here at all: it
+# lives in ~/.slife2/runtime, because the servers are one set per machine and
+# their bookkeeping is theirs (`slife2/libs/host/paths.py`).  The entry is kept
+# for a checkout that still has an old one lying around.
 runtime/
 agents/

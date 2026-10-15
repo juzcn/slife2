@@ -990,16 +990,42 @@ reference", and the rule it exists for is that a reference must never travel as
 the secret (§2.4). A keyring that is *installed* and refuses is an error rather
 than a "not found", because reading it as absent would send the reference itself.
 
-### 10.3 The data directory
+### 10.3 The data directory, and the machine's runtime
 
-One directory, and everything is under it (`libs/host/paths.py`): the config, the
-runtime state, the databases, and the agents' own files (a conversation, a
-cabinet, a WeChat login, a work area). `--data-dir` (or `SLIFE2_DATA_DIR`) is the
-knob and the *whole* answer to "where is this installation" — the config lives
-inside it rather than being named separately, because a second answer would be a
-second thing to keep in step. A child process is spawned with the *resolved*
-directory, so a relative flag cannot be re-resolved underneath the working
-directory it is given.
+**Two roots, because there are two kinds of fact** (`libs/host/paths.py`). A
+**home** is a data directory: the config, the skills, and the agents whose data
+lives in it (a conversation, a cabinet, a WeChat login, a work area). `--data-dir`
+(or `SLIFE2_DATA_DIR`) names it and is the *whole* answer to "where is this
+installation" — the config lives inside it rather than being named separately,
+because a second answer would be a second thing to keep in step. A child process
+is spawned with the *resolved* directory, so a relative flag cannot be re-resolved
+underneath the working directory it is given.
+
+**A home belongs to an agent.** `--agent jack --data-dir D` is jack, and jack is
+D: the same name in two data directories is two agents, which is why an agent name
+is claimed per home, and why a directory may hold several agents — they then share
+its config and its catalogue, the tool set being the config's.
+
+**The runtime is the machine's**, at `~/.slife2/runtime` (`SLIFE2_RUNTIME_DIR`
+overrides): the records naming pids, the start locks, the logs, the claims on
+agent names, and the list of homes the machine has run an agent in. The servers
+are one set per machine — a second `slife2` attaches to what is already running
+rather than starting a duplicate — so a copy of any of that per home could only
+disagree with the others: a second data directory reporting a running stack it
+could not see, two launchers cold-starting one port, a claim lost to whoever
+looked in the other folder.
+
+**And a home is what a call is served from.** A plugin is shared, so the process
+that writes an agent's file is generally not the one started with `--data-dir`:
+the home a call belongs to travels with it — beside the identity that already
+does (`libs/plugin/audience.py` puts it in the call's `_meta`), established for
+the length of the call (`libs/plugin/protocol.py`'s `ServeTheCallersHome`) and
+carried on every hop (`protocol.Peer`). `paths.home()` is what resolves a file
+against it; a plugin's own config, records and logs keep `paths.data_dir()`.
+Everything a plugin *derives* per home — a home's catalogue, a family's
+connections, the declarations the hub holds, the model list it resolves — is kept
+per home and built on the first ask (`libs/plugin/family.Homes`, the hub's
+`Catalogue.store`), out of that home's `slife2.yaml`.
 
 ### 10.4 Records, logs, and what a person is shown
 

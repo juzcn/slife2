@@ -1009,13 +1009,13 @@ writes one.
 
 ## Where things live
 
-**One data directory holds everything** — the config that says what to run, the
-runtime state of what is running, and the turns they produced:
+**Two places, because there are two kinds of thing.** A **home** is a data
+directory — the config, the playbooks, and the agents whose data lives in it —
+and a home is what `--data-dir` names:
 
 ```
 <data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
   slife2.yaml                      the config; absent means the defaults
-  runtime/                         records, locks, logs — reconstructible
   skills/                          <name>/SKILL.md — playbooks, written by you
   agents/                          everything that belongs to one agent
     tools.db                       the tool catalogue — the one shared file
@@ -1035,23 +1035,41 @@ runtime state of what is running, and the turns they produced:
 whose it is — and the catalogue is the exception that proves the rule: it sits
 beside the agent directories because it is everybody's and therefore nobody's.
 
+**A home belongs to an agent.** `slife2 --agent jack --data-dir D` is jack, and
+jack is D: the same name under two data directories is two agents, which is why
+an agent name is held exclusively *per home* and two instances in two homes
+never touch each other's conversations. A directory may hold several agents, and
+then they share its `slife2.yaml` and its catalogue — the tool set **is** the
+config, so agents running on one config run on one set of tools. Load a tool in
+one and it is loaded for the next, in that home.
+
 **Where that folder is depends on what you are running.** In a checkout it is
 the checkout itself — which is what makes the `slife2.yaml` in front of you the
 one in use — and otherwise it is `~/.slife2`, per-user and independent of
 wherever the command happened to be started. `--data-dir DIR` (or
 `$SLIFE2_DATA_DIR`) overrides both.
 
-A checkout therefore keeps generated state in the working tree, which is why
-`.gitignore` covers `runtime/` and `agents/`. It does *not* cover `slife2.yaml`
-or `skills/`: those are written by a person rather than produced by a run, and
-they are the point of the arrangement.
+**The servers are the machine's, not a home's.** One `slife2` starts the plugins
+its config needs and attaches to whatever is already running, so a second
+instance is one command and no duplicate process — across homes too. A plugin a
+machine is running serves every home on it, and each call is served the config
+and the files of the home it came from. That is why their bookkeeping — the
+records naming pids, the start locks, the logs, and the claim on an agent name —
+is the machine's as well and lives in `~/.slife2/runtime` (`$SLIFE2_RUNTIME_DIR`
+overrides), not in a data directory: there is one set of servers, so there is
+one record of them. It is *reconstructible* — delete it and the next start
+rebuilds what it needs.
 
-The split that remains is the one that matters: deleting `runtime/` costs
-nothing, deleting an agent's directory costs that agent — its conversation, its
-cabinet and its logins, in one place, which is what makes backing one up or
-moving one to another machine one operation. The catalogue is kept differently
-on purpose and sits outside them: the tools are not anybody's, so one hub serves
-them to every conversation, and a tool loaded in one is loaded for the next.
+A checkout therefore keeps `agents/` in the working tree, which is why
+`.gitignore` covers it. It does *not* cover `slife2.yaml` or `skills/`: those are
+written by a person rather than produced by a run, and they are the point of the
+arrangement.
+
+Deleting an agent's directory costs that agent — its conversation, its cabinet
+and its logins, in one place, which is what makes backing one up or moving one
+to another machine one operation. The catalogue is kept differently on purpose
+and sits outside them: the tools are not anybody's, so one hub serves them to
+every conversation *in that home*.
 
 `slife2.yaml` is checked in and documented in place, because **it holds no
 secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
@@ -1071,9 +1089,9 @@ Four layers, and which one a module is in is a fact about what it *is*:
 ```
 slife2/
 ├─ libs/              # a library: imported, never reached over a socket
-│  ├─ host/           # the machine — the one config file and its one writer, the
-│  │                  #   data directory, the daemon records and locks, and the
-│  │                  #   launcher that brings the servers up in order
+│  ├─ host/           # the machine — the config file and its one writer, which
+│  │                  #   home a call is served from, the daemon records and
+│  │                  #   locks, and the launcher that brings the servers up
 │  ├─ plugin/         # the contract every plugin sits on: `protocol` (what it
 │  │                  #   takes to be one of our servers), `audience` (who may
 │  │                  #   call a tool), `family` (the shared half of a family)
