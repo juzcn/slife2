@@ -183,6 +183,53 @@ def test_a_call_is_served_in_the_home_it_names(
     assert not mine.exists()
 
 
+def test_a_subagents_directory_is_inside_its_parents(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One directory is one agent's everything, and a subagent's is one level in.
+
+    **The nesting is the relationship.**  A subagent belongs to whoever made it
+    by being *underneath* it, so nothing has to keep a second record of who made
+    whom — the directory says it, removing a subagent is removing a directory,
+    and removing an agent takes its subagents with it.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    jack = agent_dir("jack")
+    researcher = agent_dir("jack", "researcher")
+
+    assert researcher == jack / "researcher"
+    assert researcher.is_dir(), "made on demand, like an agent's own"
+    assert agent_dir("jack") == jack, "and the agent's own does not move"
+
+
+def test_a_subagent_stays_inside_its_parent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both halves of the id are sanitised, and `..` is a directory too.
+
+    The second half comes out of a model's tool call rather than off a command
+    line, and it decides a *path*: what is asserted is the invariant rather than
+    a spelling — whatever the name reduces to, it lands inside the parent that
+    made it, or it is refused for reducing to nothing.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    jack = agent_dir("jack")
+
+    for name in ("..", "./x", "../elsewhere", "a/b", "researcher"):
+        try:
+            made = agent_dir("jack", name)
+        except ValueError:
+            continue  # a name with nothing left in it is refused
+        assert made.parent == jack, f"{name!r} landed outside its parent"
+
+    for name in ("..", ".", "/"):
+        with pytest.raises(ValueError):
+            agent_dir("jack", name)
+
+    assert not (tmp_path / "agents" / "elsewhere").exists()
+
+
 def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -249,15 +296,27 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
     the scheduler's ledger was being opened as a conversation store — two plugins
     on one SQLite file, against the one-writer rule the layout exists to keep.
     What is wanted is "a conversation", and only the middle of the name says so.
+
+    **Two levels, and no further.**  A subagent's conversation is one directory
+    in (`agents/jack/researcher/turns.db`) and is found; a `turns.db` deeper than
+    that — inside a subagent's cabinet, say — is not, because the walk enumerates
+    the depths the layout has rather than recursing into everything an agent
+    keeps.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     jack = agents_dir() / "jack"
     jack.mkdir(parents=True)
-    for name in ("turns.db", "worker.turns.db", "schedule.db"):
+    for name in ("turns.db", "schedule.db"):
         (jack / name).write_bytes(b"")
     (jack / "wechat.yaml").write_text("token: x\n", encoding="utf-8")
+    researcher = jack / "researcher"
+    (researcher / "cabinet").mkdir(parents=True)
+    (researcher / "turns.db").write_bytes(b"")
+    (researcher / "schedule.db").write_bytes(b"")
+    (researcher / "cabinet" / "turns.db").write_bytes(b"")
 
-    found = {path.name for path in turn_dbs()}
+    found = {path.relative_to(agents_dir()).as_posix() for path in turn_dbs()}
 
-    assert found == {"turns.db", "worker.turns.db"}
-    assert "schedule.db" not in found, "the scheduler's ledger is not a conversation"
+    assert found == {"jack/turns.db", "jack/researcher/turns.db"}
+    assert "jack/schedule.db" not in found, "a ledger is not a conversation"
+    assert "jack/researcher/cabinet/turns.db" not in found, "and neither is a name"

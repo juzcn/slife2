@@ -34,6 +34,7 @@ because a chapter is a subject and not a decision.
    - [1.7 The scheduled task, and what a clock costs](#17-the-scheduled-task-and-what-a-clock-costs)
    - [1.8 The A2A mesh, and what a per-process identity costs a shared one](#18-the-a2a-mesh-and-what-a-per-process-identity-costs-a-shared-one)
    - [1.9 The unattended agent, and what a window was for](#19-the-unattended-agent-and-what-a-window-was-for)
+   - [1.10 The subagent, and what a peer without a process costs](#110-the-subagent-and-what-a-peer-without-a-process-costs)
 2. [Streaming: one pattern, used twice](#2-streaming-one-pattern-used-twice) — `tools/call` is a request/response and a TUI needs tokens as they arrive, so one pattern rather than two special cases
 3. [The loop, and why the server owns it](#3-the-loop-and-why-the-server-owns-it) — stateless servers, and the largest change of the implementation
 4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, the machine's bookkeeping, and the home a call is served from
@@ -1427,6 +1428,109 @@ presence is on the mesh, where peers see it.  `Ctrl+C` is how it stops, which is
 a headless-only path: a window reads that key itself (`SlifeApp.action_interrupt`
 cancels the turn, or quits).  A `kill` is honest too — the broker's last will
 publishes the offline card a cancelled `join` would have published.
+
+### 1.10 The subagent, and what a peer without a process costs
+
+**The design is sdd §3.5; this is what it costs and what it was chosen over.**
+It began as a question about scale — the literature runs swarms of a thousand
+agents, and should this machine be able to? — and the answer turned out to be
+about one number, measured rather than reasoned.
+
+**Two ways to have another agent, and they differ by ~50×.**  A `--headless`
+instance is one OS process per agent, measured here at **99.5 MB private
+(120 MB working set)**, 5–11 threads, ~260 handles, three held calls (the agent
+server, the window's `attach`, the mesh's `join`) and two MQTT connections
+(measured at exactly 2×N).  Its warm start is 2–4 s, of which the shared stack's
+share is 171 ms for eighteen probes and 170 ms for the catalogue — so the cost is
+the interpreter, not the handshakes.  A conversation held instead in the shared
+agent server is a `Loop`, and `tracemalloc` over a real message list puts 500
+turns at **2.35 MB of text, ~1.5 MB of objects**.  Fifty instances, or a
+thousand loops.  The fixed stack — eighteen plugins at ~100 MB each, the `mcp:`
+children, the broker — is **~2.9 GB per machine** either way, because the servers
+are shared; what varies is only what each *agent* adds.
+
+So a thousand is reachable, and it is reachable only on the second path:
+3,000 × 100 MB of private commit plus a thousand interpreters is not a machine,
+it is a cluster.  **What the design adds is a peer with no process** — and the
+cost of that is the whole of the argument: at thirty to three hundred subagents
+the bill is ~0.5–1 GB, not 30 GB, and the mesh's fan-out (every member subscribes
+the unit's discovery wildcard and `event/+`, and the broker replays every
+retained card on every join) stays inside a unit of tens rather than a thousand.
+
+**Three shapes were considered, and two were dropped.**
+
+- **A subagent as a headless instance.** The smallest change — `--headless`
+  already exists, and "make it a subagent" is "run one without a terminal". It is
+  also the 100 MB one, and the design that *wanted* it is not this one: an
+  instance is a window that draws nothing, and a subagent has no window at all.
+- **A `slife2-subagent` plugin holding the loops**, which is the shape
+  `slife2-agent-task` has and argues for well ("it is a plugin because it holds
+  loops"). Dropped because the loops are not the cost — the transport to them is:
+  a new plugin means a new protocol hop for every message, and the identity of a
+  subagent is already the client id, which every server keys by today.
+- **A loop in the shared agent server, addressed by the second half of the client
+  id** — this one.  `loops: dict[ConversationKey, Loop]` already exists, keyed by
+  `(home, agent, subagent)`; nothing about the key is new. A subagent is an agent
+  that is *allowed to be* the second half, so the whole of the storage change is
+  a directory: `agent_dir(agent, subagent)`.
+
+**Four decisions inside it, each with a reason that would be invisible later.**
+
+- **The client id, not a new global name.** The alternative was to mint
+  subagents as agent names — `researcher` as a name in its own right, with the
+  parent recorded beside it. That needs new state (who made whom) and a new
+  lookup; the client id needs neither, and it is what the hub, the context store,
+  the cabinet and the model backend all key by already. The nesting is the
+  *consequence*, not the mechanism: `agents/jack/researcher/` says who made whom
+  because it is inside it.
+- **`Loop.records` reverses.** It was `not self.subagent`, and its reason was
+  written down: *"a subagent is a means to an end inside one of that agent's
+  turns rather than an agent that owns anything"* — so its round trips were not
+  filed under a conversation they were never part of. This design overturns the
+  premise rather than the rule: a subagent now owns a conversation, a cabinet and
+  a directory, and `subagent_remove` deletes them. The worker the old rule was
+  about does not exist in this build (nothing ever created one), so the rule is
+  replaced rather than kept beside it.
+- **The marker is not renamed.** `[PeerAgent:{…}]` stays, and the subagent
+  network gets its own envelope rather than `[Agent:{…}]`/`[Subagent:{…}]`. The
+  reason is already in the code and it is a measurement: *"`Agent` alone is the
+  one word this marker must not say … v1 measured receivers reading the sender as
+  themselves."* `Peer` is relational and cannot be read as the reader; `Agent` and
+  `Subagent` are *role* words, and on the subagent network both ends are one — a
+  child receiving from its maker would read `Subagent` as the sender, and a
+  subagent receiving from a sibling would read it as itself. What the design
+  wants on screen (`Subagent(<name>)> `) is a **channel**, and the window draws
+  from the channel alone (`slife2.tui.widgets.channel_prefix`), exactly as
+  `AsyncTask(<name>)> ` is drawn. A marker renamed would split stored turns in
+  half and buy nothing on screen.
+- **One network per maker.** `unit` is both the fan-out boundary and part of the
+  MQTT client id (`{org}/{unit}/{agent}`), and the collision probe reads its own
+  unit's discovery topic — so putting each maker's swarm in its own unit makes
+  two makers' `researcher` non-colliding for free, and keeps one swarm's presence
+  churn off the machine's agent roster.
+
+**What it deliberately does not add.**  No `spawn`: nothing here starts a
+process, and `--headless` is a different thing (an instance with no terminal). No
+claim: a name is claimed by an instance, and a subagent is not one. No third tool
+vocabulary: the mesh's four tools are presented under `subagent_*` names, and the
+*only* verbs this adds are the two A2A has no equivalent of — membership and
+lifetime, `subagent_set` and `subagent_remove`. The schema is priced: the A2A
+family is 2,492 bytes ≈ 620 tokens, plugin tools are exempt from `tool_load`
+eviction (`ToolLoadSettings`), so a second family is a per-request tax in every
+conversation forever — which is why the shell is names and descriptions rather
+than code, and why its descriptions have to say *whose* roster they list
+(`a2a_list_agents` says "peer"; a subagent family must say "yours").
+
+**Build state.**  In order, each green before the next: **(1) the directory** —
+`agent_dir(agent, subagent)`, `database_path`, `turn_dbs`, and the docstring
+reasons the old flat `<name>.turns.db` convention carried — *done*; **(2)
+identity and lifetime** — `Loop.records`, `subagent_set`/`subagent_remove`, the
+bound, the prompt's own name for a subagent; **(3) the second network and the
+shell** — a second `a2a` instance (config key, `servers:` entry, `unit`), the
+module parameterised by prefix and unit, four tool names and descriptions per
+instance; **(4) the road and the display** — the maker's window holds the swarm's
+places and runs its turns, `subagent:<name>` → `Subagent(<name>)> `. What is
+still unstated is whose window runs a turn two levels down (sdd §12).
 
 ## 2. Streaming: one pattern, used twice
 

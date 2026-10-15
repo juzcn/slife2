@@ -27,6 +27,10 @@ root of its own rather than a copy per home.
                                   the index over them (`.index.db`) inside
                       media/      what this agent generated
                       wechat.yaml this agent's WeChat login
+                      <subagent>/ the same shape again, one level in — what an
+                                  agent made with `subagent_set` owns: it
+                                  belongs to its parent by being underneath it,
+                                  and removing it is removing this directory
 
     <runtime>/                  the machine's daemons
       servers/      a record per running server: its pid, its url, its config
@@ -295,19 +299,36 @@ def agents_dir() -> Path:
     return path
 
 
-def agent_dir(agent: str) -> Path:
+def agent_dir(agent: str, subagent: str = "") -> Path:
     """One agent's directory: its conversation, its cabinet, its logins, its work.
 
-    **The name is sanitised here**, so that no caller has to remember to: it
-    comes off a command line, and `..` is a directory too.  `safe_agent_name` is
-    imported inside this function rather than at the top because it lives in
-    `slife2.libs.store.db` and `db` imports this module — a local import is what keeps one
-    implementation of "a name fit to be a file", instead of a second copy in the
-    leaf that cannot reach the first.
+    **A subagent's lives inside its parent's** — `agents/jack/researcher/` — and
+    the nesting *is* the relationship: an agent's everything is one directory, so
+    a subagent belongs to whoever made it by being underneath it, removing a
+    subagent is removing a directory, and removing an agent takes its subagents
+    with it.  That is `agents_dir`'s argument one level down, and the reason
+    nothing has to hold a second record of who made whom.
+
+    It takes **both halves of the client id** because it is the one place that
+    knows the layout: every per-agent path in this system is this function plus a
+    file name, so the nesting is written once here rather than restated wherever
+    a file happens to live.
+
+    **Both names are sanitised here**, so that no caller has to remember to: they
+    come off a command line and out of a model's tool call, and `..` is a
+    directory too.  `safe_agent_name` is imported inside this function rather
+    than at the top because it lives in `slife2.libs.store.db` and `db` imports this
+    module — a local import is what keeps one implementation of "a name fit to
+    be a file", instead of a second copy in the leaf that cannot reach the first.
+    It is also what keeps a subagent *inside* its parent: the sanitiser refuses a
+    name that reduces to `.` or `..`, so the second segment cannot climb out of
+    the first.
     """
     from slife2.libs.store.db import safe_agent_name
 
     path = agents_dir() / safe_agent_name(agent)
+    if subagent:
+        path = path / safe_agent_name(subagent)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -413,7 +434,7 @@ TURNS_DB = "turns.db"
 
 
 def turn_dbs() -> list[Path]:
-    """Every conversation store on this machine: an agent's own, and its workers'.
+    """Every conversation store on this machine: an agent's own, and its subagents'.
 
     **The pattern, named — and the name is the whole point.**  This replaces a
     `glob("*/*.db")` in `slife2-context`'s startup pass, which is not a
@@ -424,9 +445,12 @@ def turn_dbs() -> list[Path]:
     for.  A suffix `*.db` means "a database"; what is wanted here is "a
     conversation", and only the middle of the name says which.
 
-    A worker's store is `<worker>.turns.db` beside its parent's
-    (`slife2.libs.store.db.database_path`), so both spellings are enumerated rather than
-    one pattern that would also catch `myturns.db`.
+    **Two levels, and they are the ones `agent_dir` lays down**: the agent's
+    conversation, then a subagent's one directory in (`agents/jack/turns.db`,
+    `agents/jack/researcher/turns.db`).  Enumerated rather than globbed
+    recursively, because a recursion is a walk of *everything* under an agent —
+    a cabinet's index, whatever a tool saved — and what is being looked for here
+    is the one file whose name is `turns.db` at either depth.
 
     **Every home, not this process's** (`known_homes`), because the store
     reading these is shared: a context daemon serving two homes has to have
@@ -440,8 +464,8 @@ def turn_dbs() -> list[Path]:
         for directory in sorted(agents.iterdir()):
             if not directory.is_dir():
                 continue
-            for pattern in (TURNS_DB, f"*.{TURNS_DB}"):
-                found.extend(sorted(directory.glob(pattern)))
+            found.extend(sorted(directory.glob(TURNS_DB)))
+            found.extend(sorted(directory.glob(f"*/{TURNS_DB}")))
     return found
 
 

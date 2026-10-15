@@ -329,6 +329,53 @@ its own (`stop`), plus the A2A broker — the one daemon here the launcher does 
 start, because it has no module and no MCP identity, and what makes stopping it
 safe is a record written by whoever started it (`DESIGN §1.8`).
 
+### 3.5 A subagent is an agent that belongs to another agent
+
+An agent may **make** a subagent: `subagent_set` names one, and from then on the
+two are peers. A subagent has every capability its maker has — the same tool
+set, the same system prompt, the same memory of its own — and only three things
+distinguish it, each of them about *status* rather than about ability:
+
+- **It is not an instance.** No process, no claim on a name (§3.3), no window,
+  and nothing to start: it exists because it was named, and it runs when
+  something sends it a message.
+- **It is addressed by the second half of a client id** (§2.2): `(jack,
+  researcher)`, which every server already keys its state by. Nothing about the
+  id is new; what is new is that an agent is allowed to be one.
+- **It is a peer on a second mesh.** Its maker and its maker's subagents form
+  their own A2A network, told apart from the agent↔agent one by the topic
+  namespace (`org`/`unit`, §3.1) on the same broker, and carrying the same A2A
+  semantics under `subagent_*` names.
+
+**Its directory is inside its maker's.** `agents/jack/researcher/` holds
+everything the subagent owns — its conversation, its cabinet, its ledger, its
+login, what it generated — because a directory is what an agent *is* here (§7),
+one level in. So removing a subagent is removing one directory, and removing the
+agent takes its subagents with it; there is no second record of who made whom,
+because where a name's files are says it. What a subagent shares with its maker
+is the **home** — `slife2.yaml`, `agents/tools.db`, `skills/` — which is exactly
+what two agents started in one data directory share; it shares nothing else.
+
+**The only entry is a message.** A subagent has no window, so the road every
+channel delivers along (§8) is held for it by its maker: the maker's window
+carries the subagent's place on the net and runs its turns, and what the subagent
+answers is drawn on the maker's terminal as `Subagent(<name>)> ` — a channel,
+like `AsyncTask(<name>)> `, and not a marker. On the wire, a message between
+agents carries `[PeerAgent:{…}]` and one on the subagent network carries its own
+envelope (`DESIGN §1.10`).
+
+**Two verbs are not A2A's.** A2A coordinates peers that already exist: it has
+`join`, which is one of them taking its place, and nothing that makes one exist.
+So `subagent_set` and `subagent_remove` are the whole of what this adds to that
+vocabulary — membership and lifetime — and they are named the way this system
+names the rest of its membership (`mcp_set`/`mcp_remove`, `skill_set`/
+`skill_remove`) rather than as a second dialect of the mesh.
+
+**How many a maker may have is a number, not a hope.** `subagent_set` refuses
+past a configured bound, in the shape of `agent-task: max_running` (§3.1), for
+that key's reason: the tool set is one catalogue and nothing filters it, so
+without a bound a model can grow a tree of agents without limit.
+
 ---
 
 ## 4. A turn
@@ -1155,6 +1202,13 @@ code against its own docstrings. What would settle each is named with it.
    at the hop (§5.2), but a provider that legitimately answers with nothing is
    the same shape. *Settled by:* deciding whether an empty answer is a verdict or
    a failure, and stating it once.
+8. **A subagent that makes a subagent.** A subagent has every capability its
+   maker has (§3.5), so it may name one of its own, and the directory says who
+   made whom one level further in — but the road does not: a subagent's turns are
+   run by *its maker's window*, and a subagent has none. Either the road belongs
+   to the topmost window of a tree, or a conversation with no window of its own
+   gets a road that is not a window at all. *Settled by:* saying whose window
+   runs a turn two levels down, and what happens when that window closes.
 
 ---
 

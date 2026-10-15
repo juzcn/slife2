@@ -17,7 +17,7 @@ import pytest
 
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import InvalidTimeBound
-from slife2.libs.host.paths import DATA_ENV_VAR
+from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     TurnStore,
@@ -241,6 +241,31 @@ async def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
     assert jack.path != jill.path
     assert jack.count() == 1
     assert jill.count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_store_is_its_own_directory(tmp_path, monkeypatch) -> None:
+    """One directory in, under the agent that made it, and nobody else's.
+
+    The nesting is what makes a subagent removable in one operation: everything
+    it writes is underneath `agents/<agent>/<subagent>/`, so removing it is
+    removing a directory rather than a list of files somebody has to keep
+    complete.  And it is *its own* conversation — a subagent that shared its
+    parent's file would be a second writer on the one thing the layout keeps
+    apart.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    jack = store_for("jack")
+    researcher = store_for("jack", "researcher")
+
+    await researcher.save_turn(
+        embedder=EMBEDDER, messages=[{"role": "user", "content": "mine"}]
+    )
+
+    assert researcher.path == agent_dir("jack", "researcher") / "turns.db"
+    assert researcher.path != jack.path
+    assert researcher.count() == 1
+    assert jack.count() == 0
 
 
 @pytest.mark.asyncio

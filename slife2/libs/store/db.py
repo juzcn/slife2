@@ -35,6 +35,11 @@ came from is still named in the prompt (`strip_images`).
 **Agents are isolated by file.**  `agents/<agent>/turns.db` — there is no agent
 column and no query that can reach another agent's turns, because there is no
 other agent's turns in the file.  `who_helped` records the name for display.
+**A subagent's is one directory further in** (`agents/<agent>/<subagent>/
+turns.db`), which is the same isolation rather than a weaker one: what a
+subagent is, is an agent that belongs to whoever made it, so its conversation is
+its own file inside its own directory — the directory that removing it takes
+away.
 
 **No migration layer.**  This is a decision, not an omission: schema changes
 land in `_SCHEMA` for fresh databases, and an old one is deleted and rebuilt
@@ -174,20 +179,18 @@ def database_path(agent: str, subagent: str = "") -> Path:
 
     **One file per id, not a column.**  Isolation as a property of the filesystem
     beats isolation as a `WHERE` clause somebody can forget to write — the same
-    argument DESIGN.md §5 makes for agents, applied one level down.  An agent's
-    own conversation keeps the bare name it always had, so the common case does
-    not pay for the one that is not.
+    argument DESIGN.md §5 makes for agents, applied one level down.
+
+    **A subagent's store is its own directory**, `agents/<agent>/<subagent>/`,
+    because a subagent owns more than a conversation: it is an agent that
+    belongs to whoever made it rather than a means to an end inside one of that
+    agent's turns, so what it writes — this file, and the cabinet and the rest
+    that land beside it — is a directory someone can remove in one operation.
+    Who lays that directory out is `slife2.libs.host.paths.agent_dir`, and this
+    function is one line because of it: the layout belongs in one place, and the
+    file name in another.
     """
-    directory = agent_dir(agent)
-    if subagent:
-        # A worker's store sits **beside its parent's**, and not in a directory of
-        # its own: a subagent is a means to an end inside one of that agent's
-        # turns rather than an agent that owns anything.  (Its turns are not
-        # written at all — `Loop.records` — so this file is a schema and nothing
-        # more, and the name it carries is the worker's because a directory
-        # cannot carry it for two stores.)
-        return directory / f"{safe_agent_name(subagent)}.{TURNS_DB}"
-    return directory / TURNS_DB
+    return agent_dir(agent, subagent) / TURNS_DB
 
 
 @dataclass(frozen=True)
