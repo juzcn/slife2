@@ -2,7 +2,7 @@ This document is designer's memory
 
 1. Design and Coding Rules
 
-- Fallback 越少越好，它容易隐藏真正的bugs，带来不可预测的后果。影响系统设计行为的失败不要fallback, 要hard fail. 失败可以重试。真正需要fallback时。要让fallback成为一种设计行为。
+- 觉得每个操作都可能失败就会有无穷多个fallback，而设计的行为正常必须成功的不允许fallback.fallback是不影响正常行为degrade，degrade必须要得到设计批准。我们有时候更愿意hard fail，而不做一些隐藏bug的fallbcak。Fallback 越少越好，它容易隐藏真正的bugs，带来不可预测的后果。影响系统设计行为的失败不要fallback, 要hard fail. 失败可以重试。真正需要fallback时。要让fallback成为一种设计行为。
 
 - 要强化架构和结构设计，通过plugins 和 公共库共享能力和代码。plugin要功能单一，数量多没有关系，性能上损失几跳没有关系，因为是本机的通讯。统一plugin协议，做到plugin易维护易替换。
 
@@ -81,8 +81,13 @@ Aync Tool ，可以让工具异步执行，用在tool 执行时间比较长，ag
 要做一个判断，是用headless做subagent，还是专门做subagent。用headless做的好处就是改动比较小，只去掉turn save就可以。如果考虑长程任务，也许完整的agent更合适。
 
 subagent共享agent的一切
-agent swarm按照 agent headless?
+agent swarm按照 agent headless? 用headless
 
 现在rebuld context 是针对每个 prompt， 唯一的drawback就是长程任务的loop可能直接就超过了context 预算。是否可以在agent loop中动态rebuild context。最好是一致的方式。
 
-有个bug : slife2 --agent jack --data-dir "D:\Dev\Workspace\slife2-jack" 它只在这个文件夹下创建了runtime，并没有创建agents
+有个bug : slife2 --agent jack --data-dir "D:\Dev\Workspace\slife2-jack" 它只在这个文件夹下创建了runtime，并没有创建agents。要知道agent实例是完全隔离的，除非它们在同一台机器和同一个 --data-dir 下才共享tools.db。不同的--data-dir文件夹，每个agent在数据层面完全隔离，只有plugins共享。在同一个 --data-dir 中，因为共享 slife2.yaml 的工具配置，共享tools.db是合理的。
+
+
+
+有没有好的设计让大模型每调用一次，agent知道context usage，而这个信息不进memory，不重复。
+也就是每次提交给大模型的最后一条消息的尾部加 [CONTEXT-USAGE:json]，json包括token使用数和占比。那么把rebuild 做成一个它自己可以调用的工具。它看到自己的上下文紧张，会主动清理上下文，做下一个step。
