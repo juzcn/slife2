@@ -35,7 +35,6 @@ from typing import Any, ClassVar
 
 import pytest
 import pytest_asyncio
-
 from fastmcp import Client
 
 from slife2.libs.host import launcher

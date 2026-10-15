@@ -18,6 +18,7 @@ from dataclasses import replace
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import (
     DEFAULT_AGENT,
@@ -298,7 +299,7 @@ async def test_a_dump_that_cannot_be_kept_fails_the_turn(tmp_path, monkeypatch) 
             hub_client=hub_client,
             cabinet_client=cabinet_client,
         )
-        with pytest.raises(Exception):
+        with pytest.raises(ToolError, match="the cabinet is not answering"):
             async with Client(server) as client:
                 await client.call_tool(
                     "send_message",

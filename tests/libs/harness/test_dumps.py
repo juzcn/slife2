@@ -7,8 +7,6 @@ is under test is the part that decides what a conversation carries.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from slife2.libs.harness import dumps
