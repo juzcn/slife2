@@ -13,6 +13,8 @@ This document is designer's memory
     - 大模型的工具schema要准确、简洁表达工具是干什么的、参数是什么，不要重复大模型知道的知识，尽量少的交叉引用，交叉引用容易造成不易维护的依赖。
     - 工具名称和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。例外：_check_new_input
 
+- 同一台机器可以以隔离方式运行多个agent实例。两个实例是两个独立agent，碰巧它们在一台机器上，我们共享plugins; 碰巧 --data-dir, 共享 slife2.yaml 和 tools.db, 原生多agent设计，复用plugins, 复用外部mcp servers.
+
 - 完整详尽的pytest，保障系统功能正常进化，更完善的端到端测试
 
 1. 文档
@@ -48,16 +50,16 @@ async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(
 5. 工具输出管理设计
 
 正常的工具都会输出合理的长度，不会太离谱，内容多可以翻页。
-cli/shell 的输出长度不可控
-有些工具注定输出很长，比如给我写一篇1万字的论文。
+cli/shell 的输出长度不可控，有些工具注定输出很长，比如给我写一篇1万字的论文。
 
-每个输出由判别器提取内容，全文存为文件，配置专门的读工具。
-
-遗留问题，判别器输入超出context，极小概率事件。先搁置。
+设计了判别器。提取内容，全文存在文件中， dump， 文本文件 dump read，
 
 二进制数据截断，dump，做为遗留问题，
 
-6. To do list
+遗留问题，判别器输入超出context，极小概率事件。先搁置。
+
+
+1. To do list
 
 - subagent design
 - --a2a-broker host:port , use external broker, do not start/stop mosquitto
@@ -65,14 +67,12 @@ cli/shell 的输出长度不可控
 1. 设计issues
 
 每个headless的cost，能并发到1000个吗
-工具输出的问题，截断会失真，不截断会爆炸？
 
+- 判别器总是带当前上下文的，总是在当前上下文的条件下进行判别。现在已经有两个判别器了，一个是rebuild context, 一个是 compact 工具输出。
 
-判别器总是带当前上下文的，总是在当前上下文的条件下进行判别。现在已经有两个判别器了，一个是rebuild context, 一个是 compact 工具输出。
+- Async Agent Task 是一个异步one loop run，它是的设计目的是让agent委派任务，可以用在agent把任务拆分后委派任务。它没有subagent的cost，创建和停止。
 
-Async Agent Task 是一个异步one loop run，它是的设计目的是让agent委派任务，可以用在agent把任务拆分后委派任务。它没有subagent的cost，创建和停止。
-
-Aync Tool ，可以让工具异步执行，用在tool 执行时间比较长，agent选择它异步。
+- Aync Tool ，可以让工具异步执行，用在tool 执行时间比较长，agent选择它异步。
 
 现在的一个未定的设计选项，就是subagent，多loop的后台执行。沿用 a2a 消息机制可能是最一致性的。
 
@@ -85,16 +85,15 @@ agent swarm按照 agent headless? 用headless
 
 现在rebuld context 是针对每个 prompt， 唯一的drawback就是长程任务的loop可能直接就超过了context 预算。是否可以在agent loop中动态rebuild context。最好是一致的方式。
 
-有个bug : slife2 --agent jack --data-dir "D:\Dev\Workspace\slife2-jack" 它只在这个文件夹下创建了runtime，并没有创建agents。要知道agent实例是完全隔离的，除非它们在同一台机器和同一个 --data-dir 下才共享tools.db。不同的--data-dir文件夹，每个agent在数据层面完全隔离，只有plugins共享。在同一个 --data-dir 中，因为共享 slife2.yaml 的工具配置，共享tools.db是合理的。
+- 内存里Context管理：大模型每调用一次，让agent知道当前的context usage，而这个信息不进memory，不重复。也就是每次提交给大模型的最后一条消息的append [TOKEN-USAGE:json]，json包括token使用数和占比。但这个marker不进记忆，也不改变当前message,也就是说手工append。
+难点是，大模型怎么rebuild turn 和选择相关messages. 主要对长程任务。遗留。
+
+Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
+
+子agent就是完全正常功能的agent，没有TUI（但不是字面意思的headless, 压根就没有tui）, 具有agent的所有功能，创建时可以指定大模型，默认值为主agent的大模型，它没有turn memory，与主agent共享cabinet。它没有context rebuild. session lived。
+
+如果用headless建，是不是所有机制都有了？
 
 
 
-设计：大模型每调用一次，让agent知道当前的context usage，而这个信息不进memory，不重复。也就是每次提交给大模型的最后一条消息的append [CONTEXT-USAGE:json]，json包括token使用数和占比。但这个marker不进记忆，也不改变当前message,也就是说手工append。
-
-
-那么把rebuild 做成一个它自己可以调用的工具。它看到自己的上下文紧张，会主动清理上下文，做下一个step。
-
- 两个实例是两个独立agent，碰巧它们在一台机器上，我们共享plugins; 碰巧 --data-dir
-  是一样的，我们共享 slife2.yaml 和 tools.db
-
-  同一台机器可以以隔离方式运行多个agent实例。
+  
