@@ -67,12 +67,14 @@ transport, the same JSON-RPC and the same tool listing as the servers under
 `mcp:` — plus the *plugin contract*, which is the part this project adds on
 top: state keyed by a client id rather than by a session, a tool that says who
 may call it, and an identity another process checks before it reuses what it
-found (`slife2.libs.plugin.protocol`).  A **client id** is who a call is for and
-where they are: the agent, which of its conversations, and the **home** — the data
-directory that agent lives in (§4).  The third part was implied for as long as
-there was one data directory per machine and had to be said once two of them were
-served by the same processes; it is what makes "the same name in two directories"
-two agents rather than one name with one identity. The word is worth having because "MCP server" does
+found (`slife2.libs.plugin.protocol`).  A **client id** is who a call is for —
+**the name of an agent, and which of its conversations** — and **where the work
+belongs: the home**, the data directory the call came from (§4).  The two halves
+answer different questions and it is worth keeping them apart: a name picks out
+one agent on this machine, once, and the home says which directory *this call's*
+files are in.  The home was implied for as long as a machine ran one data
+directory and had to be said once shared processes began serving several; the name
+needed no such widening, which is the point of it.  The word is worth having because "MCP server" does
 not separate the servers slife2 starts from the twenty somebody else wrote, and
 that line is load-bearing everywhere below: a missing plugin fails the turn,
 where a missing entry under `mcp:` is a model with fewer tools.
@@ -1206,11 +1208,13 @@ back and forth and every task sent to it runs **twice**.  v1 therefore ran one
 plugin process per agent, which made its module globals that agent's by
 construction.  These servers are shared (§4), so the same things live in a
 **session per agent** — §1.2's WeChat rule, one section up — and a mesh is
-created for the calling agent when a tool first says who it is.  The *name* a
-peer sees is still the agent's alone, which is the one identity here that a home
-does not enter: a peer addresses `jack` on this machine, so two homes running a
-`jack` cannot both be on the mesh — the second is a name taken, and refused as
-one.  The collision
+created for the calling agent when a tool first says who it is.  **A name picks
+out one agent on this machine, once** (§4), and the mesh is where that rule
+becomes observable rather than merely enforced: a peer addresses `jack`, so a
+second `jack` — another data directory, another terminal, another process — is a
+name taken and is refused as one.  That is not a limitation of the mesh, it is
+the same rule the launcher applies to two windows, arriving at the place where
+somebody else can see it.  The collision
 machinery ports unchanged and for the same reason it existed: before joining,
 a throwaway connection with its own client id reads the retained card on the
 name's own discovery topic, and a card that is neither our own instance's nor a
@@ -1783,16 +1787,18 @@ a port. The rule for which config a call is served from is one line in one place
 builds its server with one, and a server that went looking for a file instead
 would be reading a developer's own `slife2.yaml`.
 
-`--agent NAME` is **exclusive per home**, and that is now the whole of what it
-partitions. It titles the window, it reaches the agent server, and it creates no
-port, no process and no config section — but it is no longer "a label and nothing
-more": a name plus the home a client was started in *is* an agent, which is why
-the claim is taken per home (two homes may each run a `jack`; one home may not run
-two) and why the servers' per-call state is keyed by the pair rather than by the
-name. What that state is keyed by is the client id §1 defines, so the isolation
-the earlier claim deferred — "if it ever appears, it belongs inside an MCP server"
-— is exactly what appeared there: a shared plugin keeps one of each thing per
-home and per conversation, and no call can reach another's.
+`--agent NAME` **decides everything about who an agent is, and two agents may not
+share a name.**  It titles the window, it reaches the agent server, and it creates
+no port, no process and no config section — but it is no longer "a label and
+nothing more": the claim on a name is taken **by the name alone**, machine-wide,
+so a second `jack` — another data directory, another terminal — is refused rather
+than accepted as a different agent. Which home a name was started in is where its
+files are; it is not part of who the agent is. What the *servers* key their state
+by is the client id §1 defines, name and conversation together with the home the
+call came from, because a shared process has to resolve a file as well as
+recognise a caller — so the isolation the earlier claim deferred ("if it ever
+appears, it belongs inside an MCP server") is exactly what appeared there: a
+plugin keeps one of each thing per conversation, and no call can reach another's.
 
 **The window does not listen at all, and that is a repair rather than a
 taste.**  An earlier shape gave the terminal an MCP server of its own, on a
@@ -1876,13 +1882,14 @@ has no mechanism for.
 **Agents are isolated by file.** `agent="jack"` reads and writes
 `<data>/agents/jack/turns.db`, and no query can reach another agent's turns because there are
 no other agent's turns in the file. Isolation as a property of the filesystem
-beats isolation as a `WHERE` clause somebody can forget to write. The directory
-it resolves in is the **home the call came from** (§4), not the one this process
-was started in: the store is shared, so `agent="jack"` alone names two
-conversations the moment two homes have an agent called jack, and the home in the
-client id is what says which — the file *and* the in-memory conversation are keyed
-by it (`slife2.libs.plugin.audience.client_key`). Within one home, `--agent` is the
-whole of the partition, as it always was.
+beats isolation as a `WHERE` clause somebody can forget to write. The name is the
+whole of whose conversation it is — one instance of a name runs on a machine at a
+time (§4) — and what the *call* adds is where that conversation's files are: the
+store is shared, so `agent="jack"` has a directory under every home that has ever
+run a jack in it, and the home the call came from is what says which of them this
+turn writes to. Both the file and the in-memory loop are keyed by it
+(`slife2.libs.plugin.audience.client_key`), which is also what keeps a call from
+one home from finding a conversation belonging to another.
 
 ### 5.1 The live context, and the rebuild
 
