@@ -1793,10 +1793,15 @@ no port, no process and no config section — but it is no longer "a label and
 nothing more": the claim on a name is taken **by the name alone**, machine-wide,
 so a second `jack` — another data directory, another terminal — is refused rather
 than accepted as a different agent. Which home a name was started in is where its
-files are; it is not part of who the agent is. What the *servers* key their state
-by is the client id §1 defines, name and conversation together with the home the
-call came from, because a shared process has to resolve a file as well as
-recognise a caller — so the isolation the earlier claim deferred ("if it ever
+files are; it is not part of who the agent is. **And this machine keeps no memory
+of it**: the next run of that name is told a home and uses *that* one, whether it
+is the same directory or another. The home it used before is the operator's to
+keep, to reuse or to delete, and nothing here goes looking for it — one live
+instance per name is the whole of what a name is held to, and a home is not
+something the machine administers. What the *servers* key their state by is the
+client id §1 defines, name and conversation together with the home the call came
+from, because a shared process has to resolve a file as well as recognise a
+caller — so the isolation the earlier claim deferred ("if it ever
 appears, it belongs inside an MCP server") is exactly what appeared there: a
 plugin keeps one of each thing per conversation, and no call can reach another's.
 
