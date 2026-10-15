@@ -6,7 +6,7 @@ This document is designer's memory
 
 - 要强化架构和结构设计，通过plugins 和 公共库共享能力和代码。plugin要功能单一，数量多没有关系，性能上损失几跳没有关系，因为是本机的通讯。统一plugin协议，做到plugin易维护易替换。
 
-- 代码库的组织要模块化、结构化， 按plugin, library, helper ... 等分层次分功能组织。
+- 代码库的组织要模块化、结构化、分层次组织。
 
 - 大模型工具设计
     - Schema over prompt
@@ -18,7 +18,7 @@ This document is designer's memory
 - 完整详尽的pytest，保障系统功能正常进化，更完善的端到端测试
 
 1. 文档
-readme 和 sdd属于规范文档，design.md是开发者文档，designer_notes.md是我的文档
+readme 和 sdd属于规范文档，design.md是开发者文档，designer_notes.md是我的文档。
 
 1. LLM 的 Harness Tooks
 
@@ -66,15 +66,20 @@ cli/shell 的输出长度不可控，有些工具注定输出很长，比如给�
 
 1. 设计issues
 
-每个headless的cost，能并发到1000个吗
-
 - 判别器总是带当前上下文的，总是在当前上下文的条件下进行判别。现在已经有两个判别器了，一个是rebuild context, 一个是 compact 工具输出。
 
 - Async Agent Task 是一个异步one loop run，它是的设计目的是让agent委派任务，可以用在agent把任务拆分后委派任务。它没有subagent的cost，创建和停止。
 
 - Aync Tool ，可以让工具异步执行，用在tool 执行时间比较长，agent选择它异步。
 
-现在的一个未定的设计选项，就是subagent，多loop的后台执行。沿用 a2a 消息机制可能是最一致性的。
+现在的一个未定的设计选项，就是subagent，多loop的后台执行。沿用 a2a 消息机
+
+现在rebuld context 是针对每个 prompt， 唯一的drawback就是长程任务的loop可能直接就超过了context 预算。是否可以在agent loop中动态rebuild context。最好是一致的方式。
+
+- 内存里Context管理：大模型每调用一次，让agent知道当前的context usage，而这个信息不进memory，不重复。也就是每次提交给大模型的最后一条消息的append [TOKEN-USAGE:json]，json包括token使用数和占比。但这个marker不进记忆，也不改变当前message,也就是说手工append。
+难点是，大模型怎么rebuild turn 和选择相关messages. 主要对长程任务。遗留。
+
+制可能是最一致性的。
 
 还有 agent swarm 的考虑，做agent swarm，是不是就不用subagent概念了。
 
@@ -82,12 +87,6 @@ cli/shell 的输出长度不可控，有些工具注定输出很长，比如给�
 
 subagent共享agent的一切
 agent swarm按照 agent headless? 用headless
-
-现在rebuld context 是针对每个 prompt， 唯一的drawback就是长程任务的loop可能直接就超过了context 预算。是否可以在agent loop中动态rebuild context。最好是一致的方式。
-
-- 内存里Context管理：大模型每调用一次，让agent知道当前的context usage，而这个信息不进memory，不重复。也就是每次提交给大模型的最后一条消息的append [TOKEN-USAGE:json]，json包括token使用数和占比。但这个marker不进记忆，也不改变当前message,也就是说手工append。
-难点是，大模型怎么rebuild turn 和选择相关messages. 主要对长程任务。遗留。
-
 Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
 
 子agent就是完全正常功能的agent，没有TUI（但不是字面意思的headless, 压根就没有tui）, 具有agent的所有功能，创建时可以指定大模型，默认值为主agent的大模型，它没有turn memory，与主agent共享cabinet。它没有context rebuild. session lived。
