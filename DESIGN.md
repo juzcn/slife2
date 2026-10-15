@@ -36,7 +36,7 @@ because a chapter is a subject and not a decision.
    - [1.9 The unattended agent, and what a window was for](#19-the-unattended-agent-and-what-a-window-was-for)
 2. [Streaming: one pattern, used twice](#2-streaming-one-pattern-used-twice) — `tools/call` is a request/response and a TUI needs tokens as they arrive, so one pattern rather than two special cases
 3. [The loop, and why the server owns it](#3-the-loop-and-why-the-server-owns-it) — stateless servers, and the largest change of the implementation
-4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, and the process that brings up what the config needs
+4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, the machine's bookkeeping, and the home a call is served from
 5. [The context store](#5-the-context-store) — the turn log, the recall, and the decision about which turns a conversation runs on
    - [5.1 The live context, and the rebuild](#51-the-live-context-and-the-rebuild)
    - [5.2 A result that does not fit, and the second discriminator](#52-a-result-that-does-not-fit-and-the-second-discriminator)
@@ -67,7 +67,12 @@ transport, the same JSON-RPC and the same tool listing as the servers under
 `mcp:` — plus the *plugin contract*, which is the part this project adds on
 top: state keyed by a client id rather than by a session, a tool that says who
 may call it, and an identity another process checks before it reuses what it
-found (`slife2.libs.plugin.protocol`). The word is worth having because "MCP server" does
+found (`slife2.libs.plugin.protocol`).  A **client id** is who a call is for and
+where they are: the agent, which of its conversations, and the **home** — the data
+directory that agent lives in (§4).  The third part was implied for as long as
+there was one data directory per machine and had to be said once two of them were
+served by the same processes; it is what makes "the same name in two directories"
+two agents rather than one name with one identity. The word is worth having because "MCP server" does
 not separate the servers slife2 starts from the twenty somebody else wrote, and
 that line is load-bearing everywhere below: a missing plugin fails the turn,
 where a missing entry under `mcp:` is a model with fewer tools.
@@ -270,9 +275,11 @@ model's, under their own names, like any other plugin's.
 ran one wechat child per agent, so its module globals *were* that agent's: one
 `_client`, one queue, one dedup window, because there was exactly one agent in
 the process.  These servers are shared (§4), so the same four things live in a
-`Session` keyed by the **calling agent** — the first half of the client id every
-call already carries (§3) — and a second agent that scans its own code gets its
-own file, its own poll loop and its own conversation.  This is the contract
+`Session` keyed by the **calling agent** — part of the client id every call carries
+(§3), and one part of it that a home made longer (§4) — and a second agent that
+scans its own code gets its own file, its own poll loop and its own
+conversation; a second home's login is a second session for the same reason, and
+its cursor is written to that home's `agents/<agent>/wechat.yaml`.  This is the contract
 `slife2.libs.plugin.protocol` states, at the first plugin where it costs something: a
 process that cannot ask an operator which agent it is serving has to be told, per
 call, and a call that does not say is refused rather than guessed.
@@ -841,8 +848,9 @@ names the adapter is a config to revisit; a 404 from a vendor is a mystery.
 **Artifacts go under the agent's own directory**, and that is where this port
 departs from v1.  v1 wrote them to the process's working directory, which was the main
 process's — a person's shell.  A daemon here is spawned with its working
-directory set to `<data>/runtime/`, which this design documents as
-*reconstructible — delete it and the next start rebuilds whatever it needs*, so
+directory set to the machine's runtime directory (`~/.slife2/runtime`, §4), which
+this design documents as *reconstructible — delete it and the next start rebuilds
+whatever it needs*, so
 v1's rule would put every generated image in the one directory guaranteed to lose
 it.  They land in `agents/<agent>/media/`, and
 what is kept from v1 is the distinction underneath: a generated file is a **work
@@ -1198,7 +1206,11 @@ back and forth and every task sent to it runs **twice**.  v1 therefore ran one
 plugin process per agent, which made its module globals that agent's by
 construction.  These servers are shared (§4), so the same things live in a
 **session per agent** — §1.2's WeChat rule, one section up — and a mesh is
-created for the calling agent when a tool first says who it is.  The collision
+created for the calling agent when a tool first says who it is.  The *name* a
+peer sees is still the agent's alone, which is the one identity here that a home
+does not enter: a peer addresses `jack` on this machine, so two homes running a
+`jack` cannot both be on the mesh — the second is a name taken, and refused as
+one.  The collision
 machinery ports unchanged and for the same reason it existed: before joining,
 a throwaway connection with its own client id reads the retained card on the
 name's own discovery topic, and a card that is neither our own instance's nor a
@@ -1724,11 +1736,63 @@ ordinary exit leaves the servers running until the next reboot. The count is
 by pid liveness rather than a counter, so a client that was killed — and so
 never deregistered — cannot keep them alive forever.
 
-`--agent NAME` does **not** participate in any of this. It is a label: it titles
-the window, it is passed through to the agent server, and it is exclusive (two
-live instances may not share a name). It creates no port, no process, and no
-config section. Isolation, if it ever appears, belongs inside an MCP server —
-which is why the label reaches one.
+**That bookkeeping belongs to the machine, and it moved to say so.** The records
+naming pids, the start locks, the logs, the claims on agent names and the list of
+homes this machine has run an agent in live in `~/.slife2/runtime`
+(`paths.runtime_dir`; `SLIFE2_RUNTIME_DIR` overrides, which is what a test uses to
+keep off a developer's real one). Not under a data directory, for the reason the
+servers are shared: there is one set of them, so there is one record of them, and
+a copy of any of it per directory can only disagree with the others. That is not
+a hypothetical — the shape it had is what a second `--data-dir` ran into. Its
+`status` reported a running stack it could not see (`running (external) — no
+record; not started by slife2`, all eighteen lines of it) because the records
+were in the other directory; the start lock was in neither launcher's way, so two
+cold starts could race for one port, which is the one thing that lock exists to
+prevent; and `others_running` — the count `live_clients` is built from — read
+*this* directory's clients, so a client there counted itself the last one out
+while another home was still working. What is left in a data directory is what a
+person wrote and what an agent's run produced, and the test is the one `runtime/`
+always had: delete it and the next start rebuilds whatever it needs.
+
+**And a call is served from the home it came from.** A plugin is shared, so the
+process that writes an agent's turn file is generally not the one that was
+started with `--data-dir`: it is whichever is already up. Which directory the
+work belongs in therefore travels *with the call*, out of band, in the same
+`_meta` blob that already carried the conversation (`slife2.libs.plugin.audience`,
+key `data_dir`) — beside the agent and the subagent, and out of reach of a model
+for the same reason they are: an argument would be a directory a model could name,
+and naming somebody else's is the whole of what this prevents. `paths.home()`
+answers with it for the length of a call, `protocol.ServeTheCallersHome` is the
+middleware every server registers that puts it there (`house_server`, so a server
+built over the in-memory transport honours it too), and `protocol.Peer` — what
+`open_server` hands back — puts it on every call this process makes in turn, which
+is what carries it past the first hop: a turn's `remember` reaches the context
+store with the home the turn is in, and the store resolves `agents/<agent>/…`
+there rather than in its own directory. Everything a plugin *derives* rather than
+reads is kept per home, built the first time that home asks, out of **that home's**
+`slife2.yaml`: the catalogue a hub opens (`Catalogue.store`), one `Family` per
+home for the four section plugins (`slife2.libs.plugin.family.Homes`), the
+declarations and the embedder the hub holds, and the config cache itself
+(`load_cached`, one entry per file — a single slot would have made two homes
+alternating look to every reader like a config edited between turns, since
+"has it changed?" is an `is` comparison). What is **not** per home is the set of
+plugin addresses the hub connects to: those are the shared servers, one set of
+ports for the whole machine, and nothing in this arrangement starts a process or
+a port. The rule for which config a call is served from is one line in one place
+(`config.for_the_call`): the home's file, unless one was injected — every test
+builds its server with one, and a server that went looking for a file instead
+would be reading a developer's own `slife2.yaml`.
+
+`--agent NAME` is **exclusive per home**, and that is now the whole of what it
+partitions. It titles the window, it reaches the agent server, and it creates no
+port, no process and no config section — but it is no longer "a label and nothing
+more": a name plus the home a client was started in *is* an agent, which is why
+the claim is taken per home (two homes may each run a `jack`; one home may not run
+two) and why the servers' per-call state is keyed by the pair rather than by the
+name. What that state is keyed by is the client id §1 defines, so the isolation
+the earlier claim deferred — "if it ever appears, it belongs inside an MCP server"
+— is exactly what appeared there: a shared plugin keeps one of each thing per
+home and per conversation, and no call can reach another's.
 
 **The window does not listen at all, and that is a repair rather than a
 taste.**  An earlier shape gave the terminal an MCP server of its own, on a
@@ -1812,9 +1876,13 @@ has no mechanism for.
 **Agents are isolated by file.** `agent="jack"` reads and writes
 `<data>/agents/jack/turns.db`, and no query can reach another agent's turns because there are
 no other agent's turns in the file. Isolation as a property of the filesystem
-beats isolation as a `WHERE` clause somebody can forget to write — and it is the
-one place `--agent` partitions anything, since the servers themselves stay
-shared.
+beats isolation as a `WHERE` clause somebody can forget to write. The directory
+it resolves in is the **home the call came from** (§4), not the one this process
+was started in: the store is shared, so `agent="jack"` alone names two
+conversations the moment two homes have an agent called jack, and the home in the
+client id is what says which — the file *and* the in-memory conversation are keyed
+by it (`slife2.libs.plugin.audience.client_key`). Within one home, `--agent` is the
+whole of the partition, as it always was.
 
 ### 5.1 The live context, and the rebuild
 
@@ -2514,7 +2582,13 @@ slife2-agent  ──MCP──▶  slife2-toolhub  ──MCP──▶  plugins   
 **What the hub owns is the set, and it owns all of it.** Which tools exist, what
 the model is holding, what a name resolves to, what the budget takes back, and
 who may call what — every one of those is a question about the *whole* list, so
-it is answered in one place or it is answered twice and differently. What the hub
+it is answered in one place or it is answered twice and differently.  **One set
+per home** (§4): the configuration a set is built from is a home's, so the
+catalogue, the declarations behind it and the embedder that places its rows are
+held per home and built the first time that home asks.  The addresses the hub
+*connects to* are not — they are the shared servers, one set of ports for the
+machine — which is why the split is not "everything per home" but "everything
+derived from a config section". What the hub
 does not own any more is a *connection*: the servers under `mcp:` and
 `rest-api:` are held by the two plugins named after those sections, and the hub
 is told about them. `slife2.clients.gateway` is the link itself — connect, list, call,
@@ -2806,7 +2880,10 @@ outage, and separating them is most of what the module's prose is about.
 
 ### 8.4 The catalogue, and the search over it
 
-**The catalogue is a file this process opens, not a plugin it asks.**  It was
+**The catalogue is a file this process opens, not a plugin it asks** — and it is
+**the calling home's** file (§4): `agents/tools.db` inside the directory the call
+came from, so two homes on one machine have two catalogues, each built from the
+config that home runs on, and a `func_tool_load` in one writes into that one.  It was
 the second half of `slife2-db` and that plugin is gone, for the test in §1.1: a
 store has one writer — this process — and "one writer" is what a SQLite lock
 already is. So `Catalogue` in `slife2.plugins.toolhub.server` is a thin face over
