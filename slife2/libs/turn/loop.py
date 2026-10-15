@@ -74,6 +74,16 @@ def harness_call(name: str) -> ToolCall:
     The `_harness_` prefix with the tool's own mark stripped is v1's, and it is
     what makes the pair recognisable as the machinery's rather than the model's —
     `slife2/tui/restore.py` reads it, and so does anyone reading a transcript.
+
+    **And the shape is a wire constraint rather than only a label.**  A pair is
+    written once and every later request carries it, so a provider that refuses
+    the string refuses a *request* rather than a call — on the replay, far from
+    here.  Messages states the rule, on both fields the id appears in
+    (`tool_use.id`, `tool_result.tool_use_id`: `^[a-zA-Z0-9_-]+$`, and no length
+    bound), and this shape sits inside it by construction.  The letters are the
+    load-bearing part: a separator outside that class is one that would have to
+    be sanitised on the way out, which is the thing a single builder exists to
+    make unnecessary.  `DESIGN.md` §8.5 carries the measurement.
     """
     return ToolCall(
         id=f"_harness_{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",

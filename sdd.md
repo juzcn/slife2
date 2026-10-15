@@ -395,13 +395,23 @@ arrives twice and how a cancel lands on work that already finished.
 Some things the harness has to say are said *as the model*, so that a provider
 accepts them: `_func_tool_unload` after a trim, `_check_new_input` when a message
 is waiting, are ordinary declared tools whose calls the harness writes into the
-history (`libs/turn/tools.py:harness_call`).
+history (`libs/turn/loop.py:harness_call`).
 
 The rule is that **a pair names a declared tool**, because the Responses and
 Messages backends reject a tool call in history that is not in the request's tool
 list — so the tool has to be in the model's list, which means the model can call
 it too, and that is accepted: a model calling `_check_new_input` is the
 boundary's own move made early rather than something new.
+
+**And the id a pair is joined by is one every provider takes as a call id.** The
+two halves are matched by a string the harness mints, and a provider that refuses
+the string refuses the *request* rather than the call — and refuses it on the
+replay, because a pair is written once and carried by every request the
+conversation makes after it. Messages is the backend that states the rule, and it
+states it on both fields the id appears in (`tool_use.id`,
+`tool_result.tool_use_id`); the shape is chosen inside that class at the source
+rather than sanitised on the way out, and `DESIGN §8.5` is where the constraint
+and the measurement behind it are read.
 
 A pair is written with **nothing awaited between its two halves**. An
 interruption in that gap leaves an assistant message whose call is never
@@ -1023,8 +1033,9 @@ obvious.
 4. **The loop is a pure function over a message list**: it owns no conversation,
    no socket and no clock of its own.
 5. **A history is one every provider accepts**: an assistant message's tool calls
-   are all answered, and a harness pair is written with nothing awaited between
-   its halves.
+   are all answered, a harness pair is written with nothing awaited between its
+   halves, and the id a pair is joined by is one every provider takes as a call
+   id.
 6. **A reading is never a verdict.** An empty answer, an unreadable payload and a
    silent peer are three different facts, and each is named where it is read.
 7. **A failure that affects the design's behaviour hard-fails rather than falling
