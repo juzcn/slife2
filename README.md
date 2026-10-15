@@ -1035,13 +1035,15 @@ and a home is what `--data-dir` names:
 whose it is — and the catalogue is the exception that proves the rule: it sits
 beside the agent directories because it is everybody's and therefore nobody's.
 
-**A home belongs to an agent.** `slife2 --agent jack --data-dir D` is jack, and
-jack is D: the same name under two data directories is two agents, which is why
-an agent name is held exclusively *per home* and two instances in two homes
-never touch each other's conversations. A directory may hold several agents, and
-then they share its `slife2.yaml` and its catalogue — the tool set **is** the
-config, so agents running on one config run on one set of tools. Load a tool in
-one and it is loaded for the next, in that home.
+**A directory holds the agents whose data is in it.** A directory may hold
+several, and they then share its `slife2.yaml` and its catalogue — the tool set
+**is** the config, so agents running on one config run on one set of tools, and a
+tool loaded by one is loaded for the next. `--agent jack --data-dir D` names the
+agent *and* says where its files go, and the two are separate facts: the name is
+who the agent is — one live instance per name on this machine, whichever
+directory — and `D` is the home whose config, catalogue and conversations that
+run reads and writes. Which directory a name was last started in is not
+remembered: the next run of it uses the one it is given.
 
 **A home is made when you start an agent in it.** `slife2 --data-dir D` records
 `D`, gives it its `agents/` and `skills/` if they are not there, and builds the

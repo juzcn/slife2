@@ -256,7 +256,7 @@ The cost of a library is the error boundary: a plugin that is gone fails the
 turn with a named peer, and a file that will not open raises where it is used.
 That is the right trade for a file — the traceback lands in the process that can
 describe it — and the wrong one for a remote service. And it does not change
-with the number of agents: `--agent` is a label, the servers are shared by every
+with the number of agents: the servers are shared by every
 instance (§4), so the multiplier for a library is the number of *processes* that
 import it, not the number of agents.
 

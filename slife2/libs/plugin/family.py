@@ -1188,17 +1188,22 @@ class Homes[T]:
     """One of `T` per home, built the first time that home asks.
 
     **A plugin holds a family per home, and this is what makes sharing it
-    honest.**  What a family holds is its section of `slife2.yaml` — the
-    entries, their connections, their switches — and that section belongs to a
-    home (`slife2.libs.host.paths.home`).  One family for the process would serve
-    every home the entries of whichever data directory started it, connections
-    and all, which is the leak this closes.
+    honest.**  What a family holds is its section of `slife2.yaml` — the entries,
+    their switches, and what it declares — and that section belongs to a home
+    (`slife2.libs.host.paths.home`).  One family for the process would serve every
+    home the entries of whichever data directory started it, which is the leak
+    this closes.  **The connections are not one of those per-home things**: they
+    are the machine's and pooled by name (`Links`), so two homes naming one entry
+    run one server between them.
 
-    **Built on first ask, never at start-up**, for the reason the tool
-    catalogue is (`slife2.plugins.toolhub.server.Catalogue.store`): a home is a data
+    **Built by the first ask from that home**, for the reason the tool catalogue
+    is (`slife2.plugins.toolhub.server.Catalogue.store`): a home is a data
     directory this process may not hear about until somebody in it asks
     something, and building for one nobody is using is work plus connections
-    nobody asked for.
+    nobody asked for.  **A start in a home counts as that ask**, and is the
+    commonest one there is — the client makes it before it opens a window
+    (`slife2._open_catalogue`) — so a home an agent has been started in is built
+    then rather than at its first turn.
 
     `build` is what to make, and **`source` decides which config it is made
     from**: the home's own file in production, the one a caller injected in a

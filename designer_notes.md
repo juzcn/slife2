@@ -2,7 +2,7 @@ This document is designer's memory
 
 1. Design and Coding Rules
 
-- 觉得每个操作都可能失败就会有无穷多个fallback，而设计的行为正常必须成功的不允许fallback.fallback是不影响正常行为degrade，degrade必须要得到设计批准。我们有时候更愿意hard fail，而不做一些隐藏bug的fallbcak。Fallback 越少越好，它容易隐藏真正的bugs，带来不可预测的后果。影响系统设计行为的失败不要fallback, 要hard fail. 失败可以重试。真正需要fallback时。要让fallback成为一种设计行为。
+- 觉得每个操作都可能失败就会有无穷多个fallback，而设计的行为正常必须成功的不允许fallback.fallback是不影响正常行为degrade，degrade必须要得到设计批准。我们有时候更愿意hard fail，而不做一些隐藏bug的fallbcak。失败可以重试。真正需要fallback时。要让fallback成为一种/设计行为。
 
 - 要强化架构和结构设计，通过plugins 和 公共库共享能力和代码。plugin要功能单一，数量多没有关系，性能上损失几跳没有关系，因为是本机的通讯。统一plugin协议，做到plugin易维护易替换。
 
@@ -15,10 +15,10 @@ This document is designer's memory
 
 - 完整详尽的pytest，保障系统功能正常进化，更完善的端到端测试
 
-2. 文档
+1. 文档
 readme 和 sdd属于规范文档，design.md是开发者文档，designer_notes.md是我的文档
 
-3. LLM 的 Harness Tooks
+1. LLM 的 Harness Tooks
 
 loop自动调用的工具，生成tool 消息对，就像大模型自己调用的一样。有三个小差别：1）TUI 2）元参数不起作用 3）fake call id，大模型知道不是自己调用的
 
@@ -89,5 +89,12 @@ agent swarm按照 agent headless? 用headless
 
 
 
-有没有好的设计让大模型每调用一次，agent知道context usage，而这个信息不进memory，不重复。
-也就是每次提交给大模型的最后一条消息的尾部加 [CONTEXT-USAGE:json]，json包括token使用数和占比。那么把rebuild 做成一个它自己可以调用的工具。它看到自己的上下文紧张，会主动清理上下文，做下一个step。
+设计：大模型每调用一次，让agent知道当前的context usage，而这个信息不进memory，不重复。也就是每次提交给大模型的最后一条消息的append [CONTEXT-USAGE:json]，json包括token使用数和占比。但这个marker不进记忆，也不改变当前message,也就是说手工append。
+
+
+那么把rebuild 做成一个它自己可以调用的工具。它看到自己的上下文紧张，会主动清理上下文，做下一个step。
+
+ 两个实例是两个独立agent，碰巧它们在一台机器上，我们共享plugins; 碰巧 --data-dir
+  是一样的，我们共享 slife2.yaml 和 tools.db
+
+  同一台机器可以以隔离方式运行多个agent实例。

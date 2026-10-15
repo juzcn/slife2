@@ -451,8 +451,9 @@ tool_result:
 #
 #   command + args + env     stdio: a process slife2 starts
 #   url + headers            http: an endpoint somebody else runs
-#   cwd                      stdio only; defaults to the data directory, which
-#                            is what the `.` in an argument means
+#   cwd                      stdio only; defaults to the home of whoever starts
+#                            it first, because one server is one process — an
+#                            entry that cares where it runs names its own cwd
 #   description              what it is for; for a person, not for the model —
 #                            the model reads the descriptions the server itself
 #                            gives each tool
@@ -472,6 +473,14 @@ tool_result:
 # the budget.  `enabled: false` is how a server stays configured without being
 # one of the processes at every start, and it is worth using: an entry that is
 # on is a process, a handshake, and its tools in every turn's list.
+#
+# **And an entry is one server per *name*, however many data directories name
+# it.** `serper` here and `serper` in another `--data-dir` are the same server:
+# the first one to start it brings the process up and the other home's calls go
+# to that one, because the tool names in a catalogue are the entry's, and two
+# processes under one name could not be told apart.  Two homes naming one entry
+# with *different* commands is reported in the log and the running one is used —
+# giving it another name is how you run both.
 mcp:
   serper:
     command: npx

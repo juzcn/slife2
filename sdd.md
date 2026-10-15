@@ -92,9 +92,12 @@ the process that can describe it, and the wrong one for a service.
 - **Client id** — `(agent, subagent)`: which agent is talking, and which of that
   agent's conversations. It travels with every call at every hop, and every
   server keys whatever state it has by it. See §2.2.
-- **Agent** — an identity, `--agent NAME`. It is a label and nothing more: no
-  per-agent port, process or config section. The servers are shared by every
-  instance (§3), and the label reaches them as part of the client id.
+- **Agent** — an identity, `--agent NAME`. It is claimed once on the machine
+  (§3.3), so two live instances may not share one, and the claim is by the name
+  alone rather than by `(home, name)`: which directory a name was started in is
+  where its files are, not part of who it is. It buys no per-agent port, process
+  or config section — the servers are shared by every instance (§3) — and it
+  reaches them as part of the client id.
 - **Conversation** — one client id's history, held by the agent server, stored
   by the context store.
 - **Turn** — one exchange: the messages in, the model's answer, the tool calls
@@ -309,7 +312,10 @@ server.
 `claim_agent` holds the exclusive right to run under a name for the life of the
 client, taken with a kernel lock the operating system releases if the holder
 dies. Two live claims on one identity is a contradiction rather than a
-configuration, so the second instance is refused by name. What the claim does
+configuration, so the second instance is refused by name — **the name alone, and
+machine-wide**: the claim is not per home, so a second `jack` in another data
+directory is refused too, and which directory a name was started in is where its
+files are rather than part of who it is. What the claim does
 **not** do is partition anything: the servers stay shared with every other agent,
 and `--headless` is recorded in the claim because it is what tells a *model* that
 nobody is sitting in front of this one (`DESIGN §1.9`).
@@ -1001,10 +1007,13 @@ because a second answer would be a second thing to keep in step. A child process
 is spawned with the *resolved* directory, so a relative flag cannot be re-resolved
 underneath the working directory it is given.
 
-**A home belongs to an agent.** `--agent jack --data-dir D` is jack, and jack is
-D: the same name in two data directories is two agents, which is why an agent name
-is claimed per home, and why a directory may hold several agents — they then share
-its config and its catalogue, the tool set being the config's.
+**A directory holds the agents whose data is in it.** `--agent jack --data-dir D`
+names the agent and says where its files are, and the two are separate facts: the
+name is claimed **once on the machine, by the name alone** (§3.3), so a second
+`jack` in another directory is refused rather than accepted as a different agent,
+and which directory a name used is not remembered — the next run of it is given
+one and uses that. A directory may hold several agents, and they then share its
+config and its catalogue, the tool set being the config's.
 
 **The runtime is the machine's**, at `~/.slife2/runtime` (`SLIFE2_RUNTIME_DIR`
 overrides): the records naming pids, the start locks, the logs, the claims on

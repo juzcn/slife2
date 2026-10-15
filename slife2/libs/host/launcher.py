@@ -3,8 +3,9 @@
 Every server in this system is shared infrastructure.  `slife2` ensures the ones
 its config needs are running and attaches to whatever it finds, so a second
 instance is one command and no duplicate process appears.  Nothing here is
-per-agent: an agent name is a label, and isolation, where it exists at all, is
-an MCP server's own business.
+per-agent: the name is an identity and is claimed as one (`claim_agent`), which
+buys no port and no process, and isolation, where it exists at all, is an MCP
+server's own business.
 
 The decision that everything else follows from: **a probe is the only authority
 on whether a server is running.**  A listening port proves something is there; a

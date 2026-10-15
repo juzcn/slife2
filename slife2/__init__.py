@@ -5,10 +5,12 @@ its config needs and attaches to whatever is already running, so a second
 instance is one command and no duplicate process appears.  They are daemons: a
 client exiting never stops one.
 
-``--agent NAME`` names the instance.  It is a label and nothing more — no
-per-agent port, process, or config section.  Isolation, where it is needed,
-belongs inside an MCP server, not in the process layout; the label is passed
-through to the agent server for exactly that reason.
+``--agent NAME`` names the instance, and the name is an **identity**: it is
+claimed once on the machine, so two live instances may not share one, and the
+claim is by the name rather than by the data directory.  It buys no per-agent
+port, process or config section — the servers are shared, and isolation, where it
+is needed, belongs inside an MCP server rather than in the process layout.  The
+name is passed through to the agent server for exactly that reason.
 
     slife2 [OPTIONS]          ensure the servers, then run the TUI
     slife2 status [OPTIONS]   what is running, and where

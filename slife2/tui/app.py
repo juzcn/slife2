@@ -220,9 +220,11 @@ class SlifeApp(App[None]):
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
         super().__init__()
-        # The agent label is the window title.  It changes nothing else: there is
-        # no per-agent port, process or config, because the servers are shared
-        # infrastructure and an identity is not a piece of topology.
+        # The agent's name is the window title.  The window changes nothing else:
+        # there is no per-agent port, process or config, because the servers are
+        # shared infrastructure and an identity is not a piece of topology.  (The
+        # name *is* an identity, and is claimed as one — `claim_agent` — which is
+        # a fact about the machine rather than about this window.)
         self.title = f"slife2 - {agent}"
         # (The address is *not* kept as an attribute: the client factory below
         # closes over the parameter, so `self._url` was a second spelling of one

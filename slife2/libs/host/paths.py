@@ -2,11 +2,12 @@
 
 **Two roots, because there are two kinds of fact.**  A *home* is a data
 directory: one config, one set of playbooks, and the agents whose data lives in
-it.  **It belongs to an agent** — `--agent jack --data-dir D` is jack, and jack
-is D, which is why the same name under two data directories is two agents and
-why the name is claimed per home.  A directory may hold several agents, and then
-they share its config and its catalogue, which is the whole of what "the same
-`--data-dir` shares `tools.db`" means.  The *daemons* are one set per machine —
+it.  **A directory may hold several agents**, and then they share its config and
+its catalogue, which is the whole of what "the same `--data-dir` shares
+`tools.db`" means.  What a name is *not* is a property of one: it is an identity
+claimed once on the machine (`slife2.libs.host.runtime.agent_claim_path`), so
+`--agent jack --data-dir D` names the agent and says where its files go, and the
+directory a name used before is not remembered.  The *daemons* are one set per machine —
 `slife2.libs.host.launcher` shares them by endpoint, whatever started them — so
 everything describing a running server is a fact about the machine, and it gets a
 root of its own rather than a copy per home.
