@@ -160,9 +160,9 @@ MAX_QUEUED = 32
 #: needs — the backend — is decided inside `make_loop`.
 Compressor = Callable[[LLMBackend, ClientId], Compress]
 
-#: What this process holds one conversation's state under: `(world, agent,
+#: What this process holds one conversation's state under: `(home, agent,
 #: subagent)`, built by `slife2.libs.plugin.audience.client_key`.  Not `ClientId`,
-#: which is what travels on the wire — a world rides in the call's `_meta` rather
+#: which is what travels on the wire — a home rides in the call's `_meta` rather
 #: than in an argument, so the two are built from different places and only one
 #: of them is a key.
 ConversationKey = tuple[str, str, str]
@@ -571,11 +571,11 @@ def build_server(
     #: used, which is what makes isolation a property of the key rather than a
     #: rule somebody has to remember to apply.
     #:
-    #: **The key is `client_key`'s triple, and the world in it is load-bearing.**
-    #: This process is shared by every world on the machine, so `jack` names two
-    #: conversations the moment two worlds have an agent by that name — and a
+    #: **The key is `client_key`'s triple, and the home in it is load-bearing.**
+    #: This process is shared by every home on the machine, so `jack` names two
+    #: conversations the moment two homes have an agent by that name — and a
     #: table keyed by the name alone does not answer the second caller with a
-    #: stale loop, it answers it with *the other world's history*: its prompt, its
+    #: stale loop, it answers it with *the other home's history*: its prompt, its
     #: turns, and a `remember` that writes there.
     loops: dict[ConversationKey, Loop] = {}
 
@@ -982,7 +982,7 @@ def build_server(
         cutoff = time.monotonic() - _T.timeouts.pacing.loop_idle
         # The key is a `client_key` triple, so it is *not* unpacked: the words
         # that name a conversation come from the loop (`agent`, `subagent`),
-        # which is also what keeps the world out of a log line.
+        # which is also what keeps the home out of a log line.
         for key, loop in list(loops.items()):
             if loop.lock.locked():
                 continue

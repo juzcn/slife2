@@ -81,8 +81,8 @@ from ruamel.yaml import YAML
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host.config import Config
-from slife2.libs.host.paths import agent_dir, in_world, known_worlds
-from slife2.libs.host.paths import world as world_dir
+from slife2.libs.host.paths import agent_dir, in_home, known_homes
+from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.wechat import ilink
@@ -260,14 +260,14 @@ class Session:
     Everything v1 held in module globals, keyed by the agent it belongs to.
     """
 
-    def __init__(self, agent: str, *, http: Http, world: str = "") -> None:
+    def __init__(self, agent: str, *, http: Http, home: str = "") -> None:
         self.agent = agent
         #: The data directory this login lives in, **kept rather than looked
         #: up**.  The poll loop outlives the call that started it, so a path
-        #: resolved from the ambient world inside it would be answered by
+        #: resolved from the ambient home inside it would be answered by
         #: whatever directory the *daemon* is in — and the cursor would be
-        #: written into another world's login file (`slife2.libs.host.paths.world`).
-        self.world = world
+        #: written into another home's login file (`slife2.libs.host.paths.home`).
+        self.home = home
         self.client = IlinkClient(http=http)
         #: Message keys seen inside the dedup window — the bridge re-serves
         #: recent messages, so this is what tells a re-delivery from somebody
@@ -510,18 +510,18 @@ class Wechat:
         self._http = http
         self._deliver = deliver or self._deliver_to_window
         self._note = note or self._note_window
-        #: The worlds whose logins this process watches.  `None` means every
-        #: world on the machine (`slife2.libs.host.paths.known_worlds`), which is the
+        #: The homes whose logins this process watches.  `None` means every
+        #: home on the machine (`slife2.libs.host.paths.known_homes`), which is the
         #: real answer: this is one process serving every agent, so it resumes
-        #: the logins of every world rather than of whichever directory it was
+        #: the logins of every home rather than of whichever directory it was
         #: started in.  A caller that hands in a directory — a test — gets that
-        #: directory's world and nothing else.
-        self._worlds: list[Path] | None = (
+        #: directory's home and nothing else.
+        self._homes: list[Path] | None = (
             None if directory is None else [Path(directory).parent]
         )
         self._sessions: dict[tuple[str, str], Session] = {}
 
-    def session(self, agent: str, world: str = "") -> Session:
+    def session(self, agent: str, home: str = "") -> Session:
         """One agent's session, started the first time it is asked for.
 
         **Created empty, and restored by :meth:`ready`** — a tool call must not
@@ -529,10 +529,10 @@ class Wechat:
         be down, so what a fresh session is given here is its own state and
         nothing else.
         """
-        where = world or str(world_dir())
+        where = home or str(home_dir())
         found = self._sessions.get((where, agent))
         if found is None:
-            found = Session(agent, http=self._http, world=where)
+            found = Session(agent, http=self._http, home=where)
             self._sessions[(where, agent)] = found
         return found
 
@@ -569,20 +569,20 @@ class Wechat:
         must not stop the plugin from coming up, and every one of these is
         re-triggerable by any tool call.
         """
-        for root in self._worlds or known_worlds():
+        for root in self._homes or known_homes():
             for path in sorted((root / "agents").glob(f"*/{SESSION_NAME}")):
                 self._resume_login(path, root)
 
     def _resume_login(self, path: Path, root: Path) -> None:
-        """One login file, resumed in the world it was found in.
+        """One login file, resumed in the home it was found in.
 
-        **The world travels with the session rather than being looked up when it
+        **The home travels with the session rather than being looked up when it
         is needed.**  The poll loop this starts outlives the call that started
         it, so a path resolved inside it would be answered by whatever directory
-        the *daemon* is in — and the cursor of one world's login would be written
+        the *daemon* is in — and the cursor of one home's login would be written
         into another's file.  So the directory the file was found in is kept
-        (`Session.world`) and re-entered around the work
-        (`slife2.libs.host.paths.in_world`).
+        (`Session.home`) and re-entered around the work
+        (`slife2.libs.host.paths.in_home`).
         """
         saved, _ = _read_session(path)
         # **The raw name, or nothing.**  The directory is a *sanitised*
@@ -606,7 +606,7 @@ class Wechat:
                 path,
             )
             return
-        self._spawn_in_world(root, self._resume(self.session(agent, str(root))))
+        self._spawn_in_home(root, self._resume(self.session(agent, str(root))))
 
     async def close(self) -> None:
         """Take down every loop, keep-alive and in-flight turn."""
@@ -627,20 +627,20 @@ class Wechat:
         if task is not None and not task.done():
             task.cancel()
 
-    def _spawn_in_world(
+    def _spawn_in_home(
         self, root: Path, work: Coroutine[Any, Any, None]
     ) -> asyncio.Task[None]:
-        """Spawn *work* with *root* as the world around it.
+        """Spawn *work* with *root* as the home around it.
 
         **A loop outlives the call that started it**, so by the time it resolves
-        a path the ambient world is the daemon's own — and a daemon serving two
-        worlds would write one world's cursor into the other's login file.  Every
+        a path the ambient home is the daemon's own — and a daemon serving two
+        homes would write one home's cursor into the other's login file.  Every
         task that is started from outside a call and touches a login goes through
-        here, which is what `Session.world` is kept for.
+        here, which is what `Session.home` is kept for.
         """
 
         async def run() -> None:
-            with in_world(root):
+            with in_home(root):
                 await work
 
         return self._spawn(run())
@@ -870,9 +870,7 @@ class Wechat:
     def watch(self, session: Session) -> None:
         """Start this session's poll loop, if it is not already running."""
         if session.poll is None or session.poll.done():
-            session.poll = self._spawn_in_world(
-                Path(session.world), self._poll(session)
-            )
+            session.poll = self._spawn_in_home(Path(session.home), self._poll(session))
 
     async def _poll(self, session: Session) -> None:
         """Watch one login for messages, until it stops being a login.
@@ -1671,12 +1669,11 @@ def _saved_note() -> str:
     Read off the data directories rather than out of a built `Wechat`, because
     `serve_plugin` asks for this before it builds the server — which is the
     point of it being text about a *start* rather than about the process — and
-    every world's, because this process serves every world on the machine and
+    every home's, because this process serves every home on the machine and
     the line is a count of what it is about to watch.
     """
     count = sum(
-        len(list((root / "agents").glob(f"*/{SESSION_NAME}")))
-        for root in known_worlds()
+        len(list((root / "agents").glob(f"*/{SESSION_NAME}"))) for root in known_homes()
     )
     return f"{count} saved login(s)" if count else "no logins saved"
 

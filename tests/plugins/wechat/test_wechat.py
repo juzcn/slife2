@@ -1423,8 +1423,8 @@ async def test_a_login_is_keyed_by_the_name_the_file_states(
 
     await made.plugin.start()
     try:
-        # The key's first half is the world the login was found in — this
-        # process serves every world, so a name alone is half an identity
+        # The key's first half is the home the login was found in — this
+        # process serves every home, so a name alone is half an identity
         # (`slife2.libs.plugin.audience.client_key`).
         assert [agent for _, agent in made.plugin._sessions] == ["a/b"], (
             "the session is keyed by the name in the file, not the directory"

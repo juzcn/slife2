@@ -300,7 +300,7 @@ class Windows:
     agent.
 
     **The key is `slife2.libs.plugin.audience.client_key`'s triple**, because the
-    process is shared by every *world* as well: two worlds may each be running an
+    process is shared by every *home* as well: two homes may each be running an
     agent called `jack`, and a table keyed by the name alone would hand the
     second window the first one's stream — its hand-overs typed into somebody
     else's conversation.

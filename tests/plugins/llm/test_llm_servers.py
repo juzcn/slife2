@@ -332,7 +332,7 @@ def test_anthropic_output_tokens_are_a_running_total() -> None:
 def test_anthropic_stop_reasons_speak_the_shared_vocabulary() -> None:
     """Every reason this protocol sends, in the words the system uses.
 
-    The rest of the world reads `stop_reason` without knowing which backend
+    The rest of the home reads `stop_reason` without knowing which backend
     answered: the loop decides whether to continue on `tool_calls`, and a
     reason this build has not heard of is passed through rather than folded
     into "stop" — a fact about the model, not a gap to paper over.

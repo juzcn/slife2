@@ -110,7 +110,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.paths import world
+from slife2.libs.host.paths import home
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -1499,19 +1499,19 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
     would mean two answers to "where is this installation?", and the data
     directory would still have to be found another way.
 
-    **The world's while a call is being served, and this process's otherwise**
-    (`slife2.libs.host.paths.world`), which is the difference between the two readers
+    **The home's while a call is being served, and this process's otherwise**
+    (`slife2.libs.host.paths.home`), which is the difference between the two readers
     of it.  A server loads its own config at start-up and runs on it — that is
     its identity, and no call changes it — while the tools that *edit* a config
     (`model_switch`, the `mcp_*` and `rest-api_*` families) are editing the
-    caller's file: a window in one world changing the model must not rewrite the
-    config another world is running on.  Start-up and the launcher are outside
+    caller's file: a window in one home changing the model must not rewrite the
+    config another home is running on.  Start-up and the launcher are outside
     any call, so both get this process's own directory, which is all they ever
     wanted.
     """
     if explicit is not None:
         return Path(explicit)
-    candidate = world() / DEFAULT_CONFIG_NAME
+    candidate = home() / DEFAULT_CONFIG_NAME
     return candidate if candidate.is_file() else None
 
 
@@ -1546,7 +1546,7 @@ def load(explicit: str | Path | None = None) -> Config:
 #: config)`.
 #:
 #: **One entry per file, and not one slot, because a process serves more than one
-#: world.**  `find_config_path` resolves in the caller's world, so a daemon shared
+#: home.**  `find_config_path` resolves in the caller's home, so a daemon shared
 #: by two data directories reads two `slife2.yaml` — and one slot would thrash
 #: between them.  Thrashing is not merely wasteful here: the whole staleness test
 #: a reader makes is `config is not self._config`, so a cache that answered with
@@ -1555,7 +1555,7 @@ def load(explicit: str | Path | None = None) -> Config:
 #: provider table, its cached SDK clients, and the model a new conversation starts
 #: on, every single turn.
 #:
-#: A `None` key is the *no file at all* state, which is not per world: two worlds
+#: A `None` key is the *no file at all* state, which is not per home: two homes
 #: with no config have the same built-in defaults, and they are one object because
 #: they are one answer.
 _latest: dict[Path | None, tuple[tuple[int, int] | None, Config]] = {}
@@ -1584,12 +1584,12 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     the path, rather than being read as "changed" and quietly answered with a
     fresh object (DESIGN.md §10.1).
 
-    **And the answer follows the caller's world, like every other read a shared
-    plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.world`,
+    **And the answer follows the caller's home, like every other read a shared
+    plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.home`,
     so a daemon serving two data directories reads two `slife2.yaml` — each
     cached on its own file, which is what keeps "has this config changed?" the
     one `is` comparison its readers rely on rather than a question that a second
-    world's traffic keeps answering "yes" to.
+    home's traffic keeps answering "yes" to.
     """
     global _latest
     path = find_config_path(explicit)

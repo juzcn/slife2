@@ -1364,16 +1364,16 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     # agents that were named have a directory.
     #
     # The one file here that is nobody's is the tool catalogue — the hub's, and
-    # per world (`slife2.plugins.toolhub.server.Catalogue.store`): this turn asked a
+    # per home (`slife2.plugins.toolhub.server.Catalogue.store`): this turn asked a
     # hub that was itself built against another data directory, so *this*
-    # world's catalogue was built by this world's first ask.  Which is the
-    # rule rather than a leak: a world is served the tool set it is configured
-    # with, in the file that world owns.
+    # home's catalogue was built by this home's first ask.  Which is the
+    # rule rather than a leak: a home is served the tool set it is configured
+    # with, in the file that home owns.
     here = list(agents_dir().iterdir())
     assert sorted(p.name for p in here if p.is_dir()) == ["jack"]
     assert [p.name for p in here if p.is_file()] and all(
         p.name.startswith("tools.db") for p in here if p.is_file()
-    ), "the only file in a world's agents/ is its own tool catalogue"
+    ), "the only file in a home's agents/ is its own tool catalogue"
 
 
 @pytest.mark.asyncio

@@ -1153,20 +1153,20 @@ def test_load_cached_with_no_file_is_the_defaults() -> None:
     assert load_cached().default == default_config().default
 
 
-def test_two_worlds_keep_two_cached_configs(
+def test_two_homes_keep_two_cached_configs(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A shared plugin reads the config of the world it is serving.**
+    """**A shared plugin reads the config of the home it is serving.**
 
-    `find_config_path` resolves in the caller's world, so one process serving
+    `find_config_path` resolves in the caller's home, so one process serving
     two data directories reads two files — and the cache has to hold both.  One
-    slot would answer each world with the other's config on every alternation,
+    slot would answer each home with the other's config on every alternation,
     and worse than wastefully: a reader's whole staleness test is `config is not
     self._config`, so a config that flips per call reads as a file being edited
     between turns — the provider table, its cached SDK clients and the model a
     new conversation starts on, rebuilt every time.
     """
-    from slife2.libs.host.paths import in_world
+    from slife2.libs.host.paths import in_home
 
     mine, theirs = tmp_path / "mine", tmp_path / "theirs"
     for root, model in ((mine, "local/small"), (theirs, "local/big")):
@@ -1176,16 +1176,16 @@ def test_two_worlds_keep_two_cached_configs(
         )
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
 
-    with in_world(theirs):
+    with in_home(theirs):
         assert load_cached().default == "local/big"
     assert load_cached().default == "local/small"
-    with in_world(theirs):
+    with in_home(theirs):
         assert load_cached().default == "local/big"
-    # ...and each world's file is still cached on its own contents, so an
+    # ...and each home's file is still cached on its own contents, so an
     # alternation is not an edit.
     first = load_cached()
     for _ in range(3):
-        with in_world(theirs):
+        with in_home(theirs):
             load_cached()
     assert load_cached() is first
 

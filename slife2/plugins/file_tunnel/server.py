@@ -77,7 +77,7 @@ _CHUNK = 65536
 
 # ── What will not be published ───────────────────────────────────────────────
 # A share URL is public for as long as the tunnel is up, so a leaked key is a
-# world-readable key.  The list is v1's: private-key names, dotenv, and the
+# home-readable key.  The list is v1's: private-key names, dotenv, and the
 # cloud/package credential files that carry a token in plain text.
 
 _CREDENTIAL_NAMES = frozenset(

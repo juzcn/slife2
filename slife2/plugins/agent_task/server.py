@@ -86,7 +86,7 @@ from slife2.libs.host.config import (
     Config,
     load_cached,
 )
-from slife2.libs.host.paths import world as world_dir
+from slife2.libs.host.paths import home as home_dir
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_key
 from slife2.libs.plugin.protocol import (
@@ -183,13 +183,13 @@ class AgentTask:
     name: str
     description: str
     started_at: str
-    #: The world the task was started in, **kept rather than looked up**, and
+    #: The home the task was started in, **kept rather than looked up**, and
     #: that is not a detail: this object outlives the call that made it.  Its loop
     #: runs on after the request returns — so a `key` that asked
-    #: `slife2.libs.host.paths.world` would be answered by whatever directory the
+    #: `slife2.libs.host.paths.home` would be answered by whatever directory the
     #: *daemon* is in, and the task would be filed under a key that nothing else
-    #: can find it by.  A world is a fact about where a thing was started.
-    world: str = ""
+    #: can find it by.  A home is a fact about where a thing was started.
+    home: str = ""
     status: str = RUNNING
     #: Empty until the task stops, and the one field whose emptiness is a fact:
     #: a model asking about a task that is still running reads it as such.
@@ -210,18 +210,18 @@ class AgentTask:
 
     @property
     def key(self) -> tuple[str, str, str]:
-        """`(world, agent, name)` — what this process's registry is keyed by.
+        """`(home, agent, name)` — what this process's registry is keyed by.
 
         Keyed by the agent and not by the name, because this server is shared:
         two agents may each have a task called `research`, and neither may see
-        the other's, stop it, or be capped by it.  And keyed by the world for the
-        same reason one level up: two worlds may each be running an agent called
+        the other's, stop it, or be capped by it.  And keyed by the home for the
+        same reason one level up: two homes may each be running an agent called
         `jack`, whose tasks are as separate as their conversations.
 
-        Read off the object rather than from the ambient world, because a task's
+        Read off the object rather than from the ambient home, because a task's
         loop outlives the call that started it — see the field.
         """
-        return (self.world, self.agent, self.name)
+        return (self.home, self.agent, self.name)
 
     @property
     def task_id(self) -> str:
@@ -879,7 +879,7 @@ def build_server(
     ) -> dict[str, Any]:
         """Start an agent task: one background loop that runs as you.
 
-        For work that would hold you — long, or waiting on the world. The call
+        For work that would hold you — long, or waiting on the home. The call
         returns at once and the answer reaches this conversation on its own: do
         not wait for it, and do not poll.
 
@@ -923,10 +923,10 @@ def build_server(
             name=name,
             description=description,
             started_at=now(),
-            # The world this call came in on, read *here*, at the only moment it
+            # The home this call came in on, read *here*, at the only moment it
             # is the caller's (`slife2.libs.plugin.audience.client_key` explains why
             # the object keeps it rather than asking again later).
-            world=str(world_dir()),
+            home=str(home_dir()),
         )
         tasks[task.key] = task
         # Detached from the call that starts it, which is the whole of what

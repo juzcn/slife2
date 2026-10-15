@@ -95,7 +95,7 @@ class FakeAdapter:
 
     async def transcribe_audio(self, **kwargs: Any) -> str:
         self.calls["asr"] = kwargs
-        return "hello world"
+        return "hello home"
 
     async def close(self) -> None:
         self.calls["closed"] = {}
@@ -210,7 +210,7 @@ async def test_a_transcript_is_the_answer_and_writes_nothing() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "transcribe_audio", path="a.wav")
 
-    assert answer == "hello world"
+    assert answer == "hello home"
     assert adapter.calls["asr"]["audio_path"] == Path("a.wav")
 
 

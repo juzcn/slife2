@@ -80,7 +80,7 @@ KNOWN_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
 
 #: Environment variable the active tunnel publishes its URL through.  Set on
 #: success, cleared on loss/stop.  v1's name with this project's prefix: the
-#: variable is read by another *process* only in v1's world (a subagent reusing
+#: variable is read by another *process* only in v1's home (a subagent reusing
 #: the parent's tunnel), and here it is what keeps the fact visible to a
 #: `slife2 status`-style reader without a second call.
 _TUNNEL_URL_ENV = "SLIFE2_FILE_TUNNEL_URL"

@@ -19,15 +19,15 @@ from slife2.libs.host.paths import (
     agents_dir,
     catalogue_db,
     data_dir,
+    home,
     in_checkout,
-    in_world,
-    known_worlds,
-    register_world,
+    in_home,
+    known_homes,
+    register_home,
     runtime_dir,
     schedule_dbs,
     skills_dir,
     turn_dbs,
-    world,
 )
 
 pytestmark = pytest.mark.unit
@@ -123,7 +123,7 @@ def test_the_environment_overrides_both(
     assert data_dir() == elsewhere
 
 
-def test_the_worlds_parts_live_under_the_data_directory(
+def test_the_homes_parts_live_under_the_data_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The config's neighbours: what a person wrote, and what an agent wrote."""
@@ -136,7 +136,7 @@ def test_the_worlds_parts_live_under_the_data_directory(
     assert skills_dir().is_dir()
 
 
-def test_the_runtime_is_the_machines_and_not_the_worlds(
+def test_the_runtime_is_the_machines_and_not_the_homes(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**The split, and it is the whole of why a second data directory works.**
@@ -157,64 +157,64 @@ def test_the_runtime_is_the_machines_and_not_the_worlds(
     assert not (tmp_path / "runtime").exists(), "not under the data directory"
 
 
-def test_a_call_is_served_in_the_world_it_names(
+def test_a_call_is_served_in_the_home_it_names(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`in_world` is what a shared server puts around somebody else's work.
+    """`in_home` is what a shared server puts around somebody else's work.
 
-    A server is one process for every world, so the directory an agent's file
+    A server is one process for every home, so the directory an agent's file
     goes in cannot be its own — it is the caller's, for as long as that call
-    lasts and no longer: a world that outlived its call would be one the next
+    lasts and no longer: a home that outlived its call would be one the next
     caller in this process silently inherited.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     mine = tmp_path / "mine"
     theirs = tmp_path / "theirs"
 
-    assert world() == tmp_path, "no call, so this process's own directory"
-    with in_world(theirs):
-        assert world() == theirs
+    assert home() == tmp_path, "no call, so this process's own directory"
+    with in_home(theirs):
+        assert home() == theirs
         assert agent_dir("jack") == theirs / "agents" / "jack"
         assert catalogue_db() == theirs / "agents" / "tools.db"
-        with in_world(""):
-            assert world() == tmp_path, "a call that named no world is this one's"
-        assert world() == theirs, "and the outer one is back"
-    assert world() == tmp_path, "and so is this process's"
+        with in_home(""):
+            assert home() == tmp_path, "a call that named no home is this one's"
+        assert home() == theirs, "and the outer one is back"
+    assert home() == tmp_path, "and so is this process's"
     assert not mine.exists()
 
 
-def test_a_world_is_found_by_the_ones_that_were_told_about_it(
+def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`known_worlds`: this process's own, and every one a client recorded.
+    """`known_homes`: this process's own, and every one a client recorded.
 
-    A shared daemon has to be able to *name* the worlds it serves — the schedule
+    A shared daemon has to be able to *name* the homes it serves — the schedule
     plugin walks each one's ledgers, the WeChat plugin each one's logins — and
     nothing on the machine knows a data directory exists until somebody runs an
-    agent in it.  So a client records its world, and the record outlives the
-    client: a schedule still has to fire for a world nobody is sitting in.
+    agent in it.  So a client records its home, and the record outlives the
+    client: a schedule still has to fire for a home nobody is sitting in.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
     other = tmp_path / "other"
     (other / "agents" / "jack").mkdir(parents=True)
 
-    assert known_worlds() == [(tmp_path / "mine").resolve()], "nothing told yet"
+    assert known_homes() == [(tmp_path / "mine").resolve()], "nothing told yet"
 
-    register_world(other)
+    register_home(other)
 
-    assert known_worlds() == sorted([(tmp_path / "mine").resolve(), other.resolve()])
-    # A world whose directory has gone is skipped rather than served.
+    assert known_homes() == sorted([(tmp_path / "mine").resolve(), other.resolve()])
+    # A home whose directory has gone is skipped rather than served.
     for path in sorted(other.rglob("*"), reverse=True):
         path.unlink() if path.is_file() else path.rmdir()
     other.rmdir()
-    assert known_worlds() == [(tmp_path / "mine").resolve()]
+    assert known_homes() == [(tmp_path / "mine").resolve()]
 
 
-def test_the_walks_span_every_world(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The three files a shared plugin finds its agents by, per world.
+def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The three files a shared plugin finds its agents by, per home.
 
     Each is a walk of `agents/` because there is no registry of agents; with two
-    worlds there are two of each, and a daemon that walked only its own would
+    homes there are two of each, and a daemon that walked only its own would
     never fire the other's schedules, resume its logins or answer its peers.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
@@ -225,7 +225,7 @@ def test_the_walks_span_every_world(tmp_path, monkeypatch: pytest.MonkeyPatch) -
         (jack / "turns.db").write_bytes(b"")
         (jack / "schedule.db").write_bytes(b"")
         (jack / "a2a.yaml").write_text("tasks: []\n", encoding="utf-8")
-    register_world(other)
+    register_home(other)
 
     assert [path.parent.parent.parent.name for path in turn_dbs()] == ["mine", "other"]
     assert [path.parent.parent.parent.name for path in schedule_dbs()] == [

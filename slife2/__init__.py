@@ -46,7 +46,7 @@ from slife2.libs.host.paths import (
     add_data_dir_argument,
     agents_dir,
     apply_data_dir,
-    register_world,
+    register_home,
 )
 
 __version__ = "0.1.0"
@@ -243,25 +243,25 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
-def _open_world() -> None:
-    """Make this data directory a world the whole machine can serve.
+def _open_home() -> None:
+    """Make this data directory a home the whole machine can serve.
 
     **Two statements, and a fresh `--data-dir` is where both were missing.**  The
     directory is recorded, because the servers this machine is running are one
-    set shared by every world (`slife2.libs.host.launcher._reuse`) and the only way
-    a daemon can find the ledgers, logins and catalogues of a world nobody is
+    set shared by every home (`slife2.libs.host.launcher._reuse`) and the only way
+    a daemon can find the ledgers, logins and catalogues of a home nobody is
     sitting in front of is to be told which directories exist
-    (`slife2.libs.host.paths.known_worlds`).  And its `agents/` is made, because a
+    (`slife2.libs.host.paths.known_homes`).  And its `agents/` is made, because a
     client that has started an agent here and left no trace of it is a directory
     that looks like a mistake — which is exactly what it looked like: a data
     directory holding a `runtime/` of its own and nothing else, while every file
-    the agent wrote went to the world the servers happened to be started from.
+    the agent wrote went to the home the servers happened to be started from.
 
     Not done for `status` and `down`: they read what is running rather than
-    putting anything anywhere, and a world enrolled by somebody asking a question
+    putting anything anywhere, and a home enrolled by somebody asking a question
     would be enrolled for good.
     """
-    register_world()
+    register_home()
     agents_dir()
 
 
@@ -439,8 +439,8 @@ def main(argv: list[str] | None = None) -> int:
             claimed = True
             # Before the servers are ensured, so that a daemon starting now —
             # and the walks it does on the way up — already knows about this
-            # world rather than learning about it one call later.
-            _open_world()
+            # home rather than learning about it one call later.
+            _open_home()
             code = _ensure(config, config_path)
             if code == 0:
                 app = SlifeApp(

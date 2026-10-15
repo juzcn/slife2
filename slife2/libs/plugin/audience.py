@@ -23,7 +23,7 @@ because handing a model `remember` is handing it a write into any agent's
 database, and handing it `send_message` is handing it another conversation.
 
 **Said on the tool, not in its name and not in a list in the config.**  A name is
-something the world rewrites: providers accept only letters, digits, underscore
+something the home rewrites: providers accept only letters, digits, underscore
 and hyphen, and `slife2.clients.gateway.sanitise` exists to make a name legal, so policy
 hung on a name is policy hung on a sanitiser.  A list in the config is a second
 registry kept in step by hand, which is the thing the hub exists to avoid.
@@ -93,7 +93,7 @@ def for_the_model(meta: Mapping[str, Any] | None) -> bool:
 #: provider — so the identity has to be said, and this is where.
 CLIENT = "slife2/client"
 
-#: The key inside that mapping naming the *world* the call is for: the data
+#: The key inside that mapping naming the *home* the call is for: the data
 #: directory of the process that made it.
 #:
 #: **In here rather than in a key of its own**, because it travels exactly as the
@@ -101,32 +101,32 @@ CLIENT = "slife2/client"
 #: writing an agent's turn file is not the process that was started with
 #: `--data-dir`, and only the caller knows which directory the work belongs in.
 #: `forwarded_client` already carries this whole mapping on to the next hop, so a
-#: world reaches the far end of a chain of proxies without a second mechanism.
+#: home reaches the far end of a chain of proxies without a second mechanism.
 #:
 #: **Not an argument, for the reason the conversation is not one**: a model that
 #: could name a directory could name somebody else's.
-WORLD = "world"
+DATA_DIR = "data_dir"
 
 
-def client_meta(agent: str, subagent: str = "", world: str = "") -> dict[str, Any]:
+def client_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any]:
     """What a harness-side caller attaches to a tool call it makes for one
     conversation.
 
-    **The world defaults to this process's**, which is right at every call site
-    there is: a client, a launcher and a test are one world from start to finish,
+    **The home defaults to this process's**, which is right at every call site
+    there is: a client, a launcher and a test are one home from start to finish,
     and a plugin making a call on somebody else's behalf is *inside* a call of
-    its own, where `slife2.libs.host.paths.world` already answers with the caller's
+    its own, where `slife2.libs.host.paths.home` already answers with the caller's
     (`slife2.libs.plugin.protocol.serve` is what put it there).
 
     An explicit argument is for the case the ambient answer is the wrong one —
-    a caller acting for a world it is not itself in — and there is no such caller
+    a caller acting for a home it is not itself in — and there is no such caller
     today.
     """
     return {
         CLIENT: {
             "agent": agent,
             "subagent": subagent,
-            "world": world or str(paths.world()),
+            "data_dir": home or str(paths.home()),
         }
     }
 
@@ -151,63 +151,63 @@ def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
 def client_key(agent: str, subagent: str = "") -> tuple[str, str, str]:
     """The key a shared daemon holds one conversation's state under.
 
-    **(world, agent, subagent)** — and the first element is the one this exists
+    **(home, agent, subagent)** — and the first element is the one this exists
     for.  Every plugin here is one process serving every agent, which is why it
-    keys its state by an agent name at all; the moment there are two worlds there
+    keys its state by an agent name at all; the moment there are two homes there
     are two agents called `jack`, and a table keyed by the name alone answers the
     second one with the first one's conversation.  That is not a stale value but
     the wrong conversation — a turn written into somebody else's history, or a
     tool list built for a config that is not the caller's.
 
-    Read from `slife2.libs.host.paths.world` rather than passed, and every caller is
-    inside a call where that is already the caller's world
+    Read from `slife2.libs.host.paths.home` rather than passed, and every caller is
+    inside a call where that is already the caller's home
     (`slife2.libs.plugin.protocol.serve`).  A caller *outside* a call — an idle
     sweep — must not build a key at all: it iterates the ones already there.
     """
-    return (str(paths.world()), agent, subagent)
+    return (str(paths.home()), agent, subagent)
 
 
-def world_of(meta: Mapping[str, Any] | None) -> str:
-    """The world a call named, or `""` when it named none.
+def home_of(meta: Mapping[str, Any] | None) -> str:
+    """The home a call named, or `""` when it named none.
 
     Empty is the honest answer for a call that said nothing — a `status`, a
     model server's listing — and both readers of it treat it as "the directory
     this process is in", which is what every server did before there were
-    worlds.  A world that is not a string, or is blank, is the same as no world:
+    homes.  A home that is not a string, or is blank, is the same as no home:
     the field arrives off a wire, and a caller that sent something unusable is
     not a caller that named a directory.
     """
     found = (meta or {}).get(CLIENT)
     if not isinstance(found, Mapping):
         return ""
-    named = found.get(WORLD)
+    named = found.get(DATA_DIR)
     return named if isinstance(named, str) else ""
 
 
-def with_world(meta: Mapping[str, Any] | None) -> dict[str, Any]:
-    """`meta`, with this process's world in it unless it already names one.
+def with_home(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`meta`, with this process's home in it unless it already names one.
 
     **What every outgoing call to one of our own servers goes through**, so that
-    a world reaches the far end of a chain rather than only the first hop:
+    a home reaches the far end of a chain rather than only the first hop:
     `slife2.libs.plugin.protocol.open_server` hands back a client that does this
     for every call it makes, and the hub's own proxy adds it to the identity it
     forwards for the same reason.
 
-    A meta that already names a world is left alone, because a forwarded world is
+    A meta that already names a home is left alone, because a forwarded home is
     the *caller's* — rewriting it with this process's would move somebody else's
     work into whichever directory happens to be in front of us.  A meta that says
-    nothing gets a blob with a world and no agent, and that is not the same thing
+    nothing gets a blob with a home and no agent, and that is not the same thing
     as a nameless client: `client_of` answers `None` for it, so no plugin reads
-    it as somebody's, and `world_of` answers with the directory the work belongs
+    it as somebody's, and `home_of` answers with the directory the work belongs
     in, which is the whole of what that call needed to say.
     """
     found = dict(meta or {})
     blob = found.get(CLIENT)
-    named = world_of(found)
+    named = home_of(found)
     if named:
         return found
     merged = dict(blob) if isinstance(blob, Mapping) else {}
-    merged[WORLD] = str(paths.world())
+    merged[DATA_DIR] = str(paths.home())
     found[CLIENT] = merged
     return found
 
@@ -245,16 +245,16 @@ def request_client(ctx: Any) -> tuple[str, str] | None:
     return client_of(request_meta(ctx))
 
 
-def request_world(ctx: Any) -> str:
-    """The world a tool call named, or `""`.
+def request_home(ctx: Any) -> str:
+    """The home a tool call named, or `""`.
 
     The reader for the few places that need the *name* rather than the ambient
-    answer — a key into a table of per-world state is the one that exists — and
+    answer — a key into a table of per-home state is the one that exists — and
     for a test asserting what a call carried.  Everything that resolves a file
-    wants `slife2.libs.host.paths.world` instead, which the server has already
+    wants `slife2.libs.host.paths.home` instead, which the server has already
     arranged to answer with this.
     """
-    return world_of(request_meta(ctx))
+    return home_of(request_meta(ctx))
 
 
 #: The sentence a call that did not say whose it is is refused with.  **One

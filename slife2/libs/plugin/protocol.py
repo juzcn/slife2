@@ -81,7 +81,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 import slife2.helpers.timeouts as _T
 from slife2 import __version__
 from slife2.libs.host.config import Config, ServerSettings, find_config_path, load
-from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir, in_world
+from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir, in_home
 from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
@@ -90,9 +90,9 @@ from slife2.libs.host.runtime import (
 )
 from slife2.libs.plugin.audience import (
     request_client,
-    request_world,
+    request_home,
     unaddressed,
-    with_world,
+    with_home,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,11 +330,11 @@ class _Ours(ClientTransport):
 
 
 class Peer(Client):
-    """A connection to one of our own servers, which says which world it is for.
+    """A connection to one of our own servers, which says which home it is for.
 
-    Every call this makes carries the ambient world
-    (`slife2.libs.plugin.audience.with_world`), which is the other half of
-    `ServeTheCallersWorld`: a server is told a world by the call it is answering,
+    Every call this makes carries the ambient home
+    (`slife2.libs.plugin.audience.with_home`), which is the other half of
+    `ServeTheCallersHome`: a server is told a home by the call it is answering,
     and it has to pass that on, or the second hop of every chain — the context
     store a turn is remembered in, the cabinet a tool result is saved to, the hub
     a tool is routed through — would resolve the files in its own directory.
@@ -352,7 +352,7 @@ class Peer(Client):
         meta: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        return await super().call_tool(name, arguments, meta=with_world(meta), **kwargs)
+        return await super().call_tool(name, arguments, meta=with_home(meta), **kwargs)
 
 
 async def open_server(
@@ -505,33 +505,33 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
     return args
 
 
-class ServeTheCallersWorld(Middleware):
-    """Resolve a world's files in *the caller's* world for the length of a call.
+class ServeTheCallersHome(Middleware):
+    """Resolve a home's files in *the caller's* home for the length of a call.
 
     **Registered by `serve`, so every server has it and no tool has to remember
     it.**  The servers are one set per machine (`slife2.libs.host.launcher._reuse`),
     so the process writing an agent's turn file is generally not the one that was
     started with `--data-dir`: it is whichever is already up.  What decides where
-    that file goes is therefore the call, which says whose world it is for
+    that file goes is therefore the call, which says whose home it is for
     (`slife2.libs.plugin.audience.client_meta`), and this is the one place that
-    turns the saying into an answer — `slife2.libs.host.paths.world` for everything the
+    turns the saying into an answer — `slife2.libs.host.paths.home` for everything the
     tool reaches, including the plugins it calls in turn, because their outgoing
-    calls carry the ambient world as well.
+    calls carry the ambient home as well.
 
     **Around the whole message, not just the tool body.**  A call that fails, a
     listing, a cancellation: all of them are work done for one caller, and a
-    world that leaked out of a call that raised would be a world the next call in
+    home that leaked out of a call that raised would be a home the next call in
     this process silently inherited.  The context manager is what resets it.
 
-    A message that names no world is not a message about nothing: it is the
+    A message that names no home is not a message about nothing: it is the
     daemon serving its own directory, which is what a probe, a `status` and a
-    hand-started server all are, and it is what `in_world("")` means.
+    hand-started server all are, and it is what `in_home("")` means.
     """
 
     async def on_message(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
     ) -> Any:
-        with in_world(request_world(context.fastmcp_context)):
+        with in_home(request_home(context.fastmcp_context)):
             return await call_next(context)
 
 
@@ -580,7 +580,7 @@ def serve(
         version=__version__,
     )
     write_record(record)
-    mcp.add_middleware(ServeTheCallersWorld())
+    mcp.add_middleware(ServeTheCallersHome())
     try:
         mcp.run(
             transport="http",

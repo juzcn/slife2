@@ -195,7 +195,7 @@ from slife2.clients.gateway import (
 from slife2.clients.toolclient import UpstreamTool
 from slife2.libs.host.config import Config, ToolServerSettings
 from slife2.libs.host.paths import catalogue_db, data_dir
-from slife2.libs.host.paths import world as world_dir
+from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
 from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
@@ -447,7 +447,7 @@ class Catalogue:
     ) -> None:
         self._open = open_store
         self._embedder = embedder
-        #: One store per world, keyed by the data directory it was opened in.
+        #: One store per home, keyed by the data directory it was opened in.
         self._stores: dict[str, ToolStore] = {}
         self._opening = asyncio.Lock()
         #: Why the catalogue could not take each source's listing, keyed by
@@ -487,23 +487,23 @@ class Catalogue:
         )
 
     async def store(self) -> ToolStore:
-        """The catalogue of **the world this call is for**, opened on first use.
+        """The catalogue of **the home this call is for**, opened on first use.
 
-        One file per world (`slife2.libs.host.paths.catalogue_db`), and the key is
-        the ambient world rather than a parameter because every caller of this is
-        inside a call: the hub is shared, so a `tool_search` from one world must
-        read the catalogue that world is configured with, and a `func_tool_load`
-        must not write a loaded tool into another world's file.
+        One file per home (`slife2.libs.host.paths.catalogue_db`), and the key is
+        the ambient home rather than a parameter because every caller of this is
+        inside a call: the hub is shared, so a `tool_search` from one home must
+        read the catalogue that home is configured with, and a `func_tool_load`
+        must not write a loaded tool into another home's file.
 
         Opened here rather than at start-up for the reason the whole class is
-        lazy: a world is a data directory the hub may never have heard of until
-        somebody in it asks something, and opening every world's catalogue when
+        lazy: a home is a data directory the hub may never have heard of until
+        somebody in it asks something, and opening every home's catalogue when
         the process comes up would be work for directories nobody is using.  The
         rows a store opens with are this process's own at start-up — the hub's
-        own tools — and every world's first ask merges the rest, because
+        own tools — and every home's first ask merges the rest, because
         `refresh_declared` re-reads what every plugin holds on every listing.
         """
-        key = str(world_dir())
+        key = str(home_dir())
         found = self._stores.get(key)
         if found is None:
             async with self._opening:
@@ -679,7 +679,7 @@ class Catalogue:
         than deleted: whoever adds a held resource to the store will find the
         place it has to be released.
 
-        Every world's, because the stores are per world
+        Every home's, because the stores are per home
         (`slife2.libs.plugin.audience.client_key` is the same fact one plugin over).
         """
         self._stores.clear()

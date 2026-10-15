@@ -151,7 +151,7 @@ def stub(monkeypatch, transport: StubTransport) -> None:
     URL is not somewhere a socket could be opened anyway.
 
     `Peer` and not `Client`: what `open_server` builds is the subclass that says
-    which world each call is for (`slife2.libs.plugin.protocol.Peer`), so that is
+    which home each call is for (`slife2.libs.plugin.protocol.Peer`), so that is
     the name a test has to stand in front of.
     """
     monkeypatch.setattr(protocol_module, "Peer", lambda *a, **k: transport)
@@ -241,32 +241,32 @@ async def test_a_cancelled_connect_lets_go_of_the_half_entered_client(
     assert transport.closed, "a client that never finished entering is let go"
 
 
-# --- the world a call is served in -------------------------------------------
+# --- the home a call is served in -------------------------------------------
 
 
-def _world_server() -> FastMCP:
-    """A server whose one tool answers with the world it was resolved in."""
-    server: FastMCP = FastMCP("slife2-world-test")
-    server.add_middleware(protocol_module.ServeTheCallersWorld())
+def _home_server() -> FastMCP:
+    """A server whose one tool answers with the home it was resolved in."""
+    server: FastMCP = FastMCP("slife2-home-test")
+    server.add_middleware(protocol_module.ServeTheCallersHome())
 
     @server.tool
     def where() -> str:
-        return str(paths.world())
+        return str(paths.home())
 
     return server
 
 
 @pytest.mark.asyncio
-async def test_a_shared_server_resolves_the_world_the_call_named(
+async def test_a_shared_server_resolves_the_home_the_call_named(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The mechanism the whole of one-machine-many-worlds rests on.**
+    """**The mechanism the whole of one-machine-many-homes rests on.**
 
-    A plugin is one process for every world, so the directory an agent's file
+    A plugin is one process for every home, so the directory an agent's file
     belongs in is not the process's: it is the caller's, said out of band
     (`slife2.libs.plugin.audience.client_meta`) because a model must not be able to
     name somebody else's.  The middleware turns that saying into the ambient
-    world for the length of the call — which is what every `agent_dir(agent)`
+    home for the length of the call — which is what every `agent_dir(agent)`
     deeper in the stack reads, and what makes the plugins this one calls in turn
     resolve the same directory.
     """
@@ -275,10 +275,10 @@ async def test_a_shared_server_resolves_the_world_the_call_named(
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
     theirs.mkdir()
 
-    server = _world_server()
+    server = _home_server()
     async with Client(server) as client:
         named = await client.call_tool(
-            "where", {}, meta=client_meta("jack", world=str(theirs))
+            "where", {}, meta=client_meta("jack", home=str(theirs))
         )
         unnamed = await client.call_tool("where", {})
 
@@ -287,34 +287,34 @@ async def test_a_shared_server_resolves_the_world_the_call_named(
 
 
 @pytest.mark.asyncio
-async def test_the_world_does_not_leak_out_of_a_call_that_raised(
+async def test_the_home_does_not_leak_out_of_a_call_that_raised(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A world that outlived its call would be one the next caller inherited.
+    """A home that outlived its call would be one the next caller inherited.
 
-    Which is not a tidiness: this process answers every world in turn, so a
-    world left set by a call that failed is the next turn's file written into
+    Which is not a tidiness: this process answers every home in turn, so a
+    home left set by a call that failed is the next turn's file written into
     somebody else's directory.
     """
     mine = tmp_path / "mine"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
-    server: FastMCP = FastMCP("slife2-world-test")
-    server.add_middleware(protocol_module.ServeTheCallersWorld())
+    server: FastMCP = FastMCP("slife2-home-test")
+    server.add_middleware(protocol_module.ServeTheCallersHome())
 
     @server.tool
     def breaks() -> str:
-        raise RuntimeError("this call failed, and the world goes with it")
+        raise RuntimeError("this call failed, and the home goes with it")
 
     @server.tool
     def where() -> str:
-        return str(paths.world())
+        return str(paths.home())
 
     async with Client(server) as client:
-        # What a caller sees from a tool that raised is a `ToolError`; the world
+        # What a caller sees from a tool that raised is a `ToolError`; the home
         # is the part that has to be back afterwards.
         with pytest.raises(ToolError):
             await client.call_tool(
-                "breaks", {}, meta=client_meta("jack", world=str(tmp_path / "x"))
+                "breaks", {}, meta=client_meta("jack", home=str(tmp_path / "x"))
             )
         after = await client.call_tool("where", {})
 

@@ -84,7 +84,7 @@ from mcp import MCPError
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import SEPARATOR
 from slife2.libs.host.config import ToolServerSettings
-from slife2.libs.plugin.audience import with_world
+from slife2.libs.plugin.audience import with_home
 
 logger = logging.getLogger(__name__)
 
@@ -632,12 +632,12 @@ class Connection:
                 raise_on_error=False,
                 # The caller's identity, forwarded rather than interpreted.  What
                 # carries it is a proxy, and this is the one thing it passes on
-                # that did not come from the model.  **The world goes with it**,
+                # that did not come from the model.  **The home goes with it**,
                 # because this is a hop: the plugin this reaches is a shared
                 # process holding somebody else's data, and which directory the
                 # call is about is the half of the identity the arguments cannot
-                # say (`slife2.libs.plugin.audience.with_world`).
-                meta=with_world(meta),
+                # say (`slife2.libs.plugin.audience.with_home`).
+                meta=with_home(meta),
             )
         except Exception as exc:  # noqa: BLE001 - the split below is the decision, not the catch
             if not _link_was_down(exc):

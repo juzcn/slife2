@@ -73,7 +73,7 @@ def install(monkeypatch, transport: FakeTransport | FakeWindowTransport) -> None
     its own `Client` — `open_server` does, for every plugin in this system —
     so that module is where the construction happens and therefore where a test
     has to stand in for it.  The name is `Peer` because that is what
-    `open_server` builds: a `Client` that says which world each call is for.
+    `open_server` builds: a `Client` that says which home each call is for.
     """
     monkeypatch.setattr(protocol_module, "Peer", lambda *a, **k: transport)
 

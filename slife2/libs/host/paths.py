@@ -1,17 +1,21 @@
 """Where slife2 keeps things.
 
-**Two roots, because there are two kinds of fact.**  A *world* is a data
+**Two roots, because there are two kinds of fact.**  A *home* is a data
 directory: one config, one set of playbooks, and the agents whose data lives in
-it.  The *daemons* are one set per machine — `slife2.libs.host.launcher` shares them by
-endpoint, whatever started them — so everything describing a running server is a
-fact about the machine, and it gets a root of its own rather than a copy per
-world.
+it.  **It belongs to an agent** — `--agent jack --data-dir D` is jack, and jack
+is D, which is why the same name under two data directories is two agents and
+why the name is claimed per home.  A directory may hold several agents, and then
+they share its config and its catalogue, which is the whole of what "the same
+`--data-dir` shares `tools.db`" means.  The *daemons* are one set per machine —
+`slife2.libs.host.launcher` shares them by endpoint, whatever started them — so
+everything describing a running server is a fact about the machine, and it gets a
+root of its own rather than a copy per home.
 
-    <data>/                     one world
+    <data>/                     one home
       slife2.yaml   the config; absent means the built-in defaults
       skills/       <name>/SKILL.md — the playbooks the model may read
       agents/       everything that belongs to one agent, one directory each
-        tools.db      the tool catalogue — one file for the world, and the
+        tools.db      the tool catalogue — one file for the home, and the
                       only thing here that is not an agent's own
         <agent>/      turns.db    the conversation, and what it runs on
                       schedule.db what this agent has scheduled, and every
@@ -29,9 +33,9 @@ world.
       locks/        the per-endpoint start lock two launchers race on
       agents/       the claims: which process is running under an agent name
       clients/      who is using the shared servers, so the last one out can
-                    take them down — and `world`, which names the world it is
+                    take them down — and `home`, which names the home it is
                     working in
-      worlds/       every data directory this machine has run an agent in
+      homes/       every data directory this machine has run an agent in
 
 **Which root a path comes from is the whole of the design.**  `runtime/` holds
 what a *machine* has: one set of servers, so one record of them, one lock
@@ -39,31 +43,31 @@ namespace, one log each, and one claim per agent name — and a second copy of a
 of those disagreeing with the first is a bug rather than redundancy.  It is also
 *reconstructible*: delete it and the next start rebuilds what it needs.
 
-`agents/` and `skills/` are a *world's*, and they are not reconstructible.
+`agents/` and `skills/` are a *home's*, and they are not reconstructible.
 Anything that would be a disaster to lose lives there.
 
-**And a world is what a call belongs to.**  The servers are shared, so the
+**And a home is what a call belongs to.**  The servers are shared, so the
 process that writes an agent's turn file is not the process that was started
 with `--data-dir`: it is whichever one is already up, and it resolves
-`agents/<agent>/…` in *the caller's* world rather than its own — see `world`,
-which is where a call's world is read, and `in_world`, which is how a server
+`agents/<agent>/…` in *the caller's* home rather than its own — see `home`,
+which is where a call's home is read, and `in_home`, which is how a server
 puts one around the work it does for a call.  The daemon's own config and its
-own bookkeeping stay in `data_dir()`: `slife2.yaml` is read from the world the
+own bookkeeping stay in `data_dir()`: `slife2.yaml` is read from the home the
 process was started in, and a record is written where the machine keeps them.
 
-**Where the world is depends on what you are running.**  A checkout keeps it
+**Where the home is depends on what you are running.**  A checkout keeps it
 beside itself, so the checked-in `slife2.yaml` is the one in use and the
 databases are directories you can open; an installation keeps it at `~/.slife2`,
 per-user and independent of wherever it was started from.  See `data_dir`.  The
 machine's runtime is `~/.slife2/runtime` either way, because a checkout and an
 installation on one machine share one set of daemons.
 
-**The worlds are listed, and that list is how a shared daemon finds them.**  No
-server holds a registry of agents: the schedule plugin finds a world's ledgers by
+**The homes are listed, and that list is how a shared daemon finds them.**  No
+server holds a registry of agents: the schedule plugin finds a home's ledgers by
 walking its `agents/`, the WeChat plugin its logins, the mesh its inbound
-ledgers — and each of those walks is per world, so a daemon serving two worlds
-has to be able to name them.  `register_world` is a client saying which world it
-is in, `known_worlds` is a daemon reading the list, and a world a process was
+ledgers — and each of those walks is per home, so a daemon serving two homes
+has to be able to name them.  `register_home` is a client saying which home it
+is in, `known_homes` is a daemon reading the list, and a home a process was
 itself started in counts whether or not anybody registered it.
 
 **`agents/` is one directory per agent, and the whole of one agent.**  A
@@ -90,7 +94,7 @@ is not derivable from the data directory alone — `slife2.plugins.cabinet.store
 those two names, and v1 used the same `<agent>.files/` layout, so a v1 cabinet's
 documents are adopted by copying the directory in.
 
-`SLIFE2_DATA_DIR` overrides where the world is, and is what `--data-dir` sets;
+`SLIFE2_DATA_DIR` overrides where the home is, and is what `--data-dir` sets;
 `SLIFE2_RUNTIME_DIR` overrides where the machine's runtime is.  Both exist for
 the same reason — a test that wrote into a developer's real state would be a test
 that passes on a clean machine and fails on a busy one — and neither is a knob an
@@ -218,11 +222,11 @@ def runtime_dir() -> Path:
     set per machine (`slife2.libs.host.launcher._reuse` shares them by endpoint), so a
     record naming a pid, the lock two launchers race on, the log a failed start
     is read from and the claim holding an agent name are all facts about *the
-    machine* — and a copy of each per world is a copy that can disagree with the
+    machine* — and a copy of each per home is a copy that can disagree with the
     others.  What that looked like in practice: a second data directory reporting
     a running stack it could not see ("no record; not started by slife2"), two
     launchers cold-starting one port because the lock was in neither's way, and a
-    client in one world stopping the servers a client in another was still using.
+    client in one home stopping the servers a client in another was still using.
 
     `~/.slife2/runtime` rather than a per-OS state directory, because
     `~/.slife2` is already this project's home-directory root (`data_dir`) — and
@@ -242,31 +246,31 @@ def runtime_dir() -> Path:
 #: has no idea a call is in progress — every `agent_dir(agent)` in every plugin —
 #: and because a *server* is the one place it is ever set.  `None` means "this
 #: process's own", which is what a client, a launcher and a test all are.
-_WORLD: ContextVar[Path | None] = ContextVar("slife2_world", default=None)
+_HOME: ContextVar[Path | None] = ContextVar("slife2_home", default=None)
 
 
 @contextlib.contextmanager
-def in_world(root: str | Path | None) -> Generator[None]:
-    """Resolve this world's files as `root`'s for the length of the block.
+def in_home(root: str | Path | None) -> Generator[None]:
+    """Resolve this home's files as `root`'s for the length of the block.
 
-    The one way the ambient world is ever set, and it is set **around a whole
-    call** rather than consulted at each path: a server is shared, so the world
+    The one way the ambient home is ever set, and it is set **around a whole
+    call** rather than consulted at each path: a server is shared, so the home
     is a property of the request in front of it, and everything that request
     reaches — the turn file it opens, the cabinet it writes to, the catalogue it
     reads — belongs to the caller rather than to the process.
 
-    `None` and `""` mean "no world was named", which is not an error: it is the
-    daemon's own world, which is what everything did before any of this existed.
+    `None` and `""` mean "no home was named", which is not an error: it is the
+    daemon's own home, which is what everything did before any of this existed.
     """
-    token = _WORLD.set(Path(root) if root else None)
+    token = _HOME.set(Path(root) if root else None)
     try:
         yield
     finally:
-        _WORLD.reset(token)
+        _HOME.reset(token)
 
 
-def world() -> Path:
-    """The data directory to resolve a *world's* files in.
+def home() -> Path:
+    """The data directory to resolve a *home's* files in.
 
     **The caller's if a call named one, this process's otherwise.**  Everything
     below that resolves `slife2.yaml`, `agents/`, `skills/` or the catalogue goes
@@ -274,21 +278,21 @@ def world() -> Path:
     does not, because that is the machine's (`runtime_dir`).
 
     This process's own is the fallback rather than an error, and it is the
-    common case in production: a client, a launcher and a test are all one world
+    common case in production: a client, a launcher and a test are all one home
     from start to finish, and only a *server* ever serves somebody else's.
     """
-    override = _WORLD.get()
+    override = _HOME.get()
     return override if override is not None else data_dir()
 
 
 def agents_dir() -> Path:
-    """Where every agent's own files live, in the world being served.
+    """Where every agent's own files live, in the home being served.
 
-    Not safe to delete, and made on demand here rather than when the world is
+    Not safe to delete, and made on demand here rather than when the home is
     entered: a call that touches no agent's file — a `status`, a list of tools —
     should not create the directory it does not use.
     """
-    path = world() / "agents"
+    path = home() / "agents"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -315,16 +319,16 @@ def catalogue_db() -> Path:
 
     **Not safe to delete**, and not an agent's: the catalogue is the tool *set*,
     which every conversation is served from, and a per-agent copy would be a copy
-    to keep in step.  It follows the world rather than the process for the same
-    reason the agents do: a hub serving two worlds keeps the tool set each of
+    to keep in step.  It follows the home rather than the process for the same
+    reason the agents do: a hub serving two homes keeps the tool set each of
     them is configured with, and sharing one file between them would be one
-    world's bookkeeping written into another's.
+    home's bookkeeping written into another's.
     """
     return agents_dir() / "tools.db"
 
 
 def _digest(text: str) -> str:
-    """A short name for a long one, for the file that records a world.
+    """A short name for a long one, for the file that records a home.
 
     A path is not a file name — it has separators and a drive letter — and the
     same trick is at work in `slife2.libs.host.runtime`, which digests an agent name
@@ -333,50 +337,50 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def register_world(root: Path | None = None) -> Path:
-    """Record that this machine has a world at `root`, and answer its path.
+def register_home(root: Path | None = None) -> Path:
+    """Record that this machine has a home at `root`, and answer its path.
 
     **Written by a client, read by a daemon, and never removed.**  A shared
-    server serves every world on the machine, and the only way it can find the
+    server serves every home on the machine, and the only way it can find the
     ones it is not currently talking to is to be told: the schedule plugin walks
-    the ledgers of each world, the WeChat plugin its logins and the mesh its
+    the ledgers of each home, the WeChat plugin its logins and the mesh its
     inbound ledgers, and a schedule that fires while nobody is watching is the
     whole point of having one.  So an entry outlives the client that wrote it —
-    a world whose directory is gone is skipped by `known_worlds` — and the file's
+    a home whose directory is gone is skipped by `known_homes` — and the file's
     name is the digest of the path rather than the path, which is a directory
     tree and not a name.
 
     A failure is logged rather than raised: this is bookkeeping done on the way
-    past, and a machine that cannot write one is a machine whose worlds are
+    past, and a machine that cannot write one is a machine whose homes are
     served less well, not a machine that cannot start an agent.
     """
     target = (root or data_dir()).resolve()
-    entry = worlds_dir() / f"{_digest(str(target))}.json"
+    entry = homes_dir() / f"{_digest(str(target))}.json"
     try:
-        entry.write_text(json.dumps({"world": str(target)}), encoding="utf-8")
+        entry.write_text(json.dumps({"home": str(target)}), encoding="utf-8")
     except OSError as exc:
-        logger.warning("could not record the world at %s (%s)", target, exc)
+        logger.warning("could not record the home at %s (%s)", target, exc)
     return target
 
 
-def known_worlds() -> list[Path]:
-    """Every world a shared daemon should serve on this machine.
+def known_homes() -> list[Path]:
+    """Every home a shared daemon should serve on this machine.
 
-    **This process's own, and every world a client has recorded.**  The first is
-    what makes a world work with nothing registered — a server started by hand in
+    **This process's own, and every home a client has recorded.**  The first is
+    what makes a home work with nothing registered — a server started by hand in
     a directory nothing else knows about serves that directory, exactly as it did
     before any of this — and the second is what lets one daemon serve the rest.
 
-    A registered world whose directory has been deleted is skipped, and the
-    registry keeps its entry: deleting a world is not an event this can observe,
+    A registered home whose directory has been deleted is skipped, and the
+    registry keeps its entry: deleting a home is not an event this can observe,
     and an entry is one small file rather than a directory that grows.
     """
-    found = {world().resolve()}
-    for entry in sorted(worlds_dir().glob("*.json")):
+    found = {home().resolve()}
+    for entry in sorted(homes_dir().glob("*.json")):
         try:
-            recorded = str(json.loads(entry.read_text(encoding="utf-8"))["world"])
+            recorded = str(json.loads(entry.read_text(encoding="utf-8"))["home"])
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("world record %s cannot be read (%s)", entry, exc)
+            logger.warning("home record %s cannot be read (%s)", entry, exc)
             continue
         path = Path(recorded)
         if path.is_dir():
@@ -384,9 +388,9 @@ def known_worlds() -> list[Path]:
     return sorted(found)
 
 
-def worlds_dir() -> Path:
-    """Where the worlds this machine has seen are recorded.  Safe to delete."""
-    path = runtime_dir() / "worlds"
+def homes_dir() -> Path:
+    """Where the homes this machine has seen are recorded.  Safe to delete."""
+    path = runtime_dir() / "homes"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -414,12 +418,12 @@ def turn_dbs() -> list[Path]:
     (`slife2.libs.store.db.database_path`), so both spellings are enumerated rather than
     one pattern that would also catch `myturns.db`.
 
-    **Every world, not this process's** (`known_worlds`), because the store
-    reading these is shared: a context daemon serving two worlds has to have
+    **Every home, not this process's** (`known_homes`), because the store
+    reading these is shared: a context daemon serving two homes has to have
     opened the conversations of both.
     """
     found: list[Path] = []
-    for root in known_worlds():
+    for root in known_homes():
         agents = root / "agents"
         if not agents.is_dir():
             continue
@@ -445,14 +449,14 @@ def schedule_dbs() -> list[Path]:
     in is the record.  `slife2-wechat` reads the logins it wrote for the same
     reason, and `slife2.plugins.schedule.server`'s poll reads these.
 
-    Every world, for the reason there is a registry of *worlds* and none of
-    agents: a ledger is found in the world it was written in, and a shared
+    Every home, for the reason there is a registry of *homes* and none of
+    agents: a ledger is found in the home it was written in, and a shared
     scheduler serves all of them — including the ones with nobody watching,
     which is what a schedule is for.
     """
     return [
         path
-        for root in known_worlds()
+        for root in known_homes()
         for path in sorted((root / "agents").glob(f"*/{_SCHEDULE_DB}"))
     ]
 
@@ -487,12 +491,12 @@ def a2a_inbound_paths() -> list[Path]:
     the model is the only party who can give one — which is why the file is worth
     a walk and why it is **not** an enrollment list: an agent is on the mesh
     while a window is showing it, not because it once spoke
-    (`slife2.plugins.a2a.server.join`), and every world's for the reason
-    `schedule_dbs` walks every world's.
+    (`slife2.plugins.a2a.server.join`), and every home's for the reason
+    `schedule_dbs` walks every home's.
     """
     return [
         path
-        for root in known_worlds()
+        for root in known_homes()
         for path in sorted((root / "agents").glob(f"*/{_A2A_INBOUND}"))
     ]
 
@@ -523,9 +527,9 @@ def skills_dir() -> Path:
     skills go is about to put one there — and an empty directory is the honest
     answer to "which skills are installed" on a fresh install.
 
-    The world's rather than the process's, like `agents_dir`: the playbooks a
+    The home's rather than the process's, like `agents_dir`: the playbooks a
     call is served from are the ones beside the config the caller is running.
     """
-    path = world() / "skills"
+    path = home() / "skills"
     path.mkdir(parents=True, exist_ok=True)
     return path

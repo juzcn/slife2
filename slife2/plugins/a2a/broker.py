@@ -37,7 +37,7 @@ attempted, and the message says which of the two situations it is.  Starting a
 *local* mosquitto for a remote address would put a broker on this machine's
 interfaces that nobody asked for and that the config does not describe.  **And a
 wildcard address is not "local" either**: `0.0.0.0` (or `::`, or ``""``) names
-every interface, so a broker started for one would be a world-reachable,
+every interface, so a broker started for one would be a home-reachable,
 unauthenticated one — refused by name rather than started (see :func:`ensure`).
 """
 
@@ -81,7 +81,7 @@ BROKER_NAME = "a2a-broker"
 #: the only ones a broker is started for.  **Deliberately without the wildcards**
 #: (`0.0.0.0`, `::`, ``""``): mosquitto takes `listener <port> <host>` verbatim,
 #: so a wildcard would be started with `allow_anonymous true` on every interface —
-#: a world-reachable, unauthenticated broker conjured by an edit that reads as
+#: a home-reachable, unauthenticated broker conjured by an edit that reads as
 #: "make it reachable".  A wildcard is refused by name instead (`WILDCARD_HOSTS`,
 #: and the refusal in :func:`ensure`).
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -123,7 +123,7 @@ def is_wildcard(host: str) -> bool:
     """Whether *host* names every interface rather than one address.
 
     Not "local" and not "remote": starting a broker for it is what would make
-    the mesh world-readable, so it is its own answer.
+    the mesh home-readable, so it is its own answer.
     """
     return host.strip().lower() in WILDCARD_HOSTS
 

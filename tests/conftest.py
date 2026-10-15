@@ -173,7 +173,7 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point every test at its own data directory — **and its own runtime**.
 
     Two roots, because they are two kinds of fact (`slife2.libs.host.paths`): the
-    data directory is the world a test works in, and the runtime directory is
+    data directory is the home a test works in, and the runtime directory is
     where the *machine's* daemons record themselves.  The second one defaults to
     `~/.slife2/runtime`, which on a developer's machine is a directory their own
     running stack is using — so a suite that did not redirect it would write
