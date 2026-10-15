@@ -20,6 +20,8 @@ readme 和 sdd属于规范文档，design.md是开发者文档，designer_notes.
 
 3. LLM 的 Harness Tooks
 
+loop自动调用的工具，生成tool 消息对，就像大模型自己调用的一样。有三个小差别：1）TUI 2）元参数不起作用 3）fake call id，大模型知道不是自己调用的
+
 - _check_new_input
 - _func_tool_unload
 
@@ -47,3 +49,12 @@ async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(
 
 - subagent design
 - --a2a-broker host:port , use external broker, do not start/stop mosquitto
+
+6. 设计issues
+
+每个headless的cost，能并发到1000个吗
+工具输出的问题，截断会失真，不截断会爆炸？
+
+正常的工具都会输出合理的长度，不会太离谱，内容多可以翻页。
+cli/shell 的输出长度不可控
+有些工具注定输出很长，比如给我写一篇1万字的论文。
