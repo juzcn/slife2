@@ -16,6 +16,48 @@ two — why the shape is what it is, and what each alternative cost — and
 
 ---
 
+## Contents
+
+**Every section here is a decision, and the title is the decision.**  The
+subsection titles are what a reader is looking for — *the agent task, and what a
+second loop costs* — so they are listed rather than summarised; a gloss on one
+would be a second title for the same thing.  The chapters below carry one,
+because a chapter is a subject and not a decision.
+
+1. [The shape](#1-the-shape) — the plugin/library split, and what each port to this shape cost
+   - [1.1 Plugins and libraries](#11-plugins-and-libraries)
+   - [1.2 The plugin that is not a family](#12-the-plugin-that-is-not-a-family)
+   - [1.3 The agent task, and what a second loop costs](#13-the-agent-task-and-what-a-second-loop-costs)
+   - [1.4 The cabinet, and what four kinds of document cost](#14-the-cabinet-and-what-four-kinds-of-document-cost)
+   - [1.5 A second provider table, and what a *kind* is on](#15-a-second-provider-table-and-what-a-kind-is-on)
+   - [1.6 The file tunnel, and the first second route](#16-the-file-tunnel-and-the-first-second-route)
+   - [1.7 The scheduled task, and what a clock costs](#17-the-scheduled-task-and-what-a-clock-costs)
+   - [1.8 The A2A mesh, and what a per-process identity costs a shared one](#18-the-a2a-mesh-and-what-a-per-process-identity-costs-a-shared-one)
+   - [1.9 The unattended agent, and what a window was for](#19-the-unattended-agent-and-what-a-window-was-for)
+2. [Streaming: one pattern, used twice](#2-streaming-one-pattern-used-twice) — `tools/call` is a request/response and a TUI needs tokens as they arrive, so one pattern rather than two special cases
+3. [The loop, and why the server owns it](#3-the-loop-and-why-the-server-owns-it) — stateless servers, and the largest change of the implementation
+4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, and the process that brings up what the config needs
+5. [The context store](#5-the-context-store) — the turn log, the recall, and the decision about which turns a conversation runs on
+   - [5.1 The live context, and the rebuild](#51-the-live-context-and-the-rebuild)
+6. [Compatibility notes](#6-compatibility-notes) — four facts about the installed library the code depends on, each measured rather than read
+7. [The agent loop](#7-the-agent-loop) — `loop.py` as a pure function over a message list
+   - [7.1 The clocks](#71-the-clocks)
+8. [The toolhub](#8-the-toolhub) — where the model's tools come from, and the one process that decides it
+   - [8.1 What the hub owns, and how a tool gets into the set](#81-what-the-hub-owns-and-how-a-tool-gets-into-the-set)
+   - [8.2 Sources: what a plugin holds, and how it declares it](#82-sources-what-a-plugin-holds-and-how-it-declares-it)
+   - [8.3 The list, and what says when something is missing](#83-the-list-and-what-says-when-something-is-missing)
+   - [8.4 The catalogue, and the search over it](#84-the-catalogue-and-the-search-over-it)
+   - [8.5 The budget](#85-the-budget)
+   - [8.6 Names, and the links the hub holds](#86-names-and-the-links-the-hub-holds)
+   - [8.7 Editing the config](#87-editing-the-config)
+   - [8.8 The three meta-parameters](#88-the-three-meta-parameters)
+9. [Deferred](#9-deferred) — named so they are decisions rather than oversights: what is missing, where it would go, and what the current answer costs
+10. [Fallbacks](#10-fallbacks) — the one kind of behaviour that is invisible when it is wrong
+   - [10.1 The four deformations](#101-the-four-deformations)
+   - [10.2 The register](#102-the-register)
+
+---
+
 ## 1. The shape
 
 **"Plugin" is the word for one of ours, and it names an implementation rather
@@ -154,7 +196,7 @@ needs a degraded mode to fall back into. What is given up is the *reporting*: an
 overrun is now the machine's memory instead of a named `SSEError`, and that is
 only an acceptable trade because the peer is a process this system started.
 
-## 1.1 Plugins and libraries
+### 1.1 Plugins and libraries
 
 **A plugin is a capability; a library is its implementation, and the two are not
 alternatives.**  v1 says the same thing by shipping one component as both:
@@ -2842,6 +2884,21 @@ declared, the model can call it with the names it is done with, and the pair the
 harness writes is a call the tool could genuinely have made. Nothing is written
 when nothing moved — an empty pair every turn is a record of something that did
 not happen.
+
+**A pair's id is the other half of that legality, and this half is ours to
+choose.** The call and its result are matched by a string the harness mints, and
+a provider that refuses the string refuses the whole *request* — on the replay,
+because a pair is written once and carried by every request the conversation
+makes afterwards, so the failure surfaces far from the code that wrote it.
+Messages is the backend that states the rule, and it states it on both fields the
+id appears in: `tool_use.id` and `tool_result.tool_use_id` are
+`^[a-zA-Z0-9_-]+$`, with no length bound, in the reference's own words. The shape
+`harness_call` mints — `_harness_`, the tool's name with its own mark stripped,
+and `time_ns` in hex — sits inside that class by construction, so nothing is
+sanitised on the way out; what the field shows is the other arrangement, where
+the ids that trip the pattern are ones no part of this system minted (a dot from
+an OpenAI-shaped translator, a colon from another producer's SDK) replayed into a
+history that reaches Messages later.
 
 **Recency is a call, and the hub is where it is learned.** The row carries two
 stamps — `last_loaded`, written when it entered the list, and `last_used`,
