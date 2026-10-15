@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import home, runtime_dir
+from slife2.libs.host.paths import runtime_dir
 
 logger = logging.getLogger(__name__)
 
@@ -111,20 +111,22 @@ def _lock_path(key: str) -> Path:
 
 
 def agent_claim_path(name: str) -> Path:
-    """The file holding one agent name's claim — **of one home**.
+    """The file holding one agent name's claim — **the name, and nothing else**.
 
-    The home is in the key because a name is only half an identity here: a
-    machine may be running an agent called `jack` in two data directories, and
-    those are two agents (`slife2.libs.host.paths.home`).  Keyed by the name alone,
-    the second one to start would be refused as a duplicate of the first, which is
-    the opposite of what the homes are for — while *within* a home the rule is
-    unchanged, because there one live instance per name is the whole point.
+    **A name decides everything, and two agents may not share one.**  So this is
+    the machine's, not a home's: one live instance per name on this machine,
+    whatever data directory it was started in.  A second `jack` — in another
+    home, in another terminal — is refused, and the refusal is the same fact the
+    mesh states when it will not put a second `jack` online
+    (`slife2.plugins.a2a.server.join`): whatever an agent's name picks out, it
+    picks out once.
 
-    The file still lives in the machine's runtime (`_sub`), because that is where
-    everything describing what is running on this machine lives; what it is keyed
-    by is what changed.
+    I had this keyed by `(home, name)` for a while, on the reasoning that two
+    data directories hold two agents; the designer settled it the other way, and
+    the code is the smaller for it.  Which home a name was started in is where
+    its files are, not part of who it is.
     """
-    return _sub("agents") / f"{_digest(f'agent:{home()}:{name}')}.json"
+    return _sub("agents") / f"{agent_key(name)}.json"
 
 
 def _sub(name: str) -> Path:
