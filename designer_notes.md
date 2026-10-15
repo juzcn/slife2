@@ -45,16 +45,44 @@ async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(
 
 - 因为Inbox有插对机制，注入的信息插队时，无TUI处理。
 
-5. To do list
-
-- subagent design
-- --a2a-broker host:port , use external broker, do not start/stop mosquitto
-
-6. 设计issues
-
-每个headless的cost，能并发到1000个吗
-工具输出的问题，截断会失真，不截断会爆炸？
+5. 工具输出管理设计
 
 正常的工具都会输出合理的长度，不会太离谱，内容多可以翻页。
 cli/shell 的输出长度不可控
 有些工具注定输出很长，比如给我写一篇1万字的论文。
+
+每个输出由判别器提取内容，全文存为文件，配置专门的读工具。
+
+遗留问题，判别器输入超出context，极小概率事件。先搁置。
+
+二进制数据截断，dump，做为遗留问题，
+
+6. To do list
+
+- subagent design
+- --a2a-broker host:port , use external broker, do not start/stop mosquitto
+
+1. 设计issues
+
+每个headless的cost，能并发到1000个吗
+工具输出的问题，截断会失真，不截断会爆炸？
+
+
+判别器总是带当前上下文的，总是在当前上下文的条件下进行判别。现在已经有两个判别器了，一个是rebuild context, 一个是 compact 工具输出。
+
+Async Agent Task 是一个异步one loop run，它是的设计目的是让agent委派任务，可以用在agent把任务拆分后委派任务。它没有subagent的cost，创建和停止。
+
+Aync Tool ，可以让工具异步执行，用在tool 执行时间比较长，agent选择它异步。
+
+现在的一个未定的设计选项，就是subagent，多loop的后台执行。沿用 a2a 消息机制可能是最一致性的。
+
+还有 agent swarm 的考虑，做agent swarm，是不是就不用subagent概念了。
+
+要做一个判断，是用headless做subagent，还是专门做subagent。用headless做的好处就是改动比较小，只去掉turn save就可以。如果考虑长程任务，也许完整的agent更合适。
+
+subagent共享agent的一切
+agent swarm按照 agent headless?
+
+现在rebuld context 是针对每个 prompt， 唯一的drawback就是长程任务的loop可能直接就超过了context 预算。是否可以在agent loop中动态rebuild context。最好是一致的方式。
+
+有个bug : slife2 --agent jack --data-dir "D:\Dev\Workspace\slife2-jack" 它只在这个文件夹下创建了runtime，并没有创建agents
