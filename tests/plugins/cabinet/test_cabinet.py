@@ -10,7 +10,9 @@ the cabinet, and a save that cannot embed stores nothing.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -78,12 +80,15 @@ def store(agent: str = "jack") -> CabinetStore:
 
 
 @pytest.mark.asyncio
-async def test_the_seventeen_tools_are_the_models() -> None:
-    """Every one of them carries the mark, which is what offers it to the model.
+async def test_the_tools_are_the_models_except_the_one_only_the_harness_calls() -> None:
+    """Every tool carries the mark **except `dump_save`**, and that is the rule.
 
-    There is no `list_sources` and no catalogue row: a cabinet is found through
-    `cabinet_search`, over its own index — not by the hub, whose rows are things
-    a model *calls*.
+    The mark is the whole of what keeps a tool out of the model's hands: the hub
+    merges only marked tools into the catalogue, so an unmarked one has no row to
+    be listed from, searched for, or routed to — which is why the harness reaches
+    this one **directly**, as a peer, and why the model cannot keep an output
+    whole itself.  There is no `list_sources` and no catalogue row: a cabinet is
+    found through `cabinet_search`, over its own index.
     """
     async with Client(cabinet()) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
@@ -104,10 +109,13 @@ async def test_the_seventeen_tools_are_the_models() -> None:
         "report_read",
         "report_list",
         "dump_read",
+        "dump_save",
         "cabinet_search",
         "cabinet_summarize",
     }
-    assert all(for_the_model(tool.meta) for tool in listed.values())
+    offered = {name: tool for name, tool in listed.items() if name != "dump_save"}
+    assert all(for_the_model(tool.meta) for tool in offered.values())
+    assert not for_the_model(listed["dump_save"].meta), "the harness's, and nobody else's"
     assert "list_sources" not in listed
 
 
@@ -977,11 +985,14 @@ async def test_a_window_says_where_the_next_one_starts_and_it_is_there() -> None
 
     async with Client(cabinet()) as client:
         first = await ask(client, "dump_read", call="call_page")
-        following = int(re.search(r"offset (\d+)", first).group(1))
+        next_window = re.search(r"offset (\d+)", first)
+        assert next_window is not None, first
+        following = int(next_window.group(1))
         second = await ask(client, "dump_read", call="call_page", offset=following)
 
-    last = int(re.search(r"lines \d+-(\d+) of", first).group(1))
-    assert last + 1 == following, "the next window starts where this one stopped"
+    stopped = re.search(r"lines \d+-(\d+) of", first)
+    assert stopped is not None, first
+    assert int(stopped.group(1)) + 1 == following, "the next window starts where this one stopped"
     assert f"line {following} of a tool output" in second
     assert "line 1 of a tool output" not in second
 
@@ -1051,3 +1062,59 @@ async def test_a_search_that_names_no_kind_does_not_reach_the_dumps() -> None:
 
     assert "call_word" not in anywhere
     assert "call_word" in named
+
+
+def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None:
+    """**The bill for adding a kind, paid once.**
+
+    `kind` carries a `CHECK` listing the kinds and `CREATE TABLE IF NOT EXISTS`
+    leaves an existing table exactly as it was — so an index written when there
+    were four kinds refuses a dump, deep inside a transaction, in SQLite's own
+    words about a constraint.  Opening it rebuilds the table: the rows are the
+    truth, the columns have not changed, and the ids come with them because the
+    keyword index and the vectors are keyed by id.
+    """
+    path = index_path("jack")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The schema as it was before this kind existed: the `CHECK` is the only
+    # part of it that changed, which is the whole reason a rebuild is needed.
+    old = cabinet_store._SCHEMA.replace(",'dump'", "")
+    with sqlite3.connect(path) as connection:
+        connection.executescript(old)
+        connection.execute(
+            "INSERT INTO cabinet_doc (kind, key, body, created_at, updated_at) "
+            "VALUES ('note', 'kept', 'a note that predates the dump kind', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM cabinet_doc"
+        ).fetchone()[0] == 1
+
+    caplog.set_level(logging.WARNING)
+    opened = store_of(path)
+
+    with opened._connect() as connection:
+        rows = connection.execute("SELECT id, kind, key FROM cabinet_doc").fetchall()
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'cabinet_doc'"
+        ).fetchone()[0]
+    assert [tuple(row) for row in rows] == [(1, "note", "kept")], "its id came too"
+    assert "'dump'" in ddl, "and the table can hold one now"
+    assert "rebuilt to hold it" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_dump_can_be_written_after_that_rebuild() -> None:
+    """The rebuild is not just a table: the kind it was rebuilt for has to work."""
+    path = index_path("jack")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = cabinet_store._SCHEMA.replace(",'dump'", "")
+    with sqlite3.connect(path) as connection:
+        connection.executescript(old)
+
+    await save_dump("call_after", "one line\nand another")
+
+    async with Client(cabinet()) as client:
+        answer = await ask(client, "dump_read", call="call_after")
+
+    assert "one line" in answer

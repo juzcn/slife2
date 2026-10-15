@@ -527,6 +527,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS cabinet_fts USING fts5(
 -- -- `vec0` holds one vector per row and a long document averaged into one
 -- vector describes all of it a little and none of it well -- and this is what
 -- remembers whose chunk it was.  The same arrangement as `turn_chunk`.
+
+
 CREATE TABLE IF NOT EXISTS cabinet_chunk (
     id          INTEGER PRIMARY KEY,
     doc_id      INTEGER NOT NULL,
@@ -555,6 +557,21 @@ CREATE TABLE IF NOT EXISTS index_meta (
 """
 
 
+#: The `cabinet_doc` table's own statement, lifted out of the schema so that a
+#: rebuild can create today's version of it under another name.  **Derived
+#: rather than written twice**: its `CHECK` is built from `KINDS`, and a second
+#: copy of the statement would be the copy that goes stale.
+_DDL = _SCHEMA[
+    _SCHEMA.index("CREATE TABLE IF NOT EXISTS cabinet_doc") : _SCHEMA.index(
+        ");", _SCHEMA.index("CREATE TABLE IF NOT EXISTS cabinet_doc")
+    )
+    + 2
+]
+
+#: What a rebuild calls the table while its rows are being moved.
+_REBUILDING = "cabinet_doc_rebuilding"
+
+
 def store_of(path: Path) -> CabinetStore:
     """The cabinet at *path*, opened — `slife2.libs.store.db.store_for`'s counterpart.
 
@@ -573,38 +590,56 @@ def store_of(path: Path) -> CabinetStore:
 _older_reported: set[Path] = set()
 
 
-def _report_older_index(connection: sqlite3.Connection, path: Path) -> None:
-    """Say so when this index was created before a kind this build knows.
+def _report_older_index(connection: sqlite3.Connection, path: Path) -> bool:
+    """Bring an index created before a kind this build knows up to date.
 
-    **`kind` carries a `CHECK` listing the kinds**, and `CREATE TABLE IF NOT
-    EXISTS` leaves a table that already exists exactly as it was — so an index
-    written when there were four kinds *refuses* a dump, and refuses it deep
-    inside a transaction, in SQLite's own words about a constraint.  Nothing is
-    wrong with that file except its age, and what it needs is the table rebuilt
-    (the documents are rows in it, so that is a copy rather than a re-embed).
+    **A table rebuild, because a `CHECK` cannot be altered.**  `kind` carries one
+    listing the kinds, and `CREATE TABLE IF NOT EXISTS` leaves a table that
+    already exists exactly as it was — so an index written when there were four
+    kinds *refuses* a dump, and refuses it deep inside a transaction, in SQLite's
+    own words about a constraint.  Nothing is wrong with that file except its
+    age.
 
-    There is no migration layer here, on `slife2.libs.store.db`'s doctrine — an
-    old file is *reported* rather than silently upgraded — and this is that
-    report: one line naming the file and the kinds it cannot hold, which is the
-    difference between a confusing failure and a known one.
+    The rows are the truth and the columns have not changed, so this is a copy:
+    the table is created again under the name this build's schema gives it, the
+    rows are moved **carrying their `id`** — the keyword index and the vectors
+    are keyed by it, so a renumbering would leave every document findable by
+    words it does not have — and the old table is dropped.  The schema is then
+    re-run, which is what puts the indexes back: dropping a table takes its
+    indexes with it.
+
+    A file that is already current costs one read of `sqlite_master`, and a
+    rebuild is reported, because it is a change to somebody's file and the one
+    thing it may not be is silent.  Answers whether it did anything, so the
+    caller can say so.
     """
-    if path in _older_reported:
-        return
     found = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cabinet_doc'"
     ).fetchone()
     if found is None:
-        return
+        return False
     missing = [name for name in KINDS if f"'{name}'" not in str(found[0])]
-    if missing:
+    if not missing:
+        return False
+
+    statement = _DDL.replace("cabinet_doc", _REBUILDING, 1)
+    connection.execute(statement)
+    connection.execute(
+        f"INSERT INTO {_REBUILDING} SELECT * FROM cabinet_doc"
+    )
+    connection.execute("DROP TABLE cabinet_doc")
+    connection.execute(f"ALTER TABLE {_REBUILDING} RENAME TO cabinet_doc")
+    connection.executescript(_SCHEMA)
+    if path not in _older_reported:
         _older_reported.add(path)
         logger.warning(
-            "the cabinet index %s predates %s: it will refuse a write of one "
-            "until the table is rebuilt, because `kind`'s CHECK was written "
-            "when it was created",
+            "the cabinet index %s was created before %s and has been rebuilt to "
+            "hold it — one copy of its rows, with their ids, and its indexes "
+            "recreated",
             path,
             ", ".join(missing),
         )
+    return True
 
 
 @dataclass
@@ -620,6 +655,8 @@ class CabinetStore:
         self.root = self.path.parent
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            # An index this build has outgrown is rebuilt here rather than
+            # refused later: see `_report_older_index`.
             _report_older_index(connection, self.path)
 
     def _connect(self) -> sqlite3.Connection:

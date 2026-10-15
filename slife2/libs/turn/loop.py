@@ -16,12 +16,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from itertools import count
 from typing import Any
 
 from slife2.libs.harness.async_tasks import Deliver, schedule, started
+from slife2.libs.harness.dumps import Compress
 from slife2.libs.model.base import Chunk, LLMBackend
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
@@ -128,6 +129,7 @@ class AgentLoop:
         refresh: Callable[[], Awaitable[ToolRegistry]] | None = None,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
+        compress: Compress | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tools
@@ -157,6 +159,16 @@ class AgentLoop:
         #: (`slife2.libs.harness.handover`).  A background call that nobody is behind keeps its
         #: result in the registry instead, for `check_async` to hand over.
         self._deliver = deliver
+        #: How a tool result that does not fit is fitted, or None for one that
+        #: goes in as it came.  **Handed in for the third time and the same
+        #: reason**: the loop does not know what the conversation is about, and
+        #: the party that chooses which lines of a long output this conversation
+        #: needs is the party that can see it (`slife2.libs.harness.dumps`).
+        #: None means the result is passed through, which is the loop's answer to
+        #: "nobody said otherwise" — and the cost of that answer is a turn that
+        #: carries whatever the tool returned, which is a fact about the tool and
+        #: not about this decision.
+        self._compress = compress
         #: Model calls allowed in one turn before it is cut off, or **0 for no
         #: cap at all**.  Zero is the config's spelling for "nobody asked for
         #: one" (`slife2.libs.host.config.AgentSettings.max_steps`, where an absent key is
@@ -333,7 +345,11 @@ class AgentLoop:
             for call in result.tool_calls:
                 text, _ok = await self._one(call, observer, step)
                 messages.append(
-                    Message(role="tool", content=text, tool_call_id=call.id)
+                    Message(
+                        role="tool",
+                        content=await self._fit(call, text, messages),
+                        tool_call_id=call.id,
+                    )
                 )
 
         # Only a capped turn ever gets here: with no cap the iterator does not
@@ -441,6 +457,30 @@ class AgentLoop:
             ),
         )
         return text, ok
+
+    async def _fit(
+        self, call: ToolCall, text: str, messages: Sequence[Message]
+    ) -> str:
+        """What the conversation carries for one result: the result, or a window.
+
+        **The harness's move and not the tool's**, which is why it is a callback
+        the caller injects rather than anything this module decides: fitting a
+        result is choosing what *this conversation* needs from it, and the loop
+        knows neither the conversation nor the model's budget — so it hands over
+        the call, the text and the list, and takes back what to append.  A loop
+        with no callback hands the result on unchanged: the same
+        None-means-nobody-said rule `approve` and `deliver` follow, and the cost
+        of it is a turn whose size is whatever the tool returned.
+
+        It happens **after the call is announced and before the result is
+        appended**, which is the one moment that is both: the panel's account of
+        the call is the tool's own answer (`ToolCallFinished` carries its length
+        and its head), and what enters the conversation is what the model will
+        read back later.
+        """
+        if self._compress is None:
+            return text
+        return await self._compress(call, text, messages)
 
     async def _foreground(
         self, dispatch: ToolCall, bound: float | None

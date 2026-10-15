@@ -67,7 +67,13 @@ import contextlib
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -77,6 +83,7 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.clients.gateway import flatten
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
@@ -85,12 +92,15 @@ from slife2.clients.toolclient import (
     unload_tools,
 )
 from slife2.helpers.clock import now
+from slife2.libs.harness import dumps
 from slife2.libs.harness.async_tasks import Deliver, async_tools
+from slife2.libs.harness.dumps import Compress
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     API_BACKENDS,
     API_SERVER_NAMES,
+    CABINET_SERVER_NAME,
     CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
@@ -101,7 +111,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta, request_client
 from slife2.libs.plugin.protocol import (
     ClientId,
     close_server,
@@ -125,6 +135,7 @@ from slife2.libs.turn.events import (
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.prompt import render as render_system_prompt
+from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -137,6 +148,87 @@ SERVER_NAME = "slife2-agent"
 #: and cancels the turn, which is the very way a message gets lost.  A bound is
 #: what keeps "queued" from meaning "eventually dropped".
 MAX_QUEUED = 32
+
+#: How a conversation's results get fitted into it: the backend the turn is
+#: running on and whose conversation it is, in return for the callback the loop
+#: asks.  A *builder* rather than the callback, because half of what the callback
+#: needs — the backend — is decided inside `make_loop`.
+Compressor = Callable[[LLMBackend, ClientId], Compress]
+
+
+async def _asked(
+    backend: LLMBackend,
+    call: ToolCall,
+    text: str,
+    messages: Sequence[Message],
+    *,
+    window: int,
+) -> dumps.Decision | dumps.Rejected:
+    """One discriminator call.  **A reply is what comes back.**
+
+    `REJECTED` is a reply this build cannot read, which is an ordinary thing for
+    a model to produce and the one failure this mechanism is designed around.  A
+    call that *did not complete* is not that, and is not caught: see below.
+    """
+    instruction = dumps.instruction(
+        tool=call.name,
+        body=text,
+        budget=window,
+        user_input=_current_input(messages),
+    )
+    # No tools, and no observer: this is one question and one answer, and it runs
+    # on the backend the turn already has — the conversation's own model, called
+    # the way the conversation is called.  **A call that does not complete is not
+    # caught here**: a model server that has stopped answering is a system that
+    # has come apart, and the turn it is serving is about to fail on its next
+    # request anyway — so absorbing it would buy a worse trace, not a turn.
+    stream = backend.stream([Message(role="user", content=instruction)], [])
+    reply = (await stream.result).text
+    return dumps.read_reply(reply)
+
+
+async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
+    """The designed fallback: the reader's own first window over the same output.
+
+    **The same function a model would have called**, which is the whole point of
+    it: a conversation whose discriminator could not answer gets what a
+    conversation whose model asked for the beginning would have got — the same
+    numbers, the same mark on the same lines, and the same sentence about where
+    the rest is.  A second renderer here would be a second set of addresses for
+    one output, and the one a model copied out of the conversation would reach
+    different text.
+
+    **A read that fails is left to fail the turn.**  The row was written a moment
+    ago by this same process, so a window that cannot be read back is not a case
+    to design for — it is the cabinet having stopped answering, which the
+    register (§10.2) puts on the side of the steps that must succeed.
+    """
+    try:
+        answer = await client.call_tool(
+            "dump_read",
+            {"call": call, "offset": 1},
+            meta=client_meta(*client_id),
+            timeout=_T.timeouts.work.hub,
+        )
+    except Exception as exc:  # noqa: BLE001 — the caller has the fallback
+        logger.warning("the window over %s could not be read back (%s)", call, exc)
+        return ""
+    return flatten(answer.content)
+
+
+def _current_input(messages: Sequence[Message]) -> str:
+    """The input this turn is answering: the newest user message, as words.
+
+    Read off the list rather than threaded down, because the loop appends the
+    user's message itself before it calls anything — so the newest `user` in the
+    list *is* the current input, and a message that cut into the middle of the
+    turn is the current input too, which is the honest answer to a question asked
+    while the turn was running.
+    """
+    for message in reversed(messages):
+        if message.role == "user" and isinstance(message.content, str):
+            return message.content
+    return ""
 
 #: The harness tool a message that arrived mid-turn is delivered under — v1's
 #: *cut-in*, and the name is v1's for the same reason its pair shape is.
@@ -383,6 +475,7 @@ def build_server(
     backend: LLMBackend | None = None,
     context_client: Client | None = None,
     hub_client: Client | None = None,
+    cabinet_client: Client | None = None,
     window_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
@@ -391,6 +484,11 @@ def build_server(
     `backend`, `context_client` and `hub_client` are injectable so the whole
     server — model call, tools, the restore, the rebuild, the write — can be
     exercised over the in-memory transport with no network at all.
+
+    `cabinet_client` is the seam for the one peer this server reaches *directly*
+    rather than through the hub — the cabinet, whose `dump_save` carries no
+    audience mark and therefore has no row for the hub to route
+    (`compress_for` says why that is the arrangement).
 
     `window_client` is the seam for the one thing this server *hands* rather
     than asks: a background call's result, on its way back into the conversation
@@ -427,6 +525,9 @@ def build_server(
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
+    #: The cabinet, on the same terms — though it is opened on one path only: a
+    #: tool result too large for the conversation it was called in.
+    cabinet_conn: Client | None = cabinet_client
     #: The peer a background result is *handed* to rather than asked of — the
     #: window (`slife2.libs.harness.handover`).  Injected only by a test: in production it is
     #: opened per hand-over, because that is once per finished call rather than
@@ -534,6 +635,85 @@ def build_server(
                 )
             assert hub_conn is not None
             return hub_conn
+
+    async def cabinet() -> Client:
+        """The client for the cabinet, opened on first use.
+
+        **A direct peer and not a hub route.**  The two tools this process needs
+        sit on opposite sides of the audience line — `dump_save` is the harness's
+        and carries no mark, `dump_read` is the model's and does — and the hub
+        holds rows only for what the model may see, so the harness reaches the
+        plugin itself, exactly as `slife2-context` reaches a model backend.  Both
+        tools travel over this one client: one implementation, two callers.
+        """
+        nonlocal cabinet_conn
+        if cabinet_conn is not None:
+            return cabinet_conn
+        async with opening:
+            if cabinet_conn is None:
+                cabinet_conn = await open_server(
+                    current().server("cabinet").url,
+                    name=CABINET_SERVER_NAME,
+                    fallback_tool="dump_read",
+                )
+            return cabinet_conn
+
+    def compress_for(backend: LLMBackend, client_id: ClientId) -> Compress:
+        """How one conversation's tool results are fitted into it.
+
+        **The second discriminator, and the shape of the first** (DESIGN §5.2):
+        one model call, given the result, the conversation in hand and the
+        current input, answering with **line numbers rather than text** — so the
+        harness cuts the original, and what enters the conversation is the tool's
+        own words or it is nothing.
+
+        **One fallback, for the one step whose failure is expected.**  A model is
+        asked for a decision and can answer badly or about something else, so an
+        unusable reply is an ordinary event with a designed answer: the reader's
+        own first window, which is what a model that had asked for the beginning
+        would have got.  Nothing else here falls back — keeping the output whole,
+        writing it, reading a window back are steps that must succeed, and a
+        fallback for one of them would be a hidden bug rather than a design: a
+        conversation carrying an output nobody can read back has given up the
+        bound *and* broken the address, and it would look like success.
+
+        The model is the conversation's own, through the backend its turn is
+        already using: a selection is judged *under* the conversation, and the
+        model that will read it is the one that knows what it is doing.
+        """
+
+        async def compress(
+            call: ToolCall, text: str, messages: Sequence[Message]
+        ) -> str:
+            window = current().tool_result.tokens
+            if estimate_text_tokens(text) <= window:
+                return text
+            client = await cabinet()
+            await client.call_tool(
+                "dump_save",
+                {"call": call.id, "output": text, "tool": call.name},
+                meta=client_meta(*client_id),
+                timeout=_T.timeouts.work.hub,
+            )
+            decision = await _asked(backend, call, text, messages, window=window)
+            if decision is dumps.REJECTED:
+                logger.info("compact_discriminator_unparsed call=%s", call.id)
+                return await _first_page(client, call.id, client_id)
+            lines = dumps.lines_of(text)
+            return dumps.window(
+                call=call.id,
+                lines=lines,
+                kept=dumps.cut(lines, decision, window),
+                # Whether the model *chose* nothing, which is an answer, as
+                # against choosing lines too long to fit, which is not — the two
+                # are told apart because they read differently to the model that
+                # gets one.
+                chosen=bool(decision.lines),
+                binary=decision.binary,
+                budget=window,
+            )
+
+        return compress
 
     async def turn_tools(client_id: ClientId) -> list[Tool]:
         """What the model may call, asked of the hub.
@@ -649,6 +829,7 @@ def build_server(
         max_steps: int,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
+        compressor: Compressor | None = None,
     ) -> AgentLoop:
         return AgentLoop(
             active,
@@ -670,6 +851,11 @@ def build_server(
             # call's result back to — see `hand_back`, which is the other half
             # of that.
             deliver=deliver,
+            # Built here rather than handed in, because half of what it needs is
+            # decided in this function: the backend the turn runs on.  None when
+            # the caller did not ask for one, and a result then goes in as it
+            # came — see `AgentLoop._fit`.
+            compress=None if compressor is None else compressor(active, client_id),
         )
 
     async def loop_for(
@@ -677,6 +863,7 @@ def build_server(
         client_id: ClientId,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
+        compressor: Compressor | None = None,
     ) -> AgentLoop:
         """The agent loop for a conversation, bound to that conversation.
 
@@ -694,7 +881,9 @@ def build_server(
         per conversation and without `loop.py` ever learning that keys exist.
         """
         if backend is not None:
-            return await make_loop(backend, client_id, loop.max_steps, approve, deliver)
+            return await make_loop(
+                backend, client_id, loop.max_steps, approve, deliver, compressor
+            )
 
         reference = loop.model
         async with opening:
@@ -727,6 +916,7 @@ def build_server(
             loop.max_steps,
             approve,
             deliver,
+            compressor,
         )
 
     # --- the registry --------------------------------------------------------
@@ -1359,6 +1549,10 @@ def build_server(
             # call runs, which is v1's rule for a turn with nobody behind it.
             ask if item.watched else None,
             deliver,
+            # Every turn's results are fitted, not only the ones a window has
+            # anything to say about: the callback's first act is to measure, and
+            # a result that fits costs a comparison rather than a call.
+            compress_for,
         )
         cancelled = False
         try:

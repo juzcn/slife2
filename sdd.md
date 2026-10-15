@@ -423,9 +423,22 @@ That judgement is the model's, made where the result arrived, and the harness
 writes it down as the row's mime — nothing here sniffs a payload to decide what
 a tool returned.
 
-*Not yet built:* the shortening itself, which is the harness's half. What exists
-is the storage and the reader it makes possible (§7.3); until the loop calls it,
-an oversized result reaches the conversation whole.
+The call is made where the result arrives and before it is appended: the loop
+hands the callback its call, the text and **the conversation in hand**, because
+which lines an output owes a conversation is a fact about the conversation.  The
+harness reaches the cabinet **directly** for this and through the hub for
+everything else — `dump_save` carries no audience mark, so the hub holds no row
+to route — and the model's route back in is `dump_read`, which does carry one.
+
+**One fallback, for the one step whose failure is expected.**  A model asked for
+a decision can answer badly, so an unreadable reply leaves the conversation the
+reader's own first window, which is what a model that had asked for the beginning
+would have got.  Every other step here must succeed, and a step that must succeed
+has no fallback: keeping the output, writing it, reading the window back each
+**fail the turn** loudly, because the alternative — a conversation carrying an
+output nobody can read back — has given up the bound *and* broken the address
+while looking like success.  §10.2 of DESIGN.md is where that line is drawn and
+where the one fallback is registered.
 
 ### 4.3 A harness tool pair
 

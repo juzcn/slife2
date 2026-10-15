@@ -2291,22 +2291,40 @@ argument one level up).  A literal substring is what the common case wants — a
 symbol, a path, a spelling remembered approximately — and a model that needs a
 real regex has the file, which every answer names.
 
-**What it costs.**  One model call per oversized result, whose *input* is the
-largest thing in a turn — the result plus the conversation it is judged under.
-How often that happens is **not measured**, and it is the cheap kind of number to
-get: the results are in the turn rows, and §8.5 owes the same observation about
-the tool list's threshold.  A file per dump that nothing deletes, which is the
-honest price of "kept whole".  And a dump is the one kind nobody wrote, so a
-search that names no kind skips it: machine output is not ranked against a
-person's own notes, and the address a model has for a dump is the marker in the
-transcript rather than a search.
+**What it costs, measured.**  One model call per oversized result, whose *input*
+is the largest thing in a turn — the result plus the conversation it is judged
+under — and how often that happens is the number the whole mechanism's price
+turns on.  Read off this machine's turn log on 2026-10-15: **181 turns, 347 tool
+results, median 48 tokens, p90 1,556, largest 5,284**.  Against the shipped
+window of 4,000 that is **7 results, 2.0%** over it (17% are over 1,000 and
+nothing at all is over 8,000), so the mechanism fires about once in fifty calls
+and the call it fires is worth paying for: the alternative is that result carried
+by every request the conversation makes afterwards.  It is one machine's log
+rather than a corpus, and it is the number that sizes `tool_result.tokens` — the
+instrument is the rows themselves, so re-reading it is a query (§8.5 owes the
+same observation about the tool list's threshold).
 
-**What is built, and what is not.**  The cabinet's half is in: the kind, the
-reader, the config key, and an e2e that drives the reader over the real stack
-with the window read from the config file.  The harness's half is not — the
-discriminator's call, the marker, and the loop's seam for it — so an oversized
-result currently reaches the conversation whole: nothing is lost, and nothing is
-bounded either.  §9's entry is where that stands.
+A file per dump that nothing deletes, which is the honest price of "kept whole".
+And a dump is the one kind nobody wrote, so a search that names no kind skips it:
+machine output is not ranked against a person's own notes, and the address a
+model has for a dump is the marker in the transcript rather than a search.
+
+**Both halves are built, and each is tested where it binds.**  The cabinet's: the
+kind, the reader, the config key, and an e2e that drives the reader as a real
+process over a real socket with the window read from the config file.  The
+harness's: the seam in the loop (`AgentLoop._fit`, a callback the server
+injects), the choice and its rendering (`libs/harness/dumps.py`), and the calls —
+which run over four tests in `tests/plugins/agent/test_compact.py`, one per
+outcome: a window over a huge result, the ordinary result left alone, an
+unreadable reply falling back to the reader's page, and a cabinet that cannot
+answer failing the turn.
+
+**Two gaps are real and both are named rather than half-solved** (§9): the
+discriminator's own input can exceed the model's window (the result *and* the
+conversation are handed to one call), and a model's *arguments* are not bounded
+at all — this mechanism is about what a tool returns, and a model that writes a
+hundred thousand characters into an argument has put them in the conversation
+itself.
 
 ## 6. Compatibility notes
 
@@ -3363,12 +3381,21 @@ cannot say all three is a wish rather than a decision.
   works here only if that login can be had out of band and handed over as a
   header, and headless is the case that hurts, because the browser flow has no
   browser.
-- **Window on the way in.** §5.2 decides this and half of it is built: the
-  cabinet keeps the whole of an oversized result (`dump`, §1.4) and `dump_read`
-  reads it back within the window. What is missing is the harness's half — the
-  discriminator's call, the marked selection written into the conversation, and
-  the loop's seam for it. Until it lands an oversized result reaches the
-  conversation whole: nothing is lost, and nothing is bounded either.
+- **A window with a window of its own.** §5.2's discriminator is one model call
+  whose input is the result *and* the conversation in hand, so a result larger
+  than that model's context cannot be judged at all. It is parked rather than
+  half-solved: the honest fix needs the provider's window in hand, which is a
+  fact about the model server rather than about this module, and until it exists
+  a result that big fails the turn loudly (the dump write is a step that must
+  succeed) rather than being silently shortened.
+- **What a model writes, as against what a tool answers.** §5.2 bounds a tool
+  *result*; a tool call's **arguments** are the model's own words and nothing
+  bounds them — a model that writes a hundred thousand characters into an
+  argument has put them in the conversation, and in every request after it. The
+  shape that would fix it is the same one (a window, a marker, the whole in a
+  dump), and what makes it a change rather than an extension is that the text
+  being shortened is the *model's*, so a selection of it would be a selection of
+  its own instruction to a tool — a different thing to get wrong.
 - **A task's progress, and a person's hand on one.** §1.3's four tools are the
   model's: a conversation can start an agent task, ask about it, list it and stop
   it, and nothing draws one. A window has no line for a task that is running and
@@ -3801,6 +3828,18 @@ the report of a transport that did not tear down. *Does not cover:* the call
 path, where a link that died mid-call is retried once and a refusal is a value
 the model reads (§8.3). *Failure goes:* nowhere, which is the price of a
 teardown that must not replace whatever the caller was doing.
+
+**A tool result past the window whose discriminator cannot be read is replaced by
+the reader's own first window** (§5.2).  *Gives up:* the selection — the
+conversation carries the output's beginning rather than the lines this
+conversation needed, so what a model reads first is the tool's own shape rather
+than its answer, and the model must ask for the rest.  *Does not cover:* the
+steps that must succeed — keeping the output whole, writing it, reading the
+window back — which **fail the turn** instead, because a conversation carrying an
+output nobody can read back has given up the bound *and* broken the address, and
+it would look like success from the outside: a fallback there would be a hidden
+bug rather than a design.  *Failure goes:* an `info` line naming the call, and the
+marker the conversation carries, which says what this is and where the rest is.
 
 **Everything not in this register is a defect.** The list is the whole of this
 build's declared degradation; a path that substitutes a weaker behaviour and is

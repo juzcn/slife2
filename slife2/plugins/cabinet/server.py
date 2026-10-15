@@ -839,8 +839,54 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         # once, rather than argued for at each return.
         return clip_to_tokens(answer, budget)
 
-    # ── Finding, and describing ──────────────────────────────────────────
+    @mcp.tool(name="dump_save")
+    async def dump_save(
+        ctx: Context,
+        call: str,
+        output: str,
+        tool: str = "",
+        mime: str = "",
+    ) -> dict[str, Any]:
+        """Keep one tool output whole, keyed by the call it came from.
 
+        **The harness's call and no model's.**  Nothing here decides whether an
+        output is worth keeping or which part of it matters, so this carries no
+        audience mark — which keeps it out of the hub's catalogue, and therefore
+        out of the model's list and out of `tool_search`.  The harness reaches
+        this server **directly**, as a peer, exactly as `slife2-context` reaches a
+        model backend; the model's own route back in is `dump_read`, which *is*
+        marked and therefore *is* in the catalogue.
+
+        A second call under one key replaces, because the key is one call: a
+        re-run writes the same output twice rather than two facts.
+
+        Answers with a payload rather than a sentence, and **refuses by raising**,
+        because its caller is the harness and not a model: an answer it cannot
+        read has to be distinguishable from one that says nothing went wrong.
+
+        Args:
+            call: The tool call id the output came from — the key, and the one
+                identifier the conversation and this row both carry.
+            output: The whole of what the tool returned.
+            tool: The tool's name, so a listing says what produced this.
+            mime: What the output is, when it is known not to be text.
+        """
+        opened, refusal = await cabinet(ctx)
+        if refusal:
+            raise ToolError(refusal)
+        row = await opened.write(
+            DUMP,
+            call,
+            body=output,
+            title=tool,
+            source=tool,
+            mime=mime,
+            embedder=await embedding.get(),
+        )
+        logger.info("dump_save call=%s tool=%s chars=%d", call, tool, len(output))
+        return {"kept": call, "mirror": str(row["mirror"]), "chars": len(output)}
+
+    # ── Finding, and describing ──────────────────────────────────────────
     @mcp.tool(name="cabinet_search", meta=FOR_THE_MODEL)
     async def cabinet_search(
         ctx: Context,
