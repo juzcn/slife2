@@ -170,7 +170,7 @@ class Link:
 
     async def _listed(self, tools: list[Any]) -> None:
         self.rows = [self._row(tool) for tool in tools]
-        logger.info("%s: %d tool(s) held", self.settings.name)
+        logger.info("%s: %d tool(s) held", self.settings.name, len(self.rows))
 
     def _failed(self, exc: Exception) -> None:
         # Nothing to write: a family holds no catalogue, and the hub learns this

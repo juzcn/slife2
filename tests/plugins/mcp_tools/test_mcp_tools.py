@@ -453,3 +453,31 @@ async def test_a_second_home_naming_one_entry_differently_is_told(
     ]
     assert len(said) == 1, caplog.text
     assert str(theirs) in said[0] and str(mine) in said[0], said[0]
+
+
+@pytest.mark.asyncio
+async def test_a_listing_says_how_many_tools_it_held(
+    isolated_runtime: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The one line that says a server answered, and how much it offered.**
+
+    A log call whose arguments do not match its own format string raises *inside*
+    the logging module: the line a reader wants goes missing, the count that makes
+    it worth reading goes with it, and what is printed instead is a
+    `--- Logging error ---` block on stderr.  Nothing else notices — the tools are
+    held, the declaration is right, the catalogue is right — which is why this is
+    pinned by reading the record back the way a reader would (`getMessage` renders
+    the format string, so a mismatched argument raises here rather than passing).
+    """
+    server = family(isolated_runtime)
+
+    with caplog.at_level("INFO", logger="slife2.libs.plugin.family"):
+        async with Client(server) as client:
+            await client.call_tool("list_sources", {})
+
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if "tool(s) held" in str(record.msg)
+    ]
+    assert said == ["existing: 2 tool(s) held"], caplog.text
