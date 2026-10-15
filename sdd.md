@@ -111,6 +111,14 @@ the process that can describe it, and the wrong one for a service.
   rows with nothing behind them.
 - **Source** — the thing a row came from. One plugin holds one source per entry
   of its section, and declares it to the hub.
+- **Dump** — one tool output kept whole because the conversation could not carry
+  it: a cabinet document of its own kind, keyed by the tool call that produced
+  it, and read back by searching (`dump_read`). See §4.2 and §7.3.
+- **Window** — how much of one tool result a model may be handed at once,
+  `tool_result.tokens`. **One number on both sides**: the harness spends it
+  shortening an oversized result, and the reader of a dump caps itself with it,
+  because a reader that could out-return the shortening would be this system
+  feeding itself. See §7.3.
 - **Corpus** — one searchable body of text with its two indexes: a
   conversation's turns, the tool catalogue, the cabinet's documents. All three
   are made of the same machinery (§7.2).
@@ -362,7 +370,8 @@ provider will accept (§12, where that path is listed as still open).
 ### 4.2 What the harness adds to a conversation
 
 `libs/harness/` is what the *harness* — this system, as opposed to the model or
-the person — puts into a conversation. Three mechanisms, one shape.
+the person — puts into a conversation. Four mechanisms, one shape: what the
+harness adds is **a marked address**, never a claim of its own.
 
 **Markers** (`markers.py`): `[Name:{…}]` in front of a delivered message. A
 marker is **content**, so it is stored with the message and travels into the
@@ -389,6 +398,34 @@ when its status is final, and the delivery is a separate fact**
 (`Task.delivered`): a task whose hand-back is still in flight is neither running
 nor a delivery that failed, and reading either as the other is how one answer
 arrives twice and how a cancel lands on work that already finished.
+
+**A window** (`dumps.py`): one tool result too large for the conversation. The
+whole of it is kept — a `dump` row in the cabinet, keyed by the **tool call id**,
+which is the one identifier both sides already carry, so the association with
+the turn needs no column and nothing to keep in step — and what the conversation
+carries is a **selection of that output's own lines**, named by number, within
+`tool_result.tokens` (§10.1). The selection is made by a **discriminator**: one
+model call given the result, the conversation in hand and the current input,
+answering with line ranges and nothing else. It never quotes and never
+paraphrases — the harness cuts the original at the numbers it names — so the text
+the conversation carries is the tool's own words or it is nothing, and a wrong
+answer costs a re-read rather than a fact no tool said.
+
+That the selection is **made under the conversation** is the point of it rather
+than a detail: what a result is worth is what *this* conversation is doing, so
+line numbers are chosen against the turns in hand. And what is left out is not
+lost — `dump_read` (§7.3) reads the dump back by finding, so the conversation can
+recover any part of it later.
+
+**A result that is not text is dumped and not shortened**: there are no lines to
+choose, so the whole of it is kept, a stub says so, and nothing reads it back.
+That judgement is the model's, made where the result arrived, and the harness
+writes it down as the row's mime — nothing here sniffs a payload to decide what
+a tool returned.
+
+*Not yet built:* the shortening itself, which is the harness's half. What exists
+is the storage and the reader it makes possible (§7.3); until the loop calls it,
+an oversized result reaches the conversation whole.
 
 ### 4.3 A harness tool pair
 
@@ -668,6 +705,14 @@ build the tables.
 persisted with the turns it chose, written in the same transaction as the turn
 that changed it (`read_context`/`write_context`/`append_context`).
 
+**A turn can point outside itself, and that is an addition to what memory means
+here.** A tool output too large for a conversation is stored whole in the cabinet
+and the turn keeps a marked **selection of it** (§4.2) — so the row still holds
+exactly what the model saw, and what the model saw can name something the row
+does not contain. The whole is reachable from the turn rather than in it, by the
+tool call id the turn's own messages carry, and a model reads it back with
+`dump_read`. Nothing is lost to the record, and nothing is re-run to get it.
+
 ### 7.2 The index machinery
 
 **Two legs, one answer.** A corpus is found by its words (FTS5 over a derived,
@@ -696,10 +741,10 @@ exists to keep:
 
 ### 7.3 The cabinet
 
-`plugins/cabinet/` is four kinds of private document — notes, a diary, saved
-files, reports — as one corpus with one index (`plugins/cabinet/store.py`).
-**One table rather than four plus a view**: the four kinds are one corpus, and a
-corpus whose rows live in four tables has to be unioned back together before it
+`plugins/cabinet/` is five kinds of private document — notes, a diary, saved
+files, reports, dumps — as one corpus with one index (`plugins/cabinet/store.py`).
+**One table rather than one per kind plus a view**: the kinds are one corpus, and
+a corpus whose rows live in four tables has to be unioned back together before it
 can be ranked. `kind` says what a row is, `key` is what a read and a remove take,
 and the columns a kind does not use are empty rather than absent.
 
@@ -708,6 +753,24 @@ the path is stored rather than derived, so a change to the naming rule orphans
 nothing that already exists. **Every path a caller can name is resolved against
 the cabinet root** and refused if it leaves it: a tool that writes a file for a
 model must not be talked into writing anywhere else.
+
+**A `dump` is the one kind no tool of the cabinet writes.** The harness saves a
+tool output too large for the conversation (§4.2) and this is where the whole of
+it lives — a file on disk with a row indexing it — and `dump_read` is the one way
+back. It is a **searching reader**, because searching is what a model does with a
+large output: a literal pattern finds lines and `context` brings their neighbours,
+marked so the two are told apart; `offset` reads from a line, negative from the
+end; `limit` reads fewer. **Every answer it gives is within `tool_result.tokens`**
+— the same number the harness spends shortening a result — and that is not
+tidiness: a reader that could return more than the shortening removed would have
+its own answer shortened next, which is this system feeding itself. The bound is
+enforced once, where the answer leaves, so it holds for the answers that quote the
+caller back at itself as well.
+
+*A dump is searchable with the rest*, since it is one corpus: a search naming no
+kind reaches machine output ranked against a person's notes, and whether it should
+is open — the address a model usually has is the marker in the transcript, not a
+search.
 
 ### 7.4 Embeddings
 
@@ -885,7 +948,8 @@ connection.
 
 One `slife2.yaml` inside the data directory, and its sections are the system's
 vocabulary: `servers:`, `providers:`, `embeddings:`, `agent:`, `agent-task:`,
-`context:`, `tool_load:`, `mcp:`, `rest-api:`, `cli:`, `skills:`, `media:`,
+`context:`, `tool_load:`, `tool_result:`, `mcp:`, `rest-api:`, `cli:`,
+`skills:`, `media:`,
 `file-tunnel:`, `wechat:`, `a2a:`. **Every section is read by the plugin that
 owns it** — the family plugins read their own rows, the hub merges them — and no
 section is read by two processes.

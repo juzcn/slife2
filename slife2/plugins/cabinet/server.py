@@ -69,8 +69,10 @@ from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddress
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
+from slife2.libs.turn.tokens import clip_to_tokens, estimate_text_tokens
 from slife2.plugins.cabinet.store import (
     DIARY,
+    DUMP,
     FILE,
     KINDS,
     NOTE,
@@ -757,6 +759,86 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         )
         return _listing(REPORT, "reports", page, lambda row: str(row["key"]))
 
+    # ── Reading a dump back ──────────────────────────────────────────────
+
+    @mcp.tool(name="dump_read", meta=FOR_THE_MODEL)
+    async def dump_read(
+        ctx: Context,
+        call: str,
+        offset: int = 1,
+        limit: int = 0,
+        pattern: str = "",
+        context: int = 0,
+    ) -> str:
+        """Read a tool output the harness saved, by finding — not by scrolling.
+
+        A result too large for the conversation is shortened for the model and
+        kept whole here; the marker standing in for it names the call. This is
+        the way back to the part the shortening did not carry, and it is a
+        *searching* reader: name what you are looking for and how much of what
+        surrounds it, or name the line you already know and read from there.
+        Lines are numbered, matches are marked `:`, the lines around them `-`,
+        and the numbers are the same ones the marker's selection uses.
+
+        **Every answer is within the configured budget** (`tool_result.tokens`),
+        the same number the harness spends shortening a result — so reading an
+        output back can never hand over more than the shortening took away, and
+        this tool can never feed the thing that shortens results. Read as much
+        as you like, in as many windows as it takes.
+
+        Args:
+            call: The tool call id, from the marker in the conversation.
+            offset: The first line to read; `1` is the first and `-1` the last.
+            limit: The most lines to show. `0` shows as many as the budget holds.
+            pattern: Show the lines containing this text, matched literally and
+                ignoring case.
+            context: With a pattern, how many lines either side of a match to
+                show with it.
+        """
+        opened, refusal = await cabinet(ctx)
+        if refusal:
+            return refusal
+        budget = config.tool_result.tokens
+        row = await on_thread(opened.get, DUMP, call)
+        if row is None:
+            answer = (
+                f"There is no saved output for the call {call!r} — the marker "
+                f"beside the shortened result names the calls there are."
+            )
+        else:
+            mirror = str(row.get("mirror") or "")
+            where = str(opened.root / mirror) if mirror else ""
+            mime = str(row.get("mime") or "")
+            if mime and not mime.startswith("text/"):
+                # **A dump that is not text is dumped and not read.**  Nothing
+                # here decides that a payload is not text: the judgement is made
+                # where the result arrived, and the harness writes it down as the
+                # row's mime.  Sniffing for it here would be this module deciding
+                # what a tool returned, which is the one thing the arrangement
+                # keeps out of the harness's hands — and there are no lines of a
+                # picture to find anyway.
+                answer = (
+                    f"The output of {call!r} is not text ({mime}), so there are "
+                    f"no lines to read. Its bytes are at {where}."
+                )
+            else:
+                answer = _window_of(
+                    str(row.get("body") or ""),
+                    where=where,
+                    offset=offset,
+                    limit=limit,
+                    pattern=pattern,
+                    context=context,
+                    budget=budget,
+                )
+        # **One way out, and it is measured.**  Every path above is bounded
+        # already, except the ones that quote the caller back at itself — a
+        # `pattern` with a megabyte in it, a `call` that is not an id — and an
+        # answer over the budget is one the harness would shorten, which is our
+        # own reader feeding our own shortening.  So the bound is enforced here,
+        # once, rather than argued for at each return.
+        return clip_to_tokens(answer, budget)
+
     # ── Finding, and describing ──────────────────────────────────────────
 
     @mcp.tool(name="cabinet_search", meta=FOR_THE_MODEL)
@@ -780,8 +862,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 works here.
             sentences: What you are looking for, asked normally. One per
                 question you have.
-            kind: `note`, `diary`, `file` or `report` to look in one of them.
-                Empty searches all four.
+            kind: `note`, `diary`, `file`, `report` or `dump` — a tool's own
+                output, which the harness saves — to look in one of them. Empty
+                searches all of them but the dumps, which are reached by the
+                marker naming them rather than by a search.
             since: Only documents from this time on.
             until: Only documents up to this time.
             limit: How many results.
@@ -819,8 +903,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         describes it.
 
         Args:
-            kind: `note`, `diary`, `file` or `report`.
-            key: The document's key — a subject, a date, a cabinet path or a title.
+            kind: `note`, `diary`, `file`, `report` or `dump`.
+            key: The document's key — a subject, a date, a cabinet path, a title
+                or the tool call a dump is the output of.
             summary: What it is, in words somebody would search with.
             tags: Comma-separated words to file it under.
         """
@@ -847,6 +932,209 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         return f"`{key}` is annotated.{extra}"
 
     return mcp
+
+
+def _window_of(
+    body: str,
+    *,
+    where: str,
+    offset: int,
+    limit: int,
+    pattern: str,
+    context: int,
+    budget: int,
+) -> str:
+    """A window of a dump, read by *finding*: never larger than `budget` tokens.
+
+    **Finding and reading are one gesture here, because neither half answers on
+    its own.**  A match without its neighbours is a line torn out of a stack
+    trace, and a window without a match is a page a model reads to the end to
+    learn nothing.  So `pattern` chooses the lines and `context` brings their
+    neighbours with them, marked so that the two are told apart at a glance, and
+    two neighbourhoods that meet are **merged** — one block, which is what a
+    reader sees, rather than two that overlap and spend the window twice.
+
+    **The bound is on the whole answer, header included**, and that is the
+    property the arrangement rests on rather than a nicety: a reader that could
+    hand back more than the budget would be a tool of ours feeding the harness's
+    own shortening, which is one system at both ends of a loop.  So the window
+    is filled line by line against the budget — measured by the one estimator,
+    `slife2.libs.turn.tokens` — and then the *rendering* is measured and trimmed
+    from its end until it fits, because the header and the sentence about what
+    is missing are part of what a model is handed.  What did not fit is named
+    rather than lost: how many lines there are, how many matched, and the offset
+    the next window starts at.
+
+    **The budget is the config's** (`tool_result.tokens`) and not a number of
+    this module's, because the harness spends the same one shortening a result
+    for the conversation: a reader free to differ from the shortening is the
+    loop again, one config edit away.
+
+    **The pattern is text, not an expression.**  A regex over a 240,000-line
+    output is a program whose runtime nobody bounds, running in a server every
+    agent shares — and the code-reading tools that take a regex take it because
+    their engines cannot backtrack, which Python's can.  A literal substring,
+    ignoring case, is also what the common case wants: a symbol, a path, a
+    spelling remembered approximately (§9's own three examples for the grep leg
+    v1 had).  A model that needs a real regex has the file — `where` names it,
+    and the operator's own tools read it.
+
+    **The numbers are the ones the harness's shortening shows a model**, on
+    purpose: a line named in a discriminator's reply and a line read back here
+    have to be one address, and two renderings that disagreed would be two
+    addresses for one line.
+    """
+    lines = body.splitlines()
+    total = len(lines)
+    if not total:
+        return "[refused] this output was saved empty, so there is nothing to read."
+    # **A negative `offset` counts from the end**, which is where a log's and a
+    # command's own summary is: a model asking for the tail of something it has
+    # never read does not know how long it is, and every reader it has used
+    # before takes `-1` for the last line.
+    start = offset if offset > 0 else total + offset + 1
+    if start < 1 or start > total:
+        return (
+            f"[refused] {offset} is not a line of this output: it has {total}, "
+            f"and 1 to {total} (or -1 to -{total}) are the addresses."
+        )
+
+    wanted = pattern.casefold()
+    hits = (
+        [n for n in range(start, total + 1) if wanted in lines[n - 1].casefold()]
+        if wanted
+        else []
+    )
+    # **The count is a fact about the whole output, so it is taken in its own
+    # pass.**  The window stops as soon as it is full, and a count that stopped
+    # with it would report "385 of 502" — a number about the budget dressed up
+    # as a number about the output, which is exactly what a model reads to
+    # decide whether to narrow the pattern or read on.
+    matched = len(hits)
+    runs = _runs(hits, max(context, 0), total) if wanted else [(start, total)]
+
+    kept: list[tuple[int, str]] = []
+    full = False
+    for first, last in runs:
+        for number in range(first, last + 1):
+            if limit and len(kept) >= limit:
+                full = True
+                break
+            kept.append((number, lines[number - 1]))
+            if _spent(kept) > budget:
+                kept.pop()
+                full = True
+                break
+        if full:
+            break
+
+    while True:
+        answer = _render_window(
+            kept,
+            total=total,
+            start=start,
+            seen=matched,
+            hits=set(hits),
+            pattern=pattern,
+            context=max(context, 0),
+            where=where,
+            budget=budget,
+        )
+        # An empty window renders as the refusal below rather than as a header,
+        # so this is the one case that returns without fitting anything: there
+        # is nothing left to trim.
+        if not kept or estimate_text_tokens(answer) <= budget:
+            return answer
+        kept.pop()
+
+
+def _runs(hits: list[int], context: int, total: int) -> list[tuple[int, int]]:
+    """The hits with their neighbours, as disjoint inclusive runs.
+
+    Merged rather than one run per hit, because the neighbours of two hits a
+    line apart *are* one block of text: showing the same line twice spends the
+    window on saying it twice, and a reader that saw one line under two
+    addresses would have two addresses for one line.
+    """
+    runs: list[list[int]] = []
+    for number in hits:
+        first, last = max(number - context, 1), min(number + context, total)
+        if runs and first <= runs[-1][1] + 1:
+            runs[-1][1] = max(runs[-1][1], last)
+        else:
+            runs.append([first, last])
+    return [(first, last) for first, last in runs]
+
+
+def _spent(kept: list[tuple[int, str]]) -> int:
+    """What the lines held so far cost, by the one estimator."""
+    return estimate_text_tokens("\n".join(text for _, text in kept))
+
+
+def _render_window(
+    kept: list[tuple[int, str]],
+    *,
+    total: int,
+    start: int,
+    seen: int,
+    hits: set[int],
+    pattern: str,
+    context: int,
+    where: str,
+    budget: int,
+) -> str:
+    """A window as the text a model reads: a header, numbered lines, and the count.
+
+    **A matching line and its neighbours are told apart by one character**,
+    `12: the error` against `11- the line before it`, which is the convention
+    every grep has and therefore the one a model reads without being told.  With
+    no pattern there is nothing to tell apart and the column is left blank.
+
+    The sentences this can end with are the ways a window can be partial, and a
+    reader that could not tell them apart would not know whether to read on,
+    page, or narrow the pattern.  An **empty** window is the one case that is
+    not a window at all — one line too large to show — and it says so under a
+    header that names the file, because that is where the bytes are.
+    """
+    where = where or "the cabinet"
+    head = (
+        f"[dump] {total} line{'s' if total != 1 else ''} — the whole of it is at {where}"
+    )
+    # **No match is not an empty window**, and the order is the whole of the
+    # difference: a pattern that found nothing returned no *lines*, and reading
+    # that as "one line was too large to show" would send a model looking for a
+    # file problem it does not have.
+    if pattern and not seen:
+        return f"{head}\n\nno line from {start} contains {pattern!r}"
+    if not kept:
+        return (
+            f"{head}\n\n[refused] a line from {start} does not fit a "
+            f"{budget}-token window on its own."
+        )
+    first, last = kept[0][0], kept[-1][0]
+    around = f", each with the {context} lines around it" if context else ""
+    if not pattern:
+        note = (
+            f"lines {first}-{last} of {total}; the next window starts at offset {last + 1}"
+            if last < total
+            else f"lines {first}-{total}; that is the end of it"
+        )
+    elif sum(1 for number in hits if first <= number <= last) < seen:
+        note = (
+            f"{sum(1 for number in hits if first <= number <= last)} of {seen} lines "
+            f"containing {pattern!r}{around}; the next start is offset {last + 1}"
+        )
+    else:
+        note = f"all {seen} lines containing {pattern!r}{around}, from line {start}"
+    width = len(str(last))
+    if pattern:
+        shown = "\n".join(
+            f"{number:>{width}}{':' if number in hits else '-'} {text}"
+            for number, text in kept
+        )
+    else:
+        shown = "\n".join(f"{number:>{width}}  {text}" for number, text in kept)
+    return f"{head}\n\n{shown}\n\n({note})"
 
 
 def _document(kind: str, row: dict[str, Any]) -> str:

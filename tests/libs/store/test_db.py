@@ -3,8 +3,8 @@
 Every other test reaches the store through two MCP hops and a scripted model, so
 what they can assert is what survives the trip.  These are about the store
 itself: the shape of the table, what a saved turn reads back as, and the two
-rules that live on the save path rather than in any caller — tool results are
-compacted, and a damaged row does not take the rest of the history with it.
+rules that live on the save path rather than in any caller — an image becomes a
+note, and a damaged row does not take the rest of the history with it.
 """
 
 from __future__ import annotations
@@ -20,9 +20,7 @@ from slife2.helpers.timeutil import InvalidTimeBound
 from slife2.libs.host.paths import DATA_ENV_VAR
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
-    TOOL_RESULT_CHARS,
     TurnStore,
-    compact_tool_results,
     message_text,
     safe_agent_name,
     store_for,
@@ -245,53 +243,33 @@ async def test_agents_are_isolated_by_file(tmp_path, monkeypatch) -> None:
     assert jill.count() == 0
 
 
-def test_an_oversized_tool_result_keeps_its_head_and_tail() -> None:
-    """Tool output is reproducible, so the record keeps a digest — and says so.
+@pytest.mark.asyncio
+async def test_an_oversized_tool_result_is_kept_whole(tmp_path) -> None:
+    """**The record keeps what happened, and the second rule is gone.**
 
-    Truncation is announced rather than silent: a model reading this back later
-    has to know it is shortened, and how to get the rest.  A digest that looked
-    complete would be a lie it could reason from.
+    A result over a size was saved as a head-and-tail digest, on the argument
+    that tool output is reproducible — re-run the tool and the answer comes
+    back.  Two things were wrong with that, and the second is the one that
+    decided it: nothing checked the argument (a `git status` after a commit
+    answers differently the second time), and *which* part of an output matters
+    is the tool designer's judgement rather than the store's.
+
+    What a model is shown is bounded where text enters a context — the harness
+    windows a result, and the cabinet's `dump_read` reads back what it windowed
+    out.  Bounding it here as well would be a second rule about the same thing,
+    and one the model cannot read past.
     """
-    big = "A" * 5000 + "B" * 5000
-    message = {"role": "tool", "content": big, "tool_call_id": "c1", "name": "calc"}
+    store = TurnStore(tmp_path / "jack.turn.db")
+    big = "A" * 50000
 
-    (compacted,) = compact_tool_results([message], budget=100)
+    turn = await store.save_turn(
+        embedder=EMBEDDER,
+        messages=[{"role": "tool", "content": big, "tool_call_id": "c1"}],
+    )
 
-    assert compacted["content"].startswith("A")
-    assert compacted["content"].endswith("B")
-    assert len(compacted["content"]) < len(big)
-    assert "compacted at save" in compacted["content"]
-    assert "10000 chars" in compacted["content"]
-    assert "calc" in compacted["content"]
-    # The caller's message is untouched — the live conversation still needs the
-    # whole result, and the model may still be reasoning about it.
-    assert message["content"] == big
-
-
-def test_a_result_that_fits_is_left_alone() -> None:
-    small = {"role": "tool", "content": "42", "tool_call_id": "c1"}
-    assert compact_tool_results([small]) == [small]
-    assert len("42") < TOOL_RESULT_CHARS
-
-
-def test_compaction_does_not_compound() -> None:
-    """A turn that is saved twice is not compacted twice.
-
-    The marker is the check, so it has to be distinctive enough that a tool
-    which happened to return those words cannot be mistaken for one.
-    """
-    message = {"role": "tool", "content": "x" * 40000, "tool_call_id": "c1"}
-
-    once = compact_tool_results([message], budget=100)
-    twice = compact_tool_results(once, budget=100)
-
-    assert twice[0]["content"] == once[0]["content"]
-
-
-def test_only_tool_results_are_compacted() -> None:
-    """The assistant's own words are the record's point; they are never cut."""
-    message = {"role": "assistant", "content": "y" * 40000}
-    assert compact_tool_results([message], budget=100) == [message]
+    found = store.turn(turn)
+    assert found is not None
+    assert big in json.dumps(found.messages), "the whole of it, not a digest"
 
 
 @pytest.mark.parametrize(

@@ -1,16 +1,59 @@
-"""The cabinet's index: four kinds of document, and one corpus to find them in.
+"""The cabinet's index: five kinds of document, and one corpus to find them in.
 
 The cabinet holds **notes** (keyed by subject), a **diary** (keyed by date),
-**files** (bytes on disk, metadata here) and **reports** (keyed by title).  v1
+**files** (bytes on disk, metadata here), **reports** (keyed by title) and
+**dumps** (one tool's own output, keyed by the call that produced it).  v1
 called this plugin `memfiles` and its store had four tables, a `cabinet_docs`
 view that unioned them and twelve triggers keeping a shared FTS table in step
 (`slife/plugins/memfiles/schema.sql`).  What is kept is the *design* that made
-those four things one thing, and what is dropped is the machinery slife2 does
+those things one thing, and what is dropped is the machinery slife2 does
 without:
 
-**One table, and the kinds are a column.**  A note, a day, a saved file and a
-report are four *values* of `kind` in `cabinet_doc`, with the union of the
-columns they need.  That is the "four kinds are ONE corpus" rule read literally:
+**A dump is the harness's, and it is here because it is text.**  A result too
+large for the conversation is shortened for the model and kept whole for
+everybody else — and *nothing decides which part of it mattered*, because that
+is the tool designer's judgement and not the harness's.  So the whole of it is
+stored, and the shortened copy is a selection of lines the model made with the
+budget in hand.  Bytes belong on disk, but a tool's output is text, and text
+belongs where the cabinet's other text is: this kind is a dump rather than a
+note because nothing about it was written by anybody, and it is in **this
+corpus** rather than in a directory of its own because the thing looking for it
+later is a search.  The cost is the one §1.4 names — a rank only means
+something inside the corpus that produced it — and a dump is the one kind
+nobody wrote, so a search that names no kind reaches machine output ranked
+against a person's notes.  Whether a search that named no kind should skip this
+one is open, and it is a question about this corpus rather than about dumps.
+
+**And this kind's reader is bounded, like every tool of ours that hands text to
+a model.**  What the harness writes into the transcript is a selection of lines
+with this dump named beside it, so a model that wants a part it did not get
+reads the row back with `dump_read` — a tool that returns **at most the budget's
+worth of the original**, saying how much there is and where the next window
+starts.  The reader's cap and the harness's budget are **one number**, and that
+is the whole of what makes the arrangement closed: a reader that could hand back
+more than the budget would be a tool of ours feeding the harness's own
+shortening, which is a loop with this system's machinery at both ends.  The
+bound is a property of the tool rather than a hope about how a model uses it.
+
+**A dump is not what a search that named no kind is for.**  A result over the
+window is a tool's *output*, and the address a model has for it is the marker in
+the transcript — so the corpus does not have to carry it for retrieval, and
+machine output ranked against a person's own notes is the dilution §1.4 warns
+about: one rank, and the thing nobody wrote matching on every word it happens to
+contain.  Naming the kind reaches it (`kind="dump"`), which is also how it is
+browsed and listed.
+
+**One row per call, keyed by the call id.**  That id is the one identifier both
+sides already carry: the turn's own messages hold it on the tool message, and
+this row is keyed by it, so the association with the turn is an identity rather
+than a column — nothing to write at save time, nothing to keep in step, and
+nothing that has to exist before the turn is saved (which a turn id would not).
+A second write under one key replaces, because it is the same call re-shortened
+and not a second fact about anything.
+
+**One table, and the kinds are a column.**  A note, a day, a saved file, a
+report and a dump are five *values* of `kind` in `cabinet_doc`, with the union
+of the columns they need.  That is the "four kinds are ONE corpus" rule read literally:
 the rowid **is** the corpus id, so the two legs of a search fuse on `rowid` the
 way the turns and the tool catalogue already do (`slife2.libs.store.index.fuse_ranked`), where
 v1 had to synthesise a global id out of a per-kind offset.  Four tables also
@@ -106,17 +149,25 @@ from slife2.libs.store.index import (
 
 logger = logging.getLogger(__name__)
 
-#: The four kinds, in the order a listing names them.  A closed set: `kind` is
-#: what a read tool takes and what a search filters on, so a fifth one is a
-#: change here and in `SPECS` rather than a row somebody writes.
+#: The kinds, in the order a listing names them.  A closed set: `kind` is what a
+#: read tool takes and what a search filters on, so another one is a change here
+#: and in `SPECS` rather than a row somebody writes — plus the schema below,
+#: whose `CHECK` is built from this tuple, and the two docstrings in
+#: `slife2.plugins.cabinet.server` that enumerate the kinds to a model.
 NOTE = "note"
 DIARY = "diary"
 FILE = "file"
 REPORT = "report"
-KINDS = (NOTE, DIARY, FILE, REPORT)
+#: A tool's output, kept whole because nothing here may decide what part of it
+#: mattered.  The only kind **no tool of this plugin writes**: the harness dumps
+#: it (`slife2.libs.harness`) and writes a marked selection into the
+#: conversation, and `dump_read` is how a model reads back the part it did not
+#: get — a bounded answer, for the reason the module docstring gives.
+DUMP = "dump"
+KINDS = (NOTE, DIARY, FILE, REPORT, DUMP)
 
-#: The sentence a caller gets for a kind that is not one of the four.  Spelled
-#: from `KINDS` so that a fifth cannot be added without this agreeing.
+#: The sentence a caller gets for a kind that is not one of these.  Spelled
+#: from `KINDS` so that another one cannot be added without this agreeing.
 _KIND_HINT = f"kind must be one of: {', '.join(KINDS)}"
 
 #: The index file, inside the cabinet it indexes.
@@ -140,8 +191,9 @@ class Spec:
 
     The key is what a read tool and a remove tool take, and it is the only
     column a kind is addressed by: a note by its subject, a day by its date, a
-    file by the path it was saved to, a report by its title.  Four kinds and
-    four keys, which is why this is a column and not four tables.
+    file by the path it was saved to, a report by its title, a dump by the
+    tool call it is the output of.  Five kinds and five keys, which is why this
+    is a column and not five tables.
     """
 
     #: The column a list orders by and a since/until window filters on.  v1's
@@ -173,6 +225,17 @@ SPECS: dict[str, Spec] = {
     DIARY: Spec(time="key", day=True, appends=True, mirror="diary"),
     FILE: Spec(time="created_at", day=False, appends=False, mirror=""),
     REPORT: Spec(time="created_at", day=False, appends=True, mirror="reports"),
+    # A dump replaces and does not append: the key is one call, and a second
+    # write under it is that call shortened again rather than a second fact
+    # about anything.  Its time axis is when the output arrived — the only
+    # moment this row has, since nobody wrote it.
+    #
+    # **Mirrored like a note, unlike a file.**  The kind whose `mirror` is empty
+    # is the one whose bytes are the document; a dump's content *is* text, and
+    # the mirror is the whole of it in one file on disk — which is what the
+    # marker in the transcript points a reader at.  What that costs is a second
+    # copy of the text, in a directory nothing searches.
+    DUMP: Spec(time="created_at", day=False, appends=False, mirror="dumps"),
 }
 
 
@@ -405,13 +468,13 @@ def resolve(root: Path, relative: str) -> Path:
 # ── The schema ──────────────────────────────────────────────────────────────
 
 _SCHEMA = f"""
--- The corpus: four kinds of document in one table.
+-- The corpus: five kinds of document in one table.
 --
--- **One table rather than four plus a view**, which is the design v1 reached
--- for a view to express: the four kinds are one corpus, and a corpus whose rows
--- live in four tables is a corpus that has to be unioned back together before
--- it can be ranked.  A `kind` column says what the row is, `key` is what a read
--- and a remove tool take, and the columns the kinds do not use are empty
+-- **One table rather than one per kind plus a view**, which is the design v1
+-- reached for a view to express: the kinds are one corpus, and a corpus whose
+-- rows live in four tables is a corpus that has to be unioned back together
+-- before it can be ranked.  A `kind` column says what the row is, `key` is what
+-- a read and a remove tool take, and the columns the kinds do not use are empty
 -- rather than absent.
 --
 -- **The rowid is the corpus id**, which is what lets a search fuse its two legs
@@ -444,9 +507,9 @@ CREATE TABLE IF NOT EXISTS cabinet_doc (
     UNIQUE (kind, key)
 );
 
--- A kind's list orders by its own time column, so each one is indexed: four
--- small indexes rather than one that a `kind = ?` prefix could serve only for
--- the column it names.
+-- A kind's list orders by its own time column, so each one is indexed: one
+-- small index per kind rather than one that a `kind = ?` prefix could serve
+-- only for the column it names.
 CREATE INDEX IF NOT EXISTS idx_cabinet_updated ON cabinet_doc(kind, updated_at);
 CREATE INDEX IF NOT EXISTS idx_cabinet_created ON cabinet_doc(kind, created_at);
 
@@ -503,10 +566,50 @@ def store_of(path: Path) -> CabinetStore:
     return CabinetStore(path)
 
 
+#: Indexes already reported as predating a kind this build knows.  Reported once
+#: per process per file, for the reason `slife2.libs.store.db` keeps the same set:
+#: the store is built on every call, and the alternative is the same complaint
+#: on every turn.
+_older_reported: set[Path] = set()
+
+
+def _report_older_index(connection: sqlite3.Connection, path: Path) -> None:
+    """Say so when this index was created before a kind this build knows.
+
+    **`kind` carries a `CHECK` listing the kinds**, and `CREATE TABLE IF NOT
+    EXISTS` leaves a table that already exists exactly as it was — so an index
+    written when there were four kinds *refuses* a dump, and refuses it deep
+    inside a transaction, in SQLite's own words about a constraint.  Nothing is
+    wrong with that file except its age, and what it needs is the table rebuilt
+    (the documents are rows in it, so that is a copy rather than a re-embed).
+
+    There is no migration layer here, on `slife2.libs.store.db`'s doctrine — an
+    old file is *reported* rather than silently upgraded — and this is that
+    report: one line naming the file and the kinds it cannot hold, which is the
+    difference between a confusing failure and a known one.
+    """
+    if path in _older_reported:
+        return
+    found = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cabinet_doc'"
+    ).fetchone()
+    if found is None:
+        return
+    missing = [name for name in KINDS if f"'{name}'" not in str(found[0])]
+    if missing:
+        _older_reported.add(path)
+        logger.warning(
+            "the cabinet index %s predates %s: it will refuse a write of one "
+            "until the table is rebuilt, because `kind`'s CHECK was written "
+            "when it was created",
+            path,
+            ", ".join(missing),
+        )
+
+
 @dataclass
 class CabinetStore:
     """One agent's cabinet: the index, and the mirrors beside it."""
-
     path: Path
     #: The cabinet directory, which is where the mirrors and a saved file's
     #: bytes go.  Derived from the index's own path for the reason `index_path`
@@ -517,6 +620,7 @@ class CabinetStore:
         self.root = self.path.parent
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            _report_older_index(connection, self.path)
 
     def _connect(self) -> sqlite3.Connection:
         return connect_to(self.path)
@@ -1162,7 +1266,7 @@ class CabinetStore:
         """A since/until window on **this kind's** time axis.
 
         Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
-        because both of its callers have one; a cabinet's kinds have four
+        because both of its callers have one; a cabinet's kinds have five
         different axes and v1 made the same distinction.  The bound grammar is
         the shared one (`slife2.helpers.timeutil`), so a model writes `yesterday` here
         as it does anywhere else.
@@ -1207,17 +1311,19 @@ class CabinetStore:
         words go to the keyword leg, which asks for all of them at once; meaning
         goes to the semantic leg.  Either may be empty, and both empty is a
         browse: everything, newest first, which is what a caller who named a
-        kind and nothing else is asking for.
+        kind and nothing else is asking for.  **Dumps are the one kind a browse
+        and a search that named none do not reach** — see the module docstring.
 
         **One corpus, whatever `kind` says.**  A filter narrows what is *shown*
         and never what is ranked, because a rank only means something inside the
-        corpus that produced it (§5): four indexes would be four corpora,
-        and a query spanning them would answer with an order nothing measured.
+        corpus that produced it (§5): one index per kind would be one corpus per
+        kind, and a query spanning them would answer with an order nothing
+        measured.
 
         The window is the one `listing` uses, per kind — and with no kind it is
         the *document's* `updated_at`, which every kind has, because a window
         has to have a column and "when was this written" is the only axis all
-        four share.
+        five share.
         """
         limit = page_limit(limit, MAX_PAGE)
         if kind and kind not in SPECS:
@@ -1227,6 +1333,13 @@ class CabinetStore:
         if kind:
             clauses.append("d.kind = ?")
             values.append(kind)
+        else:
+            # **A dump is not what a search that named no kind is for**, for the
+            # reason the module docstring gives: nobody wrote it, it matches on
+            # every word it happens to contain, and the address a model has for
+            # one is the marker in the transcript.  Naming the kind reaches it.
+            clauses.append("d.kind != ?")
+            values.append(DUMP)
         if since or until:
             spec = (
                 SPECS[kind]

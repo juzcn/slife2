@@ -227,3 +227,50 @@ def estimate_turn_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     it is a lie that bounds the count.
     """
     return max(sum(estimate_message_tokens(message) for message in messages), 1)
+
+
+def clip_to_tokens(text: str, budget: int) -> str:
+    """`text`, cut to fit `budget` tokens — **and never over it**.
+
+    The last line of defence for a tool of ours whose answer is bounded by
+    `tool_result.tokens`, and it exists because "bounded" by construction is not
+    the same claim as "bounded": every path through such a tool has to come out
+    under the budget, including the ones nobody thought about — a refusal that
+    quotes back the argument it refused, a header naming a path, a sentence
+    about a pattern.  A model can put anything into an argument, so a message
+    built out of one is only bounded if something measures it.
+
+    What that failure costs is not one long answer: an answer over the budget is
+    a tool result the harness would have to shorten again, and shortening *this
+    tool's* answer is what a loop with our own machinery at both ends looks
+    like.  So the bound is enforced once, where the answer leaves, rather than
+    argued for at each return.
+
+    The cut is **announced**, like every other shortening here, and the marker is
+    measured with the text it is attached to: the point of this function is the
+    number, so a marker that pushed the answer back over the budget would defeat
+    it.  A budget too small to hold even the marker answers with the empty
+    string, which is the only answer that fits.
+    """
+    if estimate_text_tokens(text) <= budget:
+        return text
+    marker = f"\n[... {len(text)} characters do not fit {budget} tokens]"
+    room = budget - estimate_text_tokens(marker)
+    if room < 1:
+        return ""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_text_tokens(text[:middle]) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    clipped = text[:low] + marker
+    # Token counts are not additive — a boundary spanning the join costs a token
+    # of its own — so the answer is measured rather than trusted, and backed off
+    # until it is under.  It terminates: every step shortens, and the empty
+    # string is under any budget this function was called with.
+    while low > 0 and estimate_text_tokens(clipped) > budget:
+        low -= max(low // 16, 1)
+        clipped = text[:low] + marker
+    return clipped if estimate_text_tokens(clipped) <= budget else ""

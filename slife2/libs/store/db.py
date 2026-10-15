@@ -122,14 +122,6 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 #: `TurnStore._report_legacy_file`, which is why this is not simply computed.
 _legacy_reported: set[Path] = set()
 
-#: How much of an oversized tool result is kept, head and tail together.  Tool
-#: output is *reproducible* — re-run the tool and the answer comes back — so the
-#: permanent record keeps a digest rather than the whole thing, and a single
-#: result cannot grow a turn past what is reasonable to store and re-read.
-#: Always announced to the model (see the marker), never silently truncated.
-TOOL_RESULT_CHARS = 8000
-
-
 #: How much of each message a listing shows.  The browse is for *choosing* a turn
 #: to read, and a preview long enough to choose from is not the same thing as the
 #: turn — which is what `turn_read` is for.  Four hundred characters is roughly a
@@ -376,52 +368,6 @@ CREATE TABLE IF NOT EXISTS context (
     turn_ids TEXT    NOT NULL DEFAULT '[]'
 );
 """
-
-
-def compact_tool_results(
-    messages: list[dict[str, Any]], budget: int = TOOL_RESULT_CHARS
-) -> list[dict[str, Any]]:
-    """Replace oversized tool results with a head+tail digest.
-
-    Returns new dicts; the caller's list is untouched, because the live
-    conversation must keep the whole result — the model may still be reasoning
-    about it in this session.
-
-    Truncation is **announced**, never silent.  A model reading a shortened
-    result back later has to know it is shortened, and how to get the rest;
-    a digest that looked complete would be a lie it could reason from.
-
-    Idempotent: a result already carrying the marker is left alone, so a turn
-    that is re-saved is not compacted twice.
-    """
-    compacted: list[dict[str, Any]] = []
-    for message in messages:
-        content = message.get("content")
-        if (
-            message.get("role") != "tool"
-            or not isinstance(content, str)
-            or len(content) <= budget
-            or _COMPACTION_MARKER in content
-        ):
-            compacted.append(message)
-            continue
-
-        half = budget // 2
-        name = message.get("name") or message.get("tool_call_id") or "the tool"
-        marker = (
-            f"\n{_COMPACTION_MARKER} original {len(content)} chars — "
-            f"full output retrievable by running {name} again]\n"
-        )
-        compacted.append(
-            {**message, "content": content[:half] + marker + content[-half:]}
-        )
-
-    return compacted
-
-
-#: The announcement.  ASCII, and distinctive enough that the idempotence check
-#: cannot be fooled by a tool that happened to return the same words.
-_COMPACTION_MARKER = "... [compacted at save:"
 
 
 def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -680,10 +626,22 @@ class TurnStore:
 
         What a turn keeps is decided here rather than by the caller: this is the
         boundary between the live conversation and the permanent record, and the
-        rules about what is worth keeping belong on this side of it.  Two of
-        them, and both announce themselves — an oversized tool result becomes a
-        head-and-tail digest, and an attached image becomes a note saying it was
-        there (`strip_images`).
+        rules about what is worth keeping belong on this side of it.  **There is
+        one such rule, and it announces itself** — an attached image becomes a
+        note saying it was there (`strip_images`).
+
+        **There used to be a second one, and its absence is a decision.**  An
+        oversized tool result was kept as a head-and-tail digest, on the argument
+        that tool output is reproducible — re-run the tool and the answer comes
+        back — and that argument was wrong twice over: nothing checked it (a
+        `git status` after a commit, a `ps` a second later and a search over a
+        moving corpus all answer differently the second time), and deciding
+        *which* part of an output to keep is the tool designer's judgement rather
+        than the store's.  The record now keeps the whole of what happened, and
+        what a model is *shown* is bounded where text enters a context instead —
+        the harness's window over a result, and the cabinet's `dump_read` over
+        what it was windowed out of.  That bound is a number about tokens rather
+        than a guess about content, and it is one a model can read past.
 
         The document is passed through `storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of
@@ -703,9 +661,7 @@ class TurnStore:
         """
         stored = strip_images(messages)
         record = _Stored(
-            document=storable(
-                json.dumps(compact_tool_results(stored), ensure_ascii=False)
-            ),
+            document=storable(json.dumps(stored, ensure_ascii=False)),
             search=searchable_text(stored),
             created_at=created_at or now(),
             completed_at=completed_at or now(),

@@ -1,0 +1,113 @@
+▸ Tool result
+
+One tool's output is about to join the conversation above, and it is larger than
+the window this conversation can spend on it. This call chooses the part that
+joins — the lines worth having in hand now — and the whole of it is kept, so
+choosing narrowly loses nothing. A model that wants another part later reads it
+back by searching: a word finds its lines and brings the lines around them, or
+it reads on from a line number it already has.
+
+The conversation in hand is the **condition** this is judged under. What this
+result is worth is what *this* conversation is doing — the input below, the work
+in the turns above it, and what they were asking for — so a line that would
+matter to someone else is a line to leave out, and a follow-up's subject is
+often in the turns above rather than in the input.
+
+Tool: {{ tool_name }}
+Size: {{ result_tokens }} tokens, against a window of {{ budget }}.
+
+Current user input:
+{{ user_input }}
+
+{{ compact_reply }}
+
+Reply with ONE JSON object holding the fields above, and nothing else. The
+result follows, one line per line, each line prefixed with its line number.
+
+Part 1 — the selection
+
+"lines" is the part of that result to keep, as [first, last] pairs, 1-based and
+inclusive. Name lines; never quote them. The harness cuts the original at the
+numbers you give, so a line you name arrives exactly as the tool wrote it — and
+nothing you write yourself reaches anyone, because the reply is an address and
+not a text.
+
+Put the pairs in the order they matter, best first. The order is used: a
+selection that still goes over the window is trimmed from its end, so the last
+pair should be the one you are least sure of.
+
+**Choose narrowly.** Every line you keep is carried by every request this
+conversation makes from now on, and every line you leave out is one search away
+for the model that needs it.
+
+Two things that are not selections are said in the same field:
+
+  {"lines": []}          nothing here bears on this conversation. The harness
+                         shortens the result by its own rule instead, which is
+                         what it does with a reply it cannot read as well.
+
+  {"lines": "binary"}    the result is not text at all — an image's bytes, a
+                         data URL, base64, an archive. There are no lines to
+                         choose: the harness keeps the whole of it and shows a
+                         stub saying so. It cannot be read back, and saying this
+                         is cheaper than letting the conversation find out.
+
+Part 2 — the cases
+
+1. A search whose hits are what the input is about, and thousands of lines that
+are not.
+
+  input Which module defines the retry policy?
+    result 4,180 lines of matches across a tree
+    → {"lines": [[1204, 1211], [3390, 3392]]}
+
+2. A long log: the lines that say what happened, and the summary it ends with.
+
+  input Why did last night's import fail?
+    result 12,904 lines of an importer's log
+    → {"lines": [[8817, 8821], [12900, 12904]]}
+
+3. A stack trace — this program's frames, and everything under them.
+
+  input Where does the KeyError come from?
+    result 3,200 lines of traceback
+    → {"lines": [[1, 40]]}
+
+4. A dump of records, where the input names the one that matters.
+
+  input What did we store for order 88412?
+    result 9,400 lines of JSON
+    → {"lines": [[6102, 6140]]}
+
+5. A diff where the change under discussion is at the end, and the file it
+touches is worth knowing.
+
+  input Did the retry backoff change in this branch?
+    result a 6,700-line diff
+    → {"lines": [[1, 12], [6615, 6690]]}
+
+6. A test run: the count is what was asked, and the failures are why.
+
+  input How many tests failed, and which?
+    result 8,050 lines of a test run
+    → {"lines": [[8040, 8050]]}
+
+7. **A follow-up whose subject is in the conversation above** — the input does
+not name it, and the turns above do.
+
+  input What about the other one?
+    result 5,100 lines of a directory listing
+    → {"lines": [[4412, 4418]]}
+
+8. Nothing in it bears on this conversation — the call was made to find out, and
+the answer is no.
+
+  input Is there an existing migration for this table?
+    result 2,900 lines of a schema search
+    → {"lines": []}
+
+9. Not text. No selection is possible, and none should be attempted.
+
+  input What does this screenshot show?
+    result 44,000 characters of a base64 data URL
+    → {"lines": "binary"}

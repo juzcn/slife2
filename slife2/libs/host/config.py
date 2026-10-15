@@ -811,6 +811,42 @@ class ToolLoadSettings:
     threshold: int = DEFAULT_TOOL_LOAD
 
 
+#: How much of one tool result a model is handed.  **One number for both sides
+#: of the arrangement**, and that is the whole of why it is a setting rather
+#: than two: the harness spends it shortening a result too large for the
+#: conversation, and a tool of ours that hands text back — `dump_read` today —
+#: caps itself with it.  Two numbers would be two answers to "how much fits",
+#: and the failure is a loop with this system's machinery at both ends: a reader
+#: handing the harness's own shortening more than it shortened away.
+#:
+#: **The number is not measured.**  It is sized to hold a useful window of a log
+#: or a listing — a few hundred lines — without one tool call taking a turn's
+#: worth of context, and what would move it is a real turn log's distribution of
+#: result sizes.  §8.5 says the same thing about the tool list's threshold.
+DEFAULT_TOOL_RESULT_TOKENS = 4000
+
+
+@dataclass(frozen=True)
+class ToolResultSettings:
+    """The `tool_result:` section — how much of one tool result a model is handed.
+
+    **This is a bound on what enters a context, and not a judgement about what a
+    tool returned.**  Whether an output is the right length is the tool
+    designer's business; what the harness owns is the context that has to carry
+    it and the whole of what was returned, and the two are answered separately —
+    the whole is kept (a dump, or the file it already came from) and the model
+    is handed a window of it, addressed by line, which it can read past.  There
+    is no truncation and no summary anywhere in that arrangement, on purpose:
+    both decide something about the content, and neither can be undone by the
+    model that needs the part they dropped.
+
+    There is deliberately no "off".  A window with no bound is the whole output,
+    which is the thing this exists to prevent.
+    """
+
+    tokens: int = DEFAULT_TOOL_RESULT_TOKENS
+
+
 @dataclass(frozen=True)
 class CliToolSettings:
     """One external command the model may run, as its `cli:` entry describes it.
@@ -1199,6 +1235,11 @@ class Config:
     #: which owns the catalogue and therefore the budget: the count it bounds is
     #: a `SELECT COUNT(*)` over its own rows.
     tool_load: ToolLoadSettings = field(default_factory=ToolLoadSettings)
+    #: How much of one tool result a model is handed.  Read by whoever hands
+    #: text back (the cabinet's `dump_read`) and spent by the harness when it
+    #: shortens a result too large for the conversation — one number, because
+    #: two would let a reader return more than the shortening removed.
+    tool_result: ToolResultSettings = field(default_factory=ToolResultSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
     #: section rather than entries under `providers:`, for the reason
     #: `EmbeddingProviderSettings` gives.
@@ -1675,6 +1716,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         agent_task=_agent_task(raw.get("agent-task"), base.agent_task),
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
+        tool_result=_tool_result(raw.get("tool_result"), base.tool_result),
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
         file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
@@ -1772,6 +1814,28 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
             f"loads, leaving it a search it cannot keep"
         )
     return ToolLoadSettings(threshold=threshold)
+
+
+def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
+    """The `tool_result:` section, defaulted.
+
+    Absent means the default rather than an error, the rule every other section
+    follows.  A present one has to hold a positive number: a budget of zero is a
+    reader that can return no line at all and a shortening that can keep none,
+    and the model would be left with a marker naming a file it is not allowed to
+    read — a configuration that looks like a working one and answers nothing.
+    """
+    if raw is None:
+        return base
+    section = _mapping(raw, "tool_result")
+    tokens = _int_or(section.get("tokens"), base.tokens, "tool_result.tokens")
+    if tokens < 1:
+        raise ConfigError(
+            f"tool_result.tokens: {tokens} would leave every window empty — "
+            f"set at least 1, or leave the section out for "
+            f"{DEFAULT_TOOL_RESULT_TOKENS}"
+        )
+    return ToolResultSettings(tokens=tokens)
 
 
 def _media(raw: Any, base: MediaSettings) -> MediaSettings:
@@ -2525,6 +2589,7 @@ __all__ = [
     "ServerSettings",
     "SkillSettings",
     "ToolLoadSettings",
+    "ToolResultSettings",
     "ToolServerSettings",
     "default_config",
     "find_config_path",

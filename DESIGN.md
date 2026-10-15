@@ -28,7 +28,7 @@ because a chapter is a subject and not a decision.
    - [1.1 Plugins and libraries](#11-plugins-and-libraries)
    - [1.2 The plugin that is not a family](#12-the-plugin-that-is-not-a-family)
    - [1.3 The agent task, and what a second loop costs](#13-the-agent-task-and-what-a-second-loop-costs)
-   - [1.4 The cabinet, and what four kinds of document cost](#14-the-cabinet-and-what-four-kinds-of-document-cost)
+   - [1.4 The cabinet, and what a kind of document costs](#14-the-cabinet-and-what-a-kind-of-document-costs)
    - [1.5 A second provider table, and what a *kind* is on](#15-a-second-provider-table-and-what-a-kind-is-on)
    - [1.6 The file tunnel, and the first second route](#16-the-file-tunnel-and-the-first-second-route)
    - [1.7 The scheduled task, and what a clock costs](#17-the-scheduled-task-and-what-a-clock-costs)
@@ -39,6 +39,7 @@ because a chapter is a subject and not a decision.
 4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, and the process that brings up what the config needs
 5. [The context store](#5-the-context-store) — the turn log, the recall, and the decision about which turns a conversation runs on
    - [5.1 The live context, and the rebuild](#51-the-live-context-and-the-rebuild)
+   - [5.2 A result that does not fit, and the second discriminator](#52-a-result-that-does-not-fit-and-the-second-discriminator)
 6. [Compatibility notes](#6-compatibility-notes) — four facts about the installed library the code depends on, each measured rather than read
 7. [The agent loop](#7-the-agent-loop) — `loop.py` as a pure function over a message list
    - [7.1 The clocks](#71-the-clocks)
@@ -743,13 +744,16 @@ over time; §9 holds that one open, because the two ways to close it are a rate
 and a depth, and `agent_task_list` with `agent_task_cancel` is what makes it
 visible and stoppable in the meantime.
 
-### 1.4 The cabinet, and what four kinds of document cost
+### 1.4 The cabinet, and what a kind of document costs
 
 **`slife2-cabinet` is the first plugin here that owns a store of its own and
 nothing else** — not a family (it declares no catalogue rows), not a connection
 (it holds nobody's server), not a model.  v1's `memfiles`, ported: a **note**, a
-**diary**, a **saved file** and a **report**, which are four kinds of document
-and, deliberately, **one corpus**.
+**diary**, a **saved file** and a **report**, which are kinds of document and,
+deliberately, **one corpus** — and later a fifth, the **dump** (§5.2), which is
+where §1.4's own arithmetic was collected for the first time: a kind costs a
+constant, a `SPECS` row, the schema's `CHECK` and two docstrings, and the reason
+to add one is that the alternative is a second store with a second index.
 
 **One table, because four kinds are one thing to search.**  v1 had four tables, a
 `cabinet_docs` view that unioned them and twelve triggers keeping a shared FTS
@@ -1778,10 +1782,11 @@ v1 arrived at by using it. The missing column is `user_message`: v1 keeps the us
 assistant's so it can be searched and embedded apart from the answer, and here
 it is `messages[0]` instead, because a turn is one list of messages and a column
 holding the first element of it would be a second copy to keep in step.
-Everything is stored as it happened, with two deliberate
-exceptions, both announced rather than silent: an oversized tool result becomes
-a head-and-tail digest, and an attached image becomes a note saying it was
-there. Nothing is lost by the second that the row was the only copy of — the
+Everything is stored as it happened, with **one** deliberate
+exception, announced rather than silent: an attached image becomes a note saying
+it was there. There used to be a second — an oversized tool result was kept as a
+head-and-tail digest — and §5.2 is where that went and what replaced it. Nothing
+is lost by the one that is left that the row was the only copy of — the
 file is still named — in the sentence the person wrote, and in the answer of the
 `attach_image` call that attached it — so attaching it again is what sends it
 again. What the
@@ -2217,6 +2222,91 @@ path atomic and the model mandatory, "the index is not ready" is not a state the
 system can be in, so nothing has to manage it. v1's answer to the same problem
 was an embedder lifecycle, a binary gate and an event-driven drainer, and its
 write path was deliberately kept on the other side of all three.
+
+### 5.2 A result that does not fit, and the second discriminator
+
+**The harness may not judge whether a tool output is the right length.**  That is
+the tool designer's business, and a rule of ours that decided which part of an
+output "mattered" would be this system guessing at a job nobody gave it.  What
+*is* ours is two things, and they are answered separately: **the burden on a
+context**, which is arithmetic — a window is so many tokens — and **the
+completeness of what is kept**, which on the record side now has no exceptions at
+all (`db.append`'s docstring is where the old digest went and why).
+
+**So the record keeps everything and the conversation gets a window.**  A result
+over `tool_result.tokens` is stored whole as a `dump` — a cabinet document of its
+own kind (§1.4), keyed by the **tool call id** — and what the conversation
+carries is a selection of that output's own lines.  An identifier both sides
+already hold is the whole of the association with the turn: the messages carry
+the call id and the dump is keyed by it, so there is no column to write at save
+time, nothing to keep in step, and — the constraint that decided it — nothing
+that has to exist *before* the turn is saved.  A turn id does not.
+
+**The selection is made by a discriminator, and it is the second one.**  §5.1's
+decides which turns a conversation runs on; this one decides which lines of one
+result join it.  Both are one model call whose reply surface is **rendered into
+the instruction** (`templates/recall.j2`, `templates/compact.j2`) and parsed
+strictly into a shape the harness acts on, and what they share is what makes
+either safe — which is not that a model judges well:
+
+* **the answer is an address, never a text.**  §5.1's is a list of turn ids; this
+  one is a list of line ranges.  The harness cuts the original at the numbers the
+  reply names, so the text the conversation carries is the tool's own words or it
+  is nothing, and a bad selection costs a re-read rather than a fact no tool
+  said;
+* **an unreadable reply is not a decision to do nothing** (`_Rejected` against
+  `None`, §5.1's split), and every failure ends in the conversation's own
+  fallback rather than in a retry;
+* **the ordinary case costs nothing**: a result under the window is never
+  handed to it.
+
+**And the judgement is made under the conversation.**  The result, the turns in
+hand and the current input are the call's whole input, because what a result is
+worth is what *this* conversation is doing — a follow-up's subject is usually in
+the turns above rather than in the input.  A result that is not text at all takes
+the other branch: there are no lines to choose, so it is kept whole, stubbed in
+the conversation, and nothing reads it back.  That judgement is the model's too,
+and the harness writes it down as the row's mime rather than sniffing a payload
+itself.
+
+**What is windowed out stays readable, and that half is built.**  `dump_read`
+reads a dump back by *finding* rather than by scrolling: a literal pattern
+chooses lines and `context` brings their neighbours, merged into one block so
+nothing is said twice; `offset` reads from a line, negative from the end; `limit`
+reads fewer.  Every answer is numbered, matches are marked, and **every answer is
+within `tool_result.tokens` — the same number the shortening spends.**  That is
+the whole point of the number being one: a reader that could hand back more than
+the shortening removed would have its *own* answer shortened next, which is this
+system's machinery feeding itself.  So the bound is enforced once, where the
+answer leaves the tool, rather than argued for at each return — and it therefore
+holds for the answers built out of what the caller asked as well.  A `pattern`
+with a megabyte in it is clipped rather than echoed; that was a real hole, found
+by asking what happens when the thing being bounded is the argument.
+
+**Why the pattern is text and not an expression.**  A regex over a 240,000-line
+output is a program whose runtime nobody bounds, running in a server every agent
+shares; the code-reading tools that take one take it because their engines cannot
+backtrack, which Python's can (the cabinet's missing `grep` leg, §9, is the same
+argument one level up).  A literal substring is what the common case wants — a
+symbol, a path, a spelling remembered approximately — and a model that needs a
+real regex has the file, which every answer names.
+
+**What it costs.**  One model call per oversized result, whose *input* is the
+largest thing in a turn — the result plus the conversation it is judged under.
+How often that happens is **not measured**, and it is the cheap kind of number to
+get: the results are in the turn rows, and §8.5 owes the same observation about
+the tool list's threshold.  A file per dump that nothing deletes, which is the
+honest price of "kept whole".  And a dump is the one kind nobody wrote, so a
+search that names no kind skips it: machine output is not ranked against a
+person's own notes, and the address a model has for a dump is the marker in the
+transcript rather than a search.
+
+**What is built, and what is not.**  The cabinet's half is in: the kind, the
+reader, the config key, and an e2e that drives the reader over the real stack
+with the window read from the config file.  The harness's half is not — the
+discriminator's call, the marker, and the loop's seam for it — so an oversized
+result currently reaches the conversation whole: nothing is lost, and nothing is
+bounded either.  §9's entry is where that stands.
 
 ## 6. Compatibility notes
 
@@ -3273,10 +3363,12 @@ cannot say all three is a wish rather than a decision.
   works here only if that login can be had out of band and handed over as a
   header, and headless is the case that hurts, because the browser flow has no
   browser.
-- **Digesting an oversized tool result.** A tool can return more text than the
-  conversation can hold and nothing bounds it. The store already has the pattern
-  for the *record* — an oversized result becomes an announced head-and-tail
-  digest — and the same rule belongs on the way into the model.
+- **Window on the way in.** §5.2 decides this and half of it is built: the
+  cabinet keeps the whole of an oversized result (`dump`, §1.4) and `dump_read`
+  reads it back within the window. What is missing is the harness's half — the
+  discriminator's call, the marked selection written into the conversation, and
+  the loop's seam for it. Until it lands an oversized result reaches the
+  conversation whole: nothing is lost, and nothing is bounded either.
 - **A task's progress, and a person's hand on one.** §1.3's four tools are the
   model's: a conversation can start an agent task, ask about it, list it and stop
   it, and nothing draws one. A window has no line for a task that is running and
@@ -3467,11 +3559,11 @@ tell a tool error from a tool result by type alone. *Does not cover:* the
 harness's own failures — a missing hub, a missing store, an `_unreadable` answer
 from a plugin — which fail the turn.
 
-**An oversized result is recorded as a digest that says so, and an image in a
-turn that has already died is replaced by a note naming it** (§5). *Gives up:*
-the bytes, in a record that could not hold them. *Does not cover:* the live
-conversation, where the same shortening happens on the way in. *Failure goes:*
-the digest and the note are in the transcript, which is the point of both.
+**An image in a turn that has already died is replaced by a note naming it**
+(§5). *Gives up:* the bytes, in a record that is text. *Does not cover:* the live
+conversation, where the same substitution happens on the way in
+(`slife2.libs.turn.attachments.drop`). *Failure goes:* the note is in the
+transcript, which is the point of it.
 
 **Text the database cannot encode is normalised, not dropped** (§5). A lone
 surrogate becomes U+FFFD; a valid pair is put back together, which is how an

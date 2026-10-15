@@ -407,6 +407,22 @@ context:
 tool_load:
   threshold: 100
 
+# ── How much of one tool result the model is handed ───────────────────────────
+# One tool call can return more text than a conversation can carry, and it would
+# then be carried by every request that conversation makes afterwards.  So a
+# result over this many tokens is kept whole in the cabinet — a `dump`, keyed by
+# the call — and what the model is shown is a selection of that output's own
+# lines, chosen in the light of what the conversation is doing.  Nothing is cut
+# and nothing is summarised; the rest is read back with `dump_read`, which finds
+# lines by a word and reads on from a line number.
+#
+# **This is one number for both sides of that**, which is the point of it being
+# a setting: the harness spends it shortening a result, and `dump_read` caps
+# itself with it — so reading an output back can never hand over more than the
+# shortening took away, which would be this system feeding itself.
+tool_result:
+  tokens: 4000
+
 # ── MCP servers ───────────────────────────────────────────────────────────────
 # Other people's MCP servers: every entry below is one, served over stdio or
 # over HTTP, and nothing else lives here.  The section is `mcp:` — the catalogue

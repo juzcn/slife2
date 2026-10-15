@@ -342,6 +342,10 @@ skills:                                 # what one playbook in skills/ is given
 tool_load:                              # how many tools the model may hold
   threshold: 100
 
+tool_result:                            # how much of one tool result it is handed
+  tokens: 4000                          # spend it on an oversized result, and
+                                        # cap `dump_read` with it — one number
+
 context:                                # how a conversation's context is decided
   ceiling: 0.8
   floor: 0.2
@@ -695,6 +699,20 @@ A note and a saved file are documents — the second write *is* what it holds �
 and a day and a title are logs, because two entries under one date are two facts
 about it and nothing in the later text says which part of the earlier one it
 replaces. That is why only the two document kinds have a remove tool.
+
+**A fifth kind is not yours.** A tool output too large to put in a conversation
+is kept here whole — a **dump**, keyed by the call that produced it — and the
+conversation carries a selection of that output's own lines instead, within
+`tool_result: tokens:`. Nothing is cut and nothing is summarised: the lines the
+model is shown are the tool's own words, chosen in the light of what the
+conversation is doing, and everything else is one `dump_read` away. **`dump_read`
+is a searching reader**, because that is what a large output needs: give it a
+word and it finds the lines and the lines around them; give it a line number and
+it reads on from there (`-1` is the last line); give it a count and it reads
+fewer. Every answer is numbered and stays within the same window, so reading an
+output back never costs more than the conversation would have — and a search that
+does not name `dump` does not see dumps, because machine output is not what your
+own notes should be ranked against.
 
 **Everything is written twice**, and one of the two is for you: the row is what
 `cabinet_search` reads, and the same document lands as markdown under

@@ -15,6 +15,7 @@ import pytest
 import slife2.libs.host.config
 from slife2.libs.host.config import (
     API_BACKENDS,
+    DEFAULT_TOOL_RESULT_TOKENS,
     ConfigError,
     default_config,
     find_config_path,
@@ -397,11 +398,32 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     for text, expected in [
         ("agent:\n  max_steps: many\n", "agent.max_steps"),
         ("tool_load:\n  threshold: lots\n", "tool_load.threshold"),
+        ("tool_result:\n  tokens: lots\n", "tool_result.tokens"),
         ("context:\n  ceiling: high\n", "context.ceiling"),
         ("servers:\n  context:\n    port: eight\n", "servers.context.port"),
     ]:
         with pytest.raises(ConfigError, match=expected):
             load(write(tmp_path, text))
+
+
+def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
+    """A reader and the shortening it must not out-run share one setting.
+
+    Two numbers would be two answers to "how much fits", and the failure they
+    produce is a loop with this system's machinery at both ends: a tool of ours
+    handing the harness's own shortening more than it shortened away, which the
+    harness then shortens again.  So it is a section, and zero is refused for the
+    reason `tool_load.threshold: 0` is — a window that holds nothing is not a
+    configuration, it is a reader that answers nothing and a shortening that
+    keeps nothing.
+    """
+    assert load(write(tmp_path, "{}\n")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
+    stated = load(write(tmp_path, "tool_result:\n  tokens: 500\n")).tool_result
+    assert stated.tokens == 500
+
+    path = write(tmp_path, "tool_result:\n  tokens: 0\n")
+    with pytest.raises(ConfigError, match="would leave every window empty"):
+        load(path)
 
 
 def test_the_terminal_is_a_server_now(tmp_path) -> None:

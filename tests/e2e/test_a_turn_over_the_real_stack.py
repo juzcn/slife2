@@ -25,20 +25,27 @@ own readiness probe, which is what a real start waits on too.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import threading
 from collections.abc import AsyncIterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 import pytest_asyncio
 
+from fastmcp import Client
+
 from slife2.libs.host import launcher
 from slife2.libs.host.config import load
 from slife2.libs.host.paths import DATA_ENV_VAR, data_dir
+from slife2.libs.plugin.audience import client_meta
+from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.plugins.cabinet.store import DUMP, index_path, store_of
 from slife2.tui.client import MCPAgentClient
+from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.e2e
 
@@ -55,6 +62,11 @@ ANSWER = "It is 42."
 #: limit is not optional: see `_ProviderHandler.do_GET`.
 MODEL = "e2e-embed"
 INPUT_TOKENS = 8192
+
+#: How much of one tool output a model may be handed, in the config this test
+#: writes.  Small on purpose: the window is what the reader is asserted
+#: against, and a window near the default would be a window no test can see.
+WINDOW = 300
 
 
 def _free_port() -> int:
@@ -235,6 +247,13 @@ def _config_text(provider_url: str, ports: dict[str, int]) -> str:
 servers:
 {servers}
 
+# **Deliberately not the default.**  One number bounds both sides of the
+# arrangement — the harness shortening an output too large for a conversation,
+# and a tool of ours handing text back — and a test that read it from the
+# default would prove nothing about the config file every child reads.
+tool_result:
+  tokens: {WINDOW}
+
 providers:
   stub:
     api: openai-completions
@@ -399,3 +418,78 @@ async def test_a_second_turn_runs_on_the_first(stack) -> None:
         "remember the number 41" in json.dumps(message)
         for message in stack["provider"].last_messages[:-1]
     ), stack["provider"].last_messages
+
+
+async def _save_dump(agent: str, call: str, body: str) -> None:
+    """A dump, put in the cabinet the way the harness will put one there.
+
+    The write is the half of the arrangement that is not built yet — the harness
+    owns it, and this test reaching the plugin's own store is the closest thing
+    to it that exists.  Everything after this line is the real thing: a second
+    process reads the row, over a socket.
+    """
+    store = store_of(index_path(agent))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    await store.write(DUMP, call, body=body, embedder=embedder)
+
+
+async def _read(client: Client, agent: str, **arguments: Any) -> str:
+    """One `dump_read`, on behalf of a conversation, as the model reads it."""
+    result = await client.call_tool("dump_read", arguments, meta=client_meta(agent))
+    return "".join(getattr(block, "text", "") for block in result.content or [])
+
+
+@pytest.mark.asyncio
+async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) -> None:
+    """**The rare case, forced** — and the loop it must not close.
+
+    A turn in real use seldom returns an output past the window, so nothing here
+    waits for one to happen: the dump is put where the harness will put it, and
+    everything after that is real. A second process owns the corpus, the call
+    crosses a socket, and the window is the number in the config file every
+    child read.
+
+    What is under test is a loop that must not exist. The harness shortens an
+    output too large for a conversation; a reader that could hand back more than
+    the window would have its *own* answer shortened next, which is this
+    system's machinery feeding itself. So every answer is measured here, from
+    the model's side of the hop, with the same estimator the harness spends —
+    including the answers built out of what the caller asked for, which is the
+    path where a window is easiest to lose.
+    """
+    lines = 4000
+    body = chr(10).join(f"line {number} of a tool output" for number in range(1, lines + 1))
+    await _save_dump("e2e", "call_e2e", body)
+    config = stack["config"]
+    budget = config.tool_result.tokens
+    assert budget == WINDOW, "the window came from the config file"
+
+    async with Client(config.server("cabinet").url) as client:
+        first = await _read(client, "e2e", call="call_e2e")
+        following = re.search(r"offset (\d+)", first)
+        assert following is not None, first
+        offset = int(following.group(1))
+        second = await _read(client, "e2e", call="call_e2e", offset=offset)
+        found = await _read(client, "e2e", call="call_e2e", pattern="line 39")
+        huge = await _read(client, "e2e", call="call_e2e", pattern="z" * 100_000)
+
+    for answer in (first, second, found, huge):
+        assert estimate_text_tokens(answer) <= budget, answer[:300]
+
+    # A window, and the address of the next one: the numbers in it are lines of
+    # the output rather than of the page it was shown.
+    assert "line 1 of a tool output" in first
+    assert f"of {lines}" in first and "the next window starts at offset" in first
+    assert f"line {offset} of a tool output" in second
+    # Finding is the same reader, and it counts the whole output rather than the
+    # window it fitted.
+    assert "line 39 of a tool output" in found and "lines containing" in found
+    # **The path where a window is easiest to lose**: an argument that is not a
+    # pattern at all is answered with rather than echoed.
+    assert "do not fit" in huge, "a 100,000-character pattern is clipped, not quoted"
+
+    # And the whole of it is a file, which is what the marker will promise.
+    dumps = data_dir() / "agents" / "e2e" / "cabinet" / "dumps"
+    assert dumps.is_dir() and list(dumps.iterdir()), _files(data_dir())
+    assert "cabinet" in first, first[:200]

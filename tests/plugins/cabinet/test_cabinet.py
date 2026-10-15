@@ -1,4 +1,4 @@
-"""`slife2-cabinet`: four kinds of document, one corpus, and the files beside it.
+"""`slife2-cabinet`: five kinds of document, one corpus, and the files beside it.
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
@@ -10,6 +10,8 @@ the cabinet, and a save that cannot embed stores nothing.
 from __future__ import annotations
 
 import asyncio
+import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +19,11 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2.libs.host.config import load
+from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import agent_dir, data_dir
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.libs.store.index import table_exists
+from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
     build_server,
@@ -30,6 +33,7 @@ from slife2.plugins.cabinet.server import (
 )
 from slife2.plugins.cabinet.store import (
     DIARY,
+    DUMP,
     FILE,
     NOTE,
     CabinetStore,
@@ -74,7 +78,7 @@ def store(agent: str = "jack") -> CabinetStore:
 
 
 @pytest.mark.asyncio
-async def test_the_sixteen_tools_are_the_models() -> None:
+async def test_the_seventeen_tools_are_the_models() -> None:
     """Every one of them carries the mark, which is what offers it to the model.
 
     There is no `list_sources` and no catalogue row: a cabinet is found through
@@ -99,6 +103,7 @@ async def test_the_sixteen_tools_are_the_models() -> None:
         "report_save",
         "report_read",
         "report_list",
+        "dump_read",
         "cabinet_search",
         "cabinet_summarize",
     }
@@ -909,3 +914,140 @@ async def test_a_search_caps_the_shortlist_it_hands_to_sql(
     answer = await store.search(keywords=[WORD], embedder=embedder)
 
     assert len(answer["results"]) == 2, "the shortlist, not the corpus"
+
+
+# --- the dump, and the one reader that has to stay inside the budget ----------
+#
+#  A dump is the kind no tool of this plugin writes: the harness saves a tool
+#  output that was too large for the conversation, keeps the whole of it, and
+#  writes a marked selection into the conversation instead.  `dump_read` is how
+#  a model gets the part the selection did not carry — and the property these
+#  tests are about is that its answers cannot out-run the selection, because a
+#  reader that could would be feeding the thing that shortens results.
+
+
+def dump_body(lines: int = 4000, *, every: int = 0) -> str:
+    """One tool output, as the harness would have saved it."""
+    return "\n".join(
+        f"line {number} of a tool output"
+        + (" MARKER" if every and number % every == 0 else "")
+        for number in range(1, lines + 1)
+    )
+
+
+async def save_dump(call: str, body: str) -> None:
+    """A dump written the way the harness will write one — through the store.
+
+    Nothing of the plugin's writes this kind (that is the point of it: the write
+    is the harness's move, not a model's), so the reader is driven here against
+    a row put there the way the harness's own call will put it.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    await store.write(DUMP, call, body=body, embedder=embedder)
+
+
+@pytest.mark.asyncio
+async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
+    """**The property the arrangement rests on**, and not a nicety.
+
+    A reader of ours handing back more than `tool_result.tokens` would be one
+    system at both ends of a loop: the harness shortens a result, the model
+    reads it back, and the shortening fires again on our own tool's answer.  So
+    the bound is on the whole answer — header included, which is why the budget
+    is checked here rather than the lines alone — and it holds at whatever
+    number the config states.
+    """
+    await save_dump("call_big", dump_body())
+    tight = replace(load(), tool_result=ToolResultSettings(tokens=120))
+
+    async with Client(build_server(tight, embedder=StubEmbedder())) as client:
+        answer = await ask(client, "dump_read", call="call_big")
+
+    assert estimate_text_tokens(answer) <= 120
+    assert "line 1 of a tool output" in answer
+    assert "the next window starts at offset" in answer
+
+
+@pytest.mark.asyncio
+async def test_a_window_says_where_the_next_one_starts_and_it_is_there() -> None:
+    """A page is only a page if the address it names resolves to the next one."""
+    await save_dump("call_page", dump_body())
+
+    async with Client(cabinet()) as client:
+        first = await ask(client, "dump_read", call="call_page")
+        following = int(re.search(r"offset (\d+)", first).group(1))
+        second = await ask(client, "dump_read", call="call_page", offset=following)
+
+    last = int(re.search(r"lines \d+-(\d+) of", first).group(1))
+    assert last + 1 == following, "the next window starts where this one stopped"
+    assert f"line {following} of a tool output" in second
+    assert "line 1 of a tool output" not in second
+
+
+@pytest.mark.asyncio
+async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -> None:
+    """A literal, case-insensitive match, and a count that is not just the page.
+
+    The count is what tells a model whether to narrow the pattern or read on,
+    so it is of the output rather than of what fitted — "640 of 4000" is a
+    different instruction from "all 30".
+    """
+    await save_dump("call_grep", dump_body(3000, every=100))
+
+    async with Client(cabinet()) as client:
+        all_of_them = await ask(client, "dump_read", call="call_grep", pattern="marker")
+        some = await ask(client, "dump_read", call="call_grep", pattern="line")
+        none = await ask(client, "dump_read", call="call_grep", pattern="nothing here")
+
+    assert "all 30 lines containing 'marker', from line 1" in all_of_them
+    assert "line 100 of a tool output MARKER" in all_of_them
+    assert re.search(
+        r"\(\d+ of 3000 lines containing 'line'; the next start is offset \d+\)", some
+    ), "a page of matches says how many there are"
+    assert "no line from 1 contains 'nothing here'" in none
+
+
+@pytest.mark.asyncio
+async def test_a_dump_that_is_not_there_is_said_rather_than_guessed() -> None:
+    async with Client(cabinet()) as client:
+        answer = await ask(client, "dump_read", call="call_never")
+
+    assert "no saved output" in answer
+
+
+@pytest.mark.asyncio
+async def test_a_line_too_large_for_the_window_names_the_file_instead() -> None:
+    """The one output a window cannot show, and the way out of it is a path.
+
+    Nothing is truncated to make it fit: the answer says the file, which is
+    where the bytes are, and the operator's own reader can page it.
+    """
+    await save_dump("call_one", "x" * 60000)
+
+    async with Client(cabinet()) as client:
+        answer = await ask(client, "dump_read", call="call_one")
+
+    assert "does not fit" in answer
+    assert "dumps" in answer, "the header names where the bytes are"
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_names_no_kind_does_not_reach_the_dumps() -> None:
+    """A dump is reached by the marker that names it, not by a search.
+
+    It is the one kind nobody wrote, and a body full of a tool's output matches
+    on every word it happens to contain — so a search that named no kind would
+    rank machine output against a person's own notes, which is the dilution the
+    one-corpus rule warns about.  Naming the kind still reaches it, and that is
+    how it is browsed and listed.
+    """
+    await save_dump("call_word", f"{WORD} is in this output\nand a second line")
+
+    async with Client(cabinet()) as client:
+        anywhere = await ask(client, "cabinet_search", keywords=[WORD])
+        named = await ask(client, "cabinet_search", keywords=[WORD], kind=DUMP)
+
+    assert "call_word" not in anywhere
+    assert "call_word" in named
