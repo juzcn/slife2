@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import runtime_dir
+from slife2.libs.host.paths import runtime_dir, world
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,20 @@ def _lock_path(key: str) -> Path:
 
 
 def agent_claim_path(name: str) -> Path:
-    return _sub("agents") / f"{agent_key(name)}.json"
+    """The file holding one agent name's claim — **of one world**.
+
+    The world is in the key because a name is only half an identity here: a
+    machine may be running an agent called `jack` in two data directories, and
+    those are two agents (`slife2.libs.host.paths.world`).  Keyed by the name alone,
+    the second one to start would be refused as a duplicate of the first, which is
+    the opposite of what the worlds are for — while *within* a world the rule is
+    unchanged, because there one live instance per name is the whole point.
+
+    The file still lives in the machine's runtime (`_sub`), because that is where
+    everything describing what is running on this machine lives; what it is keyed
+    by is what changed.
+    """
+    return _sub("agents") / f"{_digest(f'agent:{world()}:{name}')}.json"
 
 
 def _sub(name: str) -> Path:

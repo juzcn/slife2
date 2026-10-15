@@ -42,7 +42,12 @@ from slife2.libs.host.config import (
     find_config_path,
     load,
 )
-from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir
+from slife2.libs.host.paths import (
+    add_data_dir_argument,
+    agents_dir,
+    apply_data_dir,
+    register_world,
+)
 
 __version__ = "0.1.0"
 
@@ -238,6 +243,28 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
+def _open_world() -> None:
+    """Make this data directory a world the whole machine can serve.
+
+    **Two statements, and a fresh `--data-dir` is where both were missing.**  The
+    directory is recorded, because the servers this machine is running are one
+    set shared by every world (`slife2.libs.host.launcher._reuse`) and the only way
+    a daemon can find the ledgers, logins and catalogues of a world nobody is
+    sitting in front of is to be told which directories exist
+    (`slife2.libs.host.paths.known_worlds`).  And its `agents/` is made, because a
+    client that has started an agent here and left no trace of it is a directory
+    that looks like a mistake — which is exactly what it looked like: a data
+    directory holding a `runtime/` of its own and nothing else, while every file
+    the agent wrote went to the world the servers happened to be started from.
+
+    Not done for `status` and `down`: they read what is running rather than
+    putting anything anywhere, and a world enrolled by somebody asking a question
+    would be enrolled for good.
+    """
+    register_world()
+    agents_dir()
+
+
 def tui_url(config: Config, override: str | None = None) -> str:
     """Where the TUI connects: the agent server.
 
@@ -410,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
         # stay shared with every other agent.
         with claim_agent(args.agent, headless=args.headless):
             claimed = True
+            # Before the servers are ensured, so that a daemon starting now —
+            # and the walks it does on the way up — already knows about this
+            # world rather than learning about it one call later.
+            _open_world()
             code = _ensure(config, config_path)
             if code == 0:
                 app = SlifeApp(

@@ -170,8 +170,18 @@ _REAL_RESOLVER = tokens._openai_encoding
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point every test at its own data directory."""
+    """Point every test at its own data directory — **and its own runtime**.
+
+    Two roots, because they are two kinds of fact (`slife2.libs.host.paths`): the
+    data directory is the world a test works in, and the runtime directory is
+    where the *machine's* daemons record themselves.  The second one defaults to
+    `~/.slife2/runtime`, which on a developer's machine is a directory their own
+    running stack is using — so a suite that did not redirect it would write
+    records, claims and locks into the real one, and a test that passed here
+    would be one that fails on a machine with nothing running.
+    """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
     return tmp_path / "data"
 
 

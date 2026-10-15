@@ -71,6 +71,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
+from slife2.libs.plugin.audience import client_key
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
@@ -292,14 +293,21 @@ class WindowSession:
 
 
 class Windows:
-    """Every agent's session, started the first time that agent is named.
+    """Every conversation's session, started the first time one is named.
 
     The shape is `slife2.plugins.wechat.server.Wechat`'s, deliberately: one process shared by
-    every agent, and a `dict` keyed by the agent rather than a process per agent.
+    every agent, and a `dict` keyed by the caller rather than a process per
+    agent.
+
+    **The key is `slife2.libs.plugin.audience.client_key`'s triple**, because the
+    process is shared by every *world* as well: two worlds may each be running an
+    agent called `jack`, and a table keyed by the name alone would hand the
+    second window the first one's stream — its hand-overs typed into somebody
+    else's conversation.
     """
 
     def __init__(self) -> None:
-        self._sessions: dict[str, WindowSession] = {}
+        self._sessions: dict[tuple[str, str, str], WindowSession] = {}
 
     def attach(self, agent: str) -> WindowSession:
         """A window announces itself, replacing whatever session was there.
@@ -309,12 +317,13 @@ class Windows:
         the moment the stale session is discovered.  Two *live* windows cannot
         collide here: an agent name is exclusive (`slife2.libs.host.launcher.claim_agent`).
         """
-        previous = self._sessions.get(agent)
+        key = client_key(agent)
+        previous = self._sessions.get(key)
         if previous is not None:
             previous.attached = False
             previous.fail_pending(f"another window took over {agent}'s conversation")
         session = WindowSession(agent)
-        self._sessions[agent] = session
+        self._sessions[key] = session
         return session
 
     def detach(self, agent: str, session: WindowSession) -> None:
@@ -325,8 +334,9 @@ class Windows:
         would delete the window that is actually there.
         """
         session.attached = False
-        if self._sessions.get(agent) is session:
-            del self._sessions[agent]
+        key = client_key(agent)
+        if self._sessions.get(key) is session:
+            del self._sessions[key]
 
     def showing(self, agent: str) -> WindowSession | None:
         """The session a message for *agent* should go to, if a window holds one.
@@ -336,7 +346,7 @@ class Windows:
         means the same thing it has always meant: nobody is showing that
         conversation, so there is nowhere for the words to be typed.
         """
-        session = self._sessions.get(agent)
+        session = self._sessions.get(client_key(agent))
         return session if session is not None and session.attached else None
 
 

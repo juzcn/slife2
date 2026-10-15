@@ -86,8 +86,9 @@ from slife2.libs.host.config import (
     Config,
     load_cached,
 )
+from slife2.libs.host.paths import world as world_dir
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.audience import FOR_THE_MODEL, client_key
 from slife2.libs.plugin.protocol import (
     ClientId,
     agent_reader,
@@ -182,6 +183,13 @@ class AgentTask:
     name: str
     description: str
     started_at: str
+    #: The world the task was started in, **kept rather than looked up**, and
+    #: that is not a detail: this object outlives the call that made it.  Its loop
+    #: runs on after the request returns — so a `key` that asked
+    #: `slife2.libs.host.paths.world` would be answered by whatever directory the
+    #: *daemon* is in, and the task would be filed under a key that nothing else
+    #: can find it by.  A world is a fact about where a thing was started.
+    world: str = ""
     status: str = RUNNING
     #: Empty until the task stops, and the one field whose emptiness is a fact:
     #: a model asking about a task that is still running reads it as such.
@@ -201,14 +209,19 @@ class AgentTask:
     handle: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @property
-    def key(self) -> ClientId:
-        """`(agent, name)` — what this process's registry is keyed by.
+    def key(self) -> tuple[str, str, str]:
+        """`(world, agent, name)` — what this process's registry is keyed by.
 
-        Keyed by the pair and not by the name, because this server is shared:
+        Keyed by the agent and not by the name, because this server is shared:
         two agents may each have a task called `research`, and neither may see
-        the other's, stop it, or be capped by it.
+        the other's, stop it, or be capped by it.  And keyed by the world for the
+        same reason one level up: two worlds may each be running an agent called
+        `jack`, whose tasks are as separate as their conversations.
+
+        Read off the object rather than from the ambient world, because a task's
+        loop outlives the call that started it — see the field.
         """
-        return (self.agent, self.name)
+        return (self.world, self.agent, self.name)
 
     @property
     def task_id(self) -> str:
@@ -308,7 +321,7 @@ def build_server(
     #: agent server's loop registry is not: the lifespan is not the process's
     #: lifetime over the in-memory transport, and clearing here would forget
     #: tasks every time a caller disconnected.
-    tasks: dict[ClientId, AgentTask] = {}
+    tasks: dict[tuple[str, str, str], AgentTask] = {}
 
     #: The ended ones, oldest first, so that the cap has an order to forget in.
     #: Held as the objects rather than as keys: a name that has been started
@@ -821,7 +834,8 @@ def build_server(
         )
 
     def find(agent: str, name: str) -> AgentTask | None:
-        return tasks.get((agent, name))
+        found = tasks.get(client_key(agent, name))
+        return found
 
     # ── the tools ────────────────────────────────────────────────────────
 
@@ -909,6 +923,10 @@ def build_server(
             name=name,
             description=description,
             started_at=now(),
+            # The world this call came in on, read *here*, at the only moment it
+            # is the caller's (`slife2.libs.plugin.audience.client_key` explains why
+            # the object keeps it rather than asking again later).
+            world=str(world_dir()),
         )
         tasks[task.key] = task
         # Detached from the call that starts it, which is the whole of what

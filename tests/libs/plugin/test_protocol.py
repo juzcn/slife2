@@ -16,8 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
+from slife2.libs.host import paths
 from slife2.libs.plugin import protocol as protocol_module
+from slife2.libs.plugin.audience import client_meta
 from slife2.libs.plugin.protocol import house_server, identifies, open_server
 
 pytestmark = pytest.mark.unit
@@ -146,8 +149,12 @@ def stub(monkeypatch, transport: StubTransport) -> None:
 
     No port because the TCP gate runs before anything is constructed, and this
     URL is not somewhere a socket could be opened anyway.
+
+    `Peer` and not `Client`: what `open_server` builds is the subclass that says
+    which world each call is for (`slife2.libs.plugin.protocol.Peer`), so that is
+    the name a test has to stand in front of.
     """
-    monkeypatch.setattr(protocol_module, "Client", lambda *a, **k: transport)
+    monkeypatch.setattr(protocol_module, "Peer", lambda *a, **k: transport)
 
 
 @pytest.mark.asyncio
@@ -232,3 +239,83 @@ async def test_a_cancelled_connect_lets_go_of_the_half_entered_client(
         await open_server("http://test/mcp", name="slife2-context")
 
     assert transport.closed, "a client that never finished entering is let go"
+
+
+# --- the world a call is served in -------------------------------------------
+
+
+def _world_server() -> FastMCP:
+    """A server whose one tool answers with the world it was resolved in."""
+    server: FastMCP = FastMCP("slife2-world-test")
+    server.add_middleware(protocol_module.ServeTheCallersWorld())
+
+    @server.tool
+    def where() -> str:
+        return str(paths.world())
+
+    return server
+
+
+@pytest.mark.asyncio
+async def test_a_shared_server_resolves_the_world_the_call_named(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The mechanism the whole of one-machine-many-worlds rests on.**
+
+    A plugin is one process for every world, so the directory an agent's file
+    belongs in is not the process's: it is the caller's, said out of band
+    (`slife2.libs.plugin.audience.client_meta`) because a model must not be able to
+    name somebody else's.  The middleware turns that saying into the ambient
+    world for the length of the call — which is what every `agent_dir(agent)`
+    deeper in the stack reads, and what makes the plugins this one calls in turn
+    resolve the same directory.
+    """
+    mine = tmp_path / "mine"
+    theirs = tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    theirs.mkdir()
+
+    server = _world_server()
+    async with Client(server) as client:
+        named = await client.call_tool(
+            "where", {}, meta=client_meta("jack", world=str(theirs))
+        )
+        unnamed = await client.call_tool("where", {})
+
+    assert paths.Path(named.data) == theirs
+    assert paths.Path(unnamed.data) == mine, "a call that named none is its own"
+
+
+@pytest.mark.asyncio
+async def test_the_world_does_not_leak_out_of_a_call_that_raised(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A world that outlived its call would be one the next caller inherited.
+
+    Which is not a tidiness: this process answers every world in turn, so a
+    world left set by a call that failed is the next turn's file written into
+    somebody else's directory.
+    """
+    mine = tmp_path / "mine"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    server: FastMCP = FastMCP("slife2-world-test")
+    server.add_middleware(protocol_module.ServeTheCallersWorld())
+
+    @server.tool
+    def breaks() -> str:
+        raise RuntimeError("this call failed, and the world goes with it")
+
+    @server.tool
+    def where() -> str:
+        return str(paths.world())
+
+    async with Client(server) as client:
+        # What a caller sees from a tool that raised is a `ToolError`; the world
+        # is the part that has to be back afterwards.
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "breaks", {}, meta=client_meta("jack", world=str(tmp_path / "x"))
+            )
+        after = await client.call_tool("where", {})
+
+    assert paths.Path(after.data) == mine

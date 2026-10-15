@@ -48,6 +48,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from slife2.libs.host import paths
+
 #: The `_meta` key a tool declares its audience under.  Namespaced because
 #: `_meta` is shared with the server, with FastMCP and with every other client
 #: that reads it — the protocol's own keys are reverse-DNS for the same reason.
@@ -91,11 +93,42 @@ def for_the_model(meta: Mapping[str, Any] | None) -> bool:
 #: provider — so the identity has to be said, and this is where.
 CLIENT = "slife2/client"
 
+#: The key inside that mapping naming the *world* the call is for: the data
+#: directory of the process that made it.
+#:
+#: **In here rather than in a key of its own**, because it travels exactly as the
+#: identity does and for the same reason: the servers are shared, so a plugin
+#: writing an agent's turn file is not the process that was started with
+#: `--data-dir`, and only the caller knows which directory the work belongs in.
+#: `forwarded_client` already carries this whole mapping on to the next hop, so a
+#: world reaches the far end of a chain of proxies without a second mechanism.
+#:
+#: **Not an argument, for the reason the conversation is not one**: a model that
+#: could name a directory could name somebody else's.
+WORLD = "world"
 
-def client_meta(agent: str, subagent: str = "") -> dict[str, Any]:
+
+def client_meta(agent: str, subagent: str = "", world: str = "") -> dict[str, Any]:
     """What a harness-side caller attaches to a tool call it makes for one
-    conversation."""
-    return {CLIENT: {"agent": agent, "subagent": subagent}}
+    conversation.
+
+    **The world defaults to this process's**, which is right at every call site
+    there is: a client, a launcher and a test are one world from start to finish,
+    and a plugin making a call on somebody else's behalf is *inside* a call of
+    its own, where `slife2.libs.host.paths.world` already answers with the caller's
+    (`slife2.libs.plugin.protocol.serve` is what put it there).
+
+    An explicit argument is for the case the ambient answer is the wrong one —
+    a caller acting for a world it is not itself in — and there is no such caller
+    today.
+    """
+    return {
+        CLIENT: {
+            "agent": agent,
+            "subagent": subagent,
+            "world": world or str(paths.world()),
+        }
+    }
 
 
 def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
@@ -113,6 +146,70 @@ def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
         return None
     subagent = found.get("subagent")
     return agent, subagent if isinstance(subagent, str) else ""
+
+
+def client_key(agent: str, subagent: str = "") -> tuple[str, str, str]:
+    """The key a shared daemon holds one conversation's state under.
+
+    **(world, agent, subagent)** — and the first element is the one this exists
+    for.  Every plugin here is one process serving every agent, which is why it
+    keys its state by an agent name at all; the moment there are two worlds there
+    are two agents called `jack`, and a table keyed by the name alone answers the
+    second one with the first one's conversation.  That is not a stale value but
+    the wrong conversation — a turn written into somebody else's history, or a
+    tool list built for a config that is not the caller's.
+
+    Read from `slife2.libs.host.paths.world` rather than passed, and every caller is
+    inside a call where that is already the caller's world
+    (`slife2.libs.plugin.protocol.serve`).  A caller *outside* a call — an idle
+    sweep — must not build a key at all: it iterates the ones already there.
+    """
+    return (str(paths.world()), agent, subagent)
+
+
+def world_of(meta: Mapping[str, Any] | None) -> str:
+    """The world a call named, or `""` when it named none.
+
+    Empty is the honest answer for a call that said nothing — a `status`, a
+    model server's listing — and both readers of it treat it as "the directory
+    this process is in", which is what every server did before there were
+    worlds.  A world that is not a string, or is blank, is the same as no world:
+    the field arrives off a wire, and a caller that sent something unusable is
+    not a caller that named a directory.
+    """
+    found = (meta or {}).get(CLIENT)
+    if not isinstance(found, Mapping):
+        return ""
+    named = found.get(WORLD)
+    return named if isinstance(named, str) else ""
+
+
+def with_world(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`meta`, with this process's world in it unless it already names one.
+
+    **What every outgoing call to one of our own servers goes through**, so that
+    a world reaches the far end of a chain rather than only the first hop:
+    `slife2.libs.plugin.protocol.open_server` hands back a client that does this
+    for every call it makes, and the hub's own proxy adds it to the identity it
+    forwards for the same reason.
+
+    A meta that already names a world is left alone, because a forwarded world is
+    the *caller's* — rewriting it with this process's would move somebody else's
+    work into whichever directory happens to be in front of us.  A meta that says
+    nothing gets a blob with a world and no agent, and that is not the same thing
+    as a nameless client: `client_of` answers `None` for it, so no plugin reads
+    it as somebody's, and `world_of` answers with the directory the work belongs
+    in, which is the whole of what that call needed to say.
+    """
+    found = dict(meta or {})
+    blob = found.get(CLIENT)
+    named = world_of(found)
+    if named:
+        return found
+    merged = dict(blob) if isinstance(blob, Mapping) else {}
+    merged[WORLD] = str(paths.world())
+    found[CLIENT] = merged
+    return found
 
 
 def forwarded_client(meta: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -146,6 +243,18 @@ def request_meta(ctx: Any) -> Mapping[str, Any] | None:
 def request_client(ctx: Any) -> tuple[str, str] | None:
     """The `(agent, subagent)` a tool call is on behalf of."""
     return client_of(request_meta(ctx))
+
+
+def request_world(ctx: Any) -> str:
+    """The world a tool call named, or `""`.
+
+    The reader for the few places that need the *name* rather than the ambient
+    answer — a key into a table of per-world state is the one that exists — and
+    for a test asserting what a call carried.  Everything that resolves a file
+    wants `slife2.libs.host.paths.world` instead, which the server has already
+    arranged to answer with this.
+    """
+    return world_of(request_meta(ctx))
 
 
 #: The sentence a call that did not say whose it is is refused with.  **One

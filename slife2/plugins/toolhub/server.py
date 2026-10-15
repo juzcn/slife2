@@ -195,6 +195,7 @@ from slife2.clients.gateway import (
 from slife2.clients.toolclient import UpstreamTool
 from slife2.libs.host.config import Config, ToolServerSettings
 from slife2.libs.host.paths import catalogue_db, data_dir
+from slife2.libs.host.paths import world as world_dir
 from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
 from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
@@ -446,7 +447,8 @@ class Catalogue:
     ) -> None:
         self._open = open_store
         self._embedder = embedder
-        self._store: ToolStore | None = None
+        #: One store per world, keyed by the data directory it was opened in.
+        self._stores: dict[str, ToolStore] = {}
         self._opening = asyncio.Lock()
         #: Why the catalogue could not take each source's listing, keyed by
         #: source — see `failure`, which is the only reader, and `merge`, which
@@ -485,11 +487,31 @@ class Catalogue:
         )
 
     async def store(self) -> ToolStore:
-        if self._store is None:
+        """The catalogue of **the world this call is for**, opened on first use.
+
+        One file per world (`slife2.libs.host.paths.catalogue_db`), and the key is
+        the ambient world rather than a parameter because every caller of this is
+        inside a call: the hub is shared, so a `tool_search` from one world must
+        read the catalogue that world is configured with, and a `func_tool_load`
+        must not write a loaded tool into another world's file.
+
+        Opened here rather than at start-up for the reason the whole class is
+        lazy: a world is a data directory the hub may never have heard of until
+        somebody in it asks something, and opening every world's catalogue when
+        the process comes up would be work for directories nobody is using.  The
+        rows a store opens with are this process's own at start-up — the hub's
+        own tools — and every world's first ask merges the rest, because
+        `refresh_declared` re-reads what every plugin holds on every listing.
+        """
+        key = str(world_dir())
+        found = self._stores.get(key)
+        if found is None:
             async with self._opening:
-                if self._store is None:
-                    self._store = await self._open()
-        return self._store
+                found = self._stores.get(key)
+                if found is None:
+                    found = await self._open()
+                    self._stores[key] = found
+        return found
 
     @staticmethod
     async def _off_loop(function, *args, **kwargs):
@@ -656,8 +678,11 @@ class Catalogue:
         lifespan calls it, and a hook that silently does nothing is better named
         than deleted: whoever adds a held resource to the store will find the
         place it has to be released.
+
+        Every world's, because the stores are per world
+        (`slife2.libs.plugin.audience.client_key` is the same fact one plugin over).
         """
-        self._store = None
+        self._stores.clear()
 
 
 def _unpacked(text: str, ok: bool) -> tuple[str, bool]:

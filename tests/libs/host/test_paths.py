@@ -13,12 +13,21 @@ import pytest
 
 from slife2.libs.host.paths import (
     DATA_ENV_VAR,
+    RUNTIME_ENV_VAR,
+    a2a_inbound_paths,
+    agent_dir,
     agents_dir,
+    catalogue_db,
     data_dir,
     in_checkout,
+    in_world,
+    known_worlds,
+    register_world,
     runtime_dir,
+    schedule_dbs,
     skills_dir,
     turn_dbs,
+    world,
 )
 
 pytestmark = pytest.mark.unit
@@ -114,17 +123,119 @@ def test_the_environment_overrides_both(
     assert data_dir() == elsewhere
 
 
-def test_the_parts_live_under_the_root(
+def test_the_worlds_parts_live_under_the_data_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The config's neighbours: what a person wrote, and what an agent wrote."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    assert runtime_dir() == tmp_path / "runtime"
     assert agents_dir() == tmp_path / "agents"
     assert skills_dir() == tmp_path / "skills"
+    assert catalogue_db() == tmp_path / "agents" / "tools.db"
     # ...and are made on demand, so a first run has somewhere to write.
-    assert runtime_dir().is_dir()
     assert agents_dir().is_dir()
     assert skills_dir().is_dir()
+
+
+def test_the_runtime_is_the_machines_and_not_the_worlds(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The split, and it is the whole of why a second data directory works.**
+
+    The daemons are one set per machine, so the record naming a pid, the lock two
+    launchers race on and the claim on an agent name are facts about the machine.
+    Under the data directory they were facts about *a directory* — so a second
+    `--data-dir` reported a running stack it could not see, two launchers could
+    cold-start one port, and a claim was lost to whoever looked in the other
+    folder.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.delenv(RUNTIME_ENV_VAR, raising=False)
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path / "home"))
+
+    assert runtime_dir() == tmp_path / "home" / ".slife2" / "runtime"
+    assert runtime_dir().is_dir()
+    assert not (tmp_path / "runtime").exists(), "not under the data directory"
+
+
+def test_a_call_is_served_in_the_world_it_names(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`in_world` is what a shared server puts around somebody else's work.
+
+    A server is one process for every world, so the directory an agent's file
+    goes in cannot be its own — it is the caller's, for as long as that call
+    lasts and no longer: a world that outlived its call would be one the next
+    caller in this process silently inherited.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    mine = tmp_path / "mine"
+    theirs = tmp_path / "theirs"
+
+    assert world() == tmp_path, "no call, so this process's own directory"
+    with in_world(theirs):
+        assert world() == theirs
+        assert agent_dir("jack") == theirs / "agents" / "jack"
+        assert catalogue_db() == theirs / "agents" / "tools.db"
+        with in_world(""):
+            assert world() == tmp_path, "a call that named no world is this one's"
+        assert world() == theirs, "and the outer one is back"
+    assert world() == tmp_path, "and so is this process's"
+    assert not mine.exists()
+
+
+def test_a_world_is_found_by_the_ones_that_were_told_about_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`known_worlds`: this process's own, and every one a client recorded.
+
+    A shared daemon has to be able to *name* the worlds it serves — the schedule
+    plugin walks each one's ledgers, the WeChat plugin each one's logins — and
+    nothing on the machine knows a data directory exists until somebody runs an
+    agent in it.  So a client records its world, and the record outlives the
+    client: a schedule still has to fire for a world nobody is sitting in.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
+    other = tmp_path / "other"
+    (other / "agents" / "jack").mkdir(parents=True)
+
+    assert known_worlds() == [(tmp_path / "mine").resolve()], "nothing told yet"
+
+    register_world(other)
+
+    assert known_worlds() == sorted([(tmp_path / "mine").resolve(), other.resolve()])
+    # A world whose directory has gone is skipped rather than served.
+    for path in sorted(other.rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+    other.rmdir()
+    assert known_worlds() == [(tmp_path / "mine").resolve()]
+
+
+def test_the_walks_span_every_world(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The three files a shared plugin finds its agents by, per world.
+
+    Each is a walk of `agents/` because there is no registry of agents; with two
+    worlds there are two of each, and a daemon that walked only its own would
+    never fire the other's schedules, resume its logins or answer its peers.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
+    other = tmp_path / "other"
+    for root in (tmp_path / "mine", other):
+        jack = root / "agents" / "jack"
+        jack.mkdir(parents=True)
+        (jack / "turns.db").write_bytes(b"")
+        (jack / "schedule.db").write_bytes(b"")
+        (jack / "a2a.yaml").write_text("tasks: []\n", encoding="utf-8")
+    register_world(other)
+
+    assert [path.parent.parent.parent.name for path in turn_dbs()] == ["mine", "other"]
+    assert [path.parent.parent.parent.name for path in schedule_dbs()] == [
+        "mine",
+        "other",
+    ]
+    assert [path.parent.parent.parent.name for path in a2a_inbound_paths()] == [
+        "mine",
+        "other",
+    ]
 
 
 def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(

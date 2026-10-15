@@ -111,7 +111,12 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta, request_client
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    client_key,
+    client_meta,
+    request_client,
+)
 from slife2.libs.plugin.protocol import (
     ClientId,
     close_server,
@@ -154,6 +159,13 @@ MAX_QUEUED = 32
 #: asks.  A *builder* rather than the callback, because half of what the callback
 #: needs — the backend — is decided inside `make_loop`.
 Compressor = Callable[[LLMBackend, ClientId], Compress]
+
+#: What this process holds one conversation's state under: `(world, agent,
+#: subagent)`, built by `slife2.libs.plugin.audience.client_key`.  Not `ClientId`,
+#: which is what travels on the wire — a world rides in the call's `_meta` rather
+#: than in an argument, so the two are built from different places and only one
+#: of them is a key.
+ConversationKey = tuple[str, str, str]
 
 
 async def _asked(
@@ -555,10 +567,17 @@ def build_server(
         """
         return source() if source is not None else config
 
-    #: Every conversation, by key.  One entry per `(agent, subagent)` that has
-    #: been used, which is what makes isolation a property of the key rather than
-    #: a rule somebody has to remember to apply.
-    loops: dict[ClientId, Loop] = {}
+    #: Every conversation, by key.  One entry per conversation that has been
+    #: used, which is what makes isolation a property of the key rather than a
+    #: rule somebody has to remember to apply.
+    #:
+    #: **The key is `client_key`'s triple, and the world in it is load-bearing.**
+    #: This process is shared by every world on the machine, so `jack` names two
+    #: conversations the moment two worlds have an agent by that name — and a
+    #: table keyed by the name alone does not answer the second caller with a
+    #: stale loop, it answers it with *the other world's history*: its prompt, its
+    #: turns, and a `remember` that writes there.
+    loops: dict[ConversationKey, Loop] = {}
 
     #: Serialises the two lazy caches below.  Without it, two turns that start
     #: together both miss and both open a connection, and the loser is
@@ -961,12 +980,18 @@ def build_server(
         timestamp says: its own turn refreshes `last_used` when it finishes.
         """
         cutoff = time.monotonic() - _T.timeouts.pacing.loop_idle
-        for client, loop in list(loops.items()):
+        # The key is a `client_key` triple, so it is *not* unpacked: the words
+        # that name a conversation come from the loop (`agent`, `subagent`),
+        # which is also what keeps the world out of a log line.
+        for key, loop in list(loops.items()):
             if loop.lock.locked():
                 continue
             if loop.last_used < cutoff:
-                logger.info("reaping idle conversation %s", describe(client))
-                loops.pop(client, None)
+                logger.info(
+                    "reaping idle conversation %s",
+                    describe((loop.agent, loop.subagent)),
+                )
+                loops.pop(key, None)
 
     def conversation(agent: str, subagent: str, model: str) -> Loop:
         """The conversation for this key, created on demand.
@@ -985,7 +1010,7 @@ def build_server(
         would have run a turn on the empty list the restore was about to replace.
         `Loop.restored` is the claim, and it is made under the lock.
         """
-        client = (agent, subagent)
+        client = client_key(agent, subagent)
         loop = loops.get(client)
         if loop is None:
             live = current()
@@ -1009,7 +1034,9 @@ def build_server(
             )
             loops[client] = loop
             logger.debug(
-                "started %s on %s", describe(client), model or "the default model"
+                "started %s on %s",
+                describe((agent, subagent)),
+                model or "the default model",
             )
         loop.last_used = time.monotonic()
         return loop
@@ -1311,7 +1338,7 @@ def build_server(
         delivering one would drop what somebody attached, and the message keeps
         its place and its own turn instead.
         """
-        loop = loops.get(client_id)
+        loop = loops.get(client_key(*client_id))
         if loop is None or not loop.inbox:
             return ""
         waiting = loop.inbox[0]
@@ -1737,7 +1764,7 @@ def build_server(
                 image bytes, or `data:` URIs — as many as you need in one call.
         """
         client_id = request_client(ctx)
-        loop = loops.get(client_id) if client_id else None
+        loop = loops.get(client_key(*client_id)) if client_id else None
         if loop is None:
             return "No conversation is running here, so there is nothing to attach to."
         wanted = [str(source) for source in sources if str(source).strip()]
@@ -1839,7 +1866,7 @@ def build_server(
             `answered` — whether a waiting turn took this answer — and `text`,
             which is what to tell the reader when it did not.
         """
-        loop = loops.get((agent, subagent))
+        loop = loops.get(client_key(agent, subagent))
         waiting = loop.approvals.get(call_id) if loop is not None else None
         if waiting is None or waiting.done():
             return {
@@ -2623,7 +2650,7 @@ def build_server(
             `reset`: whether there was a conversation there to forget.
         """
         await forget_context(agent, subagent)
-        forgotten = loops.pop((agent, subagent), None) is not None
+        forgotten = loops.pop(client_key(agent, subagent), None) is not None
         logger.debug(
             "reset: %s %s",
             describe((agent, subagent)),

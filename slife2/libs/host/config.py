@@ -110,7 +110,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.paths import data_dir
+from slife2.libs.host.paths import world
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -1495,14 +1495,23 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
 
     The directory is the knob — `--data-dir`, or `SLIFE2_DATA_DIR` — because
     everything slife2 keeps belongs to one folder: the config that says what to
-    run, the runtime state of what is running, and the turns they produced.
-    Naming the config separately would mean two answers to "where is this
-    installation?", and the data directory would still have to be found another
-    way.
+    run and the agents whose data it describes.  Naming the config separately
+    would mean two answers to "where is this installation?", and the data
+    directory would still have to be found another way.
+
+    **The world's while a call is being served, and this process's otherwise**
+    (`slife2.libs.host.paths.world`), which is the difference between the two readers
+    of it.  A server loads its own config at start-up and runs on it — that is
+    its identity, and no call changes it — while the tools that *edit* a config
+    (`model_switch`, the `mcp_*` and `rest-api_*` families) are editing the
+    caller's file: a window in one world changing the model must not rewrite the
+    config another world is running on.  Start-up and the launcher are outside
+    any call, so both get this process's own directory, which is all they ever
+    wanted.
     """
     if explicit is not None:
         return Path(explicit)
-    candidate = data_dir() / DEFAULT_CONFIG_NAME
+    candidate = world() / DEFAULT_CONFIG_NAME
     return candidate if candidate.is_file() else None
 
 
