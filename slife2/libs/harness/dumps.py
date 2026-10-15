@@ -165,8 +165,7 @@ def read_reply(reply: Reply) -> Decision | Rejected:
             or isinstance(pair, str)
             or len(pair) != 2
             or not all(
-                isinstance(value, int) and not isinstance(value, bool)
-                for value in pair
+                isinstance(value, int) and not isinstance(value, bool) for value in pair
             )
         ):
             return REJECTED
@@ -204,9 +203,7 @@ def numbered(lines: Sequence[str], *, start: int = 1) -> str:
     )
 
 
-def cut(
-    lines: Sequence[str], decision: Decision, budget: int
-) -> list[tuple[int, str]]:
+def cut(lines: Sequence[str], decision: Decision, budget: int) -> list[tuple[int, str]]:
     """The lines a decision keeps, in the order it named them, within `budget`.
 
     **The order is used, exactly as it is for a keep-list**: a selection that
@@ -309,9 +306,7 @@ def _ranges(kept: Sequence[tuple[int, str]]) -> list[str]:
             runs[-1][1] = number
         else:
             runs.append([number, number])
-    return [
-        str(first) if first == last else f"{first}-{last}" for first, last in runs
-    ]
+    return [str(first) if first == last else f"{first}-{last}" for first, last in runs]
 
 
 def _spent(kept: Sequence[tuple[int, str]]) -> int:

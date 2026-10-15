@@ -458,7 +458,9 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
     path where a window is easiest to lose.
     """
     lines = 4000
-    body = chr(10).join(f"line {number} of a tool output" for number in range(1, lines + 1))
+    body = chr(10).join(
+        f"line {number} of a tool output" for number in range(1, lines + 1)
+    )
     await _save_dump("e2e", "call_e2e", body)
     config = stack["config"]
     budget = config.tool_result.tokens

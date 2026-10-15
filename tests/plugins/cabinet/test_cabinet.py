@@ -115,7 +115,9 @@ async def test_the_tools_are_the_models_except_the_one_only_the_harness_calls() 
     }
     offered = {name: tool for name, tool in listed.items() if name != "dump_save"}
     assert all(for_the_model(tool.meta) for tool in offered.values())
-    assert not for_the_model(listed["dump_save"].meta), "the harness's, and nobody else's"
+    assert not for_the_model(listed["dump_save"].meta), (
+        "the harness's, and nobody else's"
+    )
     assert "list_sources" not in listed
 
 
@@ -992,7 +994,9 @@ async def test_a_window_says_where_the_next_one_starts_and_it_is_there() -> None
 
     stopped = re.search(r"lines \d+-(\d+) of", first)
     assert stopped is not None, first
-    assert int(stopped.group(1)) + 1 == following, "the next window starts where this one stopped"
+    assert int(stopped.group(1)) + 1 == following, (
+        "the next window starts where this one stopped"
+    )
     assert f"line {following} of a tool output" in second
     assert "line 1 of a tool output" not in second
 
@@ -1086,9 +1090,7 @@ def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None
             "VALUES ('note', 'kept', 'a note that predates the dump kind', "
             "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
         )
-        assert connection.execute(
-            "SELECT COUNT(*) FROM cabinet_doc"
-        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM cabinet_doc").fetchone()[0] == 1
 
     caplog.set_level(logging.WARNING)
     opened = store_of(path)

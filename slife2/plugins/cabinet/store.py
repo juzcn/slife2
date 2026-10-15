@@ -624,9 +624,7 @@ def _report_older_index(connection: sqlite3.Connection, path: Path) -> bool:
 
     statement = _DDL.replace("cabinet_doc", _REBUILDING, 1)
     connection.execute(statement)
-    connection.execute(
-        f"INSERT INTO {_REBUILDING} SELECT * FROM cabinet_doc"
-    )
+    connection.execute(f"INSERT INTO {_REBUILDING} SELECT * FROM cabinet_doc")
     connection.execute("DROP TABLE cabinet_doc")
     connection.execute(f"ALTER TABLE {_REBUILDING} RENAME TO cabinet_doc")
     connection.executescript(_SCHEMA)
@@ -645,6 +643,7 @@ def _report_older_index(connection: sqlite3.Connection, path: Path) -> bool:
 @dataclass
 class CabinetStore:
     """One agent's cabinet: the index, and the mirrors beside it."""
+
     path: Path
     #: The cabinet directory, which is where the mirrors and a saved file's
     #: bytes go.  Derived from the index's own path for the reason `index_path`

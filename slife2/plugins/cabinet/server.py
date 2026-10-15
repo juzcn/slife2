@@ -1143,9 +1143,7 @@ def _render_window(
     header that names the file, because that is where the bytes are.
     """
     where = where or "the cabinet"
-    head = (
-        f"[dump] {total} line{'s' if total != 1 else ''} — the whole of it is at {where}"
-    )
+    head = f"[dump] {total} line{'s' if total != 1 else ''} — the whole of it is at {where}"
     # **No match is not an empty window**, and the order is the whole of the
     # difference: a pattern that found nothing returned no *lines*, and reading
     # that as "one line was too large to show" would send a model looking for a

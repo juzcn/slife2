@@ -59,14 +59,14 @@ def test_a_line_is_never_quoted_and_never_rewritten() -> None:
     "reply",
     [
         "not json at all",
-        "{}",                       # answered nothing: not "keep nothing"
-        '{"lines": 3}',             # wrong type
-        '{"lines": true}',          # a bool is an int, and not a line
-        '{"lines": [[3]]}',         # not a pair
-        '{"lines": [[0, 2]]}',      # line numbers start at one
-        '{"lines": [[5, 4]]}',      # backwards
+        "{}",  # answered nothing: not "keep nothing"
+        '{"lines": 3}',  # wrong type
+        '{"lines": true}',  # a bool is an int, and not a line
+        '{"lines": [[3]]}',  # not a pair
+        '{"lines": [[0, 2]]}',  # line numbers start at one
+        '{"lines": [[5, 4]]}',  # backwards
         '{"lines": [["a", "b"]]}',
-        '{"lines": "words"}',       # a word that is not the one word
+        '{"lines": "words"}',  # a word that is not the one word
         "[]",
     ],
 )
@@ -184,12 +184,8 @@ def test_the_three_answers_that_are_not_a_window_read_differently() -> None:
     it asks for the lines by name, or it knows there is nothing to read.
     """
     lines = dumps.lines_of(body())
-    nothing = dumps.window(
-        call="c", lines=lines, kept=[], chosen=False, budget=WINDOW
-    )
-    too_long = dumps.window(
-        call="c", lines=lines, kept=[], chosen=True, budget=WINDOW
-    )
+    nothing = dumps.window(call="c", lines=lines, kept=[], chosen=False, budget=WINDOW)
+    too_long = dumps.window(call="c", lines=lines, kept=[], chosen=True, budget=WINDOW)
     binary = dumps.window(
         call="c",
         lines=["AAAA"],

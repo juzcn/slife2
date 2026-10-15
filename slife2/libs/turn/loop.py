@@ -458,9 +458,7 @@ class AgentLoop:
         )
         return text, ok
 
-    async def _fit(
-        self, call: ToolCall, text: str, messages: Sequence[Message]
-    ) -> str:
+    async def _fit(self, call: ToolCall, text: str, messages: Sequence[Message]) -> str:
         """What the conversation carries for one result: the result, or a window.
 
         **The harness's move and not the tool's**, which is why it is a callback

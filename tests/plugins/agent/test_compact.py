@@ -53,9 +53,7 @@ HUGE = "\n".join(f"line {number} of a tool output" for number in range(1, 3001))
 PICKED = '{"lines": [[100, 102]]}'
 
 
-def cabinet_stub(
-    kept: dict[str, str], *, page: str = "[dump] page one"
-) -> FastMCP:
+def cabinet_stub(kept: dict[str, str], *, page: str = "[dump] page one") -> FastMCP:
     """A cabinet with just the two tools the window mechanism uses.
 
     Real and in-memory rather than mocked, for the reason the hub is: what is
@@ -65,9 +63,7 @@ def cabinet_stub(
     server = FastMCP("cabinet-stub")
 
     @server.tool
-    async def dump_save(
-        call: str, output: str, tool: str = "", mime: str = ""
-    ) -> dict:
+    async def dump_save(call: str, output: str, tool: str = "", mime: str = "") -> dict:
         kept[call] = output
         return {"kept": call, "mirror": f"dumps/{call}.md", "chars": len(output)}
 
@@ -92,9 +88,7 @@ def config_over(tokens: int):
         # `func_tool_load` first: this test is about what happens to the result,
         # and a scripted load would be three lines of somebody else's subject.
         mcp={
-            "fake": ToolServerSettings(
-                name="fake", command="in-memory", autoload=True
-            )
+            "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
         },
     )
 
@@ -135,8 +129,9 @@ async def turn(cfg, backend, kept: dict, *, page: str = "[dump] page one") -> No
                 embedder=StubEmbedder(),
             )
         ) as hub_client,
-        Client(build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context))
-        as context_client,
+        Client(
+            build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+        ) as context_client,
         Client(cabinet_stub(kept, page=page)) as cabinet_client,
     ):
         server = build_server(
@@ -288,8 +283,9 @@ async def test_a_dump_that_cannot_be_kept_fails_the_turn(tmp_path, monkeypatch) 
                 embedder=StubEmbedder(),
             )
         ) as hub_client,
-        Client(build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context))
-        as context_client,
+        Client(
+            build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+        ) as context_client,
         Client(refused) as cabinet_client,
     ):
         server = build_server(

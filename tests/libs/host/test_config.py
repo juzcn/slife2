@@ -417,7 +417,9 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     configuration, it is a reader that answers nothing and a shortening that
     keeps nothing.
     """
-    assert load(write(tmp_path, "{}\n")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
+    assert (
+        load(write(tmp_path, "{}\n")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
+    )
     stated = load(write(tmp_path, "tool_result:\n  tokens: 500\n")).tool_result
     assert stated.tokens == 500
 

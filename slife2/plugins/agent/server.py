@@ -230,6 +230,7 @@ def _current_input(messages: Sequence[Message]) -> str:
             return message.content
     return ""
 
+
 #: The harness tool a message that arrived mid-turn is delivered under — v1's
 #: *cut-in*, and the name is v1's for the same reason its pair shape is.
 #:
@@ -696,7 +697,7 @@ def build_server(
                 timeout=_T.timeouts.work.hub,
             )
             decision = await _asked(backend, call, text, messages, window=window)
-            if decision is dumps.REJECTED:
+            if isinstance(decision, dumps.Rejected):
                 logger.info("compact_discriminator_unparsed call=%s", call.id)
                 return await _first_page(client, call.id, client_id)
             lines = dumps.lines_of(text)
