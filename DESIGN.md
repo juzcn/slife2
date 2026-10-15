@@ -1503,11 +1503,21 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   from the channel alone (`slife2.tui.widgets.channel_prefix`), exactly as
   `AsyncTask(<name>)> ` is drawn. A marker renamed would split stored turns in
   half and buy nothing on screen.
-- **One network per maker.** `unit` is both the fan-out boundary and part of the
-  MQTT client id (`{org}/{unit}/{agent}`), and the collision probe reads its own
-  unit's discovery topic — so putting each maker's swarm in its own unit makes
-  two makers' `researcher` non-colliding for free, and keeps one swarm's presence
-  churn off the machine's agent roster.
+- **Two networks, and the second is a section of its own** — not a namespace
+  inside the first. The distinction the designer settled it with is the one that
+  makes them different in kind: the agent↔agent network is a network of
+  **remote** agents (peers that may be on another machine, on a broker somebody
+  else runs) and the agent↔its-subagents network is a network of **local** ones
+  (directories under the maker's own). So `a2a-subagent:` is a second section —
+  its own broker address, which may be the same one by default and may be a
+  different one, and its own `org`/`unit` — and the plugin that carries it is a
+  second instance of the a2a module rather than a second namespace inside the
+  first. What that buys over one process with two namespaces: a swarm's several
+  hundred MQTT sessions and their tasks are not the machine's agent mesh's
+  process, so neither can wedge or cap the other, and a machine can reach its
+  peers through a team broker while its own subagents stay on the broker it
+  runs. `unit` is still what keeps two makers' `researcher` from colliding and
+  the fan-out per network small, but it is now a property of the *section*.
 
 **What it deliberately does not add.**  No `spawn`: nothing here starts a
 process, and `--headless` is a different thing (an instance with no terminal). No

@@ -361,10 +361,13 @@ distinguish it, each of them about *status* rather than about ability:
 - **It is addressed by the second half of a client id** (§2.2): `(jack,
   researcher)`, which every server already keys its state by. Nothing about the
   id is new; what is new is that an agent is allowed to be one.
-- **It is a peer on a second mesh.** Its maker and its maker's subagents form
-  their own A2A network, told apart from the agent↔agent one by the topic
-  namespace (`org`/`unit`, §3.1) on the same broker, and carrying the same A2A
-  semantics under `subagent_*` names.
+- **It is a peer on a second network.** There are two, and they are different in
+  kind: the agent↔agent one is a network of **remote** agents — peers that may be
+  on another machine, on a broker somebody else runs — and the agent↔its-
+  subagents one is a network of **local** ones, which are directories here. Each
+  is a section of its own (`a2a:` and `a2a-subagent:`, §3.1), each names its own
+  broker and its own `org`/`unit`, and the second is where a subagent is a peer.
+  It is the same A2A vocabulary throughout, presented under `subagent_*` names.
 
 **Its directory is inside its maker's.** `agents/jack/researcher/` holds
 everything the subagent owns — its conversation, its cabinet, its ledger, its
