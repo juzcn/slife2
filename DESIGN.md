@@ -35,6 +35,7 @@ because a chapter is a subject and not a decision.
    - [1.8 The A2A mesh, and what a per-process identity costs a shared one](#18-the-a2a-mesh-and-what-a-per-process-identity-costs-a-shared-one)
    - [1.9 The unattended agent, and what a window was for](#19-the-unattended-agent-and-what-a-window-was-for)
    - [1.10 The subagent, and what a peer without a process costs](#110-the-subagent-and-what-a-peer-without-a-process-costs)
+   - [1.11 The interface language, and the line a shared daemon cannot be told](#111-the-interface-language-and-the-line-a-shared-daemon-cannot-be-told)
 2. [Streaming: one pattern, used twice](#2-streaming-one-pattern-used-twice) — `tools/call` is a request/response and a TUI needs tokens as they arrive, so one pattern rather than two special cases
 3. [The loop, and why the server owns it](#3-the-loop-and-why-the-server-owns-it) — stateless servers, and the largest change of the implementation
 4. [Shared servers, and the launcher](#4-shared-servers-and-the-launcher) — the servers as shared infrastructure, the machine's bookkeeping, and the home a call is served from
@@ -1653,6 +1654,69 @@ unstated is whose window runs a turn two levels down (sdd §12); and **(5) what 
 subagent is** — `role`, `fork`, and the subagent's own file that holds them —
 **done**, which is the second pass above.  What is still open there is a per-role
 prompt template.
+
+### 1.11 The interface language, and the line a shared daemon cannot be told
+
+**Ported from v1, module and all** (`slife2/tui/i18n.py` is `slife/ui/i18n.py`
+with this project's reasons on it): two languages, one table, one accessor, and
+detection done in a dozen lines of stdlib rather than by a dependency.  The whole
+user-facing surface is under a hundred strings; the packages in this space either
+shell out to PowerShell on Windows or read the same environment variables this
+does, and a catalog file for two languages is a build step for a dictionary.
+
+**The language is resolved once, at import, and `--lang` overrides it before
+anything is built.**  That ordering is the design and not an implementation
+detail: strings are resolved where they are composed — the prompt's placeholder
+at `compose`, the status bar's first connection word in `SlifeApp.__init__` — and
+a language that could change under a running window would be two answers to "what
+language is this window in" with nothing able to say which is right.
+
+**What the port cost is a boundary, and it is this project's shape rather than
+v1's.**  In v1 the plugins ran in the window's process, so `slife2.tui.notes`'
+arrival lines (`⚡ jill online`) were composed by the same interpreter that drew
+them and the flag reached every one of them.  Here the mesh and the WeChat link
+are daemons: a shared process that outlives any one window, started once for the
+whole machine and not started with anybody's `--lang`.  So those two lines follow
+the OS locale while the window follows the flag.  Three ways out were considered
+and none was taken: **pass the language to the daemons** (a second source of
+truth, stale the moment somebody's flag differs from the process already up —
+`--a2a-broker`'s problem, arriving a second time); **send the peer's name and
+state over the wire and let the window write the sentence** (correct, and a change
+to a hand-over vocabulary that belongs to the mesh rather than to a translation);
+and **leave those lines in English** (which makes the mixed interface this port
+exists to remove).  What is left is the cheapest true statement: a machine whose
+OS language and `--lang` agree — every machine that does not pass the flag, which
+is why the flag is an override rather than a setting — never sees the difference.
+
+**Two rules about what stays English, and both were measured rather than
+assumed.**  A *key cap* is not a word: `Esc`, `Ctrl+S` and `↑/↓` are what is
+printed on the keyboard, and a translated one breaks the scan from key to action
+— v1's status bar kept its keys and translated the words after them, and this one
+does the same.  And a *tool label* is the model's vocabulary rather than the
+window's: `_label()` derives `Read file` from `read_file`, and a translated one
+would have the screen naming a tool the model cannot call by that name.
+
+**A counted noun is two keys.**  `str.format` has no plural machinery and neither
+does the table, so `{n} turn` / `{n} turns` are entries the *caller* chooses
+between — the caller being the only place that has the count — and Chinese gives
+both the same value.  The alternative, `{n} turn{s}`, puts English's plural rule
+in a template and hands a translator a brace to get wrong.
+
+**Nothing the model reads is in here, and no log line either.**  The system
+prompt, every tool schema, every job's result strings and every `logger` call are
+English by rule (sdd §9.4); so is the report `slife2` prints as the servers come
+up, which is the terminal's account of the *processes* rather than the window's
+chrome, and is the same surface as `slife2 status`.  A `--lang zh` start therefore
+prints eight English server lines and then draws a Chinese window, and that is the
+intended reading: the window is what the flag names.
+
+**The tests are pinned to English, and they have to be.**  `_detect_language()`
+asks the OS, and a contributor's Chinese Windows answers `zh` — so an autouse
+fixture in `tests/conftest.py` sets it back before every test, because the tests
+it protects are exactly the ones that never mention a language (a widget test
+asserting a panel says `Arguments` has no idea it is asserting on a translation).
+The fixture is what keeps the suite's verdict about the code rather than about
+the machine it ran on.
 
 ## 2. Streaming: one pattern, used twice
 

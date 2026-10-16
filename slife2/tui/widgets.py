@@ -69,6 +69,7 @@ from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
 from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
 from slife2.plugins.wechat.server import CONFIG_KEY as WECHAT_CHANNEL
 from slife2.plugins.wechat.server import MARKER_PREFIX as WECHAT_MARKER
+from slife2.tui.i18n import t
 from slife2.tui.theme import GLYPHS, PALETTE
 
 #: Every marker this window knows how to take back off, handed to `strip_marker`
@@ -852,11 +853,18 @@ class AssistantMessage(Static):
             self._refresh()
 
     def _thinking_block(self) -> Text:
-        """The reasoning, as one line or as a block."""
-        label = f"{GLYPHS['thinking']} Thinking"
+        """The reasoning, as one line or as a block.
+
+        The label is the interface's and the count is a fact about this block,
+        so the two are separate spans of one line rather than one formatted
+        string: a translator moving the parenthetical has to be able to move it,
+        and the glyphs on either end are not a translator's to move at all.
+        """
+        label = f"{GLYPHS['thinking']} {t('thinking')}"
         if not self._thinking_open:
             line = Text(
-                f"{label} ({len(self._thinking):,} chars) {GLYPHS['collapsed']}",
+                f"{label} {t('thinking_chars', n=len(self._thinking))} "
+                f"{GLYPHS['collapsed']}",
                 style=f"italic {PALETTE['dim']}",
             )
             return line
@@ -902,7 +910,9 @@ class AssistantMessage(Static):
             # says "working", and dim so it never reads as content.
             line.append(GLYPHS["ellipsis"], PALETTE["dimmest"])
         if self._tokens:
-            line.append(f"\n{GLYPHS['up']} {self._tokens:,} tokens", PALETTE["dim"])
+            line.append(
+                f"\n{GLYPHS['up']} {t('tokens', n=self._tokens)}", PALETTE["dim"]
+            )
         self.update(line)
 
 
@@ -957,12 +967,17 @@ class ToolCallWidget(VerticalScroll):
         self._body.update(self._content())
 
     def _status(self) -> tuple[str, str, str]:
-        """`(glyph, colour, word)` for the header row."""
+        """`(glyph, colour, word)` for the header row.
+
+        The word is a key rather than the state's own name: `running` is what
+        this widget's vocabulary calls the state and `运行中` is what the screen
+        says about it, and only the first of those belongs in the code.
+        """
         if not self._done:
-            return GLYPHS["running"], PALETTE["amber"], "running"
+            return GLYPHS["running"], PALETTE["amber"], t("tool_running")
         if self._is_error:
-            return GLYPHS["error"], PALETTE["red"], "error"
-        return GLYPHS["done"], PALETTE["green"], "done"
+            return GLYPHS["error"], PALETTE["red"], t("tool_error")
+        return GLYPHS["done"], PALETTE["green"], t("tool_done")
 
     def _label(self) -> str:
         """`read_file` reads better as `Read file`."""
@@ -1015,7 +1030,7 @@ class ToolCallWidget(VerticalScroll):
             return line
 
         line.append("\n")
-        line.append("Arguments", f"bold {PALETTE['muted']}")
+        line.append(t("tool_arguments"), f"bold {PALETTE['muted']}")
         if self.arguments:
             for key, value in self.arguments.items():
                 shown = str(value)
@@ -1024,14 +1039,16 @@ class ToolCallWidget(VerticalScroll):
                 line.append(f"\n  {key} = ", PALETTE["muted"])
                 line.append(shown, PALETTE["text-secondary"])
         else:
-            line.append("\n  (no arguments)", PALETTE["muted"])
+            line.append(f"\n  {t('tool_no_arguments')}", PALETTE["muted"])
 
         if self._done:
             if self._is_error:
-                line.append("\n\nError", f"bold {PALETTE['red']}")
+                line.append(f"\n\n{t('tool_error_heading')}", f"bold {PALETTE['red']}")
                 line.append("\n" + self._result, PALETTE["red"])
             else:
-                line.append("\n\nResult", f"bold {PALETTE['muted']}")
+                line.append(
+                    f"\n\n{t('tool_result_heading')}", f"bold {PALETTE['muted']}"
+                )
                 line.append("\n" + self._result, PALETTE["text-secondary"])
                 # What the tool actually returned, when that is more than the
                 # preview shows.  A line-count guard used to stand here,
@@ -1043,8 +1060,8 @@ class ToolCallWidget(VerticalScroll):
                 # exactly this and was read by nothing else.
                 if self._result_chars > len(self._result):
                     line.append(
-                        f"\n{GLYPHS['ellipsis']} {self._result_chars:,} characters "
-                        f"in all",
+                        f"\n{GLYPHS['ellipsis']} "
+                        f"{t('tool_result_chars', n=self._result_chars)}",
                         PALETTE["dimmest"],
                     )
         return line
@@ -1406,16 +1423,20 @@ class ModelPicker(Static):
         if self._decided:
             return self._decided_line()
         line = Text()
-        line.append("Switch model", f"bold {PALETTE['text']}")
+        line.append(t("picker_title"), f"bold {PALETTE['text']}")
         if self._cursor < 0:
             # A conversation running a model this config no longer lists: said,
             # so the missing cursor is not read as a broken picker, and so that
-            # `Enter` doing nothing is explained rather than felt.
+            # `Enter` doing nothing is explained rather than felt.  A record with
+            # no name at all is named by a word of its own, so the sentence
+            # reads as one either way.
             line.append("\n")
             line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
             line.append(
-                f"{self._active or 'the model in use'} is not one of these — "
-                f"Enter picks nothing",
+                t(
+                    "picker_missing",
+                    name=self._active or t("picker_model_in_use"),
+                ),
                 PALETTE["red"],
             )
         for index, choice in enumerate(self._choices):
@@ -1438,23 +1459,26 @@ class ModelPicker(Static):
             meta = _model_meta(choice)
             if meta:
                 line.append(f"  {meta}", PALETTE["dim"])
+        # The hint row: the keys as they are, and the action each one performs in
+        # the interface's language.  `↑`/`↓`, `Enter` and `Esc` are what is
+        # printed on the keyboard, so they are not words and do not move.
         line.append("\n")
         line.append(f"{GLYPHS['up']}/{GLYPHS['down']} ", PALETTE["dim"])
-        line.append("select", f"bold {PALETTE['green']}")
+        line.append(t("picker_select"), f"bold {PALETTE['green']}")
         line.append("  Enter ", PALETTE["dim"])
-        line.append("pick", f"bold {PALETTE['green']}")
+        line.append(t("picker_pick"), f"bold {PALETTE['green']}")
         line.append("  Esc ", PALETTE["dim"])
-        line.append("cancel", f"bold {PALETTE['red']}")
+        line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
     def _decided_line(self) -> Text:
         line = Text()
         if self._chosen is None:
             line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append("Cancelled", f"bold {PALETTE['red']}")
+            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
             return line
         line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-        line.append("Switched to ", f"bold {PALETTE['green']}")
+        line.append(t("picker_switched"), f"bold {PALETTE['green']}")
         line.append(self._chosen.ref, f"bold {PALETTE['text']}")
         return line
 
@@ -1556,7 +1580,7 @@ class ApprovalPrompt(Static):
         line = Text()
         line.append(f"{GLYPHS['running']} ", f"bold {PALETTE['amber']}")
         line.append(self._name, f"bold {PALETTE['text']}")
-        line.append("  requests approval", PALETTE["amber"])
+        line.append(t("approval_requests"), PALETTE["amber"])
         # A glance's worth of the arguments, and the count of what is left: the
         # question is "may this run", and a call whose arguments run to a page
         # cannot be answered from a page anyway.
@@ -1569,22 +1593,27 @@ class ApprovalPrompt(Static):
             line.append(shown, PALETTE["muted"])
         rest = len(items) - APPROVAL_ARG_LINES
         if rest > 0:
-            line.append(f"\n  {GLYPHS['ellipsis']} {rest} more", PALETTE["dim"])
+            line.append(
+                f"\n  {GLYPHS['ellipsis']} {t('approval_more', n=rest)}",
+                PALETTE["dim"],
+            )
+        # `y` and `n`/`Esc` are the keys; the words after them are the actions,
+        # and they are the interface's (`ModelPicker._body`'s rule).
         line.append("\n")
         line.append("y ", PALETTE["dim"])
-        line.append("approve", f"bold {PALETTE['green']}")
+        line.append(t("approval_approve"), f"bold {PALETTE['green']}")
         line.append("   n/Esc ", PALETTE["dim"])
-        line.append("deny", f"bold {PALETTE['red']}")
+        line.append(t("approval_deny"), f"bold {PALETTE['red']}")
         return line
 
     def _decided_line(self) -> Text:
         line = Text()
         if self._decided:
             line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-            line.append("approved", f"bold {PALETTE['green']}")
+            line.append(t("approval_approved"), f"bold {PALETTE['green']}")
         else:
             line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append("denied", f"bold {PALETTE['red']}")
+            line.append(t("approval_denied"), f"bold {PALETTE['red']}")
         line.append("  ", PALETTE["dim"])
         line.append(self._name, f"bold {PALETTE['text']}")
         return line
@@ -1595,14 +1624,19 @@ class ApprovalPrompt(Static):
 
 
 def _model_meta(choice: ModelChoice) -> str:
-    """One model's facts, as the row's trailing note: what it costs and does."""
+    """One model's facts, as the row's trailing note: what it costs and does.
+
+    Two of the three words are the status bar's (`StatusBar.update_status`
+    reads the same keys), which is the point: a model that reasons is the same
+    fact in both places, and one word for it cannot drift into two.
+    """
     parts = []
     if choice.context_window:
-        parts.append(f"ctx {choice.context_window:,}")
+        parts.append(t("model_context", n=choice.context_window))
     if choice.thinking:
-        parts.append("thinking")
+        parts.append(t("model_thinking"))
     if choice.vision:
-        parts.append("vision")
+        parts.append(t("model_vision"))
     return "  ".join(parts)
 
 
@@ -1631,13 +1665,15 @@ class StatusBar(Static):
         if not connected:
             parts.append(f"[{PALETTE['red']}]{connection}[/]")
         elif busy:
-            parts.append(f"[{PALETTE['amber']}]working{GLYPHS['ellipsis']}[/]")
+            parts.append(
+                f"[{PALETTE['amber']}]{t('status_working')}{GLYPHS['ellipsis']}[/]"
+            )
         # Messages the user has sent that have not had their turn yet.  Shown
         # because they are deliberately *not* in the transcript until they run:
         # a queued message appearing above the answer still being written would
         # misreport the order the turns actually happened in.
         if queued:
-            parts.append(f"[{PALETTE['dim']}]{queued} queued[/]")
+            parts.append(f"[{PALETTE['dim']}]{t('status_queued', n=queued)}[/]")
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
 
@@ -1651,9 +1687,11 @@ class StatusBar(Static):
         # has to know *before* typing — `@picture.png` is either going to work
         # or be refused, and the config already knows which.
         if thinking:
-            parts.append(f"[{PALETTE['dim']}]{GLYPHS['thinking']} thinking[/]")
+            parts.append(
+                f"[{PALETTE['dim']}]{GLYPHS['thinking']} {t('model_thinking')}[/]"
+            )
         if vision:
-            parts.append(f"[{PALETTE['dim']}]{GLYPHS['vision']} vision[/]")
+            parts.append(f"[{PALETTE['dim']}]{GLYPHS['vision']} {t('model_vision')}[/]")
 
         # The *last* turn's tokens, not a running total: what a context
         # percentage is a percentage of is the conversation as it now stands,
@@ -1673,12 +1711,14 @@ class StatusBar(Static):
             # No window is configured for this model, and inventing one would
             # render a percentage that means nothing.
             parts.append(
-                f"[{PALETTE['dim']}]{GLYPHS['up']} {context_tokens:,} tokens[/]"
+                f"[{PALETTE['dim']}]{GLYPHS['up']} {t('tokens', n=context_tokens)}[/]"
             )
         if steps:
-            parts.append(
-                f"[{PALETTE['dim']}]{steps} step{'s' if steps != 1 else ''}[/]"
-            )
+            # The noun inflects in English and not in Chinese, so which of the
+            # two spellings is wanted is decided here — the count is here
+            # (`slife2.tui.i18n`).
+            key = "status_step" if steps == 1 else "status_steps"
+            parts.append(f"[{PALETTE['dim']}]{t(key, n=steps)}[/]")
         # Both spellings of the cancel, because they are not interchangeable:
         # the copy actions get first refusal on ctrl+c, and escape is the one
         # that stops the turn and cannot do anything else — nothing else claims
@@ -1693,6 +1733,7 @@ class StatusBar(Static):
         # XON, so the bar would be promising a key that arrives nowhere.  A bar
         # read by somebody whose key does nothing is worse than a bar that says
         # less.
-        hints = "Esc/Ctrl+C cancel  Ctrl+S model  Ctrl+C quit"
-        parts.append(f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {hints}[/]")
+        parts.append(
+            f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {t('status_keybinds')}[/]"
+        )
         self.update("  ".join(parts))

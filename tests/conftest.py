@@ -212,6 +212,28 @@ def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tokens, "_openai_encoding", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def english_window() -> None:
+    """Pin the window's language to English, whatever locale this machine is in.
+
+    `slife2.tui.i18n` resolves the language from the OS at import, and a
+    contributor's Chinese Windows answers `zh` — which would flip every string
+    the TUI draws and turn the suite's English assertions (`"Arguments"`,
+    `"restored 3 turns"`, `"running"`, `"Switched to "` …) red for a reason that
+    has nothing to do with the change being tested.  Pinning here keeps those
+    assertions about the code, and it is autouse because the tests it protects
+    are the ones that never mention a language: a widget test asserting on a
+    panel's words has no idea it is asserting on a translation.
+
+    It is set *before* each test rather than restored after, so a test that
+    switches language (`tests/tui/test_i18n.py`) cannot leak into the next one
+    in either direction.
+    """
+    from slife2.tui.i18n import set_language
+
+    set_language("en")
+
+
 @pytest.fixture
 def tokenizer_resolver():
     """The real vocabulary resolver, for a test that wants to drive the load itself.

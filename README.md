@@ -2,6 +2,8 @@
 
 **Terminal-based AI agent — slife v2, a clean-slate rebuild.**
 
+[中文](README.zh-CN.md)
+
 **A plugin is an MCP server over Streamable HTTP plus a small contract** — an
 implementation of the protocol, not one of its own. The TUI is a client and
 nothing else; the agent loop is a server and a client; each model backend is its
@@ -64,7 +66,7 @@ uv sync
 
 ```
 slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
-       [--a2a-broker HOST:PORT] [--keep-servers] [--headless]
+       [--a2a-broker HOST:PORT] [--keep-servers] [--headless] [--lang EN|ZH]
                                          ensure the servers, then run the TUI
 slife2 status                            what is running, and where
 slife2 down                              stop the servers this config names
@@ -95,6 +97,19 @@ simply offline. Nothing else about the agent changes — it is a window with no
 screen rather than a second kind of agent — and what tells a *model* that nobody
 is there is its system prompt (`headless` in the template a prompt is written
 in), which is the lever for how it behaves. **Ctrl+C** is the way out.
+
+**`--lang` is the window's language** — English or Chinese, otherwise detected
+from the OS. Without it a Chinese system gets a Chinese window and anything else
+gets an English one; with it you can have either on any machine, which is what it
+is for. What it covers is the window: the labels, the harness's own lines, the
+panels, the picker, the approval row, the status bar. **It does not reach the
+model.** The system prompt, every tool schema and every log line are English
+whatever the flag says, because a conversation that changed language with the
+terminal's would be a second variable in the one place a difference is expensive
+to find — and external text (a tool's result, a peer's message) is somebody
+else's words and passes through as it is. The keys keep their English names,
+since `Esc` and `Ctrl+S` are what is printed on the keyboard; the action words
+after them are the interface's.
 
 **The servers are shared.** A second `slife2` — under any `--agent` — finds them
 already running and reuses them; nothing is started twice and nothing is

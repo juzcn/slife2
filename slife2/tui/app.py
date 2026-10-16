@@ -81,6 +81,7 @@ from slife2.tui.client import (
     WindowClient,
     refused,
 )
+from slife2.tui.i18n import t
 from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.widgets import (
@@ -288,7 +289,13 @@ class SlifeApp(App[None]):
         self._window: WindowClient | None = None
         self._mesh: MeshClient | None = None
         self._connected = False
-        self._connection_text = "connecting"
+        #: What the status bar says when there is no connection.  **Resolved in
+        #: the interface's language where it is set**, rather than stored as a
+        #: state and translated at render time: the language is decided once
+        #: before this window exists (`slife2.tui.i18n`), so the two are the same
+        #: answer and the second spelling is one more thing `_refresh_status`
+        #: would have to know.
+        self._connection_text = t("connection_connecting")
         #: Whether the previous conversation is drawn, or being drawn.  Once
         #: per window: reading it again would append a second copy of a history
         #: the transcript is already showing.  **Set when the draw is finished**,
@@ -339,7 +346,7 @@ class SlifeApp(App[None]):
             # The agent's name, not the program's: the prompt is addressed to
             # whoever this instance is, and it is the one place the name is
             # read before anything has been said.
-            placeholder=f"Message {self._agent}…",
+            placeholder=t("input_placeholder", agent=self._agent),
             id="user-input",
             # `focus` rather than `indent`: Tab in a prompt should reach the
             # rest of the app, not insert whitespace nobody can see.
@@ -529,10 +536,13 @@ class SlifeApp(App[None]):
             await self._client.connect()
         except Exception as exc:  # noqa: BLE001 - a dead server is operational, not fatal
             self._connected = False
-            self._connection_text = f"disconnected: {exc}"
+            self._connection_text = t("connection_disconnected", err=exc)
             logger.warning("agent server connection failed: %s", exc)
         else:
             self._connected = True
+            # Deliberately not through `t()`: the bar draws `connection` only
+            # when there is none, so this is a state this window is in rather
+            # than a word anybody reads.
             self._connection_text = "connected"
         self._refresh_status()
         if self._connected:
@@ -588,9 +598,7 @@ class SlifeApp(App[None]):
         """
         await self._ensure_connected()
         if not self._connected:
-            raise ConnectionError(
-                f"not connected to the agent server ({self._connection_text})"
-            )
+            raise ConnectionError(t("not_connected", state=self._connection_text))
 
     async def _restore(self) -> None:
         """Show the conversation this name already had.  Once.
@@ -627,7 +635,7 @@ class SlifeApp(App[None]):
                 # continues either way.
                 logger.warning("the previous conversation could not be read: %s", exc)
                 self._connected = False
-                self._connection_text = f"disconnected: {exc}"
+                self._connection_text = t("connection_disconnected", err=exc)
                 self._refresh_status()
                 return
             restore(self._transcript, turns)
@@ -908,7 +916,7 @@ class SlifeApp(App[None]):
             # Said rather than shown as an empty picker: a list with no rows is
             # a key that looks broken, and the tool that would fix it is the
             # thing to name.
-            self._transcript.add_error("no models are configured; `model_set` adds one")
+            self._transcript.add_error(t("no_models"))
             return
         future: asyncio.Future[ModelChoice | None] = asyncio.Future()
         picker = self._transcript.add_picker(
@@ -939,7 +947,7 @@ class SlifeApp(App[None]):
             await self._require_connected()
             answer = await self._client.switch_model(choice.ref)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(f"the model was not switched: {exc}")
+            self._transcript.add_error(t("model_switch_failed", err=exc))
             return
         # A refusal rather than a note (`client.refused`), and the difference is
         # the bar: a note would leave it describing a switch that never
@@ -993,7 +1001,7 @@ class SlifeApp(App[None]):
             await self._require_connected()
             answer = await self._client.answer_approval(call_id, approved)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(f"the answer was not delivered: {exc}")
+            self._transcript.add_error(t("approval_undelivered", err=exc))
             return
         # **A sentence means nobody was waiting for it**: the turn ended while
         # the prompt was up — a cancel, or another window answering the same

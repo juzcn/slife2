@@ -39,6 +39,7 @@ from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
 from slife2.libs.turn.tools import is_harness
 from slife2.tui import notes
+from slife2.tui.i18n import t
 from slife2.tui.widgets import ChatView
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
                 # what came back, and the row that did not is the difference a
                 # reader has to be able to account for.  The row itself stays in
                 # the log line, where the store it contradicts can be looked at.
-                chat.add_error("a stored turn could not be drawn")
+                chat.add_error(t("turn_unreadable"))
                 logger.warning(
                     "a stored turn could not be drawn: %r", turn, exc_info=True
                 )

@@ -35,6 +35,13 @@ which is the lever for how it behaves.  `Ctrl+C` is the way out.
 `--help` lists the options, and the flags may be written before or after the
 command.  `--data-dir` is the one worth knowing about on its own: it decides
 which config, which runtime state and which databases everything else reads.
+
+`--lang` is the window's language, and **the window's only** (`slife2.tui.i18n`):
+the model never reads a translated string, the logs stay English whatever the
+flag says, and the report this command prints as the servers come up is the
+terminal's rather than the window's.  It overrides the language the OS reports,
+which is what it is for — a Chinese window on a machine whose interface is
+English.
 """
 
 from __future__ import annotations
@@ -136,6 +143,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "which model to start with, as provider/model "
             "(default: the config's `default`)"
+        ),
+    )
+    parser.add_argument(
+        "--lang",
+        default=None,
+        choices=("en", "zh"),
+        help=(
+            "the window's language, overriding the one the OS reports "
+            "(default: detected)"
         ),
     )
     parser.add_argument(
@@ -508,6 +524,18 @@ def _down(config: Config) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `slife2` console script."""
     args = _parse_args(argv)
+    if args.lang:
+        # **Set before anything is built**, because every string the window draws
+        # is resolved at the moment it is composed — and before the servers are
+        # ensured, so that a window is never opened in one language and finished
+        # in another.  The import is here rather than at module scope for this
+        # module's usual reason: `slife2.libs.host.config` and the servers stay
+        # importable without a UI, and this module is free of Textual only by
+        # accident of where it lives (`slife2/tui/__init__.py` imports nothing,
+        # and `i18n` needs nothing but the stdlib).
+        from slife2.tui.i18n import set_language
+
+        set_language(args.lang)
 
     try:
         config_path = find_config_path()

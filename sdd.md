@@ -1065,6 +1065,43 @@ is not an error: the turn may have ended a moment earlier, and a client that
 raised over it would call a prompt that arrived too late a failure of the
 connection.
 
+### 9.4 The interface language, and what is never translated
+
+**The window is bilingual — English and Chinese — and it is the only thing that
+is.** Detection is the OS's own answer, once, at import: the Windows UI-language
+API on Windows (the C locale carries the *region*, not the interface's
+language), else `LC_ALL` / `LC_MESSAGES` / `LANG`, most specific first, with
+Chinese locales selecting Chinese, anything else English, and any failure
+degrading to English rather than to a window that cannot be drawn. `--lang`
+overrides it, and is set before anything is built. The layer is one accessor
+over a two-language table (`tui/i18n.py`) — no catalog files, no dependency —
+and **a missing key or placeholder raises at the call site** rather than
+rendering a blank slot.
+
+**Model input is English, uniformly**: the system prompt, harness and plugin tool
+schemas, job schemas and result strings, and every log line. External text — a
+tool's result, a peer's message, a third-party command's `--help` — keeps the
+language of its source and passes through untranslated, because it is somebody
+else's words rather than this window's chrome. **Tool labels stay English too**:
+`read file` is the name the model calls, and a translated one would put the
+screen and the tool list in disagreement about what a tool is called.
+
+**Two things are key caps rather than words**, and stay English in both
+languages: the keys in the status bar's hint (`Esc`, `Ctrl+S`), because a
+translated key label breaks the key-to-action scan, and the keys in the picker's
+and the approval row's hints. The action word after each one is the interface's.
+
+**A counted noun is two entries in the table**, because `str.format` has no plural
+machinery: the caller picks between them, since the caller is what has the count.
+
+**One boundary is worth knowing.** The lines a *daemon* writes — a peer or a
+channel coming online (`a2a/mesh.py`, `wechat/server.py`, through `tui/notes.py`)
+— are composed in that daemon's process, and the daemon is shared and outlives
+any one window. It was not started with `--lang`, so it follows the OS locale
+where the window follows the flag; a machine whose OS language and `--lang`
+agree — which is every machine that does not pass the flag — never sees the
+difference.
+
 ---
 
 ## 10. Configuration and the environment
