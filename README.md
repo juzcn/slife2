@@ -372,7 +372,7 @@ tool_load:                              # how many tools the model may hold
   threshold: 100
 
 tool_result:                            # how much of one tool result it is handed
-  tokens: 4000                          # spend it on an oversized result, and
+  tokens: 8000                          # spend it on an oversized result, and
                                         # cap `dump_read` with it — one number,
                                         # and at least 128: a window smaller than
                                         # the address it opens with is refused

@@ -2899,14 +2899,34 @@ real regex has the file, which every answer names.
 is the largest thing in a turn — the result plus the conversation it is judged
 under — and how often that happens is the number the whole mechanism's price
 turns on.  Read off this machine's turn log on 2026-10-15: **181 turns, 347 tool
-results, median 48 tokens, p90 1,556, largest 5,284**.  Against the shipped
-window of 4,000 that is **7 results, 2.0%** over it (17% are over 1,000 and
-nothing at all is over 8,000), so the mechanism fires about once in fifty calls
-and the call it fires is worth paying for: the alternative is that result carried
-by every request the conversation makes afterwards.  It is one machine's log
-rather than a corpus, and it is the number that sizes `tool_result.tokens` — the
-instrument is the rows themselves, so re-reading it is a query (§8.5 owes the
-same observation about the tool list's threshold).
+results, median 48 tokens, p90 1,556, largest 5,284**.  Against the window it
+shipped with, 4,000, that is **7 results, 2.0%** over it (17% are over 1,000 and
+nothing at all is over 8,000), so the mechanism fired about once in fifty calls.
+It is one machine's log rather than a corpus, and it is the number that sizes
+`tool_result.tokens` — the instrument is the rows themselves, so re-reading it is
+a query (§8.5 owes the same observation about the tool list's threshold).
+
+**And re-read on 2026-10-16 (182 turns, 349 results, median 48, p90 1,587,
+largest 5,284 — the same distribution) it moved the default to 8,000.**  The
+first reading said the mechanism fires rarely; the second says the *trade it
+makes when it fires* is the wrong way round, and that is a fact about the
+mechanism rather than about the models.  A result over the window costs a
+discriminator call — a model call carrying the whole conversation — plus a dump
+file and a `dump_read` round trip when the model wants the rest; what it buys is
+the lines the window did not keep, which on this log is **at most 1,284 tokens**.
+A model call to save a kilobyte is a bad trade at any window size, and the
+~1M-token windows this system now runs on make it worse rather than better: the
+largest result this machine has ever produced is 0.5% of one, so the bound was
+protecting against something the conversation can afford.
+
+**Shortening is meant to be a rare event, and the window is where it sits
+between the two things a result can be.**  Every ordinary result here — a file
+read, a command's `stdout`, a listing page — is under 6,000 tokens; the case the
+mechanism exists for is the tool *bound* to be long, and the designer's own
+example of that is a ten-thousand-word essay, ~13,000 tokens.  8,000 is above the
+first and below the second: on these 349 results the mechanism fires on none, and
+it still catches the output nobody controls.  The figure that would move it again
+is the same one — the rows, re-read.
 
 A file per dump that nothing deletes, which is the honest price of "kept whole".
 And a dump is the one kind nobody wrote, so a search that names no kind skips it:

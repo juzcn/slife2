@@ -464,8 +464,18 @@ tool_load:
 # a setting: the harness spends it shortening a result, and `dump_read` caps
 # itself with it — so reading an output back can never hand over more than the
 # shortening took away, which would be this system feeding itself.
+#
+# **8,000, and it is measured.**  This machine's turn log on 2026-10-16 held 349
+# tool results — median 48 tokens, p90 1,587, largest 5,284 — so shortening fired
+# on 7 of them (2.0%) at 4,000 and fires on none here.  **Shortening should be
+# rare**, because it costs a model call (the discriminator, carrying the whole
+# conversation) to save at most a kilobyte, so the window sits between the
+# ordinary result (under 6,000 here) and the deliberately long one (a
+# ten-thousand-word essay is ~13,000).  What it still catches is the output
+# nobody controls: a shell command or a file read that would otherwise be
+# carried by every request the conversation makes afterwards.
 tool_result:
-  tokens: 4000
+  tokens: 8000
 
 # ── MCP servers ───────────────────────────────────────────────────────────────
 # Other people's MCP servers: every entry below is one, served over stdio or

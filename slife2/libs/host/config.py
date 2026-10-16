@@ -1320,11 +1320,36 @@ class ToolLoadSettings:
 #: and the failure is a loop with this system's machinery at both ends: a reader
 #: handing the harness's own shortening more than it shortened away.
 #:
-#: **The number is not measured.**  It is sized to hold a useful window of a log
-#: or a listing — a few hundred lines — without one tool call taking a turn's
-#: worth of context, and what would move it is a real turn log's distribution of
-#: result sizes.  §8.5 says the same thing about the tool list's threshold.
-DEFAULT_TOOL_RESULT_TOKENS = 4000
+#: **The number is measured, and it moved once — down in effect, not up.**
+#: Measured off this machine's turn log on 2026-10-16: **182 turns, 349 tool
+#: results, median 48 tokens, p90 1,587, largest 5,284**.  Against the 4,000
+#: this used to be, the mechanism fired on **7 results (2.0%)**; against 8,000 it
+#: fires on none, and still catches the case it exists for — an output whose
+#: length nobody controls (a shell command, a huge file read) riding in every
+#: request the conversation makes afterwards.
+#:
+#: **The window sits between the ordinary result and the deliberately long one,
+#: and that is what makes shortening a rare event** — which is what it should be,
+#: because what it costs is out of proportion to what it saves.  A result over
+#: the window pays a *discriminator call* — a model call carrying the whole
+#: conversation — plus a dump file and, when the model wants the rest, a
+#: `dump_read` round trip; what it buys is the lines the window did not keep,
+#: which on this log is at most 1,284 tokens (5,284 − 4,000).  A model call to
+#: save a kilobyte is a bad trade at any window size, and the ~1M-token windows
+#: this system runs on (`slife2.yaml`'s `context_window`) make it worse rather
+#: than better: the largest result this machine has produced is 0.5% of one.
+#:
+#: **Above the ordinary and below the deliberate.**  Every ordinary result here —
+#: a file read, a command's `stdout`, a page of a listing — is under 6,000
+#: tokens, and the case the mechanism exists for is the tool *bound* to be long
+#: (the designer's own example is a ten-thousand-word essay, ~13,000 tokens).
+#: 8,000 is above the first and below the second, so shortening fires on what
+#: nobody controls rather than on what a model asked for once.
+#:
+#: What would move it again is the same instrument — the rows themselves, so
+#: re-reading it is a query, which is the observation §8.5 makes about the tool
+#: list's threshold.
+DEFAULT_TOOL_RESULT_TOKENS = 8000
 
 #: The smallest window that can be *read*, and it is measured rather than
 #: chosen.  A window over a shortened result is built by

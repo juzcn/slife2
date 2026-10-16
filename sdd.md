@@ -937,7 +937,8 @@ when it answers.
   data.** It hands over a person's message mid-turn (§4.4), so what it answers
   *is* the thing itself — wrapped in an object it would be a message the model
   had to unwrap before it could read what somebody wrote.
-- **No answer exceeds `tool_result.tokens`** (4000). A listing pages; an output
+- **No answer exceeds `tool_result.tokens`** (8,000, the shipped default — sized
+  against a measured turn log rather than chosen). A listing pages; an output
   that cannot be bounded is the harness's (`dump`, §4.2), and the tool that reads
   it back is a *searching* reader within the same budget, so reading an output
   back can never cost the conversation more than shortening it did.
