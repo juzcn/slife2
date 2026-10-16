@@ -22,6 +22,7 @@ receives complete `ToolCall` objects and needs no accumulator of its own.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import logging
@@ -94,16 +95,38 @@ class ToolCallAccumulator:
     def add(self, delta: ToolCallDelta) -> None:
         """Absorb one fragment.
 
-        `id` and `name` are typically sent only on the first fragment for an
-        index, so they are kept rather than overwritten — a later fragment
-        carrying neither must not erase them.  A provider that repeats them
-        every fragment is harmless: the value is the same.
+        `id` is typically sent only on the first fragment for an index, so it is
+        kept rather than overwritten — a later fragment carrying none must not
+        erase it, and a provider that repeats it is harmless because the value is
+        the same.
+
+        **`name` is accumulated, because a name that arrives in pieces has no
+        other way to be read.**  Overwriting took the last fragment for the whole
+        name: `read_` followed by `file` became a call to `file`, dispatched with
+        the model's own arguments to whatever tool happened to be called that,
+        and nothing anywhere compared the reassembled name against anything.  The
+        arguments beside it have always been folded rather than replaced, for the
+        same reason: a fragment is a piece of a value, never the value.
+
+        The rule is prefix-aware, and the prefix is what keeps the case the
+        overwrite got right.  A fragment that **starts with** what has already
+        arrived is that name being *sent again* — the identical string, or a
+        longer one restating it — so it replaces what is there; a fragment that
+        does not begin with it is a continuation, and is appended.  The three
+        wires this build speaks send the name whole (`function.name` on the first
+        chat-completions delta, the `tool_use` block start, the `function_call`
+        output item), so this only decides what a gateway in front of one that
+        splits a name means — and the alternative to deciding is dispatching a
+        name the model never asked for.
         """
         part = self._parts.setdefault(delta.index, _PartialCall())
         if delta.id:
             part.id = delta.id
         if delta.name:
-            part.name = delta.name
+            if delta.name.startswith(part.name):
+                part.name = delta.name
+            else:
+                part.name += delta.name
         part.arguments += delta.arguments_delta
 
     def complete(self) -> list[ToolCall]:
@@ -184,16 +207,23 @@ class _TurnBuilder:
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
+    #: Whether the provider said it was finished.  Not the same question as
+    #: whether the stream ended — see `stream_chat_impl`, which refuses to call
+    #: a stream that ended without this the whole answer.
+    finished: bool = False
 
     def absorb(self, event: Chunk | Finish) -> Chunk | None:
         """Fold one event in, returning the chunk to forward (or None).
 
         A `Finish` is bookkeeping and is swallowed here — it never reaches the
         progress stream, because the agent loop learns the stop reason from the
-        returned `StreamChatResult` instead.
+        returned `StreamChatResult` instead.  It is *recorded* rather than only
+        read, because it is the one event that says the provider meant to stop
+        here, and that is a different fact from the stream having ended.
         """
         if isinstance(event, Finish):
             self.stop_reason = event.stop_reason
+            self.finished = True
             return None
 
         if event.text:
@@ -224,7 +254,28 @@ async def stream_chat_impl(
     model: str,
     ctx: Context,
 ) -> dict[str, Any]:
-    """Run one streamed model call and return the assembled result."""
+    """Run one streamed model call and return the assembled result.
+
+    **A stream that ends is not the provider saying it finished**, and the two
+    are compared here so that a cut generation cannot pass for a whole one.  The
+    SDK's async iteration ends *normally* when the response body simply stops —
+    a chat-completions reply whose proxy idle-timeout fired after the last
+    content chunk and before the chunk carrying `finish_reason`, a server
+    restarted mid-answer, an SSE body closed early — and with nothing reading
+    the difference this returned the partial text as the answer, with
+    `stop_reason: ""`, which `slife2.libs.turn.loop` maps to "stop".  So a
+    truncated answer was appended to the history and shown as the turn's answer,
+    and nothing anywhere said the provider had gone silent.
+
+    All three wires do signal the end, which is what makes the question
+    decidable: chat-completions sets `finish_reason` on its last chunk, Anthropic
+    sends `message_delta` with a `stop_reason`, and the Responses API ends with
+    `response.completed` or `response.incomplete` — each of which this module's
+    adapters turn into a `Finish`, the event that exists to carry exactly this
+    (`slife2.libs.model.base`).  A stream with no `Finish` is therefore one that
+    was cut, and the turn fails rather than handing half an answer to a loop
+    that would record it as a whole one.
+    """
     builder = _TurnBuilder()
     reported = 0
 
@@ -243,6 +294,11 @@ async def stream_chat_impl(
         # one, and gets the same result at the end.  See `slife2.libs.turn.events`.
         await ctx.report_progress(reported, None, encode_chunk(chunk))
 
+    if not builder.finished:
+        raise RuntimeError(
+            f"{provider}: the provider's stream ended without a finish event, so "
+            "the answer was cut short and is not returned as a whole one"
+        )
     return builder.build().to_wire()
 
 
@@ -314,6 +370,59 @@ class ProviderClients:
         self._server = server_name
         self._make_client = make_client
         self._clients: dict[str, Any] = {}
+        #: Streams holding this pool, and whether the config has moved past it.
+        #: A retired pool closes its SDK clients when its last holder is done —
+        #: see `LiveProviders.lease`.
+        self._holders = 0
+        self._retired = False
+
+    def hold(self) -> None:
+        """Count one more stream as using this pool.
+
+        **Synchronous on purpose**, and it must be: the hand-out and the count
+        have to happen with no await between them, or a rebuild landing in the
+        gap would find no holders and close a client a stream is about to use.
+        """
+        self._holders += 1
+
+    async def release(self) -> None:
+        """One holder is done with this pool, closing it if it was retired."""
+        self._holders -= 1
+        await self._close_if_retired()
+
+    async def retire(self) -> None:
+        """Say this pool will not be handed out again; close it once it is idle."""
+        self._retired = True
+        await self._close_if_retired()
+
+    async def _close_if_retired(self) -> None:
+        """Close every SDK client this pool built, once nothing is using it.
+
+        **A client owns a connection pool and its socket, and nothing else ever
+        closes it.**  `AsyncOpenAI` and `AsyncAnthropic` each hold an `httpx`
+        client; `AsyncAPIClient` defines no `__del__` and `httpx` closes nothing
+        at collection, so a client dropped without a close keeps its connections
+        until the collector happens to reach it.  The one thing that drops a pool
+        is the config-change rebuild — which is why the close lives here — and
+        before this it dropped them open, one set per config read.
+
+        **When it is safe matters as much as that it happens.**  The SDK's
+        `close()` closes the connection *under* a stream that may still be
+        reading it, so a pool the config has moved past waits for its last
+        holder: an edit must not cut off a model call that is half answered.
+        """
+        if not self._retired or self._holders:
+            return
+        clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001 - a close on the way out
+                logger.debug(
+                    "%s: an SDK client did not close cleanly",
+                    self._server,
+                    exc_info=True,
+                )
 
     def provider(self, name: str) -> ProviderSettings:
         """The named provider, or the error that says which ones there are."""
@@ -351,6 +460,12 @@ class LiveProviders:
     SDK clients with it** — necessary, because a provider whose `base_url` or key
     changed needs a client built from the new values, and cheap, because a client
     nobody has called for has not been built yet.
+
+    **Dropped, but not abandoned**: the pool being replaced is *closed* rather
+    than left to the collector, which is what `lease` and `ProviderClients` are
+    for.  An SDK client that is neither closed nor collected holds its connection
+    to the provider open, and this rebuild is the only thing that ever lets go of
+    one.
     """
 
     def __init__(
@@ -365,18 +480,41 @@ class LiveProviders:
         self._config: Config | None = None
         self._clients: ProviderClients | None = None
 
-    def clients(self) -> ProviderClients:
-        """The pool for the config as it is now, rebuilt if it has changed."""
+    @contextlib.asynccontextmanager
+    async def lease(self) -> AsyncIterator[ProviderClients]:
+        """The pool for the config as it is now, held for the length of one stream.
+
+        **The read and the hold are one step, and the hold is what makes the
+        close safe.**  A config change retires the pool it replaces, but an SDK
+        client in it may be half way through a stream somebody else is still
+        reading, and closing it would cut that answer off — so a retired pool
+        closes its clients when the last stream holding it is done.  Handing the
+        pool out and counting it have to happen with no await between them, which
+        is why this is a context manager: a `clients()` call plus a `release()`
+        the caller must remember would leave the gap open.
+        """
         config = load_cached()
+        retired: ProviderClients | None = None
         if self._clients is None or config is not self._config:
-            providers = {
-                name: provider
-                for name, provider in config.providers.items()
-                if provider.api == self._api
-            }
-            self._clients = ProviderClients(providers, self._server, self._make_client)
+            retired = self._clients
+            self._clients = ProviderClients(
+                {
+                    name: provider
+                    for name, provider in config.providers.items()
+                    if provider.api == self._api
+                },
+                self._server,
+                self._make_client,
+            )
             self._config = config
-        return self._clients
+        clients = self._clients
+        clients.hold()
+        try:
+            if retired is not None:
+                await retired.retire()
+            yield clients
+        finally:
+            await clients.release()
 
 
 def unresolved_key(server_name: str, name: str, provider: Any) -> str:
@@ -476,14 +614,18 @@ def sdk_streamer(
         tools: list[ToolSpec],
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        clients = pool.clients()
-        settings = clients.provider(provider).model(model)
-        request = build_request(messages, tools, settings)
-        response = await start(clients.client(provider), request)
-        translate = translator()
-        async for event in response:
-            for out in translate(event):
-                yield out
+        # Held for the whole stream, not just to look the provider up: the
+        # client is what carries the response being read below, and a config
+        # edit landing mid-answer must not close it out from under the stream
+        # (`LiveProviders.lease`).
+        async with pool.lease() as clients:
+            settings = clients.provider(provider).model(model)
+            request = build_request(messages, tools, settings)
+            response = await start(clients.client(provider), request)
+            translate = translator()
+            async for event in response:
+                for out in translate(event):
+                    yield out
 
     return stream
 

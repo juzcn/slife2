@@ -301,6 +301,20 @@ class Net:
     marker: str
     #: What the window calls a line from this network's sender.
     bubble: str
+    #: **The inbound ledger this network's process owns**, under an agent's own
+    #: directory (`slife2.libs.host.paths.a2a_inbound_path`).  One file per
+    #: network, and a name rather than a shared one because the file records
+    #: something process-local: the completion bridges *this* mesh is holding.
+    #: Both networks are served by one module and both are started on a machine
+    #: that configures both, so one file between them meant each process reading
+    #: the other's live pending tasks as a dead predecessor's orphans and
+    #: rewriting the whole file from its own memory — a task announced as
+    #: unanswerable while its bridge was answering, and a task added by one
+    #: process erased by the other's next save, which is the one fact the file
+    #: exists to keep.  **The remote network keeps the bare name it has always
+    #: had**, so a home that already has one is not made to forget the peers it
+    #: owes an answer to.
+    ledger: str
     #: Whether every member of this network shares one topic namespace.
     #: True for the remote network, and false for the local one — see
     #: `unit_for`, which is where that is used and argued.
@@ -334,6 +348,7 @@ REMOTE = Net(
     channel="a2a",
     marker="[PeerAgent:",
     bubble="PeerAgent",
+    ledger="a2a.yaml",
 )
 
 #: The local network: an agent and the subagents it made, which are directories
@@ -356,6 +371,8 @@ LOCAL = Net(
     channel="subagent",
     marker="[SubagentPeer:",
     bubble="Subagent",
+    # Beside the remote network's rather than the same file: see `Net.ledger`.
+    ledger="a2a-subagent.yaml",
     shared_unit=False,
 )
 
@@ -1035,6 +1052,21 @@ class ToolLoadSettings:
 #: worth of context, and what would move it is a real turn log's distribution of
 #: result sizes.  §8.5 says the same thing about the tool list's threshold.
 DEFAULT_TOOL_RESULT_TOKENS = 4000
+
+#: The smallest window that can be *read*, and it is measured rather than
+#: chosen.  A window over a shortened result is built by
+#: `slife2.libs.harness.dumps.window`, and the line that says where the whole of
+#: it is — `[DUMP:{"call": "…", "total": N}]` — is what makes the rest reachable
+#: at all.  Measured with the same estimator the harness spends, that address
+#: alone costs 50 tokens for a short call id and 61 for the ~20-character ids
+#: the providers actually emit, before a single line of the output is kept.
+#: `dumps.window` now refuses to hand back a window whose address it had to cut
+#: (an output nobody can name is one nobody can read back, so it fails the turn
+#: rather than looking like an answer) — and a budget that can *only* fail is a
+#: configuration that looks like a working one and answers nothing, which is the
+#: same argument this section has always made about zero, applied to the number
+#: the address actually costs.
+MIN_TOOL_RESULT_TOKENS = 128
 
 
 @dataclass(frozen=True)
@@ -2248,11 +2280,11 @@ def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
         return base
     section = _mapping(raw, "tool_result")
     tokens = _int_or(section.get("tokens"), base.tokens, "tool_result.tokens")
-    if tokens < 1:
+    if tokens < MIN_TOOL_RESULT_TOKENS:
         raise ConfigError(
-            f"tool_result.tokens: {tokens} would leave every window empty — "
-            f"set at least 1, or leave the section out for "
-            f"{DEFAULT_TOOL_RESULT_TOKENS}"
+            f"tool_result.tokens: {tokens} is smaller than the window's own "
+            f"address — set at least {MIN_TOOL_RESULT_TOKENS} (the default is "
+            f"{DEFAULT_TOOL_RESULT_TOKENS}), or leave the section out"
         )
     return ToolResultSettings(tokens=tokens)
 
@@ -2843,10 +2875,29 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
             f"{where}.port: {port} is not a port (1-65535); leave it out for "
             f"the default ({default.port})"
         )
+    path = str(raw.get("path") or default.path)
+    if not path.startswith("/"):
+        # **The third field, and the one nothing checked.**  `host` and `port`
+        # are read one line up and `path` was copied through, so `path: mcp`
+        # was accepted and `ServerSettings.url` concatenates the two halves
+        # with nothing between them: the endpoint became
+        # `http://127.0.0.1:8005mcp`, whose *port* is the string `8005mcp`.
+        # Nothing raised here — the first thing to read the URL does
+        # (`runtime.normalize_url`'s `urlsplit(...).port`, inside
+        # `start_lock`), so the typo arrived as a `ValueError` out of the
+        # start-up loop, after some servers were already up and running, in a
+        # command that catches `ConfigError` and answers every other bad field
+        # with one sentence.  A path is the third of the three fields this
+        # function reads, so it is refused where they are.
+        raise ConfigError(
+            f"{where}.path: {path!r} is not a path — the endpoint is the "
+            f"address and the path together, so it has to start with `/`; "
+            f"leave it out for the default ({default.path})"
+        )
     return ServerSettings(
         host=str(raw.get("host") or default.host),
         port=port,
-        path=str(raw.get("path") or default.path),
+        path=path,
     )
 
 

@@ -9,8 +9,6 @@ the truth about whether anybody wants it.
 
 from __future__ import annotations
 
-from tests.fakes import config_file
-
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +20,7 @@ from slife2.libs.host.config import load
 from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.plugins.skills.playbooks import USE_TOOL
 from slife2.plugins.skills.server import build_server
+from tests.fakes import config_file
 
 pytestmark = pytest.mark.unit
 
@@ -188,6 +187,41 @@ async def test_a_dot_name_is_refused_because_nothing_would_list_it(
     assert "dot" in str(raised.value)
     assert not (isolated_runtime / "skills" / ".notes").exists()
     assert "no skill called" in str(unreadable.value)
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_resolves_into_a_dot_directory_is_refused_too(
+    isolated_runtime: Path,
+) -> None:
+    """**The dot rule is about where the name lands, and it was about its spelling.**
+
+    `_within` resolves a name before comparing it — that is its own argument, and
+    the file guard next door is built on it — while the dot check ran on the raw
+    string.  So `a/../.notes` walked past it and installed into
+    `<data>/skills/.notes`, and the answer was the confident one this tool
+    gives on success ("`a/../.notes` is installed (1 file(s))…"): `scan` skips
+    every dot-directory by rule, so there was no `skill_list` line, no catalogue
+    row, and `skill_use` answered "no skill called '.notes'" — an install that
+    reported success and installed nothing anything could find, which is exactly
+    what the rule exists to prevent.  Checked on the resolved path, every
+    spelling of the same directory is refused, and before anything is created.
+    """
+    config_on_disk(isolated_runtime)
+
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "skill_set",
+                {
+                    "name": "a/../.notes",
+                    "files": files(manifest("notes")),
+                },
+            )
+        listed = await ask(client, "skill_list")
+
+    assert "dot" in str(raised.value)
+    assert not (isolated_runtime / "skills" / ".notes").exists()
+    assert "notes" not in listed, "nothing was installed, so nothing is listed"
 
 
 @pytest.mark.asyncio

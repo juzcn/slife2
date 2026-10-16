@@ -287,6 +287,13 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
 
     The entry stays, the link goes, and the listing says `off` rather than
     `failed`: a server nobody asked to connect has not failed at anything.
+
+    **And `mcp_list_tools` says the same thing**, which is what the assertions
+    below it are for.  A switched-off entry has no link, so it has no error
+    either, and the tool's fallback read those two as "it is not answering yet"
+    — one entry with three accounts: `[off]` in the listing, `off` in its own
+    state, and a sentence telling the model to wait for a connection
+    `enabled: false` promises will never be opened.
     """
     async with Client(family(isolated_runtime)) as client:
         off = await ask(client, "mcp_set_enabled", name="existing", enabled=False)
@@ -302,6 +309,8 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
     assert written_off["enabled"] is False
     assert "existing [off]" in listed
     assert "no tool list to show" in tools
+    assert "switched off" in tools, "the word the listing and its state both use"
+    assert "not answering yet" not in tools, "there is no link to be waiting for"
     assert "connected" in on
     assert "existing [ready]" in back
     assert "enabled" not in section(isolated_runtime)["existing"], "on is the default"

@@ -7,10 +7,13 @@ that a directory which merely *looks* busy is not mistaken for a checkout.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
 
+from slife2.libs.host.config import REMOTE
 from slife2.libs.host.paths import (
     DATA_ENV_VAR,
     RUNTIME_ENV_VAR,
@@ -20,6 +23,7 @@ from slife2.libs.host.paths import (
     catalogue_db,
     data_dir,
     home,
+    homes_dir,
     in_checkout,
     in_home,
     known_homes,
@@ -257,6 +261,61 @@ def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     assert known_homes() == [(tmp_path / "mine").resolve()]
 
 
+def test_a_home_is_registered_without_ever_truncating_the_record(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A client writes this file on every start, and daemons read it while up.**
+
+    `register_home` rewrote the record in place — `write_text` empties the file
+    first and the JSON arrives afterwards — and `known_homes` lets a `ValueError`
+    out by design, because a record it cannot read is a file to look at and not a
+    home that is not there.  So a daemon walking the registry in that window —
+    the context store's lifespan pass, the scheduler's poll, the mesh's announce
+    — read an empty file and failed its own *start-up* pass: the launcher
+    reported that server FAILED and `slife2` exited 2, on a first start, over a
+    file that was never damaged, only in flight.  Every other bookkeeping file
+    here is written beside-and-renamed for exactly this reason
+    (`slife2.libs.host.runtime._write_json_atomic`).
+
+    What is asserted is the window itself, from the only two sides a reader can
+    meet: the record is never opened for writing in place, and at the moment it
+    is replaced it still holds the whole of what was there.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
+    other = tmp_path / "other"
+    other.mkdir()
+    register_home(other)
+    record = next(homes_dir().glob("*.json"))
+    before = record.read_text(encoding="utf-8")
+
+    seen: list[str] = []
+    real_open, real_replace = Path.open, os.replace
+
+    def watching_open(self: Path, *args, **kwargs):
+        mode = kwargs.get("mode", args[0] if args else "r")
+        handle = real_open(self, *args, **kwargs)
+        if self == record and "w" in mode:
+            seen.append(self.read_text(encoding="utf-8"))
+        return handle
+
+    def watching_replace(src, dst):
+        if Path(dst) == record:
+            seen.append(Path(dst).read_text(encoding="utf-8"))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(Path, "open", watching_open)
+    monkeypatch.setattr(os, "replace", watching_replace)
+    register_home(other)
+
+    assert seen == [before], (
+        "the record was caught half-written, which is what a daemon reading the "
+        f"registry at that moment sees: {seen!r}"
+    )
+    assert json.loads(record.read_text(encoding="utf-8"))["home"] == str(
+        other.resolve()
+    )
+
+
 def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The three files a shared plugin finds its agents by, per home.
 
@@ -279,10 +338,11 @@ def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
         "mine",
         "other",
     ]
-    assert [path.parent.parent.parent.name for path in a2a_inbound_paths()] == [
-        "mine",
-        "other",
-    ]
+    # One network's, by name: the walk the remote mesh does, which must not pick
+    # up the local network's file for the same agent (`Net.ledger`).
+    assert [
+        path.parent.parent.parent.name for path in a2a_inbound_paths(REMOTE.ledger)
+    ] == ["mine", "other"]
 
 
 def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(

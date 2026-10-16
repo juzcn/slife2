@@ -518,6 +518,14 @@ class Catalogue:
         What is genuinely this home's is the declarations — the `mcp:` entries,
         the playbooks, the commands of *this* section — and those are what a
         per-home refresh merges.
+
+        **The lock is held for the whole of that**, and `remember` takes it for
+        its hold and fan-out, so "complete" has no window: a listing that lands
+        during an open is either in `seed`'s snapshot or in the fan-out's list,
+        and never in neither.  Registering the store after `_open` returns is
+        therefore not a race with that fan-out but the other end of one handoff:
+        a fan-out cannot run while the lock is held, so one that has not seen
+        this file has already left its rows in `_held` for `seed` to write.
         """
         key = str(home_dir())
         found = self._stores.get(key)
@@ -604,6 +612,11 @@ class Catalogue:
         the source's verdict, and it can only do so if the write happened here
         rather than one call later, at a home's first ask.  The rows are held
         *after* that write, so a refusal is not remembered as the truth.
+
+        **And the hold and the fan-out are one step, under the lock a store
+        opens under**, which is what lets `seed` and this function divide the
+        work between them with no window: see the comment on the `async with`
+        below and `seed`, which is the other half of that handoff.
         """
         rows = list(tools)
         here = str(home_dir())
@@ -615,10 +628,28 @@ class Catalogue:
             rows,
             autoload=autoload,
         )
-        self._held[source] = (category, rows, autoload)
-        for key, store in list(self._stores.items()):
-            if key != here:
-                await self._write(key, store, source, category, rows, autoload=autoload)
+        # **The hold and the fan-out are one step, and the lock is `_opening`**
+        # — the one `store` builds a file under — because the two writers that
+        # can put this source into a home's file have to agree about which home
+        # is missing it.  Without it, a listing that lands while a home is
+        # opening is written into every home *but* that one: `_stores` cannot
+        # hold a file that has not finished opening (publishing it is the last
+        # thing `store` does), and `seed`'s snapshot of `_held` was taken before
+        # these rows were held — so neither writer covers it, and nothing repairs
+        # it until this source's next relist (`timeouts.pacing.relist_after`,
+        # minutes) or a restart.  Under the lock the two are exclusive and the
+        # split is exact: a store that opens after this step is seeded from
+        # `_held`, and one that was already open is in the fan-out's list here —
+        # once either way, which matters because two overlapping merges of one
+        # source into one file are a race on the tool table's primary key (the
+        # same fact `Declarations.lock` is built on).
+        async with self._opening:
+            self._held[source] = (category, rows, autoload)
+            for key, store in list(self._stores.items()):
+                if key != here:
+                    await self._write(
+                        key, store, source, category, rows, autoload=autoload
+                    )
         return found
 
     async def seed(self, key: str, store: ToolStore) -> None:
@@ -639,6 +670,14 @@ class Catalogue:
         `list_tools` to fail the whole list with and for `servers` to report, and
         raising here would instead take the store's opening down with it, leaving
         the home with no catalogue at all rather than one carrying the reason.
+
+        **It is the other half of a handoff with `remember`**, which is why that
+        one holds `_opening` for its own hold and fan-out: a listing that arrives
+        while this runs is either in `_held` already and written by the loop
+        below, or held after the open published this file and written by that
+        fan-out.  Neither half covers both orders on its own, and the window
+        between them is a `seed`'s length — every source the machine holds, each
+        with an embedding call behind it.
         """
         for source, (category, rows, autoload) in list(self._held.items()):
             try:
@@ -2943,23 +2982,52 @@ def build_server(
         if str(row.get("category") or "") in (SKILL, CLI):
             # A row a search can find and a call cannot reach, which is the
             # shape of both document families.  Said here rather than left to
-            # the branch below, whose answer ("not a server this hub is
-            # configured with any more") would be false: these have never had a
-            # server behind them, and the model reached this name by reading a
-            # search result that told it so.
+            # the branch below, whose answer is about a server that is not
+            # holding the row any more — false for these, which never had one
+            # behind them, and which the model reached by reading a search
+            # result that told it so.
             return {"text": document_is_not_callable(name, row), "ok": False}
 
         source = str(row.get("source_id") or "")
         upstream = by_source(source)
         if upstream is None:
-            # The row is real and its owner is not one of ours: the entry was
-            # removed from the config, or switched off, since this row was
-            # written.  Said as what it is rather than as an unknown tool.
+            # **The row is real and nothing is holding it.**  Its owner is not
+            # one of our own connections and no plugin has declared it *now*,
+            # which has two causes and the caller's own config tells them apart
+            # — where the answer here used to be one guess at both.
+            #
+            # A source the config still names and no plugin declares is a plugin
+            # that is not answering: `refresh_declared` skips a plugin that is
+            # down whole, so its sources leave this home's address book while
+            # their rows stay on purpose (`Upstream.declare`, and
+            # `test_a_plugin_that_stops_answering_keeps_the_rows_it_declared`).
+            # The other shape is an entry taken out of the section while the
+            # plugin that held it was silent: `forget_source` is that plugin's
+            # deletion to ask for, and it has not been asked.
+            #
+            # **Neither sentence may tell the caller the config does not name the
+            # source when it does**, which is the one thing the text here got
+            # wrong: it answered "not a server this hub is configured with any
+            # more — check `mcp:` in the config" for a source whose entry was
+            # there all along and whose *plugin* was the thing that was down.
+            # That is the shape this is reached in: a switched-off entry stays
+            # declared and is refused by its plugin, and a removal whose plugin
+            # did answer has already had its rows deleted (`forget_source`).
+            if source in configured_sources(current()):
+                return {
+                    "text": (
+                        f"{name!r} belongs to {source!r}, which is still in this "
+                        f"home's config — no plugin is declaring it right now, "
+                        f"and the plugin that serves its section is the one that "
+                        f"would. `servers` says whether it is answering."
+                    ),
+                    "ok": False,
+                }
             return {
                 "text": (
-                    f"{name!r} belongs to {source!r}, which is not a server this "
-                    f"hub is configured with any more — check `mcp:` in the "
-                    f"config"
+                    f"{name!r} belongs to {source!r}, which is no longer in this "
+                    f"home's config — its entry was removed, and this row goes "
+                    f"the next time the plugin that held it answers."
                 ),
                 "ok": False,
             }

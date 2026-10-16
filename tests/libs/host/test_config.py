@@ -17,6 +17,7 @@ from slife2.libs.host.config import (
     A2A_BROKER_ENV_VAR,
     API_BACKENDS,
     DEFAULT_TOOL_RESULT_TOKENS,
+    MIN_TOOL_RESULT_TOKENS,
     ConfigError,
     default_config,
     find_config_path,
@@ -387,6 +388,27 @@ def test_no_cap_is_spelt_zero_or_not_at_all(tmp_path) -> None:
         load(write(tmp_path, "agent:\n  max_steps: -1\n"))
 
 
+def test_a_server_path_that_is_not_a_path_is_refused(tmp_path) -> None:
+    """**A path is the third field of an address, and it was the unchecked one.**
+
+    `path: mcp` — no leading slash — was accepted, and `ServerSettings.url`
+    puts the address and the path together with nothing between them, so the
+    endpoint became `http://127.0.0.1:8005mcp`.  That is not a URL whose port
+    can be read: the first thing to read one (`runtime.normalize_url`'s
+    `urlsplit(...).port`, reached from `start_lock` inside the start-up loop)
+    raised `ValueError`, after some servers were already up — where every other
+    bad field in this file gets one sentence and nothing starts.  `port: 0`, one
+    line above, is the same refusal for the same reason.
+    """
+    for written in ("mcp", "mcp/route"):
+        with pytest.raises(ConfigError, match="servers.context.path"):
+            load(write(tmp_path, f"servers:\n  context:\n    path: {written}\n"))
+
+    path = write(tmp_path, "servers:\n  context:\n    path: /route\n")
+    assert load(path).server("context").path == "/route"
+    assert load(path).server("context").url.endswith("/route"), "one address, whole"
+
+
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     """**A typo has to read like every other typo.**
 
@@ -425,8 +447,29 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     assert stated.tokens == 500
 
     path = write(tmp_path, "tool_result:\n  tokens: 0\n")
-    with pytest.raises(ConfigError, match="would leave every window empty"):
+    with pytest.raises(ConfigError, match="smaller than the window's own address"):
         load(path)
+
+
+def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
+    """**Refused where it is written, not at the turn it would ruin.**
+
+    A window over a shortened result opens with the line that says where the
+    whole of it is, and that address costs 50-61 tokens for the call ids the
+    providers emit — more than a small budget has in total.  `dumps.window`
+    refuses to hand back a window whose address it had to cut, so such a budget
+    can only ever fail a turn; the config is where that is worth saying, which
+    is the argument this section already makes about zero.
+    """
+    with pytest.raises(ConfigError, match="smaller than the window's own address"):
+        load(write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS - 1}\n"))
+
+    assert (
+        load(
+            write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS}\n")
+        ).tool_result.tokens
+        == MIN_TOOL_RESULT_TOKENS
+    )
 
 
 def test_the_terminal_is_a_server_now(tmp_path) -> None:

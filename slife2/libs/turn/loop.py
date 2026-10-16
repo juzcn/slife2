@@ -63,6 +63,22 @@ BACKGROUND_UNAVAILABLE = (
 )
 
 
+def timed_out(name: str, bound: float) -> str:
+    """What a call that ran past the bound somebody set is answered with.
+
+    **One spelling, because two paths write it.**  A call runs under a clock
+    only when the model asked for one, and the same bound firing has to read the
+    same way whichever path the call took — the sentence names the tool and the
+    bound, and both are what the model acts on (retry with a longer one, or
+    without one at all).  v1's sentence, verbatim, and the second copy this
+    replaces is exactly how the background path came to say nothing: its timeout
+    was a bare `TimeoutError`, and `slife2.libs.harness.async_tasks._runner` renders
+    whatever escapes a task as `Error: {type}: {exc}`, so the hand-back read
+    `Error: TimeoutError: ` with neither fact in it.
+    """
+    return f"Error: Tool '{name}' timed out ({bound}s)."
+
+
 def harness_call(name: str) -> ToolCall:
     """A call the harness makes on the model's behalf, marked as one.
 
@@ -359,7 +375,7 @@ class AgentLoop:
             # against: it no longer contains a half-written batch.
             answers: list[Message] = []
             for call in result.tool_calls:
-                text, _ok = await self._one(call, observer, step)
+                text, _ok = await self._one(call, observer, step, messages)
                 answers.append(
                     Message(
                         role="tool",
@@ -392,7 +408,11 @@ class AgentLoop:
         )
 
     async def _one(
-        self, call: ToolCall, observer: TurnObserver, step: int
+        self,
+        call: ToolCall,
+        observer: TurnObserver,
+        step: int,
+        messages: Sequence[Message],
     ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
 
@@ -404,6 +424,13 @@ class AgentLoop:
         the event that opens the call carries it so the panel can say which
         step of the turn this is (v1's `(3/30)`), and this is the only place
         that knows both the call and the step it was made in.
+
+        `messages` travels no further than a background call needs it, and it
+        is passed rather than read off an attribute because the loop does not
+        own the conversation (the module docstring's "pure function over a
+        message list"): it is handed one, and a call that outlives the turn it
+        was made in is the one case where the *later* state of that list is what
+        has to be reachable — see `_background`.
 
         * **Nothing is announced before the gate answers.**  A call the operator
           refused never happened as far as the transcript is concerned: v1's
@@ -460,7 +487,7 @@ class AgentLoop:
         # not have shown one whatever it did with it.
         started = time.monotonic()
         if meta.background:
-            text, ok = await self._background(dispatch, bound)
+            text, ok = await self._background(dispatch, bound, messages)
         else:
             text, ok = await self._foreground(dispatch, bound)
         await self._emit(
@@ -488,11 +515,15 @@ class AgentLoop:
         None-means-nobody-said rule `approve` and `deliver` follow, and the cost
         of it is a turn whose size is whatever the tool returned.
 
-        It happens **after the call is announced and before the result is
-        appended**, which is the one moment that is both: the panel's account of
-        the call is the tool's own answer (`ToolCallFinished` carries its length
-        and its head), and what enters the conversation is what the model will
-        read back later.
+        **Two callers, and one window.**  The ordinary one is the step loop
+        below, where the fit happens after the call is announced and before the
+        result is appended — the one moment that is both, so the panel's account
+        of the call is the tool's own answer (`ToolCallFinished` carries its
+        length and its head) while what enters the conversation is what the model
+        will read back later.  The other is a **background** call's hand-back
+        (`_background`), which is the same result arriving by a different road:
+        it becomes a message in a later turn rather than a tool message in this
+        one, and it used to skip this step entirely for exactly that reason.
         """
         if self._compress is None:
             return text
@@ -517,12 +548,14 @@ class AgentLoop:
             async with asyncio.timeout(bound):
                 return await self._tools.execute(dispatch)
         except TimeoutError:
-            # v1's sentence, verbatim.
             logger.warning("tool_timeout name=%s timeout=%s", dispatch.name, bound)
-            return f"Error: Tool '{dispatch.name}' timed out ({bound}s).", False
+            return timed_out(dispatch.name, bound), False
 
     async def _background(
-        self, dispatch: ToolCall, bound: float | None
+        self,
+        dispatch: ToolCall,
+        bound: float | None,
+        messages: Sequence[Message],
     ) -> tuple[str, bool]:
         """Hand a call to the background, and answer the id the model polls.
 
@@ -534,26 +567,69 @@ class AgentLoop:
         when nobody did — v1's mapping exactly, and the same mapping the
         foreground path uses, which is why this method takes `bound` rather than
         deciding anything.
+
+        **The window reaches this road too.**  A background call's result arrives
+        as a *message* — a turn of its own, several turns later — which is the
+        one road a tool result takes that the step loop's fit does not cover, so
+        the whole output used to enter the conversation and its turn log and be
+        carried by every later request: one call's answer was bounded or
+        unbounded depending only on whether the background delivery landed.
+        The fit here is the same `_fit`, over the same result, so what enters the
+        conversation is bounded the same way — and it is applied to the *body*
+        only, at the far end (`slife2.libs.harness.async_tasks.hand_back`), because
+        the marker and the sentence that name the call this answers are not
+        something a window may take away.
+
+        `messages` is handed over as the list it is and not as a copy: the
+        hand-back can arrive long after this turn ended — after a rebuild has
+        replaced the conversation, even — and the honest thing for the
+        discriminator to be shown is the conversation as it stands *then*, which
+        only a reference to the live list can be.
         """
-        coro = self._result(dispatch)
-        if bound is not None:
-            coro = asyncio.wait_for(coro, timeout=bound)
+
+        async def fit(body: str) -> str:
+            """What the conversation carries for this result, decided when it lands."""
+            return await self._fit(dispatch, body, messages)
+
         # **The call's own id and name go with it**, because nothing else can
         # supply them later: `check_async` is given a task id and nothing else —
         # a call the model makes a step or a turn afterwards is carrying none of
         # this — and a result that cannot say which call it answers is one the
         # model has to match up from memory.
         task_id = schedule(
-            coro,
+            self._timed(dispatch, bound),
             call_id=dispatch.id,
             tool=dispatch.name,
             deliver=self._deliver,
+            fit=fit,
         )
         # v1's sentence, under the marker the registry wrote
         # (`slife2.libs.harness.async_tasks.started`): the sentence is what the model acts on,
         # and the marker is what a screen and a reader of the transcript pair
         # this call's two halves by.
         return started(task_id, dispatch.id, dispatch.name), True
+
+    async def _timed(self, dispatch: ToolCall, bound: float | None) -> tuple[str, bool]:
+        """One background call's answer, under the model's own bound if it set one.
+
+        Separate from `_background` only because the clock has to run *inside*
+        the scheduled task: the bound fires long after `_background` has returned
+        the task id, so a `wait_for` around the schedule would be a bound on
+        nothing.  That is also why the timeout is caught here rather than left to
+        `slife2.libs.harness.async_tasks._runner`: what escapes a task is rendered as
+        `Error: {type}: {exc}`, and a bare `TimeoutError` carries no message — so
+        the conversation used to read `Error: TimeoutError: ` where the
+        foreground path says which tool broke which bound.  **The same sentence,
+        from the same builder** (`timed_out`), because a bound that fired is one
+        fact and it must not read two ways.
+        """
+        if bound is None:
+            return await self._result(dispatch)
+        try:
+            return await asyncio.wait_for(self._result(dispatch), timeout=bound)
+        except TimeoutError:
+            logger.warning("tool_timeout name=%s timeout=%s", dispatch.name, bound)
+            return timed_out(dispatch.name, bound), False
 
     async def _result(self, dispatch: ToolCall) -> tuple[str, bool]:
         """One call's answer, as its text *and* whether it worked.

@@ -39,6 +39,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 import slife2.plugins.schedule.server as schedule_server
+from slife2.helpers.clock import now
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings, default_config
 from slife2.libs.plugin.audience import client_meta, for_the_model, request_client
@@ -275,6 +276,28 @@ async def write(
 def ledger(agent: str = AGENT) -> ScheduleStore:
     """The real ledger on this test's data directory."""
     return ScheduleStore.open(agent)
+
+
+def open_a_run(name: str = "daily") -> str:
+    """A run written with nothing doing it: what a fire leaves, unanswered.
+
+    **Written with the store rather than with `schedule_run_now`, and the
+    difference is the subject of the skip tests below.**  `run_now` puts a
+    background task *behind* the run, and a run that is being done is not one a
+    skip may close — it is happening, and its answer is already on its way to the
+    conversation.  This is the other state, which is the only one a skip is for:
+    the trigger was written and nobody has answered it.
+
+    The stamp is the clock's own spelling, which is what a ledger row holds — so
+    a test can hand the same instant back written another way and the lookup
+    still has to place it.
+    """
+    store = ledger()
+    task = store.task(name)
+    assert task is not None
+    stamp = now()
+    store.record(task, stamp)
+    return stamp
 
 
 def later(seconds: float = 0, days: float = 0) -> datetime:
@@ -871,14 +894,22 @@ async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> Non
             )
 
 
-async def test_skipping_a_run_is_an_answer_rather_than_a_gap(tasks: Tasks) -> None:
-    async with Client(build(tasks=tasks)) as client:
+async def test_skipping_a_run_is_an_answer_rather_than_a_gap() -> None:
+    """A skipped run is an answer, and it has no moment it happened at.
+
+    The run is a **trigger nobody answered** — written, with no background task
+    behind it — which is the state this tool is for: a run that did not happen.
+    A run that *is* being done is refused rather than answered
+    (`test_skipping_a_run_that_is_being_done_is_refused`), which is why
+    `open_a_run` is a store write and not a `schedule_run_now`.
+    """
+    async with Client(build()) as client:
         await write(client)
-        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        due_at = open_a_run()
         skipped = await ask(
             client,
             SCHEDULE_RUN_SKIP,
-            {"name": "daily", "due_at": run["due_at"], "note": "the day is over"},
+            {"name": "daily", "due_at": due_at, "note": "the day is over"},
         )
 
     assert skipped["status"] == SKIPPED
@@ -887,9 +918,40 @@ async def test_skipping_a_run_is_an_answer_rather_than_a_gap(tasks: Tasks) -> No
     assert skipped["ran_at"] == ""
 
 
-async def test_a_run_is_found_by_the_moment_rather_than_its_spelling(
-    tasks: Tasks,
-) -> None:
+async def test_skipping_a_run_that_is_being_done_is_refused(tasks: Tasks) -> None:
+    """**A run that is happening is not one that did not happen.**
+
+    `pending` with an `agent_task_id` is work in flight, and the skip used to take
+    it: the row went `skipped` — `ran_at` cleared, the error blanked, the note
+    filed — while the background task ran on and its answer was delivered anyway.
+    Nothing could put it back, either: `reconcile` selects `pending` rows and only
+    those, so it would never look at that row again, and `schedule_run_now` for
+    its due time hit `reopen`'s "a run that ended is not reopened".  The ledger
+    was left permanently wrong about a run that did happen.
+    """
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        # Both spellings: the run by its due time, and the newest one open.
+        for arguments in (
+            {"name": "daily"},
+            {"name": "daily", "due_at": run["due_at"]},
+        ):
+            with pytest.raises(ToolError, match="being done"):
+                await ask(client, SCHEDULE_RUN_SKIP, arguments)
+
+    still = ledger().newest("daily")
+    assert still is not None and still.status == PENDING
+    assert still.agent_task_id == run["agent_task_id"], "still the task doing it"
+
+    # And the work is not lost: the task ends, and the run closes as one that ran.
+    tasks.status = TASK_FINISHED
+    await reconcile(default_config(), tasks_client=tasks.client)
+    closed = ledger().newest("daily")
+    assert closed is not None and closed.status == RAN
+
+
+async def test_a_run_is_found_by_the_moment_rather_than_its_spelling() -> None:
     """**A run's key is a moment, and a model hands the moment back its own way.**
 
     The row is keyed by the string `slife2.helpers.clock` wrote, so the same instant
@@ -904,10 +966,10 @@ async def test_a_run_is_found_by_the_moment_rather_than_its_spelling(
     strings agree only once the conversion happens — and they are two different
     strings whatever that time is.
     """
-    async with Client(build(tasks=tasks)) as client:
+    async with Client(build()) as client:
         await write(client)
-        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
-        utc = datetime.fromisoformat(run["due_at"]).astimezone(UTC)
+        due_at = open_a_run()
+        utc = datetime.fromisoformat(due_at).astimezone(UTC)
         skipped = await ask(
             client,
             SCHEDULE_RUN_SKIP,
@@ -918,7 +980,7 @@ async def test_a_run_is_found_by_the_moment_rather_than_its_spelling(
             },
         )
 
-    assert skipped["due_at"] == run["due_at"]
+    assert skipped["due_at"] == due_at
     assert skipped["status"] == SKIPPED
 
 
@@ -943,15 +1005,16 @@ async def test_a_due_at_in_no_grammar_is_told_apart_from_a_run_that_is_gone(
                 )
 
 
-async def test_skipping_with_no_due_at_closes_the_newest_open_run(
-    tasks: Tasks,
-) -> None:
-    async with Client(build(tasks=tasks)) as client:
+async def test_skipping_with_no_due_at_closes_the_newest_open_run() -> None:
+    """The run you were just handed, while nothing is doing it: the trigger
+    carried its timestamp, and a model that read it does not have to send it
+    back."""
+    async with Client(build()) as client:
         await write(client)
-        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+        due_at = open_a_run()
         skipped = await ask(client, SCHEDULE_RUN_SKIP, {"name": "daily"})
 
-    assert skipped["due_at"] == run["due_at"]
+    assert skipped["due_at"] == due_at
     assert skipped["status"] == SKIPPED
 
 
@@ -1265,6 +1328,48 @@ async def test_a_limit_that_is_not_positive_does_not_bypass_the_ceiling() -> Non
     assert len(listed["runs"]) == RUNS_LIMIT, "the default bound, not the whole table"
 
 
+# ── newest first is by the moment, not by the string ─────────────────────────
+
+
+async def test_the_ledger_orders_runs_by_the_instant_and_not_by_the_string() -> None:
+    """**"Newest first" across a local-zone change, where the strings disagree.**
+
+    A stamp is local time with its offset, so as a *string* it orders correctly
+    only while every row shares one offset — and the rows either side of a
+    daylight-saving change are exactly the ones that do not. `01:30:00+01:00` is
+    00:30Z and `01:15:00+00:00` is 01:15Z, so the older run is the greater
+    string: `schedule_runs` showed the wrong order and, with its `LIMIT` on top,
+    dropped the genuinely newest runs off the page — and `store.newest`, which is
+    the whole of what `schedule_run_skip` with no `due_at` closes, answered with
+    a run that was not the newest open one.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    # 2026-10-25 in London: 02:00 BST goes back to 01:00 GMT, so the hour runs
+    # twice — the first occurrence at +01:00 and the second an hour later at
+    # +00:00, which is the newer half of the hour by the clock.
+    for stamp in (
+        "2026-10-25T01:30:00+01:00",  # 00:30Z, the oldest
+        "2026-10-25T01:45:00+01:00",  # 00:45Z
+        "2026-10-25T01:00:00+00:00",  # 01:00Z
+        "2026-10-25T01:15:00+00:00",  # 01:15Z, the newest
+    ):
+        store.record(task, stamp)
+
+    assert [run.due_at for run in store.runs("daily")] == [
+        "2026-10-25T01:15:00+00:00",
+        "2026-10-25T01:00:00+00:00",
+        "2026-10-25T01:45:00+01:00",
+        "2026-10-25T01:30:00+01:00",
+    ]
+    newest = store.newest("daily")
+    assert newest is not None, "the ledger is not empty"
+    assert newest.due_at == "2026-10-25T01:15:00+00:00"
+
+
 # ── the fire, chosen by instant ──────────────────────────────────────────────
 
 
@@ -1288,3 +1393,84 @@ async def test_the_newest_fire_is_chosen_by_instant_not_by_clock_reading() -> No
     assert found is not None, "the newest fire is an hour newer by the clock"
     assert found.timestamp() > anchor.timestamp()
     assert found.timestamp() <= until.timestamp()
+
+
+async def test_a_fall_back_repeat_fires_once_and_not_twice() -> None:
+    """**The one thing the anchor suppression has to make an exception for.**
+
+    A fall-back hour names the same wall reading twice, an hour apart, so the
+    second `01:00` is *strictly newer as an instant* than the anchor the first one
+    left — and by instants alone the next poll finds it and fires the same
+    occurrence a second time, which is the double fire the module docstring says
+    does not happen.  Equality of readings is the whole of the exception, which is
+    why the day after still fires: the reading is the same and the day is not.
+    """
+    # 2026-10-25 in London: 02:00 BST goes back to 01:00 GMT.
+    fired = datetime.fromisoformat("2026-10-25T01:00+01:00")  # the first occurrence
+
+    # The poll half a minute later, on the other side of the change.  The fire
+    # behind it is the `01:00+00:00` the clock reached by going back — an hour
+    # newer as an instant, the same reading, and already run.
+    assert (
+        latest_fire(
+            "0 1 * * *",
+            fired,
+            datetime.fromisoformat("2026-10-25T01:00:30+00:00"),
+            "Europe/London",
+        )
+        is None
+    )
+    # …and it stays one occurrence however late the poll is.
+    assert (
+        latest_fire(
+            "0 1 * * *",
+            fired,
+            datetime.fromisoformat("2026-10-25T03:00+00:00"),
+            "Europe/London",
+        )
+        is None
+    )
+    # The next day is a fire, which is the half that stops the exception from
+    # meaning "never again".
+    tomorrow = latest_fire(
+        "0 1 * * *",
+        fired,
+        datetime.fromisoformat("2026-10-26T01:00:30+00:00"),
+        "Europe/London",
+    )
+    assert tomorrow is not None
+    assert (
+        tomorrow.astimezone(ZoneInfo("Europe/London")).strftime("%Y-%m-%d %H:%M")
+        == "2026-10-26 01:00"
+    )
+
+
+async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> None:
+    """The same rule at the clock, which is where the second run was written.
+
+    A second fire is not only a second trigger: `due` finds a fire fresh enough to
+    run, `fire` writes a run for it — the two spellings of 01:00 are two keys, so
+    `UNIQUE(task_id, due_at)` does not dedupe them — and a dispatch refused as a
+    duplicate leaves a spuriously `failed` run behind, or, if the first has
+    finished by then, does the work twice.
+
+    The anchor is what the first fire left, and the poll is half a minute past the
+    moment the clock went back — the two lines that make the second fire appear.
+    """
+    async with Client(build(window)) as client:
+        await write(client, cron="0 1 * * *", timezone="Europe/London")
+
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.advance(task, "2026-10-25T01:00:00+01:00")  # the fire that happened
+
+    did = await poll_once(
+        default_config(),
+        window_client=window.client,
+        reference=datetime.fromisoformat("2026-10-25T01:00:30+00:00"),
+    )
+
+    assert did == []
+    assert window.handed == []
+    assert store.newest("daily") is None, "no second run was written"

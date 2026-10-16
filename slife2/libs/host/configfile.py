@@ -322,9 +322,10 @@ def upsert(
     `set_enabled`.
 
     The entry's key order and comments are the caller's now — an entry written
-    fresh is rendered in the order it was built.  What survives from the entry
-    being replaced is its comment in the *section*, the explanation a person
-    put above it, because that belongs to the section and not to the fields.
+    fresh is rendered in the order it was built.  What survives from the file is
+    that entry's comment in the *section*, the explanation a person put above it,
+    and the one above the entry *after* it, because that is where ruamel keeps
+    it and throwing the old mapping away throws it too (`_swap_entry`).
 
     `enabled: true` **removes** the key rather than writing it, because
     `enabled` is the default and the file's own convention is that only
@@ -343,7 +344,7 @@ def upsert(
         # A fresh mapping rather than an update of the one that is there: what
         # is written is exactly what was handed in, and nothing the caller did
         # not name survives from whatever the entry used to say.
-        current[name] = CommentedMap(values)
+        _swap_entry(current, name, values)
 
     _edit(target, mutate)
     logger.info("config_upsert section=%s name=%s", section, name)
@@ -500,6 +501,28 @@ def _drop_entry(
         _put_intro(current, names[index - 1], survivor)
 
 
+def _swap_entry(current: CommentedMap, name: str, values: Mapping[str, Any]) -> None:
+    """Put *values* under `name` in *current*, keeping the entry below it whole.
+
+    **The mapping that is already there is not only the entry.**  ruamel keeps
+    "the comment above entry N+1" as a *trailing* comment of entry N's last
+    value (`_tail_of`), so assigning a fresh `CommentedMap` over `name` throws
+    that block away with the old mapping and its `ca.items` — and the entry
+    below loses the explanation a person wrote for it, in a write that reported
+    success.  A `remove` is the same hazard and does the surgery for it
+    (`_drop_entry`); this is that move, one operation over: lift the block off
+    the entry being replaced, write the new one, and hang the block back where
+    the entry it introduces now begins.
+
+    Nothing is lifted when the name is not there yet — a fresh entry has no
+    comment of its own to lose, and `_tail_of` needs the key to exist.
+    """
+    survivor = _take_intro(current, name) if name in current else None
+    current[name] = CommentedMap(_without_empties(values))
+    if survivor is not None:
+        _put_intro(current, name, survivor)
+
+
 def remove(section: str, name: str, *, path: Path | None = None) -> bool:
     """Delete *section* → *name*; True if it was there.
 
@@ -607,7 +630,7 @@ def update_entry(
                 # comment above a stranger (`configfile._drop_entry`).
                 _drop_entry(values, document, section, name)
         else:
-            values[name] = CommentedMap(_without_empties(result))
+            _swap_entry(values, name, result)
 
     _edit(target, mutate)
     logger.info("config_update section=%s name=%s existed=%s", section, name, existed)

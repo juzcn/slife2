@@ -43,6 +43,44 @@ def test_a_prefix_without_a_closing_bracket_is_left_whole() -> None:
     assert markers.strip(torn, *MARKERS) == torn
 
 
+def test_a_payload_with_a_bracket_in_it_does_not_end_the_marker_early() -> None:
+    """**The payload is JSON, and `json.dumps` does not escape `]`.**
+
+    An agent task's name is model-chosen free text and goes into the payload
+    verbatim (`slife2.plugins.agent_task.server.marker`), so a task named
+    `parse [draft] config` produced a marker whose own payload bracket ended it:
+    the raw JSON tail was drawn over the message.  Both callers are display
+    paths, so this was a wrong line rather than lost data — which is exactly the
+    kind nobody reports.
+    """
+    from slife2.plugins.agent_task import server as agent_task
+
+    task = agent_task.AgentTask(
+        agent="jack",
+        name="parse [draft] config",
+        description="",
+        started_at="2026-08-10T14:03:00+08:00",
+    )
+    text = f"{agent_task.marker(task)} the answer"
+
+    assert markers.strip(text, *MARKERS) == "the answer"
+
+
+def test_a_torn_marker_does_not_eat_the_start_of_the_message() -> None:
+    """**A bracket in the body is not the marker's end.**
+
+    The promise above — a torn row is shown whole, because a display that eats
+    the rest of a message is worse than one that shows a marker it could not
+    read — was broken by the same line: the end was the first `]` after the
+    prefix, and for a marker whose JSON was truncated that bracket is inside the
+    person's own words.
+    """
+    torn = f'{MARKER_PREFIX}{{"task_id": "x"'
+    body = f"{torn}] the person's words"
+
+    assert markers.strip(body, *MARKERS) == body
+
+
 def test_a_marker_a_message_only_mentions_is_left_alone() -> None:
     """A marker is a prefix by construction, and only that — so text *about* one
     is somebody's words rather than something to unwrap."""

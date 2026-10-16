@@ -43,7 +43,7 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-from slife2.libs.host.config import ModelSettings
+from slife2.libs.host.config import Config, ModelSettings, ProviderSettings
 from slife2.libs.model.base import Chunk, Finish, Streamer, ToolCallDelta
 from slife2.libs.model.wire import decode_chunk
 from slife2.libs.turn.messages import Message, ToolCall, ToolSpec, Usage
@@ -1059,6 +1059,38 @@ def test_accumulator_keeps_the_first_id_and_name() -> None:
     assert (call.id, call.name) == ("c1", "calc")
 
 
+def test_accumulator_joins_a_name_the_provider_sent_in_pieces() -> None:
+    """**A name that arrives in fragments has no other way to be read.**
+
+    Overwriting took the last fragment for the whole name — `read_` followed by
+    `file` became a call to `file` — and nothing compared the reassembled name
+    against anything, so the call was dispatched, its arguments intact, to
+    whichever tool happened to be called that: an unknown-tool error at best, a
+    *different* tool than the model chose at worst.
+    """
+    accumulator = ToolCallAccumulator()
+    accumulator.add(ToolCallDelta(index=0, id="c1", name="read_"))
+    accumulator.add(ToolCallDelta(index=0, name="file", arguments_delta='{"p": "a"}'))
+    (call,) = accumulator.complete()
+    assert call.name == "read_file"
+    assert call.arguments == {"p": "a"}
+
+
+def test_accumulator_does_not_double_a_name_the_provider_repeats() -> None:
+    """The case the overwrite got right, which accumulating must not break.
+
+    A provider that restates the whole name on every fragment — rather than
+    sending it once — still yields the name once.
+    """
+    accumulator = ToolCallAccumulator()
+    accumulator.add(ToolCallDelta(index=0, id="c1", name="read_file"))
+    accumulator.add(ToolCallDelta(index=0, name="read_file", arguments_delta='{"p"'))
+    accumulator.add(ToolCallDelta(index=0, name="read_file", arguments_delta=': "a"}'))
+    (call,) = accumulator.complete()
+    assert call.name == "read_file"
+    assert call.arguments == {"p": "a"}
+
+
 def test_accumulator_orders_by_index() -> None:
     accumulator = ToolCallAccumulator()
     accumulator.add(ToolCallDelta(index=2, id="c3", name="c", arguments_delta="{}"))
@@ -1162,6 +1194,33 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
     assert result.data["text"] == "hello"
     assert result.data["stop_reason"] == "stop"
     assert [c.text for c in chunks] == ["he", "llo"]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_without_a_finish_is_not_a_whole_answer() -> None:
+    """**The stream ending is not the provider saying it finished.**
+
+    The SDK's iteration ends *normally* when the response body simply stops — a
+    chat-completions reply whose proxy idle-timeout fired between the last
+    content chunk and the chunk carrying `finish_reason`, a server restarted
+    mid-answer, an SSE body closed early — so a partial generation and a
+    finished one are the same shape at this layer.  Nothing compared them, and
+    the partial text was returned with `stop_reason: ""`, which the loop turns
+    into "stop": a truncated answer appended to the history and shown as the
+    turn's answer, with zero tokens and no word anywhere that the provider had
+    gone silent.
+
+    Every one of the three wires does signal the end — `finish_reason` on the
+    last chunk, Anthropic's `message_delta`, `response.completed` — and each
+    becomes a `Finish`, so a stream that carries none is one that was cut.
+    """
+    server = build_llm_server(
+        name="t", streamer=scripted(Chunk(text="the answer is 4"))
+    )
+    with pytest.raises(Exception, match="without a finish"):
+        await call_stream_chat(
+            server, messages=[{"role": "user", "content": "2+2"}], tools=[], model="m"
+        )
 
 
 @pytest.mark.asyncio
@@ -2009,6 +2068,101 @@ def test_a_user_message_with_an_image_survives_conversion() -> None:
     )
     assert messages[0]["content"][0] == {"type": "text", "text": "look"}
     assert messages[0]["content"][1]["source"]["media_type"] == "image/jpeg"
+
+
+# --- the provider pool -------------------------------------------------------
+
+
+class _FakeSDKClient:
+    """Stands in for `AsyncOpenAI`/`AsyncAnthropic`: a thing that can be closed."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _config(base_url: str) -> Config:
+    """A config with one provider, so a *new* object is an edit as the pool reads it."""
+    return Config(
+        providers={
+            "p": ProviderSettings(
+                api="openai-completions",
+                base_url=base_url,
+                api_key_ref="a-plain-literal-key",
+                models={"m": ModelSettings(model="m")},
+            )
+        }
+    )
+
+
+def _pool(monkeypatch, built: list[_FakeSDKClient], current: list[Config]):
+    """A `LiveProviders` whose config read is `current`, and the clients it built."""
+    from slife2.plugins.llm import server_common
+
+    def make_client(_provider: Any, _key: str) -> Any:
+        built.append(_FakeSDKClient())
+        return built[-1]
+
+    monkeypatch.setattr(server_common, "load_cached", lambda: current[0])
+    return server_common.LiveProviders("openai-completions", "t", make_client)
+
+
+@pytest.mark.asyncio
+async def test_a_config_change_closes_the_client_it_replaces(monkeypatch) -> None:
+    """**The rebuild is the only thing that ever drops an SDK client**, and it
+    must let go of it rather than abandon it.
+
+    `AsyncOpenAI` and `AsyncAnthropic` each hold an `httpx` client with its open
+    socket to the provider — `AsyncAPIClient` defines no `__del__` and `httpx`
+    closes nothing at collection — so a client dropped without a close keeps its
+    connections until the collector happens to reach it, once per changed config
+    read.  The rebuild is the *designed* live-reload path, so this is an ordinary
+    edit rather than a corner.
+    """
+    built: list[_FakeSDKClient] = []
+    current = [_config("https://first.test/v1")]
+    pool = _pool(monkeypatch, built, current)
+
+    async with pool.lease() as clients:
+        clients.client("p")
+    assert built[0].closed is False, "the pool in use is not touched"
+
+    current[0] = _config("https://second.test/v1")  # the edit
+    async with pool.lease() as clients:
+        clients.client("p")
+
+    assert built[0].closed is True, "the replaced client is let go, not abandoned"
+    assert built[1].closed is False, "and the one now in use is not"
+    assert len(built) == 2, "one client per config, built on first use"
+
+
+@pytest.mark.asyncio
+async def test_a_client_is_not_closed_under_a_stream_that_is_reading_it(
+    monkeypatch,
+) -> None:
+    """The close waits for the last holder, and that is the whole reason for one.
+
+    The SDK's `close()` closes the connection under a response that is still
+    being read, and a model answer takes minutes — so an edit that landed
+    mid-answer would cut the answer off if the retired pool closed eagerly.  It
+    closes when the stream holding it is done instead.
+    """
+    built: list[_FakeSDKClient] = []
+    current = [_config("https://first.test/v1")]
+    pool = _pool(monkeypatch, built, current)
+
+    async with pool.lease() as running:  # a stream in flight
+        running.client("p")
+
+        current[0] = _config("https://second.test/v1")  # the edit lands mid-answer
+        async with pool.lease() as fresh:
+            fresh.client("p")
+
+        assert built[0].closed is False, "the answer being read is left alone"
+
+    assert built[0].closed is True, "and the client is let go the moment it ends"
 
 
 # --- the `main` every model server shares ------------------------------------

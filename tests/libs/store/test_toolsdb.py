@@ -966,6 +966,41 @@ def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) 
     assert "matched_in" not in by_name["office__other"], "and a row the words missed"
 
 
+def test_a_word_match_the_line_does_show_is_not_reported_as_hidden(tmp_path) -> None:
+    """**`rest` has to mean the words are somewhere the line cannot show.**
+
+    The field is rendered as `matched your words in its parameters`, so the scope
+    it tests against has to be exactly the columns the line prints.  It was
+    `{name description}` — but the line prints `category` and `source_id` too, so
+    a row whose words are in *those* was reported `rest`, and the answer pointed
+    at a column the words are not in.  That is the same uncheckable mark this
+    field exists to prevent, one step along: a reader told the evidence is in the
+    parameters looks there and finds nothing.
+
+    Two rows under `mcp:github` in category `mcp`, with neither word in their
+    name, description or schema, are found by `github` through `source_id` and by
+    `mcp` through `category` — and both are `line` matches, because both of those
+    columns are printed on the line.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "mcp:github",
+        "mcp",
+        [tool("alpha__one", "Fetch a record."), tool("alpha__two", "Fetch a record.")],
+    )
+
+    for keyword in ("mcp", "github"):
+        answer = asyncio.run(store.search(keywords=[keyword], embedder=EMBEDDER))
+        by_name = {row["name"]: row for row in answer["results"]}
+        assert by_name["alpha__one"]["matched_in"] == "line", (
+            f"{keyword!r} is in a column the line prints"
+        )
+        assert by_name["alpha__two"]["matched_in"] == "line", (
+            "and every row the word found, not only the first"
+        )
+
+
 def test_a_row_the_meaning_leg_never_saw_still_carries_its_number(tmp_path) -> None:
     """Every row on the page has a meaning number, including the ones words found.
 

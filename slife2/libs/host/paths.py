@@ -113,6 +113,7 @@ import contextlib
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
@@ -377,6 +378,11 @@ def register_home(root: Path | None = None) -> Path:
     client's, named where the fix is: the running server is the thing that loses
     the file, and it must not lose it quietly.
 
+    **And it is written whole or not at all** (`_write_atomically`), because the
+    client writing it is running while the daemons reading it are — every start
+    rewrites this file, and a reader that caught the truncation would fail a
+    start-up pass of its own.
+
     Raises:
         OSError: If the record cannot be written — an unwritable runtime
             directory, a full disk.  Nothing is degraded in its place: the
@@ -384,8 +390,42 @@ def register_home(root: Path | None = None) -> Path:
     """
     target = (root or data_dir()).resolve()
     entry = homes_dir() / f"{_digest(str(target))}.json"
-    entry.write_text(json.dumps({"home": str(target)}), encoding="utf-8")
+    _write_atomically(entry, json.dumps({"home": str(target)}))
     return target
+
+
+def _write_atomically(path: Path, text: str) -> None:
+    """Put *text* at *path* so a reader sees all of it or none of it.
+
+    **This is written by a client on every start and read by daemons that are
+    already up**, which is why it is not `write_text`.  A truncating write
+    leaves the file empty for as long as it takes to write it back — the file is
+    opened and emptied first, and the JSON arrives afterwards — and `known_homes`
+    lets a `ValueError` out by design: a record it cannot read is a file to look
+    at, not a home that is not there (`DESIGN.md` §10.1).  So a daemon walking
+    the registry in that window — the context store's lifespan pass
+    (`turn_dbs`), the scheduler's poll (`schedule_dbs`), the mesh's announce,
+    WeChat's resume — read an empty file and its `json.loads("")` failed its
+    *start-up* pass, which is a server the launcher reports as FAILED and an
+    exit 2 on a first start, over a file that was never damaged, only in flight.
+
+    Written beside the target and renamed onto it, which is what every other
+    bookkeeping file in this codebase does (`slife2.libs.host.runtime._write_json_atomic`)
+    — the one home this could not be folded into, because that one swallows the
+    failure and `register_home`'s contract is that a write which fails is raised:
+    a home nobody recorded is a home whose schedules never fire, and that has to
+    be the client's problem and not a line in a log.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def known_homes() -> list[Path]:
@@ -511,12 +551,8 @@ def schedule_db(agent: str) -> Path:
     return agent_dir(agent) / _SCHEDULE_DB
 
 
-#: The A2A ledger's own file name, spelt once for the reason `_SCHEDULE_DB` is.
-_A2A_INBOUND = "a2a.yaml"
-
-
-def a2a_inbound_paths() -> list[Path]:
-    """Every agent's A2A ledger on this machine.
+def a2a_inbound_paths(ledger: str) -> list[Path]:
+    """Every agent's *ledger* on this machine — one network's, not both.
 
     **The same mechanism `schedule_dbs` is, and it is a walk for the same
     reason**: a ledger is a file per agent and there is no registry of agents to
@@ -527,16 +563,22 @@ def a2a_inbound_paths() -> list[Path]:
     while a window is showing it, not because it once spoke
     (`slife2.plugins.a2a.server.join`), and every home's for the reason
     `schedule_dbs` walks every home's.
+
+    **The name is the caller's, and it is `Net.ledger`'s** — this walk reads the
+    ledgers of the network the caller is serving and never the other one's.  One
+    name for both networks (which is what this was) meant the process serving
+    the *remote* mesh walked up the file the *local* one was holding bridges in,
+    and told the model a live task could not be completed.
     """
     return [
         path
         for root in known_homes()
-        for path in sorted((root / "agents").glob(f"*/{_A2A_INBOUND}"))
+        for path in sorted((root / "agents").glob(f"*/{ledger}"))
     ]
 
 
-def a2a_inbound_path(agent: str) -> Path:
-    """One agent's A2A ledger: `<agent>/a2a.yaml`.
+def a2a_inbound_path(agent: str, ledger: str) -> Path:
+    """One agent's ledger for one network: `<agent>/<ledger>`.
 
     What it holds is the inbound tasks this agent's mesh is holding a completion
     bridge for, which is what lets a *restart* tell its orphans from ids it has
@@ -544,8 +586,12 @@ def a2a_inbound_path(agent: str) -> Path:
     `wechat.yaml` for §5's reason — an agent's state is a directory — and YAML
     for v1's, which is the format this file has always had: an entry in it is a
     peer still owed a reply, so it is a document rather than one long line.
+
+    `ledger` is `Net.ledger`, and it is required rather than defaulted because
+    the default would be a second spelling of one network's name in a module
+    that has no business knowing which network is calling.
     """
-    return agent_dir(agent) / _A2A_INBOUND
+    return agent_dir(agent) / ledger
 
 
 #: The file that makes a directory a subagent's.  Spelt once for the reason

@@ -736,6 +736,15 @@ def build_server(
         # part of the list no turn in `turn_ids` describes, so it is the one part
         # a rebuild cannot reconstruct — and dropping it would silently delete
         # the user's own message from a turn that was cut off mid-flight.
+        #
+        # **`carried` is a count *from the end*, and it is the caller's word that
+        # the run is the end.**  Nothing here can check that: the ids and the
+        # messages arrive as two shapes and are joined by neither, so a caller
+        # whose unbacked messages sat somewhere else would be handed back the
+        # wrong slice and told nothing.  `slife2.plugins.agent.server.rebuild_into`
+        # is the one caller, and `Loop.covered` is where it keeps the run at the
+        # end — a turn that follows unbacked messages does not join `turn_ids`,
+        # which is what keeps the count honest.
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
         # Published before the caller is told, and a failure here **fails the

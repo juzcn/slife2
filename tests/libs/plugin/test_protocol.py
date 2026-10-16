@@ -12,13 +12,17 @@ report anything).
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host import paths
+from slife2.libs.host.config import ServerSettings
+from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.plugin.protocol import house_server, identifies, open_server
@@ -319,3 +323,70 @@ async def test_the_home_does_not_leak_out_of_a_call_that_raised(
         after = await client.call_tool("where", {})
 
     assert paths.Path(after.data) == mine
+
+
+# --- the record a server leaves behind ---------------------------------------
+
+#: The address the tests below serve on.  Nothing is bound on it: `serve` writes
+#: its record *before* it binds, which is the whole of what they are about.
+URL = "http://127.0.0.1:8000/mcp"
+
+
+class RefusingMCP:
+    """A server that cannot bind, which is what a duplicate on a live port is.
+
+    `bind` fails and `run` never returns, exactly as `mcp.run` does when another
+    process already holds the port — the record has been written by then, and
+    that is what has to be put back.
+    """
+
+    def run(self, **options: Any) -> None:
+        raise OSError("address already in use")
+
+
+def serve_once() -> None:
+    """Run `serve` far enough to write its record, and no further."""
+    protocol_module.serve(
+        RefusingMCP(),
+        ServerSettings(port=8000),
+        SimpleNamespace(host=None, port=None),
+        name="slife2-agent",
+    )
+
+
+def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
+    """**A duplicate on a port the shared stack already serves is supported.**
+
+    A server records itself rather than being recorded, so a hand-started one is
+    indistinguishable from a launched one — which is the point, and it is why
+    `python -m slife2.plugins.agent.server --port 8000` beside a running stack is
+    a thing people do.  That process cannot bind, so it exits; what it must not
+    do on the way through is take the *running* server's record with it.  It
+    did: the record is keyed by the URL alone, so the newcomer's write replaced
+    the live one's, and its `finally` deleted that URL's record — and `slife2
+    down` then reported "no record; not started by slife2" and left the daemon
+    running.
+    """
+    live = ServerRecord.now(
+        name="slife2-agent", url=URL, pid=os.getpid(), config="", version=""
+    )
+    write_record(live)
+
+    with pytest.raises(OSError):
+        serve_once()
+
+    assert read_record(URL) == live, "the running server's record is not ours"
+
+
+def test_a_server_that_never_served_takes_its_own_record_back() -> None:
+    """**The other half, so this does not become "never delete anything".**
+
+    An endpoint nobody live owns is this process's to record — that is the
+    crashed daemon's stale record, and a start has to be able to take it over —
+    and a record a process wrote without ever serving has to go: `down` reads it
+    as a server that is still there.
+    """
+    with pytest.raises(OSError):
+        serve_once()
+
+    assert read_record(URL) is None

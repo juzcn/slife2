@@ -250,6 +250,16 @@ def window(
     an answer over the window would be a tool result the harness has to shorten
     again, and shortening this one is the loop the arrangement exists to
     prevent.
+
+    **And the address is not the part that may be shed.**  A clip answers with a
+    shorter *answer*, so it may take the lines and the sentence — but the
+    `[DUMP:…]` marker is how a model names the output to read the rest back, and
+    a window whose marker was cut is a conversation that has given up the bound
+    *and* broken the address while looking like success.  A budget too small to
+    hold it is therefore a failure and not a shorter window: nothing here can
+    decide to spend fewer tokens than the address costs, so it says so
+    (`tool_result.tokens` is validated as `>= 1` and nothing else, so an operator
+    can configure this; see the raise below).
     """
     total = len(lines)
     head = f"{MARKER}{json.dumps({'call': call, 'total': total}, ensure_ascii=False)}{MARKER_END}"
@@ -281,7 +291,22 @@ def window(
         )
     body = numbered_lines(kept)
     answer = f"{head} {said}" + (f"\n\n{body}" if body else "")
-    return clip_to_tokens(answer, budget)
+    # **The clip must leave the address standing, or this is not a window.**
+    # `clip_to_tokens` shortens from the end and protects nothing: at a small
+    # enough budget it cut the marker mid-JSON (the model could not name the dump
+    # to ask for the rest) and at a smaller one still it answered with the empty
+    # string — a tool result that says nothing at all, in a conversation that
+    # carries it forever.  The state is the one §10.2 puts on the side of the
+    # steps that must succeed: an output nobody can read back is worse than a
+    # turn that failed, because it looks like an answer.
+    clipped = clip_to_tokens(answer, budget)
+    if not clipped.startswith(head):
+        raise ValueError(
+            f"a `tool_result.tokens` window of {budget} cannot hold the window's "
+            f"own address ({estimate_text_tokens(head)} tokens), so the output "
+            f"could not be read back — raise it"
+        )
+    return clipped
 
 
 def numbered_lines(kept: Sequence[tuple[int, str]]) -> str:

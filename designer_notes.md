@@ -97,12 +97,30 @@ Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
 A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。顺便把这个功能做了：--a2a-broker host:port , use external broker。我们可以把A2A的agent理解为Remote Agent, Suagent是一个Local Agent.
   
 
-- 代码级 review
+- 代码级 review, 目的是保持code clean
 
 1、codereview， find bugs, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）
+2、codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
+
+- Fallback code-review
+
+我发现claude code写代码很仔细，防范任何可能的状态，经常导致fallback过度设计。要按照一下原则进行code review， fix them one by one. update docs（README.zh-CN.md， sdd, design, readme.md）
+
+1、每个操作都可能失败，如果从代码级控制，就会有数个fallback，而设计的行为y应该必须成功，不允许fallback，可以重试，可以hard fail。不恰当的fallback隐藏bug，带来不可预测的后果。
+
+2、在和兴功能正常的条件下如果确实需要fallback时，要把fallback 和 相应的degrade mode作为一种设计，必须要得到设计批准。而不能随意fallback.
+
+3、Fallback设计主要针对外部服务，不可控的场景。我们自己的逻辑不允许fallback, 本机通讯、本机进程、本机函数等默认是可靠的。
+
+- 结构性review
+
+1、评估架构和结构设计的合理性，codereview plugins 和 公共库共享能力和代码。plugin和公共库设计要功能单一，数量多没有关系，性能上损失几跳没有关系，因为是本机的或本进程的通讯。规范plugin协议，做到plugin易维护易替换。fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）
+
+2、大模型工具review, 理解大模型工具的schema是大模型可见的，它的输出是大模型可见的，因此schema和输出要对大模型友好，并规范统一，减少大模型使用的困惑和不必要的重新推理。 设计遵循以下原则：
+    - Schema over prompt
+    - 大模型的工具schema要准确、简洁表达工具是干什么的、参数是什么，不要重复大模型知道的知识，尽量少的交叉引用，交叉引用容易造成不易维护的依赖。
+    - 工具名称、描述和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。例外：_check_new_input
+
 2、codereview, find duplicate and dead codes, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）.
-3、codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
 
-- 结构级 review
-
-4、codereview for fallback,觉得每个操作都可能失败就会有无穷多个fallback，而设计的行为正常必须成功的不允许fallback.fallback是不影响正常行为degrade，degrade必须要得到设计批准。我们有时候更愿意hard fail，而不做一些隐藏bug的fallbcak。失败可以重试。真正需要fallback时。要让fallback成为一种/设计行为。fix them one by one , update docs（README.zh-CN.md， sdd, design, readme.md）
+4、codereview for fallback,fix them one by one , update docs（README.zh-CN.md， sdd, design, readme.md）

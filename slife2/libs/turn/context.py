@@ -168,12 +168,45 @@ def normalise_ids(values: Iterable[Any]) -> list[int]:
     directions that neither type-check the other: a model's reply, which is JSON
     of whatever the encoder wrote, and a list read back out of the store, where
     a stringly `"7"` reaching a `rowid IN (…)` query matches nothing — and the
-    failure would be a silently short context rather than an error.
+    failure would be a silently short context rather than an error.  `_is_id` is
+    the other half of that rule — what *counts* as one id — and a caller that
+    filters a reply before handing it here reads it, so the two cannot disagree
+    about what a coerced id is (`_keep` did, and the cost was a whole reply).
     """
     seen: dict[int, None] = {}
     for value in values:
         seen.setdefault(int(value), None)
     return list(seen)
+
+
+def _is_id(value: Any) -> bool:
+    """Whether one entry of a `context` list is a turn id.
+
+    **The ints are *coerced* rather than trusted**, which is `normalise_ids`'s
+    rule and therefore this function's: a reply is JSON, so `"7"` and `7` are
+    the same id written by two encoders, and the model is asked for turn ids —
+    the ones it read in a `[TURN:…]` footnote — not for a particular JSON type.
+
+    Two values that look like ids are not:
+
+    * `bool` is a subclass of `int`, and `true` would otherwise become turn 1;
+    * a float, because a turn id is a whole count and the same rule
+      `slife2.libs.turn.tools.parse_timeout` states for a bound applies here:
+      `1e999` is valid JSON, arrives as `inf`, and `int(inf)` raises
+      `OverflowError` out of a function whose whole contract is that a malformed
+      reply is refused rather than raised.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        try:
+            int(value)
+        except ValueError:
+            return False
+        return True
+    return False
 
 
 def _keep(raw: Any) -> list[int] | _Rejected | None:
@@ -184,6 +217,14 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
     reply this build does not act on.  `bool` is excluded from the ids on the
     way through, because it is a subclass of `int` and `true` would otherwise
     become turn 1.
+
+    **The filter asks `_is_id` rather than `isinstance(item, int)`**, and that
+    was a bug of the silent kind: a model that wrote `["7", "9"]` — JSON of
+    whatever the encoder wrote, which is the source `normalise_ids`'s docstring
+    names — made *every* id resolve to `REJECTED`, so `parse` answered `None` and
+    dropped the other half of the decision with it.  A valid `recall` beside the
+    keep-list was thrown away and the model's instruction was ignored, with only
+    `recall_discriminator_unparsed` in the log to say so.
     """
     if raw is None:
         return None
@@ -194,9 +235,7 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
             return []
         return REJECTED
     if isinstance(raw, list):
-        if not all(
-            isinstance(item, int) and not isinstance(item, bool) for item in raw
-        ):
+        if not all(_is_id(item) for item in raw):
             return REJECTED
         return normalise_ids(raw)
     return REJECTED

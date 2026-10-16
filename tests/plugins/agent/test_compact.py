@@ -379,3 +379,69 @@ async def test_a_dump_that_cannot_be_kept_fails_the_turn(tmp_path, monkeypatch) 
                     "send_message",
                     {"agent": DEFAULT_AGENT, "prompt": "look something up"},
                 )
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_cannot_be_read_back_fails_the_turn(
+    tmp_path, monkeypatch
+) -> None:
+    """**The fallback is a read, not a licence to carry nothing.**
+
+    The reader's own first window is the answer when the *discriminator* cannot
+    be read — an ordinary thing for a model to produce — and it is a real read of
+    the row this same process wrote a moment ago, on the side of the steps that
+    must succeed (`compress_for`: "nothing else here falls back").  A cabinet
+    whose save landed and whose read then failed has given up the output
+    entirely, and a turn that swallowed that would enter the conversation with an
+    empty tool result: the bound gone *and* the address gone, with nothing
+    anywhere saying so — which is the failure that catch was hiding.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    cfg = config_over(WINDOW)
+    backend = FakeBackend(
+        calling("fake__echo", {"text": HUGE}),
+        answered("I am not sure what to make of this."),
+        answered("done"),
+    )
+    kept: dict[str, str] = {}
+    half_broken = FastMCP("cabinet-half-broken")
+
+    @half_broken.tool
+    async def dump_save(call: str, output: str, tool: str = "", mime: str = "") -> dict:
+        kept[call] = output
+        return {"kept": call, "mirror": f"dumps/{call}.md", "chars": len(output)}
+
+    @half_broken.tool
+    async def dump_read(
+        call: str, offset: int = 1, limit: int = 0, pattern: str = "", context: int = 0
+    ) -> str:
+        raise ValueError("the cabinet is not answering")
+
+    async with (
+        Client(
+            build_hub(
+                cfg,
+                transports=plugin_transports(
+                    cfg, {"fake": lambda settings: upstream_server()}
+                ),
+                embedder=StubEmbedder(),
+            )
+        ) as hub_client,
+        Client(
+            build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+        ) as context_client,
+        Client(half_broken) as cabinet_client,
+    ):
+        server = build_server(
+            cfg,
+            backend=backend,
+            context_client=context_client,
+            hub_client=hub_client,
+            cabinet_client=cabinet_client,
+        )
+        with pytest.raises(ToolError, match="the cabinet is not answering"):
+            async with Client(server) as client:
+                await client.call_tool(
+                    "send_message",
+                    {"agent": DEFAULT_AGENT, "prompt": "look something up"},
+                )

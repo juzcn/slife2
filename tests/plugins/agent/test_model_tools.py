@@ -11,6 +11,7 @@ model added to a provider does not lose the ones beside it.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -21,11 +22,15 @@ from fastmcp import Client
 from slife2.libs.host.config import DEFAULT_AGENT, load, load_cached
 from slife2.libs.host.configfile import read_scalar, read_section
 from slife2.libs.host.launcher import Outcome, Status
+from slife2.libs.model.base import Chunk, StreamChatResult
+from slife2.libs.plugin.audience import client_meta
+from slife2.libs.turn.messages import ToolCall
 from slife2.plugins.agent.server import build_server
 from slife2.plugins.context.server import build_server as build_context
 from slife2.plugins.toolhub.server import build_server as build_hub
 from tests.fakes import (
     FakeBackend,
+    ScriptedTurn,
     StubEmbedder,
     config_file,
     keep_the_context,
@@ -313,7 +318,7 @@ providers:
 
 
 @asynccontextmanager
-async def answering_server(isolated_runtime: Path):
+async def answering_server(isolated_runtime: Path, backend: FakeBackend | None = None):
     """`server_for`'s server, plus the two peers a turn needs to run.
 
     The real context and hub servers over the in-memory transport, exactly as
@@ -322,31 +327,84 @@ async def answering_server(isolated_runtime: Path):
     so the test needs a conversation that can: asserting on the file after a
     switch is not the same claim, and it is the one the whole tool exists for.
 
+    **The agent itself is wired into the hub**, which is `test_server.py`'s
+    `wired` and its reason: a message that arrives mid-turn is folded in by a
+    call to `_check_new_input`, that call is made through the hub, and a hub
+    holding `blank_plugin` for the agent would hand the loop a registry with no
+    such tool — so the fold would silently not happen.
+
     An ordinary context manager rather than a fixture, like `server_for` beside
     it: it is entered inside a test rather than around one, and what it stands up
     is what the `async with` tears down.
     """
     write_config(isolated_runtime)
     live = load()
-    async with (
-        Client(
-            build_context(live, embedder=StubEmbedder(), ask=keep_the_context)
-        ) as context,
-        Client(
-            build_hub(
-                live,
-                transports=plugin_transports(live),
-                embedder=StubEmbedder(),
-            )
-        ) as hub,
-    ):
-        yield build_server(
+    holder: dict[str, Any] = {}
+    hub_client = Client(
+        build_hub(
+            live,
+            transports=plugin_transports(
+                live, {"agent": lambda _settings: holder["agent"]}
+            ),
+            embedder=StubEmbedder(),
+        )
+    )
+    async with Client(
+        build_context(live, embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context:
+        server = build_server(
             live,
             context_client=context,
-            hub_client=hub,
-            backend=FakeBackend(text_turn("one"), text_turn("two")),
+            hub_client=hub_client,
+            backend=backend or FakeBackend(text_turn("one"), text_turn("two")),
             source=load_cached,
         )
+        # Before the hub is entered, because entering it is what opens the
+        # client for the agent transport above.
+        holder["agent"] = server
+        async with hub_client:
+            yield server
+
+
+async def send(
+    server: Any, prompt: str, *, home: Path | None = None, **arguments
+) -> Any:
+    """One turn, on a client of its own — the same shape `test_server.py` uses.
+
+    A fresh client each time, deliberately: the conversation lives in the
+    *server*, and a second caller while a turn is running is a second connection
+    rather than a second call on the first one's session.
+    """
+    async with Client(server) as client:
+        return await client.call_tool(
+            "send_message",
+            {"agent": DEFAULT_AGENT, "prompt": prompt, **arguments},
+            meta=client_meta(DEFAULT_AGENT, home=str(home)) if home else None,
+        )
+
+
+def calling(name: str, arguments: dict, *, delay: float = 0.0) -> ScriptedTurn:
+    """A scripted turn where the model calls one tool — here, a step boundary."""
+    return ScriptedTurn(
+        result=StreamChatResult(
+            text="checking",
+            tool_calls=(ToolCall(id="c1", name=name, arguments=arguments),),
+            stop_reason="tool_calls",
+        ),
+        chunks=[Chunk(text="checking")],
+        delay=delay,
+    )
+
+
+async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
+    """Block until the backend has been asked for that many model streams."""
+    for _ in range(1000):
+        if len(backend.calls) >= wanted:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"the model was asked for {len(backend.calls)} stream(s), not {wanted}"
+    )
 
 
 @pytest.mark.asyncio
@@ -415,3 +473,144 @@ async def test_the_four_tools_are_marked_for_the_model(isolated_runtime) -> None
     assert not for_the_model(tools["send_message"].meta), (
         "the client's tools stay its own"
     )
+
+
+# --- a switch during a turn ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
+    isolated_runtime,
+) -> None:
+    """**A switch lands under a turn that is already running, and the answer is
+    still the old model's.**
+
+    `model_switch` is used *from inside a turn* — it is the way out of a model
+    that has stopped answering — and it takes no lock on the conversation, so the
+    loop's reference moves while that turn is still in flight.  The reply must
+    name what answered (`Outcome.model`, taken where `loop_for` resolves the
+    backend), or it disagrees with the turn's own record and with itself: the
+    caller is told the model that never saw its message.
+
+    Both callers are asserted, because there are two and they are answered at
+    different moments.  The turn's own caller reads its reply after the switch;
+    a caller whose message was **folded in** is parked on the lock and answered
+    even later, so reading the loop's reference there is the same mistake one
+    step further out.
+    """
+    backend = FakeBackend(
+        calling("skill_list", {}, delay=0.5),
+        ScriptedTurn(
+            result=StreamChatResult(text="the answer", stop_reason="stop"),
+            chunks=[Chunk(text="the answer")],
+            delay=0.5,
+        ),
+        # Scripted so that a second turn *can* run: a fold that did not happen
+        # fails on the `injected` assertion below rather than on the backend
+        # running out of turns.
+        text_turn("two"),
+    )
+
+    async with answering_server(isolated_runtime, backend=backend) as server:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        # The message must be waiting before the step boundary, which is where
+        # the running turn folds it in (a `delay` of half a second above).
+        await asyncio.sleep(0.05)
+        # ...and the switch must land while the absorbing turn is still in flight.
+        await wait_for_streams(backend, 2)
+        async with Client(server) as client:
+            switched = await ask(client, "model_switch", ref="local/small")
+        one, two = await asyncio.gather(first, second)
+
+    assert "moved with it" in switched, "the switch did land, mid-turn"
+    assert one.data["model"] == "local/big", "the model that answered the turn"
+    assert two.data["injected"] is True, "and the message really was folded in"
+    assert two.data["text"] == one.data["text"]
+    assert two.data["model"] == "local/big", "the same model, said to both callers"
+
+
+# --- one process, several homes -----------------------------------------------
+
+
+#: **The second home's config, and it deliberately lacks `local/small`.**  The
+#: way the switch bug shows is that a loop belonging to another home is moved onto
+#: a reference *that home's* file cannot name — so this home must not have it.
+OTHER_HOME = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://local.test/v1
+    api_key: ${LOCAL_KEY}
+    models:
+      - model: big
+        name: Big
+default: local/big
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_switch_moves_only_the_conversations_of_the_callers_home(
+    isolated_runtime,
+) -> None:
+    """**The loop table is keyed by home, and so is an edit to it.**
+
+    One process serves every home on the machine, which is why a loop is filed
+    under `(home, agent, subagent)` at all.  `current()` resolved the reference
+    just written into the *caller's* config file — so a switch that moved every
+    loop in the process would point another home's conversation at a model that
+    home cannot name, and its store would record a foreign model from the next
+    turn on.
+    """
+    mine, theirs = isolated_runtime, isolated_runtime.parent / "theirs"
+    write_config(mine, CONFIG)
+    write_config(theirs, OTHER_HOME)
+
+    async with answering_server(mine) as server:
+        # A conversation in the *other* home, started on the model this home is
+        # about to switch away from.
+        first = await send(server, "one", home=theirs)
+        async with Client(server) as client:
+            switched = await ask(client, "model_switch", ref="local/small")
+        second = await send(server, "two", home=theirs)
+
+    assert switched.endswith("Nothing was running, so nothing had to move.")
+    assert first.data["model"] == "local/big"
+    assert second.data["model"] == "local/big", (
+        "another home's switch did not reach that home's conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_home_cannot_block_a_removal_with_another_homes_conversation(
+    isolated_runtime,
+) -> None:
+    """A false refusal, and it printed the other home's conversation names.
+
+    `model_remove` refuses for a model a running conversation is on, and that
+    walk has to be the same home-scoped one the registry is keyed by: the model
+    here is one *this* home has a conversation on nowhere, so a refusal would be
+    a refusal about somebody else's conversation — in a sentence a model reads.
+
+    Both homes hold the same config here, deliberately: what is being shown is
+    that the other home's conversation cannot block an edit this home is entitled
+    to make, not that the two files differ.
+    """
+    mine, theirs = isolated_runtime, isolated_runtime.parent / "theirs"
+    write_config(mine, CONFIG)
+    write_config(theirs, CONFIG)
+
+    async with answering_server(mine) as server:
+        # A conversation in the other home, on the model this home will remove.
+        await send(server, "one", home=theirs, model="local/small")
+        async with Client(server) as client:
+            answer = await ask(client, "model_remove", ref="local/small")
+
+    assert not answer.startswith("[refused]"), answer
+    assert answer.startswith("`local/small` is removed")
+    assert [one["model"] for one in section(mine)["local"]["models"]] == ["big"]
+    assert [one["model"] for one in section(theirs)["local"]["models"]] == [
+        "big",
+        "small",
+    ], "the other home's file is not this call's to edit"

@@ -46,6 +46,7 @@ rather than in a field invented here.  Measured against FastMCP 4.0.11, a
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from slife2.libs.host import paths
@@ -120,15 +121,44 @@ def client_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any
 
     An explicit argument is for the case the ambient answer is the wrong one —
     a caller acting for a home it is not itself in — and there is no such caller
-    today.
+    today.  It travels exactly as written, because a caller that names a
+    directory is stating something about a home this process is not in, and
+    rewriting it would be this module overruling the one party that knows.
+
+    What the *default* holds is `_for_the_wire`'s answer rather than the
+    directory as this process happens to spell it: the home is read at the other
+    end, in a process started somewhere else, so a relative one there is a
+    different directory.
     """
     return {
         CLIENT: {
             "agent": agent,
             "subagent": subagent,
-            "data_dir": home or str(paths.home()),
+            "data_dir": home or _for_the_wire(paths.home()),
         }
     }
+
+
+def _for_the_wire(root: Path) -> str:
+    """A home as it leaves this process: **absolute**, however it was spelt.
+
+    A relative one is the hazard this exists for.  The daemon that receives it
+    resolves it against *its own* working directory, and every daemon here is
+    spawned with that set to the machine's runtime directory
+    (`slife2.libs.host.launcher._argv`), so `--data-dir rel/chk` arrives meaning
+    `<runtime>/rel/chk`: the client reads its config from the directory it
+    named, the daemon writes `agents/jack` under the runtime directory, and
+    nothing errors — the work is simply somewhere else, which is the one shape
+    of failure a file layout can have that no message reports.  `_argv` resolves
+    the directory it puts in a child's argv for exactly this reason; the `_meta`
+    hop is the same crossing by another road.
+
+    An absolute path travels as it was named.  It already means one directory in
+    every process, whatever that process's working directory is, so there is
+    nothing to fix — and resolving it would rewrite a home reached through a
+    symlink, which is a spelling the operator chose.
+    """
+    return str(root if root.is_absolute() else root.resolve())
 
 
 def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
@@ -207,7 +237,7 @@ def with_home(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     if named:
         return found
     merged = dict(blob) if isinstance(blob, Mapping) else {}
-    merged[DATA_DIR] = str(paths.home())
+    merged[DATA_DIR] = _for_the_wire(paths.home())
     found[CLIENT] = merged
     return found
 

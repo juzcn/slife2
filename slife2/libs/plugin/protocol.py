@@ -85,6 +85,9 @@ from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir, in_hom
 from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
+    pid_alive,
+    read_record,
+    same_process,
     tcp_listening,
     write_record,
 )
@@ -545,6 +548,31 @@ class ServeTheCallersHome(Middleware):
             return await call_next(context)
 
 
+def _live_owner(url: str) -> ServerRecord | None:
+    """The live process this endpoint's record names, or `None` if there is none.
+
+    **The record is keyed by the URL alone** (`runtime.record_path`), so this is
+    the only question that tells a server that is *running* from the left-over
+    record of one that is gone — and there is exactly one caller, which must not
+    touch another process's record.
+
+    A pid that is not alive owns nothing: that is the daemon that crashed, and
+    the machine that was rebooted.  A pid that is alive is accepted as the owner
+    when the start token proves it, because Windows reuses pids and a record
+    whose number now belongs to an unrelated process is not a server on this
+    port — the rule `launcher._stop_one` decides "is this ours to stop" by.  A
+    record with no token at all is a platform that cannot prove ownership
+    (`ServerRecord.start_token`), and there a live pid is the whole of the
+    evidence there is.
+    """
+    record = read_record(url)
+    if record is None or not pid_alive(record.pid):
+        return None
+    if same_process(record) or not record.start_token:
+        return record
+    return None
+
+
 def serve(
     mcp: FastMCP,
     server: ServerSettings,
@@ -563,6 +591,18 @@ def serve(
     reuses it either way, and an instance pointed at a *different* config sees a
     record that is not its own and refuses rather than talking to a server
     holding somebody else's key.
+
+    **The record is written only for an endpoint nobody live owns, and only the
+    record this process wrote is deleted on the way out.**  The write is before
+    the bind — it has to be, because `mcp.run` binds and then never returns
+    until the server stops — so a second process on a port the shared stack
+    already serves (a hand-started duplicate, which this function's whole design
+    supports) would otherwise replace the *running* server's record with its own
+    on the way in and delete it on the way out: it cannot bind, so it exits, and
+    `slife2 down` then reports "no record; not started by slife2" and leaves the
+    live daemon running.  Both halves are therefore ownership-conditional: a
+    record naming a live process is somebody else's server, and one that is no
+    longer ours to delete is not deleted.
 
     Two options are pinned explicitly even where they match the default, because
     flipping either is *silent* and a future refactor could do it without
@@ -589,7 +629,21 @@ def serve(
         config=str(config_path) if config_path else "",
         version=__version__,
     )
-    write_record(record)
+    owner = _live_owner(url)
+    if owner is None:
+        write_record(record)
+    else:
+        # Said out loud, because the bind is about to fail and uvicorn's own
+        # error says "address in use" without saying whose: a record naming the
+        # other server is the only place the answer is written down.
+        logger.warning(
+            "%s: %s is already serving (recorded for %s, pid %d), so this "
+            "instance leaves that record alone",
+            name,
+            url,
+            owner.name,
+            owner.pid,
+        )
     try:
         mcp.run(
             transport="http",
@@ -600,7 +654,8 @@ def serve(
             stateless_http=True,
         )
     finally:
-        clear_record(url)
+        if owner is None and read_record(url) == record:
+            clear_record(url)
 
 
 def configure_logging() -> None:

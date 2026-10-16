@@ -413,10 +413,10 @@ class ScheduleStore:
         """The ledger, newest first, optionally narrowed.
 
         Newest by *when the run was due*, because that is the run's identity —
-        and the ordering is done on the stored string rather than on a parsed
-        moment, which is the one place this module trusts `slife2.helpers.clock`'s
-        spelling: every row here was written by this process on this machine, so
-        they share an offset and compare as the timestamps they look like.
+        and by the **instant** rather than by the stored string, because a stamp
+        is local time with its offset and two rows either side of a
+        daylight-saving change are two offsets.  See `_by_instant` for the two
+        spellings of one moment that made "newest first" order backwards.
         """
         query = (
             "SELECT r.*, t.name AS task_name FROM scheduled_runs r "
@@ -429,7 +429,7 @@ class ScheduleStore:
         if status:
             query += " AND r.status = ?"
             parameters.append(status)
-        query += " ORDER BY r.due_at DESC LIMIT ?"
+        query += f" {_by_instant('r.due_at')} LIMIT ?"
         parameters.append(limit)
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
@@ -439,7 +439,10 @@ class ScheduleStore:
         """A task's newest run, optionally restricted to some states.
 
         "Newest" by *when it was due*, not by rowid: a backfilled run is inserted
-        late and belongs where its due time puts it.
+        late and belongs where its due time puts it — and by the instant rather
+        than the stored string, for the reason `runs` gives.  `_newest_open` is
+        what turns this into a decision, so a wrong answer here closes the wrong
+        run.
         """
         task = self.task(name)
         if task is None:
@@ -449,7 +452,7 @@ class ScheduleStore:
         if statuses:
             query += f" AND status IN ({','.join('?' * len(statuses))})"
             parameters.extend(statuses)
-        query += " ORDER BY due_at DESC LIMIT 1"
+        query += f" {_by_instant('due_at')} LIMIT 1"
         with self._connect() as connection:
             row = connection.execute(query, parameters).fetchone()
         return _run(row, name) if row else None
@@ -481,11 +484,24 @@ class ScheduleStore:
         a function of the last thing anybody said" that `reopen` refuses to do.
         The caller is told nothing happened by getting the row back unchanged,
         exactly as it is when a reopen is refused.
+
+        **And a run whose work is in flight is not *skipped*, which is the same
+        rule seen from the other side.**  `pending` with an `agent_task_id` means
+        the work is being done right now, so a `skipped` row would record that
+        this run did not happen while a background task went on producing an
+        answer that is still delivered.  Nothing could put it back either:
+        `reconcile` closes `pending` rows and only those, so it would never look
+        at the row again, and `reopen` refuses one that has ended.  The other
+        endings are not this: `ran` and `failed` come from what the task did, and
+        `missed` — like a skip of a `pending` run with *no* task on it — is a
+        trigger nobody answered, which is exactly a run that did not happen.
         """
         if status not in STATUSES:
             raise ValueError(f"{status!r} is not a run state")
         found = self.run(name, due_at)
         if found is None or found.status not in UNSETTLED:
+            return found
+        if status == SKIPPED and found.status == PENDING and found.agent_task_id:
             return found
         with self._connect() as connection:
             connection.execute(
@@ -570,7 +586,7 @@ class ScheduleStore:
                 "SELECT r.*, t.name AS task_name FROM scheduled_runs r "
                 "JOIN scheduled_tasks t ON t.id = r.task_id "
                 "WHERE r.status = ? AND r.agent_task_id <> '' "
-                "ORDER BY r.due_at",
+                f"{_by_instant('r.due_at', newest_first=False)}",
                 (PENDING,),
             ).fetchall()
         return [_run(row, row["task_name"]) for row in rows]
@@ -638,3 +654,19 @@ def moment_of(stamp: str) -> datetime:
     papering over.
     """
     return datetime.fromisoformat(stamp)
+
+
+def _by_instant(column: str, *, newest_first: bool = True) -> str:
+    """The `ORDER BY` for a stamp column: on the instant, not on the string.
+
+    **The same question `moment_of` asks, asked where the rows are.**  A stamp is
+    local time with its offset, so as a *string* it orders correctly only while
+    every row shares one offset — which is precisely what a local-zone ledger
+    across a daylight-saving change does not have.  `2026-10-25T01:30:00+01:00` is
+    00:30Z and `2026-10-25T01:15:00+00:00` is 01:15Z, so the older run is the
+    greater string: "newest first" handed it back above the newer one, and with a
+    `LIMIT` on top, cut the genuinely newest runs off the page.  `julianday` reads
+    the offset and gives the instant.  A stamp SQLite cannot read orders with the
+    NULLs, which is last in a `DESC` listing — where a damaged row belongs.
+    """
+    return f"ORDER BY julianday({column})" + (" DESC" if newest_first else "")

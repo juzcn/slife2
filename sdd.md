@@ -1291,10 +1291,16 @@ code against its own docstrings. What would settle each is named with it.
 3. **A scheduled run and the task that runs it.** A run is tied to its task by a
    name-derived id, which is not unique across two overlapping runs of one task.
    *Settled by:* an id minted per run.
-4. **A fire in a repeated local hour.** A daylight-saving fall-back can make a
-   daily expression fire twice, because the suppression compares instants and the
-   repeated hour is two of them. *Settled by:* the rule stated in the expression
-   layer, and a test in a zone that has the transition.
+4. **A fire in a repeated local hour.** *Settled* in the expression layer, which
+   is where the rule was said to belong. A daylight-saving fall-back makes one
+   wall reading name two instants, and the suppression compared instants alone —
+   so the second occurrence was strictly newer than the anchor the first left,
+   and the task fired twice: two runs in the ledger (their stamps differ, so
+   `UNIQUE(task_id, due_at)` does not dedupe them), two triggers, and a second
+   `agent_task_start` under a name the first had already taken. The rule is now
+   stated as the reading it is: a fire whose *reading* equals the anchor's is the
+   same fire, which is an equality only the repeated hour can produce, since
+   inside one day a reading names one instant.
 5. **A history left with an unanswered tool call.** *Settled*, and not by the
    repair that was proposed: the loop no longer creates the state. The
    assumption underneath it was that a tool execution cannot raise, and running

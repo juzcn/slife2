@@ -177,6 +177,46 @@ def test_the_whole_answer_is_measured_including_the_sentence() -> None:
     assert estimate_text_tokens(answer) <= 50
 
 
+def test_a_window_too_small_for_its_own_address_fails_rather_than_lies() -> None:
+    """**A state that cannot be read back must fail, not look like success.**
+
+    `clip_to_tokens` bounds the answer and protects nothing, so a
+    `tool_result.tokens` small enough cut the `[DUMP:…]` marker mid-JSON — the
+    model could not name the dump to ask for the rest — and a smaller one still
+    answered with the empty string: a tool result that says nothing at all, in a
+    conversation that carries it for ever.  The address is what makes the bound
+    survivable, so a budget that cannot hold it is a failure rather than a
+    shorter window (`slife2.libs.host.config` validates `tokens >= 1` and nothing
+    else, so this is reachable by a config edit alone).
+    """
+    lines = dumps.lines_of(body())
+    decision = dumps.read_reply('{"lines": [[1, 3]]}')
+
+    # Each of these is smaller than the marker's own cost under either measure,
+    # so the guard is what has to answer — not the size of a window.
+    for budget in (1, 5, 15):
+        with pytest.raises(ValueError, match="address"):
+            dumps.window(
+                call="call_abc123",
+                lines=lines,
+                kept=dumps.cut(lines, decision, budget),
+                chosen=True,
+                budget=budget,
+            )
+
+    # And a budget with room for the address still answers with it whole.
+    answer = dumps.window(
+        call="call_abc123",
+        lines=lines,
+        kept=dumps.cut(lines, decision, WINDOW),
+        chosen=True,
+        budget=WINDOW,
+    )
+
+    assert answer.startswith(dumps.MARKER)
+    assert '"call": "call_abc123"' in answer
+
+
 def test_the_three_answers_that_are_not_a_window_read_differently() -> None:
     """Nothing bears on it; the lines are too long to fit; it is not text.
 

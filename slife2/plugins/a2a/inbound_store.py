@@ -101,8 +101,13 @@ class InboundStore:
         self._load()
 
     @classmethod
-    def open(cls, agent: str) -> InboundStore:
-        """The ledger for one agent, created and stamped with its name.
+    def open(cls, agent: str, ledger: str) -> InboundStore:
+        """The ledger for one agent *on one network*, created and stamped with its name.
+
+        `ledger` is `Net.ledger`, and it is the network's own file: what a
+        ledger records is the completion bridges *this* mesh is holding, so two
+        processes serving one agent's name over two networks must not share one
+        (see `Net.ledger` for what sharing cost).
 
         This is the only way a ledger comes into existence, and the file's
         existence says one thing: this agent has had inbound tasks, so a *later*
@@ -119,7 +124,7 @@ class InboundStore:
         what an orphan notice is addressed to.  It is also where the
         ``pending → stale`` migration above gets persisted.
         """
-        store = cls(a2a_inbound_path(agent), agent)
+        store = cls(a2a_inbound_path(agent, ledger), agent)
         store._save()
         return store
 

@@ -176,10 +176,29 @@ def latest_fire(
     the fire happened on, so a wall-clock comparison silently drops every fire
     inside the repeated hour.  Instants are what "the newest fire behind this
     task" means, the same difference `due()` asks about when it measures lateness.
+
+    **The one thing an instant comparison gets wrong is a reading the anchor has
+    already been at**, and that is why the fall-back rule is stated rather than
+    left to fall out.  A fall-back hour names the same wall reading twice, an hour
+    apart, so the second occurrence is *strictly newer as an instant* than the
+    anchor the first one left — and by instants alone the next poll finds it and
+    fires it, which is the second fire the module docstring says does not happen.
+    Equality of readings is the whole of the exception: `0 1 * * *` in
+    `Europe/London` on the fall-back day fires at `01:00+01:00`, and the
+    `01:00+00:00` an hour behind it is that same occurrence — while a task due
+    every minute, anchored at `01:20+01:00`, still finds `01:12+00:00`, an older
+    reading and a newer instant, which is a fire.
     """
     reference = _reference(until, timezone)
     nudge = datetime.fromtimestamp(reference.timestamp() + 1, reference.tzinfo)
     found = previous_run(expression, nudge, timezone)
-    if found.timestamp() <= _reference(after, timezone).timestamp():
+    anchor = _reference(after, timezone)
+    if found.timestamp() <= anchor.timestamp():
+        return None
+    # The same reading twice is the fall-back's one occurrence and not two.  As
+    # *readings* — the zone stripped from both — because each has already been
+    # restated in the task's zone, so "the same reading" is the task's wall clock
+    # rather than this machine's.
+    if found.replace(tzinfo=None) == anchor.replace(tzinfo=None):
         return None
     return found

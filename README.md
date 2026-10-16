@@ -373,7 +373,9 @@ tool_load:                              # how many tools the model may hold
 
 tool_result:                            # how much of one tool result it is handed
   tokens: 4000                          # spend it on an oversized result, and
-                                        # cap `dump_read` with it — one number
+                                        # cap `dump_read` with it — one number,
+                                        # and at least 128: a window smaller than
+                                        # the address it opens with is refused
 
 context:                                # how a conversation's context is decided
   ceiling: 0.8
@@ -482,7 +484,10 @@ before dispatch, so no tool server ever sees one.
 - **`_async`** — run it in the background. The model gets a `task_id` and the
   result is **handed back into the conversation** when it arrives, wearing
   `[AgentToolResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`; the
-  window shows it as a message on the `async-tool:<tool>` channel.
+  window shows it as a message on the `async-tool:<tool>` channel. The result
+  goes through `tool_result: tokens:` like any other — backgrounding is how a
+  call escapes the *wait*, not the bound — so a huge output arrives as a window
+  over it, with `dump_read` for the rest.
   `check_async` answers where the call *is* (running, finished, failed,
   cancelled), and `cancel_async` abandons it. **An agent task's own loop has no
   `_async`** — it runs one turn, so there would be nowhere to hand a result back
@@ -898,7 +903,10 @@ due time it carries. A fire nothing was there to receive — no window showing t
 agent — ends the run `failed` with the reason recorded, rather than leaving it
 `pending`: the ledger is where "did it run?" is answered. A task that
 has come due is **not the agent's to decline**; `schedule_run_skip` exists for the
-runs that did not happen at all.
+runs that did not happen at all — and a run whose task *is* running is refused
+rather than closed, because closing it would leave the work going with nothing
+recording it: `agent_task_cancel` is how that one ends, and `reconcile` then
+closes the run `failed` with the reason.
 
 | tool | what it does |
 |---|---|
@@ -1058,6 +1066,8 @@ and a home is what `--data-dir` names:
       wechat.yaml                  its WeChat login (~24h, written on a scan)
       a2a.yaml                     its A2A ledger: the inbound tasks whose
                                    completion bridge this process holds
+      a2a-subagent.yaml            the same for the local network, which is a
+                                   second process and therefore a second file
 ```
 
 **Nothing inside an agent's directory repeats its name** — the directory says

@@ -273,9 +273,17 @@ async def test_a_tool_the_far_end_does_not_have_is_its_answer_too() -> None:
 class DeadClient:
     """A client whose calls fail the way a dead link does.
 
-    The rebuild rule is about a link that dies *during a call*, and nothing about
-    a real transport can be made to fail on demand — so the client is what is
-    faked, and the transport is a placeholder nothing looks at.
+    Nothing about a real transport can be made to fail on demand, so the client
+    is what is faked and the transport is a placeholder nothing looks at.
+
+    `dies` raises `CONNECTION_CLOSED`, **which is the SDK's code for two
+    different situations**: a send onto a transport that is already torn down,
+    and a request that was in flight when the read stream ended (`mcp/shared/
+    jsonrpc_dispatcher.py`'s `_fan_out_closed` wakes every pending waiter with
+    it, and the streamable HTTP transport synthesises it for an SSE stream that
+    ended with no answer).  The fake is ambiguous on purpose, because the real
+    exception is — which is why the connection may not read it as "nothing was
+    asked"; see `test_a_call_whose_answer_was_lost_is_not_run_again`.
     """
 
     def __init__(self, *, dies: bool, refuses: bool, times_out: bool = False) -> None:
@@ -300,12 +308,11 @@ class DeadClient:
     async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
         self.calls += 1
         if self.dies:
-            # **The shape a torn-down link really has**, and the whole of the
-            # retry rule: the dispatcher refuses a send onto a transport that is
-            # already gone with this code, which is what says "nothing reached
-            # the far end" (`slife2.clients.gateway.LINK_DOWN_CODE`).  A generic
-            # exception is a *different* case and must not retry — see the test
-            # below.
+            # The code a dead link really reports (`slife2.clients.gateway.
+            # LINK_DOWN_CODE`) — and the code a request that was in flight when
+            # the link went reports too, which is what the connection may not
+            # treat as "nothing was asked".  A generic exception is a third case
+            # and must not drop the link at all — see the test below.
             raise MCPError(code=LINK_DOWN_CODE, message="Connection closed")
         if self.times_out:
             raise TimeoutError("the call did not answer")
@@ -314,53 +321,64 @@ class DeadClient:
         )
 
 
-def clients(
-    *,
-    dies: bool = False,
-    refuses: bool = False,
-    first_dies: bool = False,
-    times_out: bool = False,
-):
+def clients(*, dies: bool = False, refuses: bool = False, times_out: bool = False):
     """A client factory, and the list of clients it built."""
     made: list[DeadClient] = []
 
     def make(_transport: Any, _handler: Any) -> Any:
-        client = DeadClient(
-            dies=dies or (first_dies and not made), refuses=refuses, times_out=times_out
-        )
-        if first_dies and made:
-            client.dies = False
-        made.append(client)
-        return client
+        made.append(DeadClient(dies=dies, refuses=refuses, times_out=times_out))
+        return made[-1]
 
     return make, made
 
 
 @pytest.mark.asyncio
-async def test_a_link_that_dies_mid_call_is_rebuilt_once() -> None:
-    """Once, and it succeeds when the second link is good.
+async def test_a_call_whose_answer_was_lost_is_not_run_again() -> None:
+    """**The code does not say nothing was asked**, and reading it as if it did
+    ran a model's tool twice.
 
-    A tool that never ran is worth a second attempt; nothing about a real
-    transport can be made to fail on demand, which is why the client is a seam.
+    `CONNECTION_CLOSED` is raised for a send onto a transport that is already
+    torn down *and* — with the same code — to wake every request that was in
+    flight when the read stream ended (`mcp/shared/jsonrpc_dispatcher.py`'s
+    `_fan_out_closed`), and the streamable HTTP transport synthesises it for an
+    SSE stream that ended with no answer.  Both are reachable through a real
+    call: an `mcp:` HTTP upstream whose response stream is cut mid-call, and a
+    stdio child that dies mid-tool after its output file was written.
+
+    Since the two cannot be told apart, the attempted call is answered as a
+    failure and never re-run — the second execution is a second file write, a
+    second render, a second message sent — and the dead link is dropped so the
+    *next* ask rebuilds it.
     """
-    make, made = clients(first_dies=True)
+    make, made = clients(dies=True)
     link = connection(client_factory=make)
 
-    assert await link.call("echo", {}) == ("answered", True)
-    assert len(made) == 2, "one connection, then one rebuild"
+    text, ok = await link.call("echo", {})
+
+    assert ok is False
+    assert "Connection closed" in text, "the far end's failure, as a value"
+    assert len(made) == 1, "not rebuilt: the request may have reached the far end"
+    assert made[0].calls == 1, "and certainly not run a second time"
     await link.close()
 
 
 @pytest.mark.asyncio
-async def test_a_server_that_is_down_costs_two_timeouts_not_more() -> None:
-    """The other half of "once": a dead server must not be retried forever."""
+async def test_a_link_that_died_is_rebuilt_for_the_next_call() -> None:
+    """The source does not stay broken: what the call dropped, the next ask builds.
+
+    That is what "the source stops counting as usable when a call fails at the
+    transport" costs — one call is answered with the failure, and the ask after
+    it reconnects and re-lists rather than every call finding the same dead
+    client.
+    """
     make, made = clients(dies=True)
     link = connection(client_factory=make)
 
-    _text, ok = await link.call("echo", {})
+    assert (await link.call("echo", {}))[1] is False
+    assert link.usable is False, "the source stopped counting as usable"
 
-    assert ok is False
-    assert len(made) == 2
+    assert (await link.call("echo", {}))[1] is False
+    assert len(made) == 2, "the second call reconnected, on a link that died too"
     await link.close()
 
 

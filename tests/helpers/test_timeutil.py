@@ -42,7 +42,12 @@ def test_a_non_canonical_iso_bound_is_the_date_it_names() -> None:
     assert normalize_bound("20261007") == "2026-10-07"
     assert normalize_bound("20261007", role="until") == "2026-10-08", "a day ends late"
     assert normalize_bound("2026-W41-2") == "2026-10-06", "a week date is a date too"
-    assert normalize_bound("2026-10-07T09:30") == "2026-10-07T09:30:00"
+    # The seconds are filled in; the offset is the new part, and the test below
+    # owns that one.
+    assert (
+        datetime.fromisoformat(normalize_bound("2026-10-07T09:30"))
+        == datetime(2026, 10, 7, 9, 30).astimezone()
+    )
     # And something no parser knows is still a refusal rather than a window.
     with pytest.raises(InvalidTimeBound):
         normalize_bound("2026-10")
@@ -74,6 +79,33 @@ def test_a_utc_datetime_becomes_local() -> None:
 
     # Which is the whole point: one instant written two ways, one string.
     assert normalize_bound("2026-01-01T08:00:00+08:00") == local
+
+
+def test_a_bound_with_no_offset_is_local_time_too() -> None:
+    """**The spelling a model is likeliest to write is the one that drops the turn.**
+
+    `2026-10-07T09:31:02` and `2026-10-07T09:31:02+08:00` name one instant, but
+    the bare string is a prefix of the column's own and sorts just before it —
+    so `until=BARE` excluded the turn stored at exactly that second while
+    `until=+08:00` kept it, and there was no matching edge on `since`.  Two
+    spellings of one instant, two windows, at the boundary only and therefore
+    never noticed.
+
+    **Written against this machine's offset rather than a fixed `+08:00`.**  The
+    column holds local time, so the bare spelling can only be read at the local
+    offset — and a runner in UTC is a machine where that offset is `+00:00`.  A
+    fixed-`+08:00` assertion would pass only on a clock set to it, the failure
+    `test_a_utc_datetime_becomes_local` above is already on record for.  What
+    every timezone shares is that the two spellings become one string, which is
+    what is asserted.
+    """
+    moment = datetime(2026, 10, 7, 9, 31, 2)
+    bare = moment.isoformat(sep="T")  # no offset, which is what a model writes
+    local = moment.astimezone().isoformat(timespec="seconds")
+
+    assert "T" in bare and "+" not in bare, "the spelling under test carries no offset"
+    assert normalize_bound(bare) == local
+    assert normalize_bound(bare, role="until") == local, "and the end of the window too"
 
 
 def test_a_bound_that_reaches_the_offset_step_unparseable_is_a_refusal(

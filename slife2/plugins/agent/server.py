@@ -265,21 +265,22 @@ async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
     one output, and the one a model copied out of the conversation would reach
     different text.
 
-    **A read that fails is left to fail the turn.**  The row was written a moment
-    ago by this same process, so a window that cannot be read back is not a case
-    to design for — it is the cabinet having stopped answering, which the
-    register (§10.2) puts on the side of the steps that must succeed.
+    **A read that fails is left to fail the turn**, and this is deliberately a
+    bare call rather than a wrapped one.  The row was written a moment ago by
+    this same process, so a window that cannot be read back is not a case to
+    design for — it is the cabinet having stopped answering, which the register
+    (§10.2) puts on the side of the steps that must succeed.  It used to catch
+    every exception, log a warning and answer `""`, which is an empty tool result
+    entering the conversation: the fallback `compress_for` forbids one paragraph
+    up ("nothing else here falls back"), and the mask covered exactly the failure
+    this step would then be unable to report.
     """
-    try:
-        answer = await client.call_tool(
-            "dump_read",
-            {"call": call, "offset": 1},
-            meta=client_meta(*client_id),
-            timeout=_T.timeouts.work.hub,
-        )
-    except Exception as exc:  # noqa: BLE001 — the caller has the fallback
-        logger.warning("the window over %s could not be read back (%s)", call, exc)
-        return ""
+    answer = await client.call_tool(
+        "dump_read",
+        {"call": call, "offset": 1},
+        meta=client_meta(*client_id),
+        timeout=_T.timeouts.work.hub,
+    )
     return flatten(answer.content)
 
 
@@ -427,6 +428,15 @@ class Pending:
     #: cancelled in the meantime and leave an orphan the next turn would fold in
     #: with nobody waiting for it.
     result: TurnResult | None = None
+    #: The model that answered this message, written **with** `result` and only
+    #: by the turn that wrote it.  Kept on the entry rather than read off the
+    #: loop when the caller is finally answered, because the two can differ: the
+    #: reply names what answered, and a `model_switch` arriving while that turn
+    #: was running moves the loop's reference without moving the answer
+    #: (`slife2.plugins.agent.server._reply` is where that is argued).  Nothing
+    #: reads this unless `result` is set, so its emptiness is not a branch —
+    #: `result` is still the one field that says whether anything folded this in.
+    model: str = ""
 
 
 @dataclass
@@ -501,11 +511,25 @@ class Loop:
     turn_ids: list[int] = field(default_factory=list)
     #: How many of `messages` those ids account for — the system prompt, then
     #: each turn in the list, in order.  What follows is the **carried tail**:
-    #: messages this conversation holds that no turn in the list covers, which is
-    #: a cancelled turn's repair and nothing else.  v1 re-derives the same run by
-    #: grouping messages into turns; a count is enough here because nothing else
-    #: can leave a message unbacked, and it is what lets a rebuild replace the
-    #: turns without destroying a message that has no turn to be replaced by.
+    #: messages this conversation holds that no turn in the list covers, which a
+    #: rebuild takes back verbatim rather than reconstructing.
+    #:
+    #: **The ids have to describe a *prefix*, and that is the invariant the whole
+    #: count rests on.**  `rebuild_into` hands `len(messages) - covered` to the
+    #: store as "how many messages at the end no turn accounts for", and the store
+    #: re-appends `messages[-carried:]` — so an unbacked run that is not at the
+    #: end would be read off the wrong end of the list entirely.  Three things
+    #: leave messages unbacked and none of them is the cancelled repair alone: a
+    #: cancelled turn (`run_turn_into` truncates back to the user's message and
+    #: the id is never claimed), a failed turn (`send_message` records it with the
+    #: id deliberately dropped), and a store that answered `remember` with a
+    #: refusal, so `record` answered `None`.  A turn that runs on top of one of
+    #: those therefore does **not** join `turn_ids`: its own messages join the
+    #: carried run instead, and the two stay one prefix and one tail
+    #: (`send_message`'s `else` branch is where that is decided).  v1 re-derived
+    #: the same run by grouping messages into turns; a count is enough here only
+    #: because of that rule, and it is what lets a rebuild replace the turns
+    #: without destroying a message that has no turn to be replaced by.
     covered: int = 0
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
@@ -1142,6 +1166,23 @@ def build_server(
         loop.last_used = time.monotonic()
         return loop
 
+    def this_home() -> str:
+        """The home the call in front of us is for: the first half of a loop key.
+
+        **Read inside a call, which is the only place it is the caller's.**
+        `ServeTheCallersHome` (`slife2.libs.plugin.protocol`) has put the caller's
+        directory around the whole message, so `client_key` answers with *their*
+        home rather than this daemon's — and this process serves every home on the
+        machine, so the difference decides whether an edit reaches a conversation
+        somebody else is having.
+
+        The empty identity beside it is deliberate: all that is wanted here is the
+        home, and it is read from the one function that defines what a loop is
+        filed under rather than from `paths.home` beside it — so a key and a
+        filter can never disagree about where a conversation belongs.
+        """
+        return client_key("")[0]
+
     def detach(coro: Coroutine[Any, Any, Any]) -> None:
         """Run a write that must outlive the cancellation that prompted it.
 
@@ -1353,9 +1394,12 @@ def build_server(
         the list, where it is not yet.
 
         `carried` is what the message list holds beyond the turns in `turn_ids`:
-        a cancelled turn's repair, and nothing else.  The store puts those
-        messages back verbatim, so a rebuild replaces the *turns* without
-        destroying something that has no turn to be replaced by.
+        the **unbacked run at its end** — a cancelled turn's repair, a failed
+        turn, a turn the store would not record — and it is exactly
+        `len(messages) - covered` because `covered` counts a prefix (`Loop.covered`
+        states the invariant).  The store puts those messages back verbatim, so a
+        rebuild replaces the *turns* without destroying something that has no turn
+        to be replaced by.
 
         Returns the counts as the event that reports them, because the
         discriminator is the most expensive thing a turn does and the two
@@ -1819,6 +1863,11 @@ def build_server(
                 if outcome.result is not None:
                     for folded in loop.injected:
                         folded.result = outcome.result
+                        # The absorbing turn's own record of what answered, and
+                        # the model its folded callers are told — taken here
+                        # because it is what `_reply` needs and because the loop
+                        # may be moved onto another model before they read it.
+                        folded.model = outcome.model
                 loop.injected.clear()
                 # **After the trim**, so its pair — written into the turn it
                 # followed — rides this turn's record.  It is a cancelled trim
@@ -2352,10 +2401,17 @@ def build_server(
                 f"[refused] `{ref}` is the default model; `model_switch` to "
                 f"another first."
             )
+        # **This home's conversations, and this home's only.**  The loop table is
+        # keyed by `(home, agent, subagent)` because one process serves several
+        # homes, and `current()` above read the *caller's* file — so a loop filed
+        # under another home is a conversation this call knows nothing about, and
+        # refusing on its behalf would be a false refusal that also printed
+        # somebody else's conversation names into a sentence the model reads.
+        here = this_home()
         holders = [
             describe((one.agent, one.subagent))
-            for one in loops.values()
-            if one.model == ref
+            for key, one in loops.items()
+            if key[0] == here and one.model == ref
         ]
         if holders:
             return (
@@ -2463,15 +2519,25 @@ def build_server(
         # that same boundary (`Outcome.model`).  Everything the conversation
         # reaches its model with moves, images included: `accepts_images` is
         # what `attach_image` refuses against.
+        # **Only this home's conversations move, and that is a boundary rather
+        # than a filter.**  The table is keyed by `(home, agent, subagent)`
+        # because one process serves every home on the machine, and the
+        # reference just resolved came out of the *caller's* `slife2.yaml` — so
+        # moving another home's loop would point it at a model its own config may
+        # not even name, and its store would then record a foreign model.  The
+        # home is read here, inside the call, which is the only place it is the
+        # caller's (`this_home`).
+        here = this_home()
+        mine = [loop for key, loop in loops.items() if key[0] == here]
         reference = f"{name}/{settings.model}"
-        for loop in loops.values():
+        for loop in mine:
             loop.model = reference
             loop.provider = name
             loop.api = endpoint.api
             loop.model_id = settings.model
             loop.accepts_images = settings.accepts_images
 
-        running = len(loops)
+        running = len(mine)
         if running:
             moved = (
                 f" {running} conversation{'' if running == 1 else 's'} already "
@@ -2604,7 +2670,7 @@ def build_server(
                 # `None` — and then this message still owes itself a turn, which
                 # is what the rest of this block is for.
                 if item.result is not None:
-                    return _injected_reply(loop, item.result)
+                    return _injected_reply(item)
                 # Ours, and its turn is starting now.  A message waiting in
                 # the inbox is *not* in `messages`: `AgentLoop.run_turn`
                 # re-reads the list every step, so an early append would be
@@ -2718,7 +2784,27 @@ def build_server(
                     raise repaired from exc
                 else:
                     turn_id = await record(loop, item, outcome)
-                    if turn_id is not None:
+                    # **A turn joins `turn_ids` only when the list it follows is
+                    # wholly accounted for**, and this is the second half of what
+                    # `covered` means.  `covered` is a count from the *start*, so
+                    # the ids it stands for have to describe a prefix of
+                    # `messages` — and an unbacked run in front of this turn (a
+                    # cancelled or failed turn, or one the store refused to
+                    # record) makes that impossible: the id would be counted as
+                    # covering messages that are not its own, and the next
+                    # rebuild's `carried = len(messages) - covered` would then be
+                    # read off the wrong end of the list — silently dropping the
+                    # unbacked messages *and* re-appending this turn's own tail a
+                    # second time.
+                    #
+                    # Such a turn's messages stay in the carried run instead:
+                    # verbatim, in order, and not addressable (a keep-list cannot
+                    # name a turn the loop cannot name either).  The row is still
+                    # written — a turn that happened is recorded however it ended
+                    # (`remember_turn`) — and the rebuild that next changes the
+                    # context carries the whole run back in beside the turns it
+                    # keeps, which is what makes this a delay rather than a loss.
+                    if turn_id is not None and loop.covered == before:
                         loop.turn_ids.append(turn_id)
                         # **Only what this turn appended is covered.**  Setting
                         # `covered` to the whole list counted the carried tail
@@ -2727,7 +2813,9 @@ def build_server(
                         # `carried = len(messages) - covered`, so its tail came
                         # out zero and the user's own message was dropped from
                         # the conversation.  The turn's own messages are exactly
-                        # the ones appended since `before`.
+                        # the ones appended since `before`, and they are the whole
+                        # of the run because the guard above says nothing was
+                        # carried into this turn.
                         loop.covered += len(loop.messages) - before
                         # ...and it is addressable now, which is what the next
                         # turn's discriminator needs: a turn it cannot name is
@@ -2751,7 +2839,14 @@ def build_server(
         # assert says so to a reader and to the checker rather than leaving
         # branches that can never be taken.
         assert outcome.result is not None
-        return _reply(loop, outcome.result, injected=False, refused=outcome.refused)
+        return _reply(
+            outcome.result,
+            # What answered this message, not what the loop's reference says by
+            # now — `_reply` is where that is argued.
+            model=outcome.model or loop.model,
+            injected=False,
+            refused=outcome.refused,
+        )
 
     @mcp.tool
     async def transcript(agent: str, subagent: str = "") -> dict[str, Any]:
@@ -3172,9 +3267,9 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
 
 
 def _reply(
-    loop: Loop,
     result: TurnResult,
     *,
+    model: str,
     injected: bool,
     refused: list[str],
 ) -> dict[str, Any]:
@@ -3193,6 +3288,16 @@ def _reply(
     `_injected_reply` for a folded message, and the re-raises in `send_message`
     for a cancellation and a failure — so those branches were dead.
 
+    **`model` is passed in rather than read off the loop**, and that is the
+    second thing this signature is for.  The loop's reference is *not* the model
+    that answered: `model_switch` moves it under a turn that is already running
+    — that is the whole of what makes the tool the way out of a model that has
+    stopped answering — so a reply built from `loop.model` here would name a
+    model that never saw this message.  What is passed is the turn's own record
+    of it (`Outcome.model`, taken at the boundary `loop_for` resolves the
+    backend at), which is the same fact the row is written with
+    (`recorded_model`) and for the same reason.
+
     `injected` and `refused` are the only two things that differ between the two
     callers, and both are facts about *the message being answered* rather than
     about the turn that answered it: whether its own turn ran or it rode
@@ -3207,18 +3312,21 @@ def _reply(
         "usage": result.usage.to_wire(),
         "steps": result.steps,
         "stop_reason": result.stop_reason,
-        "model": loop.model,
+        "model": model,
         "injected": injected,
         "refused": refused,
     }
 
 
-def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
+def _injected_reply(item: Pending) -> dict[str, Any]:
     """What a caller is told when a running turn folded its message in.
 
     **The answer that turn's own caller got, said the same way**, because there
     is only one answer to give: the model was handed both messages in one turn,
-    and what it said was said to both.
+    and what it said was said to both — so `item.model`, the absorbing turn's own
+    record of what answered, is the model this reply names too.  Reading the
+    loop's reference here instead would let a `model_switch` during that turn
+    answer this caller as a model that never saw the message.
 
     `usage` and `steps` are that whole turn's, deliberately — they describe the
     work that answered this message, which is that turn's work and nothing else.
@@ -3233,7 +3341,10 @@ def _injected_reply(loop: Loop, result: TurnResult) -> dict[str, Any]:
     `_reply` builds one dict, and a caller must not have to know which path
     handed it the answer in order to read a field of it.
     """
-    return _reply(loop, result, injected=True, refused=[])
+    # Written together with `result` and only by a turn that produced one
+    # (`Pending.model`), so by the time this caller is answered both are there.
+    assert item.result is not None
+    return _reply(item.result, model=item.model, injected=True, refused=[])
 
 
 def main(argv: list[str] | None = None) -> int:

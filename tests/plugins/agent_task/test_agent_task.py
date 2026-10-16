@@ -27,6 +27,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -226,15 +227,25 @@ async def hub() -> Any:
 
 
 async def ask(
-    client: Client, tool: str, arguments: dict[str, Any] | None = None
+    client: Client,
+    tool: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    home: Path | None = None,
 ) -> dict[str, Any]:
     """One call, named the way every server in this system is named.
 
     The identity rides in `_meta` rather than in an argument
     (`slife2.libs.plugin.audience`), because a process that serves every agent cannot guess
-    whose task a call is for — which is `UNADDRESSED`'s whole subject.
+    whose task a call is for — which is `UNADDRESSED`'s whole subject.  `home` is
+    the other half of that identity, and it is what a test about two homes says:
+    the same agent name in two directories is two agents.
     """
-    result = await client.call_tool(tool, arguments or {}, meta=client_meta(AGENT))
+    result = await client.call_tool(
+        tool,
+        arguments or {},
+        meta=client_meta(AGENT, home=str(home) if home else ""),
+    )
     return result.data
 
 
@@ -569,6 +580,94 @@ async def test_two_tasks_may_not_share_one_name(hub: Client, store: Store) -> No
                 client, AGENT_TASK_START, {"name": "research", "description": "again"}
             )
     await settle(built, "research")
+
+
+# ── one process, several homes ────────────────────────────────────────────────
+
+
+async def test_a_listing_names_only_the_callers_homes_tasks(
+    hub: Client, store: Store, window: Window, isolated_runtime: Path
+) -> None:
+    """**The registry is keyed by `(home, agent, name)`, and the listing has to
+    be too.**
+
+    One process serves every home on the machine, so two homes may each be
+    running an agent called `jack`.  A listing that matched on the agent name
+    alone would hand one home's model the other home's task names, descriptions,
+    states and times — rows it could then neither inspect nor stop, because
+    `agent_task_status` and `agent_task_cancel` go through `find`, which does use
+    the whole key and answers `unknown` for exactly those rows.  Naming tasks a
+    model cannot act on is worse than naming none: the next thing it does is ask
+    about one.
+    """
+    theirs = isolated_runtime.parent / "theirs"
+    built = build(
+        text_turn(
+            "never sent",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+        hub=hub,
+        context=store,
+        window=window,
+    )
+    async with Client(built.mcp) as client:
+        started = await ask(
+            client,
+            AGENT_TASK_START,
+            {"name": "research", "description": DESCRIPTION},
+            home=theirs,
+        )
+        here = await ask(client, AGENT_TASK_LIST, home=isolated_runtime)
+        there = await ask(client, AGENT_TASK_LIST, home=theirs)
+        stopped = await ask(
+            client, AGENT_TASK_CANCEL, {"name": "research"}, home=theirs
+        )
+
+    assert started["status"] == "running"
+    assert here["tasks"] == [], "the other home's task is not this home's"
+    assert [row["name"] for row in there["tasks"]] == ["research"]
+    assert stopped["status"] == "cancelled", "and its own home can still stop it"
+
+
+async def test_the_cap_counts_only_the_callers_homes_tasks(
+    hub: Client, store: Store, window: Window, isolated_runtime: Path
+) -> None:
+    """`agent-task: max_running` bounds *this* home's agent, not its name.
+
+    A cap counted by agent name alone would refuse a start in one home because of
+    tasks running in another — a refusal with nothing behind it that neither the
+    caller nor the operator could explain, since the tasks it counted are ones
+    the caller cannot even ask about.
+    """
+    theirs = isolated_runtime.parent / "theirs"
+    built = build(
+        text_turn(
+            "never sent",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn(
+            "never sent either",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+        hub=hub,
+        context=store,
+        window=window,
+        max_running=1,  # timeouts: the value this test is built around, not a budget
+    )
+    async with Client(built.mcp) as client:
+        await ask(
+            client,
+            AGENT_TASK_START,
+            {"name": "theirs", "description": DESCRIPTION},
+            home=theirs,
+        )
+        mine = await ask(
+            client, AGENT_TASK_START, {"name": "mine", "description": DESCRIPTION}
+        )
+        await ask(client, AGENT_TASK_CANCEL, {"name": "theirs"}, home=theirs)
+        await ask(client, AGENT_TASK_CANCEL, {"name": "mine"})
+
+    assert mine["status"] == "running", "this home's cap was free"
 
 
 # ── stopping one ─────────────────────────────────────────────────────────────

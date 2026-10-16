@@ -254,6 +254,7 @@ class _OutboundSend:
         "session",
         "payload",
         "attempts",
+        "unsent",
         "delivered",
         "loops",
         "record",
@@ -273,6 +274,11 @@ class _OutboundSend:
         self.session = session
         self.payload = payload
         self.attempts = 1
+        #: How many times in a row the publish has *failed to leave* — the
+        #: attempts the ladder must not count (`_deliver`).  Kept only so the
+        #: retry backs off instead of hammering a dropped link; cleared by the
+        #: first publish that lands.
+        self.unsent = 0
         self.delivered = False
         self.loops: set[asyncio.Task] = set()
         #: Whether this send created a task (TASK_REQUEST) or is a bare
@@ -530,7 +536,14 @@ class A2AMesh:
     :meth:`list_agents`, :meth:`complete_task`.
     """
 
-    def __init__(self, config: A2ASettings, agent: str) -> None:
+    def __init__(self, config: A2ASettings, agent: str, ledger: str) -> None:
+        """*ledger* is `Net.ledger` — which network's inbound file this mesh owns.
+
+        A parameter rather than read off the section, because which network this
+        is is not a fact about the settings: both networks are configured out of
+        the same shape and are served by this one class, and the ledger is one
+        file per network (`Net.ledger`).
+        """
         self._config = config
         self._topics = TopicSpace(
             org=config.org or "default",
@@ -558,7 +571,7 @@ class A2AMesh:
         #: Inbound tasks awaiting a result — persisted, per agent, so a
         #: restarted process can tell the ones its predecessor died holding
         #: (which can never be completed) from ids it has simply never seen.
-        self._inbound = InboundStore.open(self.agent_name)
+        self._inbound = InboundStore.open(self.agent_name, ledger)
         self._responder = MeshResponder(
             agent_id=self.agent_name,
             mqtt=self._mqtt_cfg,
@@ -1151,6 +1164,26 @@ class A2AMesh:
         verdict this process has no business giving (DESIGN.md §10.1).  Left
         `pending`, a late terminal still routes — the ``finally`` below keeps
         every correlation for exactly that — and records the true outcome.
+
+        **A rung is spent by a publish, not by an attempt to publish.**  The
+        ladder is the profile's answer to *silence from the peer*: what it counts
+        is how many times the peer could have seen the request.  ``send.attempts``
+        used to be incremented before ``_publish_attempt`` and left standing when
+        that raised, so a publish that never left was spent as if it had —
+        ``_publish_props`` raises exactly that way whenever the outbound client
+        is mid-reconnect (``_run_outbound`` clears ``_connected`` in its
+        ``finally``), and the first two backoffs are ~1 s and ~2 s, so a
+        three-to-five-second broker or outbound outage consumed the whole budget
+        after ``send_message`` had answered "The result will arrive in this
+        conversation": nothing was ever published, the conversation was pushed
+        "it was sent 3 times ... and never acknowledged" — a count of attempts
+        that no peer could have answered — and the send was not retried when the
+        link came back, leaving its task row ``pending`` for ever.  A failed
+        publish retries the *same* rung now, and ``unsent`` is what makes that
+        retry back off instead of spinning: it rides the same ladder delay, so a
+        send that cannot be published retries on the profile's capped cadence
+        until the mesh carries it — or until the mesh goes down, which is where
+        this loop ends (``_closing``, and ``disconnect`` cancels ``send.loops``).
         """
         try:
             try:
@@ -1178,20 +1211,28 @@ class A2AMesh:
                         "task" if send.record else "message",
                     )
                     return
-                await asyncio.sleep(_backoff_delay(send.attempts - 1))
+                await asyncio.sleep(_backoff_delay(send.attempts - 1 + send.unsent))
                 if self._closing or send.delivered:
                     return
-                send.attempts += 1
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex[:16])
-                except Exception as e:  # noqa: BLE001 - a failed attempt is retried, not raised: the budget below is what decides, and every client error means the same thing here
+                except Exception as e:  # noqa: BLE001 - a failed publish is retried, not raised: every client error means the same thing here, and the rung it was making is still owed
+                    # Nothing left this process, so nothing was *sent*: the rung
+                    # is still owed (see the docstring), and the attempt the
+                    # warning names is the one being made rather than the one
+                    # that landed.  `unsent` is only the delay's — the budget
+                    # must not move, or three seconds of a dropped link would
+                    # exhaust a ladder that is about the peer's silence.
+                    send.unsent += 1
                     logger.warning(
                         "a2a_delivery_retry_failed task=%s attempt=%d err=%s",
                         send.task_id,
-                        send.attempts,
+                        send.attempts + 1,
                         e,
                     )
-                    continue  # still under the attempts budget — try again
+                    continue  # the link may be back before the next rung
+                send.attempts += 1
+                send.unsent = 0
                 logger.info(
                     "a2a_delivery_retry task=%s attempt=%d",
                     send.task_id,

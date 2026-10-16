@@ -827,10 +827,22 @@ def build_server(
     agent_of = agent_reader("agent whose task it could be", "a task")
 
     def running(agent: str) -> int:
+        """How many of **this home's** tasks for `agent` are still going.
+
+        **Home-scoped as well as agent-scoped, because the registry is.**  A task
+        is keyed by `(home, agent, name)` and `find` looks it up by that whole
+        key — so a count that matched on the agent name alone would cap a start in
+        one home on tasks running in another, which is a refusal neither the
+        caller nor the operator could explain.  The home is read here, inside the
+        call, which is the one place it is the caller's (`AgentTask.home` says why
+        the objects keep their own).
+        """
         return sum(
             1
             for task in tasks.values()
-            if task.agent == agent and task.status == RUNNING
+            if task.agent == agent
+            and task.home == str(home_dir())
+            and task.status == RUNNING
         )
 
     def find(agent: str, name: str) -> AgentTask | None:
@@ -968,7 +980,17 @@ def build_server(
         forgotten — so a row can go `unknown` like any other.
         """
         agent = agent_of(ctx)
-        mine = [task for task in tasks.values() if task.agent == agent]
+        # **This home's tasks, and this home's only.**  The registry is keyed by
+        # `(home, agent, name)` and every other reader goes through that key
+        # (`find`), so a listing that matched on the agent name alone would name
+        # another home's tasks — names, descriptions, states and times — for a
+        # caller who could then neither inspect nor stop any of them, because
+        # `agent_task_status` and `agent_task_cancel` do go through the key and
+        # answer `unknown` for those very rows.
+        here = str(home_dir())
+        mine = [
+            task for task in tasks.values() if task.agent == agent and task.home == here
+        ]
         # Running first, then the most recently started — the order the question
         # "what is still going" wants, and a total order rather than a ranking.
         # Two sorts and not one: `sorted` here is the recency order, and the

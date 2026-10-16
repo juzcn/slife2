@@ -962,9 +962,15 @@ def build_server(
 
         **A task that has come due is not yours to decline** — the trigger tells
         you to run it. This is for the runs that *did not happen*: one that could
-        not be started, and one whose moment passed while slife2 was not running,
-        where doing it late is the other answer and a `pending` row is the one
-        ending that accounts for nothing.
+        not be started, one whose moment passed while slife2 was not running,
+        where doing it late is the other answer, and a trigger nobody acted on,
+        which sits `pending` accounting for nothing until somebody says so.
+
+        **And a run that is *being* done is not one of those.** `pending` with an
+        `agent_task_id` means the work is happening now, and its answer is on its
+        way to you however this call goes — so skipping it is refused, and the
+        row you get back is the one that is still in flight. A run closes itself
+        when the task doing it ends; `schedule_runs` says which run is which.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
@@ -973,6 +979,20 @@ def build_server(
         stamp = _key_of(store, task.name, stamp) if stamp else _newest_open(store, task)
         settled = store.settle(task.name, stamp, SKIPPED, note=note.strip())
         assert settled is not None  # the run was read a moment ago
+        # `settle` refuses this one — a `skipped` row would claim a run did not
+        # happen while a background task went on producing an answer — and the
+        # refusal is turned into words here, the way `schedule_run_now` turns
+        # `reopen`'s refusal into words.  The other refusal `settle` makes, on a
+        # run that already ended, is answered with the row as it stands: there
+        # the model can see for itself what happened, and here it cannot see why
+        # nothing did.
+        if settled.status == PENDING and settled.agent_task_id:
+            raise ToolError(
+                f"the run of {task.name!r} due at {stamp!r} is being done: it is "
+                f"running as the background task {settled.agent_task_id!r}, whose "
+                f"answer is on its way to you. It closes itself when that task "
+                f"ends, so there is nothing here to skip."
+            )
         logger.info("scheduled run of %s skipped for %s", task.name, agent)
         return settled.row()
 

@@ -532,24 +532,30 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
     anything can find.
     """
     root = skills_dir()
-    if name.startswith("."):
-        # **A dot-name is the shape of the staging directory, and `scan` skips
-        # it.**  `install` stages into `.{name}.installing` and moves the old
-        # copy to `.{name}.replacing`, so the leading dot is reserved for the
-        # swap's own directories — and `scan` refuses to list one so that a
-        # `SIGKILL` in that window cannot become a catalogue row for a name
-        # nobody installed.  A skill an operator names `.notes` would therefore
-        # install, report success and be unfindable: no row, no `skill_list`
-        # line, and `skill_use` answering that no such skill exists.  Refused
-        # here, where the name is still the caller's to change.
-        raise ValueError(
-            f"{name!r} starts with a dot, and a dot-directory is reserved for "
-            f"the staging an install swaps through — `scan` never lists one, so "
-            f"this would be a skill nothing could find. Drop the leading dot."
-        )
     final = _within(root, name)
     if final == root.resolve():
         raise ValueError("a skill needs a name")
+    # **The dot rule is about where a name lands, not about how it is spelled.**
+    # `install` stages into `.{name}.installing` and moves the old copy to
+    # `.{name}.replacing`, so the leading dot is reserved for the swap's own
+    # directories — and `scan` refuses to list one so that a `SIGKILL` in that
+    # window cannot become a catalogue row for a name nobody installed.  A skill
+    # that lands in one would therefore install, report success and be
+    # unfindable: no row, no `skill_list` line, and `skill_use` answering that no
+    # such skill exists.  Checked on `final`, because a spelling is not a
+    # location: `a/../.notes` and `sub/./../.notes` reach the same `.notes` a
+    # plain name does, and the check on the raw string passed them — this was the
+    # one guard here not put through the resolution `_within` argues for.
+    # Refused before anything is created, where the name is still the caller's to
+    # change.
+    inside = final.relative_to(root.resolve())
+    if any(part.startswith(".") for part in inside.parts):
+        raise ValueError(
+            f"{name!r} installs into {inside.as_posix()!r}, and a dot-directory "
+            f"is reserved for the staging an install swaps through — `scan` "
+            f"never lists one, so this would be a skill nothing could find. Name "
+            f"it without a dot."
+        )
     staging = root / f".{name}.installing"
     previous = root / f".{name}.replacing"
     shutil.rmtree(staging, ignore_errors=True)

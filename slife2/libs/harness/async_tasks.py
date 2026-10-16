@@ -128,6 +128,19 @@ CANCELLED = "cancelled"
 #: channel is a fact about the message rather than about the transport.
 Deliver = Callable[[str, str], Awaitable[bool]]
 
+#: How a result is **fitted** before it is handed back: the tool's own text in,
+#: what the conversation carries out — or `None` for a caller that has nothing to
+#: fit with, in which case the result goes in as it came.
+#:
+#: **Here rather than in the hand-back itself**, because fitting a result is
+#: choosing what *that conversation* needs from it and this registry knows
+#: nothing about any conversation (`slife2.libs.harness.dumps` is where the
+#: choice is made).  It is a second callback beside `Deliver` rather than part of
+#: it because the two answer different questions and are supplied by different
+#: parties: the loop has the window, and only the server has the conversation —
+#: and a delivery that is *not* fitted is still a delivery worth making.
+Fit = Callable[[str], Awaitable[str]]
+
 
 @dataclass
 class Task:
@@ -151,6 +164,12 @@ class Task:
     #: for a caller with no conversation to reach (a test, a worker), and then
     #: the result stays here for `check_async` to hand over.
     deliver: Deliver | None = None
+    #: How the result is fitted before it goes into the conversation, or None for
+    #: a caller with no window to apply.  Bound when the call was made, beside
+    #: `deliver` and for the same reason: it is a fact about the *call* — the
+    #: loop's own `_fit`, closed over the call and the conversation it was made
+    #: in — and nowhere else.
+    fit: Fit | None = None
     #: Whether it got there, so `check_async` can either confirm it or offer the
     #: text before it is dropped.
     delivered: bool = False
@@ -255,6 +274,7 @@ def schedule(
     call_id: str,
     tool: str,
     deliver: Deliver | None = None,
+    fit: Fit | None = None,
 ) -> str:
     """Start `coro` in the background and answer the id the model polls.
 
@@ -267,6 +287,9 @@ def schedule(
     stores text for the model to read, but whether that text is an answer or a
     failure is not something a reader of the string can decide, and this
     registry is the thing that has to decide it (see `_runner`).
+
+    `fit` is kept with the task rather than applied here, because the result it
+    is for does not exist yet — see `Fit` and `hand_back`.
     """
     task_id = uuid.uuid4().hex[:8]
     _tasks[task_id] = Task(
@@ -274,6 +297,7 @@ def schedule(
         call_id=call_id,
         tool=tool,
         deliver=deliver,
+        fit=fit,
     )
     _prune_finished()
     logger.info("async_task_scheduled id=%s tool=%s", task_id, tool)
@@ -339,10 +363,24 @@ async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
     The channel goes with the words (`channel_for`): a cancelled call, a failed
     one and a finished one all come back the same way, and the bubble a person
     sees has to say which tool it was about.
+
+    **And the window is applied here, to the body alone.**  A background call's
+    result reaches the conversation as a *message* — a turn of its own, later —
+    which is the one road a tool result takes that the loop's own fit does not
+    cover: `slife2.libs.turn.loop._fit` runs where a result is appended to a turn,
+    and this one arrives in a turn of its own, so without this the whole output
+    entered the conversation and its log and was carried by every later request.
+    The fit is over the tool's own words and not over the marker and sentence
+    above them: the model has to be able to name the call this answers, and only
+    the output is what a window is a window over.  A fit that raises is an
+    ordinary delivery failure, for the reason the `except` is here at all — the
+    result stays readable to whoever asks next.
     """
     if task.deliver is None:
         return
     try:
+        if task.fit is not None:
+            body = await task.fit(body)
         task.delivered = bool(
             await task.deliver(
                 handed_back(task, task_id, status, body), channel_for(task.tool)

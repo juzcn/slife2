@@ -3222,12 +3222,20 @@ work it started.
 failure from a peer's *refusal*, and does opposite things with them. A refusal —
 an unknown tool, bad arguments, a permission it will not grant — is a value the
 model reads and acts on, and rebuilding the link would only be told the same
-thing again. A link that died mid-call is retried, **once**: a tool that never
-ran is worth a second attempt, and a server that is down must not turn every
-call into two timeouts. FastMCP makes the split visible for free —
-`call_tool(..., raise_on_error=False)` returns `is_error` where the raising form
-throws — which is one of the reasons this port is a few hundred lines where v1's
-was three thousand.
+thing again. **A transport failure is not retried at all**, and this reverses
+what this paragraph used to say. The request *was* handed to the SDK, so it may
+have reached the peer — and the SDK raises one code (`CONNECTION_CLOSED`) both
+for a send onto a link that was already gone and for every request that was in
+flight when the link went, so no failure carries the claim "nothing was asked".
+Reading it as that claim is what ran a model's file write, render or message a
+second time. What is retried is the one case this process can prove on its own:
+a connection with **no client behind it**, where there was nothing to ask with —
+and that is a first attempt rather than a second one. Nothing is left broken by
+it: the link a failed call dropped is rebuilt by the *next* ask, at the cost of
+one call answered with the failure. FastMCP makes the refusal/transport split
+visible for free — `call_tool(..., raise_on_error=False)` returns `is_error`
+where the raising form throws — which is one of the reasons this port is a few
+hundred lines where v1's was three thousand.
 
 **Three kinds of missing, and only one of them is ours.** A missing *hub* is a
 plugin gone and fails the turn, like the store. A missing *source* — a plugin

@@ -46,20 +46,24 @@ the floor under it.
 **Two failures that look alike and are not.**  A *transport* failure and a peer's
 *refusal* are opposites here.  A refusal — an unknown tool, bad arguments, a
 permission it will not grant — is a value the caller reads and acts on, and
-rebuilding the link would only be told the same thing again.  A link that was
-*already down when the call was made* is retried, **once**: nothing was asked of
-the far end, so a second attempt is not a second execution.  FastMCP makes the
-split visible for free — `call_tool(..., raise_on_error=False)` returns
-`is_error` where the raising form throws — which is one of the reasons this port
-is a few hundred lines where v1's gateway was three thousand.
+rebuilding the link would only be told the same thing again.  A transport
+failure is *not* retried either: a request that was handed to the SDK may have
+reached the peer, and re-running it is a second render, a second file write, a
+second message sent.  What is retried is the one case this process can prove —
+a connection with no client to ask with, where nothing was asked because there
+was nothing to ask with — and it is rebuilt *before* the attempt rather than
+after it.  FastMCP makes the refusal/transport split visible for free —
+`call_tool(..., raise_on_error=False)` returns `is_error` where the raising form
+throws — which is one of the reasons this port is a few hundred lines where v1's
+gateway was three thousand.
 
-**And the retry is the one thing this module decides about failure.**  It holds
-no clock of its own: how long a tool may take is the *caller's* to say — the
-loop's `_timeout`, or the tool's own declared deadline — and a caller that gives
-up cancels the call rather than being answered by a timer down here.  A bound
-here would cut off calls whose callers had said they were willing to wait, and
-the retry that follows a timer is a second render, a second file write, a second
-message sent.
+**And how failure is answered is all this module decides.**  It holds no clock of
+its own: how long a tool may take is the *caller's* to say — the loop's
+`_timeout`, or the tool's own declared deadline — and a caller that gives up
+cancels the call rather than being answered by a timer down here.  A bound here
+would cut off calls whose callers had said they were willing to wait, and a
+timer's answer would arrive while the far end was still running the call it
+timed out.
 
 **A credential is held by the process that needs it.**  `env` and `headers` are
 the two places a tool server is handed one, they are resolved by the config's own
@@ -90,21 +94,34 @@ logger = logging.getLogger(__name__)
 
 #: The SDK's JSON-RPC `CONNECTION_CLOSED` code, spelled rather than imported:
 #: `mcp_types` has the constant and `mcp` does not re-export it, and this build
-#: does not depend on `mcp_types` by name.  What it means is the whole of the
-#: retry rule below — the dispatcher raises it for a send onto a transport that
-#: is already torn down, which is precisely "nothing reached the far end".
-#: `REQUEST_TIMEOUT` is deliberately outside this class: a call that timed out
-#: went out, and may still be running.
+#: does not depend on `mcp_types` by name.
+#:
+#: **It says the link is gone.  It says nothing about how far a request got**,
+#: and reading it as "nothing was asked" is what ran a model's tool twice.  The
+#: dispatcher raises it for a send onto a transport that is already torn down —
+#: nothing reached the far end — and, with the same code, to wake *every request
+#: already in flight* when the read stream ends
+#: (`mcp/shared/jsonrpc_dispatcher.py`'s `_fan_out_closed`), and the streamable
+#: HTTP transport synthesises it for a request whose SSE stream ended with no
+#: answer (`mcp/client/streamable_http.py`).  So it is a reason to drop the link
+#: and never a reason to run the call again.  `REQUEST_TIMEOUT` is outside the
+#: class for the same reason: a call that timed out went out, and may still be
+#: running.
 LINK_DOWN_CODE = -32000
 
 
-def _link_was_down(exc: BaseException) -> bool:
-    """Whether a failed call never reached the peer.
+def _link_is_down(exc: BaseException) -> bool:
+    """Whether a failed call is the link's failure rather than the peer's answer.
 
     True for the dispatcher's `CONNECTION_CLOSED` and for nothing else — see
-    :data:`LINK_DOWN_CODE`.  Everything else means the request went out: a peer
-    that refused, a tool whose body threw, a transport that died while the
-    answer was on its way.  None of those is a reason to run the call again.
+    :data:`LINK_DOWN_CODE`.  **It is not "nothing was asked"**, which is why the
+    call it came from is never run again: the same code wakes a request that was
+    in flight when the stream ended, so the only thing this licenses is letting
+    the link go.
+
+    Everything else means the request went out and this is the far end's answer:
+    a peer that refused, or a tool whose body threw.  Neither is a reason to
+    rebuild, and neither is a reason to run the call again.
     """
     return isinstance(exc, MCPError) and getattr(exc, "code", None) == LINK_DOWN_CODE
 
@@ -560,20 +577,22 @@ class Connection:
         caller used: the advertised name is sanitised and may carry the server in
         front of it, and only the row that recorded it knows both.
 
-        **One rebuild, and only for a transport failure.**  A peer that answered
+        **Nothing that was asked for is ever asked again.**  A peer that answered
         and refused — an unknown tool, bad arguments, a permission it will not
         grant — has said something the model should read, and rebuilding the link
-        would only repeat it.  A link that was gone *before* the call went out is
-        the one case where trying again is not superstition, and it is tried
-        exactly once: a server that is down must not turn every call into two
-        attempts.
+        would only repeat it.  A call that *did* go out and then failed is not
+        retried either, and that is the more important half of the rule: it may
+        be running at the far end, so a second attempt is a second render, a
+        second file write, a second message sent.  There is no exception whose
+        code can tell that case from a send onto a link that was already gone
+        (see :data:`LINK_DOWN_CODE`), so no failure is read as licence to retry.
 
-        **Nothing else is retried**, and that is a claim about what may already
-        have happened rather than about failure: a call that reached the far end
-        may be running there, and a retry of it is a second render, a second file
-        write, a second message sent.  So `_call_once` returns `None` — "the
-        link was gone and nothing was asked" — for that one case only, and
-        everything else comes back as a value the model reads.
+        **The one thing tried again is a call there was no client to make**, and
+        it is safe precisely because it was never asked: `_call_once` returns
+        `None` for it, this method lets the dead connection go, connects, and
+        asks — which is a first attempt rather than a second one.  A source does
+        not stay broken by this: the link dropped by a failed call is rebuilt by
+        the next ask, at the cost of one call answered with the failure.
 
         **No clock lives here**, which is the other half of the same rule: the
         caller that gave up cancels this call (`slife2.libs.turn.loop`'s `_timeout`, or the
@@ -592,7 +611,9 @@ class Connection:
         if result is not None:
             return result
 
-        logger.info("%s: rebuilding the link and retrying %s", self.settings.name, tool)
+        # Nothing was asked — there was no client to ask with — so connecting and
+        # asking now is the first attempt at this call rather than a second one.
+        logger.info("%s: reconnecting and calling %s", self.settings.name, tool)
         await self.disconnect()
         if not await self.ready():
             return f"{self.settings.name} is not connected: {self._error}", False
@@ -607,14 +628,25 @@ class Connection:
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> tuple[str, bool] | None:
-        """One attempt.  `None` means the link was down, not that the tool failed.
+        """One attempt.  `None` means there was no client to make it with.
 
-        **`None` is a claim about the far end**, and it is the only thing that
-        makes the caller's rebuild-and-retry safe: it says the call never left
-        this process, so running it again is not running it twice.  That is what
-        `LINK_DOWN_CODE` is, and it is why the branch below is narrow rather
-        than an `except Exception` — v1 measured what the wide version costs,
-        and it is the one failure the whole three-way split exists to prevent.
+        **`None` is a claim about this process, and never about the far end.**  A
+        connection with no client is a connection nothing was asked of, so
+        running the call after connecting is running it once — that is the whole
+        of what makes the caller's reconnect safe, and it is decided *here*,
+        before the call, rather than read out of an exception afterwards.  No
+        exception can carry that claim: the SDK raises `CONNECTION_CLOSED` both
+        for a send onto a torn-down link and for a request that was in flight
+        when the link went (:data:`LINK_DOWN_CODE`), and reading the second as
+        the first is what ran a model's file write twice.
+
+        **A transport failure and a refusal are still told apart**, because they
+        want different things: a refusal is the peer's answer, and the link is
+        left alone for the next call to use; a link that is down is let go here,
+        so the *next* ask reconnects rather than every call finding the same dead
+        client.  The branch is narrow rather than an `except Exception` because
+        v1 measured what the wide version costs: rebuilding on a peer's refusal
+        asks the same question again and is told the same thing.
         """
         client = self._client
         if client is None:
@@ -627,7 +659,7 @@ class Connection:
                 # error, and this is the half of the contract that says a
                 # refusal is a value: the difference between "the tool said no"
                 # and "the link is gone" is exactly what the two branches below
-                # are, and collapsing them would rebuild the link every time a
+                # are, and collapsing them would drop the link every time a
                 # caller passed a bad argument.
                 raise_on_error=False,
                 # The caller's identity, forwarded rather than interpreted.  What
@@ -640,25 +672,33 @@ class Connection:
                 meta=with_home(meta),
             )
         except Exception as exc:  # noqa: BLE001 - the split below is the decision, not the catch
-            if not _link_was_down(exc):
-                # The call went out, or the peer answered and something in it
-                # threw.  Either way this is the far end's answer and the model's
-                # to read — *not* a reason to rebuild, and above all not a reason
-                # to run it again.  The connection is left alone: it is the next
-                # call, refused by a dispatcher whose link really is gone, that
-                # takes the rebuild.
+            # Neither branch runs the call again — see the docstring.  What the
+            # split decides is the *link*: a peer's refusal leaves it standing,
+            # a dead one is dropped so the next ask rebuilds it.
+            if _link_is_down(exc):
+                # The link is gone, and this call is answered rather than
+                # retried: the code reaches here for a request that was in
+                # flight when the stream ended just as much as for a send onto a
+                # dead transport, so the far end may already be running it.
+                logger.warning(
+                    "%s: calling %s found the link down: %s",
+                    self.settings.name,
+                    tool,
+                    exc,
+                )
+                self._error = f"{type(exc).__name__}: {exc}".strip()
+                await self.disconnect()
+            else:
+                # The request went out and this is the far end's answer — a
+                # refusal, or a tool that threw.  The model's to read, and the
+                # link is left alone.
                 logger.warning(
                     "%s: calling %s failed: %s", self.settings.name, tool, exc
                 )
-                return (
-                    f"{self.settings.name}: {tool} failed: {type(exc).__name__}: {exc}",
-                    False,
-                )
-            logger.warning(
-                "%s: calling %s found the link down: %s", self.settings.name, tool, exc
+            return (
+                f"{self.settings.name}: {tool} failed: {type(exc).__name__}: {exc}",
+                False,
             )
-            self._error = f"{type(exc).__name__}: {exc}".strip()
-            return None
         return flatten(result.content), not result.is_error
 
     async def close(self) -> None:

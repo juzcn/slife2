@@ -384,6 +384,37 @@ async def test_a_window_narrows_without_deciding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_day_axis_reads_a_datetime_bound_as_the_day_it_names() -> None:
+    """**One day, named two ways, is one day.**
+
+    `diary_list` promises "days at or before this", and a bound that carries a
+    time names a day as surely as a date-only one does — but only the date-only
+    bound was moved past its day, because that advance is written for a column
+    holding a moment.  So `until=2026-10-07T12:00:00` cut `< '2026-10-07'` and
+    dropped the very day it names, while `until=2026-10-07` kept it.  `since`
+    truncated correctly, and that asymmetry is what made this a defect rather
+    than a rule: a window whose two bounds were the same moment returned nothing
+    at all.
+    """
+    async with Client(cabinet()) as client:
+        for day in ("2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"):
+            await ask(client, "diary_write", content=f"on {day}", date=day)
+        by_day = await ask(client, "diary_list", until="2026-10-07")
+        by_moment = await ask(client, "diary_list", until="2026-10-07T12:00:00")
+        equal = await ask(
+            client,
+            "diary_list",
+            since="2026-10-07T12:00:00",
+            until="2026-10-07T12:00:00",
+        )
+
+    assert by_moment == by_day, "the same day named two ways is two answers"
+    assert "- 2026-10-07" in by_moment, "the day the bound names is in its window"
+    assert "2026-10-08" not in by_moment
+    assert "- 2026-10-07" in equal, "a window whose bounds are one day is that day"
+
+
+@pytest.mark.asyncio
 async def test_a_search_with_neither_input_browses() -> None:
     """Both empty is a browse rather than an empty answer, and it says so."""
     async with Client(cabinet()) as client:

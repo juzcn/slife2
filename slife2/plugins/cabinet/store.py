@@ -111,6 +111,7 @@ import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1308,11 +1309,15 @@ class CabinetStore:
         as it does anywhere else.
 
         A **day** axis takes the day part of the bound, and its `until` is
-        exclusive: `normalize_bound` resolves an `until` to the *end* of the day
-        it names — `2026-10-07` becomes `2026-10-08`, which is right against a
-        column holding a moment and one day too many against a column that
-        already holds a day.  `<` is the same statement said where the column is
-        the day itself.
+        exclusive because that is the only comparison a column of days has:
+        `2026-10-07` becomes `2026-10-08`, so the day named is the last one in.
+        **A bound that carries a time has to be put past its day here**, because
+        `normalize_bound` only advances a *date-only* `until` — that advance is
+        written for a column holding a moment, where the bound is compared with
+        `<=` and means the instant.  Left unadvanced, `until=2026-10-07T12:00:00`
+        cut `< '2026-10-07'` and dropped the very day it names: the same day
+        written two ways was two different answers, and a window whose two bounds
+        were the same moment returned nothing at all.
         """
         clauses: list[str] = []
         values: list[Any] = []
@@ -1322,8 +1327,11 @@ class CabinetStore:
             values.append(bound[:10] if spec.day else bound)
         if until:
             bound = normalize_bound(until, role="until")
+            if spec.day:
+                day = date.fromisoformat(bound[:10])
+                bound = (day + timedelta(days=1) if "T" in bound else day).isoformat()
             clauses.append(f"{spec.time} {'<' if spec.day else '<='} ?")
-            values.append(bound[:10] if spec.day else bound)
+            values.append(bound)
         return clauses, values
 
     # ── Searching ───────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ import shutil
 import time
 import types
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,8 @@ from slife2.libs.host.config import (
     default_config,
     load_cached,
 )
-from slife2.libs.host.paths import in_home
+from slife2.libs.host.paths import catalogue_db, in_home
+from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
@@ -48,8 +49,10 @@ from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
     MAX_LOAD_NAMES,
     PLUGIN,
+    Catalogue,
     _parameters,
     _verdict,
+    configured_sources,
     model_name,
 )
 from slife2.plugins.toolhub.server import (
@@ -1415,6 +1418,43 @@ async def test_a_plugin_that_stops_answering_keeps_the_rows_it_declared() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> None:
+    """**The row is real, so the answer may not say the config is what is wrong.**
+
+    A plugin that is not answering declares nothing, so this home's address book
+    loses its sources while their rows stay on purpose (the test above) — and the
+    answer for a call to one of them named the two shapes that *cannot* be
+    reached: a switched-off entry is still declared, and refused by its plugin
+    instead, and an entry whose plugin did answer has had its rows deleted
+    (`Upstream.declare`'s `forget_source`).  So the sentence was false about the
+    one case it is reached in — the config still names `fake`, and the thing to
+    go and look at is the plugin — which is a wrong diagnosis handed to whoever
+    reads it, and the reason the hub may not answer a routing failure with a
+    guess about the config.
+    """
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+    ) as first:
+        await first.call_tool("list_tools", {})
+
+    def refuses_to_start(settings: ToolServerSettings) -> Any:
+        raise FileNotFoundError("no such program: slife2-mcp-tools")
+
+    # `mcp-tools` is the plugin that holds `fake` — with it down, nothing
+    # declares the entry, and the entry is still in the config.
+    async with Client(
+        hub_for(connected={"mcp-tools": refuses_to_start}, entries=entries)
+    ) as second:
+        answer = await call(second, "fake__echo")
+
+    assert answer["ok"] is False
+    assert "not a server this hub is configured with any more" not in answer["text"]
+    assert "'fake'" in answer["text"], "the answer names what the call belongs to"
+    assert "`servers`" in answer["text"], "and where the plugin's health is reported"
+
+
+@pytest.mark.asyncio
 async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
     """`enabled: false` leaves the row and takes the server away.
 
@@ -1997,28 +2037,41 @@ def clients(*, dies: bool = False, refuses: bool = False, first_dies: bool = Fal
 
 
 @pytest.mark.asyncio
-async def test_a_call_that_dies_at_the_transport_is_retried_once() -> None:
-    """Once, and it succeeds when the second link is good.
+async def test_a_call_that_dies_at_the_transport_is_answered_and_the_next_rebuilds() -> (
+    None
+):
+    """**A call that went out is never asked again** — and the source does not stay broken.
 
-    A link that died mid-call is the one failure where trying again is not
-    superstition — the tool never ran, or ran and could not say so.
+    The link died with the answer on its way, so the far end may have run the
+    call: a retry of it is a second render, a second file write, a second
+    message sent.  `slife2.clients.gateway` reads no exception as licence to
+    retry, because the SDK raises the same code for a request that was in flight
+    as for a send onto a link already gone.
+
+    What the model gets is the failure, and what the *next* ask gets is a new
+    link — connecting and asking there is a first attempt rather than a second
+    one, which is the half that keeps one dropped link from costing every call
+    that follows.
     """
     make, made = clients(first_dies=True)
 
     async with Client(hub_for(connected={"fake": unused}, client_factory=make)) as hub:
-        result = await call(hub, "fake__echo")
+        first = await call(hub, "fake__echo")
+        second = await call(hub, "fake__echo")
 
-    assert result == {"text": "answered", "ok": True}
-    assert len(made) == 2, "one connection, then one rebuild"
+    assert first["ok"] is False, "the call that went out is answered, not run again"
+    assert second == {"text": "answered", "ok": True}, "and the next one reconnects"
+    assert len(made) == 2, "one connection per call, and no rebuild of its own"
 
 
 @pytest.mark.asyncio
-async def test_an_upstream_that_is_down_costs_two_timeouts_not_more() -> None:
-    """The other half of "once": a dead server must not be retried forever.
+async def test_an_upstream_that_is_down_costs_one_attempt_per_call() -> None:
+    """The other half: a dead server must not be hammered either.
 
-    Named for the *upstream*, because `slife2.clients.gateway` has this same test at the
-    link's own layer: this one is the hub's half — a `mcp:` entry, reached
-    through the plugin that holds it.
+    Named for the *upstream*, because `slife2.clients.gateway` has this same
+    test at the link's own layer: this one is the hub's half — a `mcp:` entry,
+    reached through the plugin that holds it.  Every call costs one attempt, and
+    the failure names the entry rather than being retried into a second one.
     """
     make, made = clients(dies=True)
 
@@ -2026,7 +2079,7 @@ async def test_an_upstream_that_is_down_costs_two_timeouts_not_more() -> None:
         result = await call(hub, "fake__echo")
 
     assert result["ok"] is False
-    assert len(made) == 2
+    assert len(made) == 1, "one attempt, because the attempt is what may have run"
 
 
 @pytest.mark.asyncio
@@ -2697,3 +2750,110 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
 
     held = ToolStore(mine / "agents" / "tools.db", threshold=100)
     assert held.route("second") is not None, "the re-read stopped at the asking home"
+
+
+@dataclass
+class SlowOpenEmbedder(StubEmbedder):
+    """A `StubEmbedder` that stops inside the first embedding it is asked for.
+
+    **The window under test is measured in embedding calls.**  A store's open is
+    `seed`'s writes — one call behind each source — and then `sync_indexes`,
+    which may re-embed the whole catalogue; parking the first call is parking the
+    open at a place the test can stand on, rather than racing a sleep against
+    whatever the machine is doing.  `reached` says the park happened, `proceed`
+    is what lets the open go.
+    """
+
+    pause: bool = False
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
+    proceed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if self.pause:
+            self.pause = False
+            self.reached.set()
+            await self.proceed.wait()
+        return await StubEmbedder.embed(self, texts)
+
+
+@pytest.mark.asyncio
+async def test_a_listing_that_lands_during_an_open_reaches_that_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The window between `seed`'s snapshot and the file's publication.**
+
+    `Catalogue.store()` builds a home's file and the build is not instant:
+    `seed` writes every source the machine holds and `sync_indexes` may re-embed
+    the whole catalogue.  Two writers can put a source into that file, and one
+    landing *inside* the window was covered by neither — the fan-out at the end
+    of `remember` walks `_stores`, which cannot hold a file that has not
+    finished opening (publishing it is the last thing `store` does), and `seed`'s
+    snapshot of `_held` was taken before those rows were held.  So the source
+    landed in every home *but* the one that was opening, and nothing repaired it:
+    the next write for that source is its next relist
+    (`slife2.helpers.timeouts.timeouts.pacing.relist_after`, minutes) or a restart.
+
+    **The halves are exclusive now** — `remember` holds `_held` and does the
+    fan-out under the lock an open is under — so a listing is either in the
+    snapshot (`seed` writes it) or held after the file was published (the
+    fan-out finds it).  This drives the window open by hand, with the open parked
+    inside `seed` and one source already held so that there is a write to park
+    in, and reads the files rather than asking the hub again: asking would
+    re-list the machine's sources and repair the very thing under test.
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config = default_config()
+    embedder = SlowOpenEmbedder()
+
+    async def open_store() -> ToolStore:
+        """The three steps `open_catalogue` is: build the file, seed it, index it."""
+        store = await asyncio.to_thread(
+            ToolStore, catalogue_db(), threshold=100, known=configured_sources(config)
+        )
+        await catalogue.seed(str(home_dir()), store)
+        await store.sync_indexes(embedder)
+        return store
+
+    async def embedder_of_call() -> StubEmbedder:
+        return embedder
+
+    catalogue = Catalogue(open_store, embedder_of_call)
+
+    # A first home, and one source the machine already holds: that source is what
+    # the second home's open has to write, and therefore where its open can be
+    # parked.
+    await catalogue.store()
+    await catalogue.remember(
+        "machine", PLUGIN, [{"name": "first", "description": "Already held."}]
+    )
+
+    embedder.pause = True
+    with in_home(theirs):
+        opening = asyncio.create_task(catalogue.store())
+    await embedder.reached.wait()  # inside `seed`, past its snapshot
+
+    # A listing lands now, from the home that is *not* opening — what the hub's
+    # own relist is: a fact about the machine, so every home's file gets it.
+    with in_home(mine):
+        landing = asyncio.create_task(
+            catalogue.remember(
+                "late", PLUGIN, [{"name": "late__one", "description": "Mid-open."}]
+            )
+        )
+
+    # **The open is let go as soon as the listing has finished**, which is the
+    # order that loses the rows — and it is the listing that says so rather than
+    # a sleep, so the failure cannot be timed away.  Blocked on the open's lock,
+    # the listing never finishes, and the timer is then what ends the wait.
+    loop = asyncio.get_running_loop()
+    landing.add_done_callback(lambda _: embedder.proceed.set())
+    let_go = loop.call_later(0.5, embedder.proceed.set)
+    await asyncio.gather(opening, landing)
+    let_go.cancel()
+
+    opened = ToolStore(theirs / "agents" / "tools.db", threshold=100)
+    assert opened.route("first") is not None, "the open finished its own seeding"
+    assert opened.route("late__one") is not None, (
+        "the listing landed in every home but the one that was opening"
+    )

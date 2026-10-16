@@ -1104,6 +1104,63 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
+    hub,
+) -> None:
+    """**`carried` is a count of the *tail*, so `turn_ids` has to be a prefix.**
+
+    A turn whose `record` answered nothing is left unbacked — a failed turn, a
+    cancelled one, or a store that refused the write — and the next rebuild
+    carries its messages verbatim.  That is only expressible while the unbacked
+    run is still at the end of the list: a *later* turn that does get an id sits
+    behind messages its id does not describe, and `covered` can no longer be read
+    as a prefix.  Reading `len(messages) - covered` off the wrong end then took
+    the newest turn's own tail, re-appended it *after* a list the log had just
+    rebuilt it into, and silently dropped the message the mechanism exists to
+    keep.
+
+    Asserted through the model, which is the only reader that matters: the third
+    turn is sent the whole conversation, in order, once.  `{"context": "clear"}`
+    is what forces the rebuild — the decision has to *change* the context, or the
+    in-hand list stands and nothing is ever re-derived.
+    """
+    from slife2.plugins.context.server import build_server as build_context
+
+    class RefusesOnce(FakeBackend):
+        """A provider that answers a 500 to the first call and works after it."""
+
+        def stream(self, messages, tools) -> Stream:
+            if not self.calls:
+                self.calls.append((list(messages), list(tools)))
+                raise RuntimeError("the provider answered 500")
+            return super().stream(messages, tools)
+
+    backend = RefusesOnce(text_turn("second answer"), text_turn("third answer"))
+    answers = iter(["{}", "{}", '{"context": "clear"}'])
+
+    async def ask(agent, subagent, model, messages, prompt) -> str:
+        return next(answers)
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=ask)
+    ) as context_client:
+        server = build_server(
+            config(), context_client=context_client, hub_client=hub, backend=backend
+        )
+        with pytest.raises(Exception, match="500"):
+            await send(server, "one")
+        assert (await send(server, "two")).data["text"] == "second answer"
+        assert (await send(server, "three")).data["text"] == "third answer"
+
+    assert prompts_seen(backend, 2) == [
+        "user:one",
+        "user:two",
+        "assistant:second answer",
+        "user:three",
+    ], "the unanswered message is still in the conversation, and nothing is twice"
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     hub, tmp_path, monkeypatch
 ) -> None:

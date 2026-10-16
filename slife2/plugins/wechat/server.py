@@ -494,6 +494,34 @@ def format_link_line(state: str) -> str:
     return notes.offline("Wechat")
 
 
+def _home_key(root: str | Path) -> str:
+    """One home's canonical spelling — the first half of a session's key.
+
+    **A key is an identity, so it is the directory and not the string somebody
+    wrote it with.**  `Wechat.session` is asked for a login by two callers who
+    spell one home differently.  A tool call carries the client's own
+    `data_dir`, which is a spelling and not a directory: `client_meta` sends the
+    home "exactly as written", and `_for_the_wire` leaves an absolute path
+    alone on purpose (a symlinked home is "a spelling the operator chose"), so
+    what arrives in the ambient home (`ServeTheCallersHome` → `in_home`) is the
+    client's string.  `_resume_login` keys by the directory `known_homes`
+    answered with, which is `Path.resolve()`d.  Both read the *same file* —
+    `agent_dir` resolves the two to one directory — so the mismatch is invisible
+    everywhere except in the key, and what it bought was a second `Session` for
+    one login: a second `ready()` → `_adopt` → `try_restore_session` on the same
+    token and then a second `watch()`, so two poll loops, each with its own
+    cursor and its own `seen` window, handed every inbound message to the
+    conversation twice.  Any home whose spelling is not canonical splits them —
+    `--data-dir d:\\DEV\\…` under a directory whose real name is `D:\\Dev\\…`, or
+    a symlinked or junctioned one — which is the class of name `AGENT_KEY`
+    exists for, one level up.
+
+    Resolved, because that is the spelling one of the two ends already answers
+    with and only one of them can move.
+    """
+    return str(Path(root).resolve())
+
+
 class Wechat:
     """Every agent's login, and the loop that watches each one."""
 
@@ -528,8 +556,13 @@ class Wechat:
         be the thing that waits for a network round trip to a bridge that may
         be down, so what a fresh session is given here is its own state and
         nothing else.
+
+        **The home is one key however it is spelled** (`_home_key`): a call
+        arrives with the client's own `data_dir` string and `_resume_login`
+        arrives with a resolved directory, and the same home spelled twice was
+        two sessions — and so two poll loops — on one login.
         """
-        where = home or str(home_dir())
+        where = _home_key(home or home_dir())
         found = self._sessions.get((where, agent))
         if found is None:
             found = Session(agent, http=self._http, home=where)
@@ -606,7 +639,7 @@ class Wechat:
                 path,
             )
             return
-        self._spawn_in_home(root, self._resume(self.session(agent, str(root))))
+        self._spawn_in_home(root, self._resume(self.session(agent, _home_key(root))))
 
     async def close(self) -> None:
         """Take down every loop, keep-alive and in-flight turn."""

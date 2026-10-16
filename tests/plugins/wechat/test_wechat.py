@@ -33,7 +33,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.harness import handover, markers
 from slife2.libs.harness.handover import DeliveryFailed
 from slife2.libs.host.config import TUI_SERVER_NAME, Config, load
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import agent_dir, in_home
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat import server as wechat
@@ -1428,6 +1428,52 @@ async def test_a_login_is_keyed_by_the_name_the_file_states(
         # (`slife2.libs.plugin.audience.client_key`).
         assert [agent for _, agent in made.plugin._sessions] == ["a/b"], (
             "the session is keyed by the name in the file, not the directory"
+        )
+    finally:
+        await made.close()
+
+
+@pytest.mark.asyncio
+async def test_one_login_is_one_session_however_the_home_is_spelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The key's other half is a directory, so it has one spelling.**
+
+    The two ends of a session's key are spelled by different parties.  A tool
+    call's home is the client's own `data_dir`, which travels as a *spelling*
+    rather than as a directory — `slife2.libs.plugin.audience.client_meta` sends it
+    "exactly as written" and `_for_the_wire` deliberately leaves an absolute
+    path alone — while `_resume_login` keys by the directory `known_homes`
+    answered with, which is `Path.resolve()`d.  Both read the *same file*
+    (`agent_dir` resolves the two to one directory), so the mismatch is
+    invisible everywhere except in the key — and what it bought was a second
+    `Session` for one login, which is a second `ready()` → `_adopt` →
+    `try_restore_session` on the same token and then a second `watch()`: two
+    poll loops, each with its own cursor and its own `seen` window, handing every
+    inbound message to the conversation twice, two turns and two replies, one of
+    them to a window that is not showing.  That is the failure `AGENT_KEY` exists
+    to prevent, arriving by the other door.
+
+    Any data directory whose raw spelling is not canonical splits them —
+    `--data-dir d:\\DEV\\…` under a directory whose real name is `D:\\Dev\\…`, or
+    a symlinked one.  The spelling here is a `..`, which is a spelling difference
+    every platform has; the reported one is a drive letter's case on Windows.
+    """
+    signed_in()
+    made = rig(monkeypatch)
+    spelled = str(wechat.home_dir() / "agents" / "..")
+    assert spelled != str(wechat.home_dir()), "the spelling this test is about"
+    assert Path(spelled).resolve() == wechat.home_dir().resolve(), "one home"
+
+    await made.plugin.start()
+    try:
+        # As a call arrives: it names its home as the string it was given, and
+        # `home_dir()` answers with it for as long as the block is entered.
+        with in_home(spelled):
+            made.plugin.session("jack")
+        assert [agent for _, agent in made.plugin._sessions] == ["jack"], (
+            "one login, keyed by two spellings of its home — that is two poll "
+            "loops on one token"
         )
     finally:
         await made.close()

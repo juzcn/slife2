@@ -142,6 +142,53 @@ def test_an_update_replaces_the_entry_rather_than_patching_it(tmp_path) -> None:
     assert "# Kept for a rainy day." in path.read_text(encoding="utf-8")
 
 
+def test_a_write_leaves_the_entry_below_it_its_comment(tmp_path) -> None:
+    """**Replacing an entry is not only replacing the entry.**
+
+    ruamel keeps "the comment above entry N+1" as the *trailing* comment of
+    entry N's last value (the fact `_tail_of` documents), so writing a fresh
+    mapping over N throws that block away with the old mapping and its
+    `ca.items` — and the operator's explanation of the entry below disappears in
+    a write that reported success.  `remove` does the surgery for the same
+    hazard (`_drop_entry`); these are the other two ways to reach it, and both
+    are exercised because they write through different callers.
+
+    The entry being written *keeps its own* comment, which is the other half:
+    that one belongs to the section and to a replacement, and only the block
+    introducing the *next* entry is at stake.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        "mcp:\n"
+        "  # Describes slow-one, which is written again.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n"
+        "  # Describes tail, which stays.\n"
+        "  tail:\n"
+        "    command: tail\n",
+        encoding="utf-8",
+    )
+
+    # The first key, then a middle one: the block that introduces the entry
+    # after each is in that entry's deepest last slot, and a replacement leaves
+    # both behind.
+    upsert("mcp", "slow-one", {"command": "uvx"}, path=path)
+    update_entry(
+        "mcp", "filesystem", lambda current: {**current, "args": ["-x"]}, path=path
+    )
+
+    after = path.read_text(encoding="utf-8")
+    assert "Describes slow-one" in after, "the entry's own comment is the section's"
+    assert "Describes filesystem" in after, "and the next entry keeps its own"
+    assert after.index("Describes filesystem") < after.index("filesystem:")
+    assert "Describes tail" in after
+    assert after.index("Describes tail") < after.index("tail:")
+    assert list(load(path).mcp) == ["slow-one", "filesystem", "tail"]
+
+
 def test_a_field_that_says_nothing_is_not_written(tmp_path) -> None:
     """An empty value is four spellings of "no value", and none is a field.
 

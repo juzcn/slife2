@@ -352,6 +352,96 @@ async def test_an_undelivered_result_stays_readable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_background_result_is_windowed_before_it_is_handed_back() -> None:
+    """**A result is bounded whichever road it took.**
+
+    A background call's answer reaches the conversation as a *message* — a turn
+    of its own, several turns later — which is the one road a tool result takes
+    that the loop's own fit does not cover.  So the whole output entered the
+    conversation and its turn log and was carried by every later request, and one
+    call's answer was bounded or unbounded depending only on whether that
+    delivery landed.  The window is over the body alone: the marker and the
+    sentence that name the call this answers are how the model pairs the result
+    with the call that asked for it, and a window may not take them away.
+    """
+    big = "\n".join(f"line {number} of a tool output" for number in range(1, 400))
+    fitted: list[tuple[str, int]] = []
+    handed: list[str] = []
+
+    async def fit(call: ToolCall, text: str, _messages: list[Message]) -> str:
+        fitted.append((call.name, len(text)))
+        return "WINDOW"
+
+    async def deliver(text: str, _channel: str) -> bool:
+        handed.append(text)
+        return True
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await asyncio.sleep(0)
+        return big
+
+    call = ToolCall(id="call-fit", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    loop = one(call, [a_tool("slow", slow)], deliver=deliver, compress=fit)
+    await loop.run_turn(messages, "hi")
+
+    for _ in range(100):  # the background task, not this one, is doing the work
+        if handed:
+            break
+        await asyncio.sleep(0.01)  # timeouts: a fixture's magnitude, not a budget
+
+    # The loop fits the *started* text it appends as this call's tool message,
+    # and the hand-back fits the tool's own words — the second is what this is
+    # about, and without it the fit never sees the output at all.
+    assert ("slow", len(big)) in fitted, "the window never saw the tool's own words"
+    assert handed, "the result was never handed back"
+    assert "WINDOW" in handed[0], "the hand-back carried the whole output"
+    assert big not in handed[0]
+    # The two halves that are not the output stand: they are the address.
+    assert handed[0].startswith(MARKER_PREFIX)
+    assert "The background call to slow finished." in handed[0]
+
+
+@pytest.mark.asyncio
+async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
+    """The foreground's sentence, on the road that used to say nothing.
+
+    `_background` wrapped its call in `asyncio.wait_for`, whose `TimeoutError`
+    carries no message — and `slife2.libs.harness.async_tasks._runner` renders
+    whatever escapes a task as `Error: {type}: {exc}`, so the conversation read
+    literally `Error: TimeoutError: `: no tool, no bound, and nothing the model
+    could act on.  A bound that fired is news it acts on, and the sentence that
+    carries it is the one the foreground path already writes.
+    """
+    handed: list[str] = []
+    never = asyncio.Event()
+
+    async def deliver(text: str, _channel: str) -> bool:
+        handed.append(text)
+        return True
+
+    async def hangs(_arguments: dict[str, Any]) -> tuple[str, bool]:
+        await never.wait()
+        return "never", True
+
+    call = ToolCall(
+        id="call-slow", name="hangs", arguments={"_async": True, "_timeout": 0.05}
+    )
+    messages: list[Message] = []
+    loop = one(call, [a_tool("hangs", hangs)], deliver=deliver)
+    await loop.run_turn(messages, "hi")
+
+    for _ in range(100):  # the bound has to fire before the hand-back exists
+        if handed:
+            break
+        await asyncio.sleep(0.01)  # timeouts: a fixture's magnitude, not a budget
+
+    assert handed, "the timed-out call was never handed back"
+    assert "Error: Tool 'hangs' timed out (0.05s)." in handed[0]
+    assert "TimeoutError" not in handed[0]
+
+
+@pytest.mark.asyncio
 async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
     """No `deliver` means the mode is refused, in a sentence that can be acted on.
 

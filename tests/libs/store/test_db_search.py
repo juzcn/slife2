@@ -599,6 +599,45 @@ async def test_a_model_that_answers_nothing_is_not_a_finished_index(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_a_partial_embedding_is_refused_before_the_turn_is_written(
+    tmp_path,
+) -> None:
+    """**A short answer at the save path is a hole `sync_indexes` cannot see.**
+
+    `_embed_turns` refuses an answer with fewer vectors than it asked for, and so
+    does every other embedding path — but `save_turn` wrote whatever it was
+    handed.  A *partial* answer is the shape that matters: the turn gets
+    `turn_chunk` rows for some of its chunks, and `_turns_without_vectors`
+    selects turns with no chunk row at all, so nothing would ever select this one
+    again — `index_status` would report `ready: True` over an index that is
+    missing vectors, which is exactly the hole the sibling's check names.  The
+    check has to sit before `_write_turn`, so a refused save is a save that
+    stored nothing.
+    """
+
+    class Partial(StubEmbedder):
+        """One vector short, so a chunk row is written for only some chunks."""
+
+        async def embed(self, texts):
+            return await super().embed(texts[:-1])
+
+    store = TurnStore(tmp_path / "jack.turn.db")
+    # Two paragraphs over the chunk size, so the turn is more than one chunk —
+    # without that a short answer is the whole answer and the row stays
+    # repairable.
+    messages = [
+        {"role": "user", "content": "x" * 1200},
+        {"role": "assistant", "content": "y" * 1200},
+    ]
+
+    with pytest.raises(RuntimeError) as raised:
+        await store.save_turn(messages=messages, embedder=Partial())
+
+    assert "searchable only by keyword" in str(raised.value)
+    assert store.count() == 0, "a save that raised stored nothing"
+
+
+@pytest.mark.asyncio
 async def test_the_loop_keeps_running_while_a_turn_is_embedded(tmp_path) -> None:
     """Stated the way it matters: something else gets to run during a save."""
 

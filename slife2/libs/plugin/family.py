@@ -768,6 +768,12 @@ async def apply_and_report(
 def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> str:
     """One server's tools, capped, with the count it was capped from.
 
+    **Three ways to have no list, and they are three answers**: switched off,
+    not answering, and answering with nothing.  Each is the state the `_list`
+    tool prints for the same entry, and folding any two of them together makes
+    this plugin tell a model two things about one entry — the model is the party
+    that cannot check, so it is the party the disagreement costs.
+
     The cap is announced rather than applied quietly: a trimmed list that reads
     as the whole list is a model concluding a server cannot do something it can.
 
@@ -776,6 +782,20 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
     under two names would make a reader wonder whether they are two things.
     """
     rows = list(one.rows or [])
+    if not one.settings.enabled:
+        # **The switch is read first, as it is everywhere else** (`state_word`,
+        # `apply_and_report`).  A switched-off entry has no link, so `usable` is
+        # False and `error` is empty — and the fallback below read those two as
+        # "it is not answering yet", which is a link the entry's own
+        # `enabled: false` promises will never be asked.  One entry then had
+        # three accounts: `mcp_list` printed `[off]`, `Held.state` answered
+        # `off`, and this told the model to wait for a connection nobody is
+        # opening.  The word is the same one both of the others use.
+        return (
+            f"'{name}' is {one.state} — it is switched off, so this process "
+            f"does not connect it and there is no {noun} list to show. The "
+            f"`_list` tool reports its state."
+        )
     if not one.usable:
         reason = one.error or "it is not answering yet"
         return (

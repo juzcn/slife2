@@ -679,6 +679,23 @@ class TurnStore:
         # a disk: the one thing that must not happen here is a synchronous
         # request blocking every other call this server is answering.
         vectors = await embedder.embed(chunks) if chunks else []
+        # **The count is checked, as every other embedding path checks it.**  A
+        # short answer used to be written as-is, and a *partial* one is the worst
+        # shape it can take: the turn gets `turn_chunk` rows for some of its
+        # chunks, and `_turns_without_vectors` selects turns with *no* chunk row
+        # at all — so `sync_indexes` can never see this one again and
+        # `index_status` reports `ready: True` over an index that is missing
+        # vectors.  That is the exact hole `_embed_turns`' check names, and the
+        # sibling paths (`_embed_turns`, the catalogue's `_embed`,
+        # `RemoteEmbedder.embed`) all refuse it; the save path was the one that
+        # did not.  Raised before the transaction opens, so a refused save is a
+        # save that stored nothing.
+        if len(vectors) != len(chunks):
+            raise RuntimeError(
+                f"the embedding model answered {len(vectors)} vectors for "
+                f"{len(chunks)} chunks, so this turn would be searchable only "
+                f"by keyword"
+            )
         # The writes are the other way round — blocking, and off the loop.
         await self._off_loop(self.ensure_indexes, embedder)
         return await self._off_loop(self._write_turn, record, vectors)

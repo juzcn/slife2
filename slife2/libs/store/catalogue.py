@@ -1467,13 +1467,14 @@ class ToolStore:
             self._rows_in_order, ordered, clauses, values, limit
         )
 
-        # **Where the words are, for the rows they matched** — the line shows two
-        # of the five columns a row is indexed by, so a row can be marked `matched
-        # your words` with nothing on the line to check it against: a skill's
-        # whole playbook rides in its `schema` column, and `skill:browser-harness`
-        # matches `read`/`file` through the body while its description says
-        # nothing about either.  A mark whose evidence cannot be seen is a mark
-        # that cannot be checked, so the answer says which side it is on.
+        # **Where the words are, for the rows they matched** — `schema` is the one
+        # column of the five a row is indexed by that the line does not print, so
+        # a row can be marked `matched your words` with nothing on the line to
+        # check it against: a skill's whole playbook rides in that column, and
+        # `skill:browser-harness` matches `read`/`file` through the body while
+        # its description says nothing about either.  A mark whose evidence
+        # cannot be seen is a mark that cannot be checked, so the answer says
+        # which side it is on.
         page = [int(row["rowid"]) for row in rows]
         inline = (
             await asyncio.to_thread(self._matched_in_line, expression, page)
@@ -1501,11 +1502,18 @@ class ToolStore:
     def _matched_in_line(self, expression: str, rowids: Sequence[int]) -> set[int]:
         """Which of those rows hold the words in the columns the line prints.
 
-        `{name description}` is what a result line shows; `category`, `source_id`
-        and `schema` are indexed and unshown, and `schema` is the one that carries
-        something substantial — a tool's parameters, or for a skill the whole
-        playbook (`tool_document` argues the column, and this is not the place it
-        is what it says).
+        **The line prints four of the five columns a row is indexed by** — name,
+        description, category and source_id — so `schema` alone is unshown, and
+        `{name description category source_id}` is the scope whose miss means
+        "the words are in the parameters".  It used to be `{name description}`,
+        and that was wrong about the renderer: a row whose words are in its
+        category or its source_id was reported `rest`, and the renderer turns
+        `rest` into `matched your words in its parameters` — a pointer at a
+        column the words are not in, which is the same uncheckable mark this
+        function exists to prevent, one step along.  `schema` is the one that
+        carries something substantial — a tool's parameters, or for a skill the
+        whole playbook (`tool_document` argues the column, and this is not the
+        place it is what it says).
 
         The filter is a column-scoped `MATCH` rather than a token comparison in
         Python: what counts as a word here is `unicode61`'s answer, and a second
@@ -1520,7 +1528,10 @@ class ToolStore:
                 for row in connection.execute(
                     "SELECT f.rowid AS rowid FROM tool_fts f"
                     f" WHERE tool_fts MATCH ? AND f.rowid IN ({_marks(rowids)})",
-                    (f"{{name description}} : ({expression})", *rowids),
+                    (
+                        f"{{name description category source_id}} : ({expression})",
+                        *rowids,
+                    ),
                 )
             }
 

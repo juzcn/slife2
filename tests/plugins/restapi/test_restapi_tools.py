@@ -11,6 +11,7 @@ fetched.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,45 @@ async def test_a_key_nothing_resolves_says_so_at_the_moment_it_is_written(
     assert "does not resolve" in answer
     assert "credstore set NOBODY_HAS_THIS_ONE" in answer
     assert section(isolated_runtime)["github"]["api_key"] == "${NOBODY_HAS_THIS_ONE}"
+
+
+@pytest.mark.asyncio
+async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The other half of that note, and the half that was a hole.**
+
+    A `keyring:NAME` written as an API key is the shape `resolve_secret` leaves
+    verbatim when `credstore` cannot be imported — its declared degrade — and the
+    value then travels to somebody else's API *as the credential*
+    (DESIGN.md §10.1).  The note above is what turns that into a sentence at the
+    moment it is written, and it did not: the `keyring:` shape returned early
+    with nothing to say, so the two halves of one rule disagreed and the leaking
+    half was the silent one.  The rule is
+    `slife2.libs.host.config.unresolved_reference`'s, which counts a keyring
+    reference with no credstore behind it as unresolved.
+
+    `credstore` is made unimportable rather than assumed absent: it is a real
+    dependency and it is installed on the machine this suite runs on, so the
+    degrade has to be stated.
+    """
+    monkeypatch.setitem(sys.modules, "credstore", None)
+
+    async with Client(family(isolated_runtime)) as client:
+        answer = await ask(
+            client,
+            "rest_api_set",
+            name="github",
+            spec="https://api.example.test/openapi.yaml",
+            base_url="https://api.example.test",
+            api_key="keyring:slife2/github",
+        )
+
+    assert "does not resolve" in answer
+    # The name to store it under is the URI's own tail, not `${…}`'s arithmetic:
+    # `reference[2:-1]` would have said `eyring:slife2/gith`.
+    assert "credstore set slife2/github" in answer
+    assert section(isolated_runtime)["github"]["api_key"] == "keyring:slife2/github"
 
 
 @pytest.mark.asyncio

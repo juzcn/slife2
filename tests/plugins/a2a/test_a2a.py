@@ -96,6 +96,13 @@ from slife2.plugins.a2a.server import (
 from slife2.plugins.a2a.task_store import TaskStore, get_store
 from slife2.tui.client import MCPMeshClient
 
+#: Which inbound ledger these tests use.  **A ledger is one file per network**
+#: (`Net.ledger`), because what it records is the completion bridges one mesh is
+#: holding — so every call that opens or names one says which.  The remote
+#: network's is what these tests drive unless one says otherwise; the split
+#: itself is `test_each_network_keeps_its_own_ledger`.
+LEDGER = REMOTE.ledger
+
 pytestmark = pytest.mark.unit
 
 AGENT = "jack"
@@ -306,7 +313,7 @@ def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     silence, which loses a peer's result and leaves the conversation that asked
     waiting for an answer that had already arrived.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
     corr = "corr-pruned"
     mesh._corr_to_task[corr] = TASK
     mesh._sends[TASK] = _OutboundSend(TASK, PEER, "session", "{}")
@@ -360,7 +367,7 @@ async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
     `_withdrawn` beside them use.  The class is where the cap is stated now, so
     the assertion is on the class: a plain dict here is the drift coming back.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
     assert isinstance(mesh._pending, FIFOCache)
     assert isinstance(mesh._corr_to_task, FIFOCache)
 
@@ -384,25 +391,25 @@ async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
 
 
 def test_an_inbound_task_is_written_down_and_taken_back_out() -> None:
-    store = InboundStore.open(AGENT)
+    store = InboundStore.open(AGENT, LEDGER)
     store.add(TASK, PEER)
     assert [t.task_id for t in store.stale()] == []
     # On disk, with the owner named — the directory holds the sanitised name.
-    raw = json.loads(json.dumps(_read_yaml(a2a_inbound_path(AGENT))))
+    raw = json.loads(json.dumps(_read_yaml(a2a_inbound_path(AGENT, LEDGER))))
     assert raw["agent"] == AGENT
     assert TASK in raw["pending"]
     assert raw["pending"][TASK]["peer"] == PEER
 
     store.drop(TASK)
-    assert _read_yaml(a2a_inbound_path(AGENT))["pending"] == {}
+    assert _read_yaml(a2a_inbound_path(AGENT, LEDGER))["pending"] == {}
 
 
 def test_a_restart_tells_its_orphans_from_ids_it_has_never_seen() -> None:
     """The whole reason this file exists: the bridge died with the process."""
-    first = InboundStore.open(AGENT)
+    first = InboundStore.open(AGENT, LEDGER)
     first.add(TASK, PEER)
 
-    second = InboundStore.open(AGENT)
+    second = InboundStore.open(AGENT, LEDGER)
     orphans = second.stale()
     assert [t.task_id for t in orphans] == [TASK]
     assert orphans[0].peer == PEER
@@ -413,8 +420,8 @@ def test_a_restart_tells_its_orphans_from_ids_it_has_never_seen() -> None:
 
 def test_a_retry_revives_a_task_its_predecessor_dropped() -> None:
     """A peer that re-sends the same task id re-registers the bridge."""
-    InboundStore.open(AGENT).add(TASK, PEER)
-    second = InboundStore.open(AGENT)
+    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
+    second = InboundStore.open(AGENT, LEDGER)
     assert second.stale() != []
     second.add(TASK, PEER)
     assert second.stale() == []
@@ -423,13 +430,13 @@ def test_a_retry_revives_a_task_its_predecessor_dropped() -> None:
 def test_answering_a_peer_clears_what_that_peer_is_owed() -> None:
     """A plain message is the only reply an orphan can still get, so it pays the
     debt — and only that peer's, because the others are still waiting."""
-    first = InboundStore.open(AGENT)
+    first = InboundStore.open(AGENT, LEDGER)
     first.add(TASK, PEER)
     first.add("other", "someone-else")
 
     # A set, not a list: the two arrived inside the same second, so the
     # oldest-first ordering the notice uses has nothing to order them by.
-    store = InboundStore.open(AGENT)
+    store = InboundStore.open(AGENT, LEDGER)
     assert {t.task_id for t in store.stale()} == {"other", TASK}
 
     store.clear_stale_peer(PEER)
@@ -442,8 +449,10 @@ def test_completing_an_orphan_is_refused_with_the_reply_that_still_works() -> No
     ever complete it, so the answer is a plain message instead."""
     from slife2.plugins.a2a.mesh import A2AMesh
 
-    InboundStore.open(AGENT).add(TASK, PEER)
-    mesh = A2AMesh(default_config().a2a, AGENT)  # opens the ledger: TASK → stale
+    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
+    mesh = A2AMesh(
+        default_config().a2a, AGENT, LEDGER
+    )  # opens the ledger: TASK → stale
 
     orphan = mesh.complete_task(TASK, "too late")
     assert "arrived before this process started" in orphan
@@ -460,29 +469,63 @@ def test_completing_an_orphan_is_refused_with_the_reply_that_still_works() -> No
 
 def test_a_ledger_without_an_owner_belongs_to_nobody() -> None:
     """The `agent:` key is the whole reason the directory name is not trusted."""
-    orphan = a2a_inbound_path(AGENT)
+    orphan = a2a_inbound_path(AGENT, LEDGER)
     orphan.parent.mkdir(parents=True, exist_ok=True)
     orphan.write_text("pending: {}\nstale: {}\n", encoding="utf-8")
     assert InboundStore.at(orphan) is None
 
 
 def test_the_ledger_is_how_a_shared_process_finds_the_agents_it_serves() -> None:
-    InboundStore.open(AGENT)
-    InboundStore.open("someone-else")
-    found = {InboundStore.at(p).agent for p in a2a_inbound_paths()}  # type: ignore[union-attr]
+    InboundStore.open(AGENT, LEDGER)
+    InboundStore.open("someone-else", LEDGER)
+    found = {InboundStore.at(p).agent for p in a2a_inbound_paths(LEDGER)}  # type: ignore[union-attr]
     assert found == {AGENT, "someone-else"}
 
 
-def test_a_ledger_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_network_keeps_its_own_ledger() -> None:
+    """**One agent, two networks, two files** — and neither reads the other's.
+
+    Both networks are served by this one module and a machine may configure
+    both, so one shared file meant the process serving the local mesh opened the
+    *remote* mesh's file and read its live `pending` tasks as a dead
+    predecessor's orphans — telling the model that a task whose bridge was
+    answering could never be completed — and then rewrote the whole file from
+    its own memory, erasing whatever the other process had added since.  That
+    last part is the one fact the file exists to keep: a peer is owed an answer.
+
+    Two files rather than a guard, because of what the file records: the
+    completion bridges *this* mesh is holding, which is process-local by
+    construction and invisible to the other process — no liveness check can tell
+    one process's live task from another's orphan when neither can see the
+    other's bridges.
+    """
+    InboundStore.open(AGENT, REMOTE.ledger).add(TASK, PEER)
+
+    # The local network's process starts.  Its ledger is its own, so the remote
+    # mesh's task is not an orphan it may announce as unanswerable.
+    InboundStore.open(AGENT, LOCAL.ledger)
+    theirs = _read_yaml(a2a_inbound_path(AGENT, LOCAL.ledger))
+    assert theirs["pending"] == {} and theirs["stale"] == {}, "its own file, empty"
+
+    # ...and that save left the remote one's task exactly where it was.
+    ours = _read_yaml(a2a_inbound_path(AGENT, REMOTE.ledger))
+    assert TASK in ours["pending"], "the other network's task survived"
+
+    assert REMOTE.ledger != LOCAL.ledger
+    assert {path.name for path in a2a_inbound_paths(LOCAL.ledger)} == {LOCAL.ledger}
+    assert {path.name for path in a2a_inbound_paths(REMOTE.ledger)} == {REMOTE.ledger}
+
+
+def test_the_ledger_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each `add` is a whole-file write with an fsync, so the cap is turned down
     rather than the writes being made 200 times: the property is the trimming,
     and the number is asserted rather than exercised."""
     monkeypatch.setattr("slife2.plugins.a2a.inbound_store._MAX_ENTRIES", 5)
 
-    store = InboundStore.open(AGENT)
+    store = InboundStore.open(AGENT, LEDGER)
     for index in range(9):
         store.add(f"task{index}", PEER)
-    assert len(_read_yaml(a2a_inbound_path(AGENT))["pending"]) == 5
+    assert len(_read_yaml(a2a_inbound_path(AGENT, LEDGER))["pending"]) == 5
     # The oldest went, because the newest is the one still owed an answer.
     assert store._pending.get("task0") is None
     assert store._pending.get("task8") is not None
@@ -504,13 +547,13 @@ def test_a_damaged_ledger_is_refused_rather_than_read_as_empty() -> None:
     nor reported (DESIGN.md §10.1).  The read raises naming the file instead,
     and because it runs before `open`'s write, nothing is overwritten.
     """
-    path = a2a_inbound_path(AGENT)
+    path = a2a_inbound_path(AGENT, LEDGER)
     path.parent.mkdir(parents=True, exist_ok=True)
     damaged = "agent: jack\npending: {\n"  # a flow mapping that never closes
     path.write_text(damaged, encoding="utf-8")
 
     with pytest.raises(ValueError, match="could not be read"):
-        InboundStore.open(AGENT)
+        InboundStore.open(AGENT, LEDGER)
 
     assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
 
@@ -525,13 +568,13 @@ def test_a_ledger_section_that_is_not_a_mapping_is_refused_rather_than_read_as_e
     was dropped from a file whose whole purpose is to remember it.  The section
     is refused instead, naming the section and the file.
     """
-    path = a2a_inbound_path(AGENT)
+    path = a2a_inbound_path(AGENT, LEDGER)
     path.parent.mkdir(parents=True, exist_ok=True)
     damaged = "agent: jack\npending:\n  - not-a-mapping\nstale: {}\n"
     path.write_text(damaged, encoding="utf-8")
 
     with pytest.raises(ValueError, match="pending"):
-        InboundStore.open(AGENT)
+        InboundStore.open(AGENT, LEDGER)
 
     assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
 
@@ -543,13 +586,13 @@ def test_a_ledger_entry_that_is_not_a_mapping_is_refused_rather_than_dropped() -
     section without it (DESIGN.md §10.1) — the orphaned peer vanished from the
     one record of the reply it is still owed.  The row is named instead.
     """
-    path = a2a_inbound_path(AGENT)
+    path = a2a_inbound_path(AGENT, LEDGER)
     path.parent.mkdir(parents=True, exist_ok=True)
     damaged = f"agent: jack\npending:\n  {TASK}: not-a-mapping\nstale: {{}}\n"
     path.write_text(damaged, encoding="utf-8")
 
     with pytest.raises(ValueError, match=TASK):
-        InboundStore.open(AGENT)
+        InboundStore.open(AGENT, LEDGER)
 
     assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
 
@@ -563,8 +606,8 @@ def test_a_ledger_write_that_failed_is_findable_rather_than_whispered(
     not fail over a bookkeeping write — so what changes is where it goes: an
     error naming the file, which is the only place an operator will see it.
     """
-    store = InboundStore.open(AGENT)
-    path = a2a_inbound_path(AGENT)
+    store = InboundStore.open(AGENT, LEDGER)
+    path = a2a_inbound_path(AGENT, LEDGER)
     before = path.read_text(encoding="utf-8")
 
     def refuse(src: Any, dst: Any) -> None:
@@ -895,7 +938,7 @@ def wired(window: Window | None = None) -> Session:
     from slife2.plugins.a2a.mesh import A2AMesh
 
     session = Session(
-        agent=AGENT, net=REMOTE, mesh=A2AMesh(default_config().a2a, AGENT)
+        agent=AGENT, net=REMOTE, mesh=A2AMesh(default_config().a2a, AGENT, LEDGER)
     )
     _wire(session)
     return session
@@ -1083,7 +1126,7 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
         def __init__(self, **kwargs: Any) -> None:
             raise OSError("the broker refused the probe connection")
 
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
     monkeypatch.setattr("slife2.plugins.a2a.mesh.aiomqtt.Client", Refusing)
 
     with pytest.raises(RuntimeError, match="name probe"):
@@ -1102,13 +1145,31 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     hears, against a broker this process cannot publish to at all.  The warning
     names the task and which rung it was on.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
     send = _OutboundSend("task-a-retry-that-failed", PEER, "session", "{}")
 
-    async def refuse(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("the broker refused the publish")
+    async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        return None
 
-    monkeypatch.setattr(mesh, "_publish_attempt", refuse)
+    real = mesh._publish_attempt
+    rungs = 0
+
+    async def refuse_the_first(send_: _OutboundSend, corr: str) -> None:
+        """One rung that cannot be published, and then a link that works.
+
+        Only the first, because a failed publish does not spend the ladder
+        (`_deliver`): a fake that refused every publish would leave the loop
+        retrying this rung for ever, which is the *point* of that fix and not
+        something this test is about.
+        """
+        nonlocal rungs
+        rungs += 1
+        if rungs == 1:
+            raise RuntimeError("the broker refused the publish")
+        await real(send_, corr)
+
+    monkeypatch.setattr(mesh, "_publish_props", lands)
+    monkeypatch.setattr(mesh, "_publish_attempt", refuse_the_first)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
     monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
 
@@ -1123,6 +1184,61 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     assert failed, "a failed retry left no trace beyond the exhausted ladder"
     assert all(send.task_id in line for line in failed), "the task is not named"
     assert any("attempt=2" in line for line in failed), "the rung is not named"
+
+
+@pytest.mark.asyncio
+async def test_a_publish_that_never_left_is_not_a_rung_of_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The ladder counts what a peer could have seen.**
+
+    `_deliver` incremented `send.attempts` before `_publish_attempt` and left
+    the count standing when that raised — which is exactly what a mesh does
+    while its outbound client is mid-reconnect (`_publish_props` answers
+    `A2A mesh is not connected.`).  The first two backoffs are ~1 s and ~2 s, so
+    a broker or outbound outage of three or four seconds spent the whole budget
+    without a single publish leaving: the send was abandoned, the conversation
+    was pushed "it was sent 3 times over the requester retry ladder and never
+    acknowledged" — a count of things no peer could have received — and nothing
+    retried it when the link came back, so the task row `pending` that
+    `a2a_send_message` promised a result for stayed `pending` for ever.
+
+    The link is down for four publishes and then up, and both halves of that
+    are asserted: the send is still there when the link returns, and the rungs
+    it then spends are its own.
+    """
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    send = _OutboundSend("task-the-link-was-down-for", PEER, "session", "{}")
+    published: list[str] = []
+    down = 4
+
+    async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        published.append(topic)
+
+    real = mesh._publish_attempt
+
+    async def a_link_that_drops(send_: _OutboundSend, corr: str) -> None:
+        nonlocal down
+        if down:
+            down -= 1
+            raise RuntimeError("A2A mesh is not connected.")
+        await real(send_, corr)
+
+    monkeypatch.setattr(mesh, "_publish_props", lands)
+    monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_drops)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
+    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+
+    await mesh._deliver(send)
+
+    # `send.attempts` starts at one: the send's own publish, which `send_message`
+    # makes before `_deliver` is started.  The two retries the profile allows are
+    # the two that follow, and both of them have to reach the wire.
+    assert len(published) == _MAX_ATTEMPTS - 1, (
+        f"the ladder was spent on publishes that never left: "
+        f"{len(published)} of {_MAX_ATTEMPTS - 1} rungs reached the broker"
+    )
+    assert send.attempts == _MAX_ATTEMPTS, "the rungs that landed are not counted"
 
 
 class _OneMessageBroker:
@@ -1169,7 +1285,7 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
     the clause below, written to log exactly this class of failure, could never
     see one.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
 
     def bug(_msg: Any) -> None:
         raise AttributeError("a body with no 'result' at all")
@@ -1377,7 +1493,7 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
     that matters: a notice awaited where it is found is this plugin's readiness
     spent on another plugin's turn.
     """
-    InboundStore.open(AGENT).add(TASK, PEER)
+    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
     session = wired()
 
     announce_orphans(session)
@@ -1398,7 +1514,7 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
 @pytest.mark.asyncio
 async def test_the_orphan_notice_lands_on_the_channels_the_window_draws_alone() -> None:
     """The queue is what delivers it, and the bubble is `PeerAgent(orphans)> `."""
-    InboundStore.open(AGENT).add(TASK, PEER)
+    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
     window = Window()
     async with Client(window.mcp) as client:
         window.client = client
@@ -1448,7 +1564,7 @@ async def test_a_notice_that_reached_nothing_is_offered_again(
     refusing = Window(refuse=True)
     async with Client(refusing.mcp) as window_client:
         refusing.client = window_client
-        InboundStore.open(AGENT).add(TASK, PEER)
+        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
         session = wired()
         announce_orphans(session)
         session.post("a peer's own message", PEER, "a message from jill")
@@ -1482,7 +1598,7 @@ async def test_a_notice_the_writer_cannot_judge_is_not_offered_again(
     dying = Window(broken=True)
     async with Client(dying.mcp) as client:
         dying.client = client
-        InboundStore.open(AGENT).add(TASK, PEER)
+        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
         session = wired()
         announce_orphans(session)
 
@@ -1525,7 +1641,7 @@ async def test_a_start_that_fails_after_building_a_session_still_tears_down(
     its way to it left every built session running: its writer, and — when a
     start still joined the mesh as well — a pair of MQTT connections and a
     retained *online* card nobody would retire."""
-    InboundStore.open(AGENT).add(TASK, PEER)  # a ledger, and an orphan in it
+    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)  # a ledger, and an orphan in it
     left: list[str] = []
 
     async def connect(self: Any) -> None:
@@ -1968,6 +2084,26 @@ def _a_mesh_that_records_its_ends(
     return joined, left
 
 
+def _joins_that_wait(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Event]:
+    """Hold every `join` where its own call would, and hand back each hold.
+
+    **A held `join` says nothing of its own** — writing nothing is what it is
+    defined by, and the keepalive is the only thing that ever happens on it —
+    so there is no state to poll and no line to wait for.  Being the wait is
+    what makes two of them drivable in a known order: each call is at the mesh
+    the moment it appears here.
+    """
+    holds: list[asyncio.Event] = []
+
+    async def held(_ctx: Any) -> None:
+        event = asyncio.Event()
+        holds.append(event)
+        await event.wait()
+
+    monkeypatch.setattr(a2a_server, "_hold_open", held)
+    return holds
+
+
 def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() -> None:
     """Two reasons to be on the mesh, and the mesh outlives either one alone.
 
@@ -1984,7 +2120,7 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     session = Session(
         agent=AGENT,
         net=REMOTE,
-        mesh=A2AMesh(default_config().a2a, AGENT),  # opens the ledger
+        mesh=A2AMesh(default_config().a2a, AGENT, LEDGER),  # opens the ledger
     )
 
     session.hold(WINDOW)
@@ -1994,6 +2130,133 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     session.hold(USED)
     assert not session.release(WINDOW), "a tool is still waiting to be answered"
     assert session.release(USED), "the last reason is the one that ends it"
+
+
+@pytest.mark.asyncio
+async def test_two_windows_showing_one_agent_are_two_holds(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**Two holders of one reason are two reasons to stay** (`Session.hold`).
+
+    This is the case the set could not express, and the one the reason table had
+    to become a count for: the *second* `join` for an agent used to be a no-op,
+    so whichever of the two calls finished first was answered "that was the last
+    reason" — and the mesh went down underneath a window that was still showing
+    the agent.  Nothing brings it back: the survivor is parked in `_hold_open`,
+    which only pings, and `join` never re-checks the connection.  The agent then
+    reads `✗ offline` on the broker for the life of that window and every task a
+    peer sends to it is lost.
+
+    Two windows are the plain way in (both call `MCPMeshClient.hold`), and one
+    window gets there alone — a dropped stream is retried by
+    `slife2.tui.app._hold_mesh` after `pacing.reconnect`, and the stale call is
+    not cancelled until its next `report_progress` fails, up to a
+    `deliver.keepalive` later.
+
+    Driven through the real tool call and the real release, because *when the
+    mesh ends* is the plugin's own decision and not the fake's.
+    """
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
+    holds = _joins_that_wait(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        first = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 1, "the first join never reached the mesh")
+        second = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 2, "the second join never reached the mesh")
+        assert joined == [AGENT], "the second window dialled a mesh of its own"
+
+        # One of the two windows goes, and the other is still showing that agent.
+        holds[0].set()
+        await first
+        assert left == [], (
+            "a window leaving took the agent off the mesh while a second one "
+            "was still holding it — nothing reconnects that survivor"
+        )
+
+        holds[1].set()
+        await second
+        # Asserted with the server still up: the teardown below acknowledges
+        # every mesh anyway, so a check made after it would pass for free.
+        assert left == [AGENT], "the last window to leave did not take it off"
+
+
+@pytest.mark.asyncio
+async def test_a_window_arriving_as_the_mesh_is_torn_down_gets_a_live_one(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**One lock, both halves of the decision** (`connected`, `join`).
+
+    `disconnect` clears `_connected` only at its very end — the cancelled
+    outbound task has to reach its client context first — and the release was
+    awaited outside the session's lock while `connected`'s already-connected
+    fast path was taken outside it as well.  So a call arriving inside that
+    window was handed a mesh on its way out: it held its reason on a client
+    whose reply subscription (`reply/<agent>/+`) was being dropped, so the
+    peer's answer reached a topic nobody was listening on and the conversation
+    waited for a result that could never arrive — the reason held for ever on a
+    mesh that was already offline.
+
+    Held under one lock the two ends cannot interleave: either the arrival takes
+    its hold first and the release finds the agent still wanted, or the teardown
+    finishes first and the arrival finds a mesh that is genuinely down.  This is
+    the second of those, which is the one that has to dial again.
+    """
+    joined: list[str] = []
+    left: list[str] = []
+    tearing_down = asyncio.Event()
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        joined.append(self.agent_name)
+
+    async def disconnect(self: Any) -> None:
+        """Tear down the way the real one does: `_connected` last."""
+        left.append(self.agent_name)
+        await tearing_down.wait()
+        self._connected = False
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    holds = _joins_that_wait(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        leaving = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 1, "the first join never reached the mesh")
+        holds[0].set()
+        await until(lambda: left == [AGENT], "the window's departure never began")
+
+        arriving = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        # The teardown is still in flight, so this call has to be waiting rather
+        # than holding a mesh that is going away — measured here, where the
+        # difference is: the fast path answered in the same tick, with
+        # `_connected` still true because `disconnect` had not finished.
+        await asyncio.sleep(0.05)
+        assert len(holds) == 1, (
+            "a window arriving mid-teardown was handed the mesh that was "
+            "leaving — its reply topic is being unsubscribed under it"
+        )
+
+        tearing_down.set()
+        await until(lambda: len(holds) == 2, "the arriving window never joined")
+        assert joined == [AGENT, AGENT], (
+            "the arriving window was not given a mesh of its own: it is riding "
+            "the one that went down, and it never reconnects"
+        )
+        holds[1].set()
+        await leaving
+        await arriving
+        assert left == [AGENT, AGENT], "each departure takes its own mesh down"
 
 
 @pytest.mark.asyncio
@@ -2009,7 +2272,7 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     X completed async task" over the cancellation the model had already been
     given.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT)
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
 
     async def no_publish(*args, **kwargs) -> None:
         return None

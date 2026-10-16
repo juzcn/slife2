@@ -32,6 +32,7 @@ from slife2.libs.host.config import (
     load,
     load_cached,
     resolve_secret,
+    unresolved_reference,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
@@ -158,18 +159,33 @@ def _unresolved(api_key: str) -> str:
     says so) — but for an *API key* the place it surfaces is a 401 from somebody
     else's server, one turn later, naming nothing.  One line here is the
     difference between that and knowing now.
+
+    **And "is this still a reference" is not answered here.**
+    `slife2.libs.host.config.unresolved_reference` is where that question is answered, and
+    its docstring names the four places that used to answer it separately and the
+    leak that came of it.  This was one of them: a `keyring:` value returned
+    `""` — nothing to say — where the rule says *unresolved*, so on a host with
+    no `credstore` (the degrade `resolve_secret` names) a
+    `keyring:slife2/github` did not resolve, was left verbatim, was written into
+    the proxy child's `API_KEY` as the credential, and the person was told
+    nothing while the sibling `${VAR}` case printed the note — two halves of one
+    rule disagreeing.
     """
     if not api_key:
         return ""
     reference = _reference(api_key)
+    if not unresolved_reference(resolve_secret(reference)):
+        return ""
     if reference.startswith("keyring:"):
-        return ""
-    if resolve_secret(reference) != reference:
-        return ""
+        # **Not `reference[2:-1]`**, which is the `${…}` wrapper's arithmetic:
+        # it would tell a person to store `eyring:slife2/gith`.  A keyring URI's
+        # own tail is the name, and `credstore set` takes it verbatim.
+        how = f"`credstore set {reference[len('keyring:') :]}`"
+    else:
+        how = f"`credstore set {reference[2:-1]}` (or export it)"
     return (
         f"\nNote: {reference} does not resolve to anything yet — set it with "
-        f"`credstore set {reference[2:-1]}` (or export it) before this API is "
-        f"called."
+        f"{how} before this API is called."
     )
 
 

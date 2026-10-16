@@ -10,9 +10,11 @@ it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from slife2.libs.host.paths import in_home
+from slife2.libs.host.paths import DATA_ENV_VAR, in_home
 from slife2.libs.plugin.audience import (
     client_key,
     client_meta,
@@ -78,6 +80,31 @@ def test_the_home_goes_out_with_every_call_a_server_makes(
     # And a proxy forwards the home on with the identity it forwards, which is
     # what makes it reach the far end of a chain rather than the first hop.
     assert home_of(forwarded_client(with_home(None))) == str(mine)
+
+
+def test_a_relative_home_is_made_absolute_before_it_travels(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The far end resolves the home it is handed, and not from this directory.**
+
+    Every daemon here is spawned with its working directory set to the machine's
+    runtime directory (`slife2.libs.host.launcher._argv`), so a `--data-dir
+    rel/chk` that travelled as it was typed would mean `<runtime>/rel/chk` at the
+    other end: the client reads the config from the directory it named, the
+    daemon writes `agents/jack` under the runtime directory, and nothing fails —
+    the work is simply somewhere else.  `_argv` resolves the directory it puts in
+    a child's argv for exactly this hazard; a `_meta` home is the same crossing
+    by another road, and `with_home` fills in the same value for a call that
+    names none.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(DATA_ENV_VAR, "rel/chk")
+
+    sent = home_of(client_meta("jack"))
+
+    assert Path(sent).is_absolute(), "a relative home is a different directory"
+    assert sent == str((tmp_path / "rel" / "chk").resolve())
+    assert home_of(with_home(None)) == sent, "the same answer for the bare case"
 
 
 def test_one_conversation_is_keyed_by_the_three_things_that_identify_it(

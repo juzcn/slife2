@@ -315,21 +315,45 @@ class Session:
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(MAX_QUEUED))
     writer: asyncio.Task | None = None
     #: Why this agent is on the mesh — and the mesh lives exactly as long as this
-    #: set has something in it.  `USED` is added by any call that needs the mesh
+    #: table has something in it.  `USED` is added by any call that needs the mesh
     #: and is never taken back: a send is followed by a reply the agent is
     #: waiting for, so an agent with a task outstanding *is* on the mesh and
     #: nothing inside this process's life makes that stop being true.  `WINDOW` is
     #: added by `join` for as long as its call is open, which is what makes a
     #: closed window show up as `✗ offline` rather than as a card nobody retires.
-    reasons: set[str] = field(default_factory=set)
+    #:
+    #: **A count per reason rather than a set of them.**  A set held one entry
+    #: for each *kind*, so two callers holding the same kind were one entry and
+    #: the first to finish was the last one — see `hold`, which is where that
+    #: cost a live window its mesh.
+    reasons: dict[str, int] = field(default_factory=dict)
 
     def hold(self, reason: str) -> None:
-        """Add one reason for this agent to be on the mesh."""
-        self.reasons.add(reason)
+        """Add one reason for this agent to be on the mesh: one more *holder*.
+
+        **Two holders of one reason are two reasons to stay.**  `reasons` was a
+        set, so a second `join` for an agent was a no-op and the *first* of the
+        two to end tore the mesh down while the other was still holding it.  The
+        survivor is left parked in `_hold_open`, which only pings, and `join`
+        never re-checks the connection — so the agent stayed falsely `offline` on
+        the broker for the life of that window and every task a peer sent to it
+        was lost silently.  Two windows showing one agent get there directly, and
+        one window gets there alone: `slife2.tui.app._hold_mesh` retries a dropped
+        stream after `pacing.reconnect`, while the stale call is not cancelled
+        until its next `report_progress` fails — up to a `deliver.keepalive`
+        later, as `_hold_open`'s own docstring says.  The class's contract is
+        that the mesh lives exactly as long as this has something in it, and a
+        count is what makes a second holder something.
+        """
+        self.reasons[reason] = self.reasons.get(reason, 0) + 1
 
     def release(self, reason: str) -> bool:
-        """Give up one reason.  True when it was the last one."""
-        self.reasons.discard(reason)
+        """Give up one holder of *reason*.  True when it was the last one."""
+        held = self.reasons.get(reason, 0)
+        if held <= 1:
+            self.reasons.pop(reason, None)
+        else:
+            self.reasons[reason] = held - 1
         return not self.reasons
 
     def post(
@@ -714,7 +738,9 @@ def build_server(
         — which a broker settles by kicking the older one offline.
         """
         found = mesh_settings()
-        return A2AMesh(replace(found, unit=net.unit_for(found.unit, member)), member)
+        return A2AMesh(
+            replace(found, unit=net.unit_for(found.unit, member)), member, net.ledger
+        )
 
     def session_of(agent: str) -> Session:
         """This agent's mesh, built on first use and kept.
@@ -741,6 +767,19 @@ def build_server(
         together must not both dial the broker, and a mesh whose connect failed
         is discarded rather than half-kept, so a retry starts from nothing.
 
+        **The fast path is inside that lock too, and the lock is the same one the
+        release takes** (`join`'s `finally`), because the two are one decision
+        read from either end: a caller may hold this mesh only if nothing is
+        taking it down.  Outside the lock the already-connected check was a read
+        of state a teardown was three awaits from clearing — `disconnect` only
+        clears `_connected` once the cancelled outbound task has reached its
+        client context — so a tool call could be handed a mesh on its way out and
+        hold `USED` on it for ever: its publish landed on a client whose reply
+        subscription was being dropped, and the conversation then waited for a
+        result no topic was listening for.  Held under this lock, either the hold
+        comes first and the release finds the mesh still wanted, or the teardown
+        comes first and this sees a mesh that is genuinely down and re-dials it.
+
         **`reason` is the caller's, and it is what the mesh's lifetime is made
         of** (`Session.reasons`).  A caller that is waiting for something back —
         every tool here but `join` — holds `USED`, for the rest of this process's
@@ -758,9 +797,6 @@ def build_server(
                 "section in slife2.yaml, which is the whole of the switch."
             )
         session = session_of(agent)
-        if session.mesh.is_connected:
-            session.hold(reason)
-            return session
         async with session.lock:
             if session.mesh.is_connected:
                 session.hold(reason)
@@ -822,7 +858,7 @@ def build_server(
         # (`slife2/plugins/a2a/broker.py`).
         logger.info("a2a_broker %s", ensure_broker(config_now.a2a))
 
-        for path in a2a_inbound_paths():
+        for path in a2a_inbound_paths(net.ledger):
             store = InboundStore.at(path)
             if store is None:
                 logger.warning("a2a_ledger_without_an_owner path=%s", path)
@@ -927,20 +963,31 @@ def build_server(
         try:
             await _hold_open(ctx)
         finally:
+            # **Under the lock `connected` takes**, so the departure and a call
+            # arriving at the same moment cannot both be right about this mesh:
+            # either that call holds its reason first and `release` below finds
+            # the agent still wanted, or this takes the mesh down first and the
+            # call finds it down and dials it again.  Awaiting the teardown
+            # outside the lock made the second answer a lie — `_connected` is
+            # cleared only at the end of `disconnect`, so a caller arriving
+            # mid-teardown was handed a mesh whose reply topic was already being
+            # unsubscribed, and held `USED` on it for ever.
+            #
             # Only when this was the last reason: an agent that has sent
             # something is waiting for a reply, and a window closing is not a
             # reason to stop listening for it.  The reason itself was taken by
             # `connected`, which is where every caller says which one it is.
-            if session.release(WINDOW):
-                try:
-                    await session.mesh.disconnect()
-                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
-                    logger.error(
-                        "a2a %s: the mesh would not leave the broker as its "
-                        "window left, so the agent may stay advertised: %s",
-                        session.agent,
-                        e,
-                    )
+            async with session.lock:
+                if session.release(WINDOW):
+                    try:
+                        await session.mesh.disconnect()
+                    except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+                        logger.error(
+                            "a2a %s: the mesh would not leave the broker as its "
+                            "window left, so the agent may stay advertised: %s",
+                            session.agent,
+                            e,
+                        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # The mesh tools (standard A2A operations, v1's four)

@@ -952,3 +952,40 @@ def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:
     )
     # The empty case is the one it is for: a turn with no text reads as the note.
     assert with_note("", "[TURN:{}]") == "[TURN:{}]"
+
+
+def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
+    """**The one source `normalise_ids` exists for, and `parse` refused it.**
+
+    `_keep` tested `isinstance(item, int)`, so a model that wrote `["1"]` — JSON
+    of whatever the encoder wrote, which is the source `normalise_ids`'s own
+    docstring names — made every id resolve to `REJECTED`.  `parse` then answered
+    `None` and dropped the *other* half of the decision with it, so a valid
+    `recall` beside the keep-list was ignored in silence.  What an id is, is
+    `normalise_ids`'s to decide, and the two now read as one rule.
+    """
+    from slife2.libs.turn.context import Decision, parse
+
+    assert parse('{"context": ["2", 1]}') == Decision(keep=[2, 1])
+    # The whole reply survives, which is what "both halves" means.
+    assert parse('{"context": ["1"], "recall": {"query": "the very first"}}') == (
+        Decision(
+            keep=[1],
+            recall={
+                "query": "the very first",
+                "since": None,
+                "until": None,
+                "anchor": None,
+            },
+        )
+    )
+    # And a value that is not an id is still a reply this build does not obey —
+    # including `1e999`, valid JSON that arrives as `inf`, whose `int()` raises.
+    for not_an_id in (
+        '{"context": ["clear"]}',
+        '{"context": [null]}',
+        '{"context": [true]}',
+        '{"context": [1.5]}',
+        '{"context": [1e999]}',
+    ):
+        assert parse(not_an_id) is None, not_an_id

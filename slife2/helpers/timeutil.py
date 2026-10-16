@@ -215,6 +215,16 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
     # A model may write UTC or some other offset, and the column holds local
     # time.  Comparing the two lexicographically is wrong exactly at the
     # boundary — the same instant written two ways is two different strings.
+    #
+    # **A bound that carries no offset is put through `at` too.**  A bare
+    # `2026-10-07T09:31:02` means the second the wall clock in this zone read,
+    # which is the column's own reckoning — but as a *string* it is a prefix of
+    # the column's `2026-10-07T09:31:02+08:00` and sorts just before the instant
+    # it names.  That made `until` fall one second short (the turn at the named
+    # second was excluded) while `since` did not, so two spellings of one instant
+    # gave two windows and the spelling a model is likeliest to write dropped the
+    # turn.  `at` attaches the local offset, which is the shape the column holds
+    # and the only one where the comparison means the second it says.
     if "T" in resolved:
         try:
             moment = datetime.fromisoformat(resolved)
@@ -226,8 +236,7 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # guarantees, so a value that reached here unparseable is a bound it
             # cannot place (DESIGN.md §10.1).
             raise InvalidTimeBound(_bound_error(role, value)) from None
-        if moment.tzinfo is not None:
-            resolved = at(moment)
+        resolved = at(moment)
 
     return resolved
 
