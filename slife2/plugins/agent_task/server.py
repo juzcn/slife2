@@ -98,6 +98,7 @@ from slife2.libs.plugin.protocol import (
     open_server,
     serve_plugin,
     tool_payload,
+    unreadable,
 )
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message
@@ -511,17 +512,13 @@ def build_server(
         """
         raw = payload.get("messages")
         if not isinstance(raw, list):
-            raise ConnectionError(
-                f"the context store did not return a message list (it said "
-                f"{payload!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
+            raise unreadable(
+                "the context store", "return a message list", payload
             )
         turn_ids = payload.get("turn_ids")
         if not isinstance(turn_ids, list):
-            raise ConnectionError(
-                f"the context store did not return a turn-id list (it said "
-                f"{payload!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
+            raise unreadable(
+                "the context store", "return a turn-id list", payload
             )
         return (
             [Message.from_wire(item) for item in raw],

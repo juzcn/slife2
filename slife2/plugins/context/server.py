@@ -80,6 +80,7 @@ from slife2.libs.plugin.protocol import (
     house_server,
     open_server,
     serve_plugin,
+    unreadable,
 )
 from slife2.libs.store.db import TurnStore, store_for
 from slife2.libs.store.index import Embedder, page_limit
@@ -176,10 +177,8 @@ async def _ask_model(
         timeout=_T.timeouts.work.model_call,
     )
     if not isinstance(result.data, dict):
-        raise ConnectionError(
-            f"the model server did not return a stream_chat result (it said "
-            f"{result.data!r}); a daemon from another build does this — try "
-            f"`slife2 down`"
+        raise unreadable(
+            "the model server", "return a stream_chat result", result.data
         )
     return StreamChatResult.from_wire(result.data).text
 

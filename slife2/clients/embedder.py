@@ -23,14 +23,17 @@ from typing import Any
 from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.config import EMBEDDINGS_SERVER_NAME
+from slife2.libs.host.config import EMBEDDINGS_SERVER_NAME, plugin
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.store.index import Embedder
 
 logger = logging.getLogger(__name__)
 
-#: The embeddings server's key in the config's `servers:` table.
-EMBEDDINGS_KEY = "embeddings"
+#: The embeddings server's key in the config's `servers:` table, read off the row
+#: `PLUGINS` files it under.  It is the only key any client needs to know, and it
+#: used to be a literal here: `servers:` keys are the launcher's, the plugins' and
+#: now the registry's, and a client that spells one is a fourth place for it.
+EMBEDDINGS_KEY = plugin("embeddings").key
 
 
 class RemoteEmbedder:
@@ -154,7 +157,6 @@ class EmbedderConnection:
 
 __all__ = [
     "EMBEDDINGS_KEY",
-    "Embedder",
     "EmbedderConnection",
     "RemoteEmbedder",
 ]

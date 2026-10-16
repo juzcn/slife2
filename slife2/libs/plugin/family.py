@@ -471,7 +471,6 @@ class Family:
 
     def __init__(
         self,
-        config: Config,  # noqa: ARG002 - the house signature; the entries are passed in
         *,
         category: str,
         entries: Iterable[ToolServerSettings],
@@ -1437,7 +1436,6 @@ def build_family_server(
     links = Links()
     family: Homes[Family] = Homes(
         lambda theirs: Family(
-            theirs,
             category=category,
             entries=entries(theirs),
             links=links,

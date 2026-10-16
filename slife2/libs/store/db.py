@@ -472,6 +472,17 @@ def assistant_message(messages: list[dict[str, Any]]) -> str:
 
 
 def _cut(text: str, chars: int) -> str:
+    """Truncate for a listing, saying so with `…`.
+
+    **The same two lines as `slife2.libs.turn.events.preview`, and deliberately
+    not the same ellipsis**, which is the one thing a reader would otherwise have
+    to guess at: that one writes `"..."` because its string reaches a Windows
+    console through the server's *log* and U+2026 is not in every codepage, while
+    this one writes a listing that a model reads back and a person reads on a
+    terminal that has been drawing box characters since it opened. Both announce
+    the cut, which is the property that matters — a message that reads as short
+    is one the caller has no reason to `turn_read`.
+    """
     if len(text) <= chars:
         return text
     return text[:chars] + "…"

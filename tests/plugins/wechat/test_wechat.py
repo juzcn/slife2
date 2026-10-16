@@ -905,9 +905,10 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
     """Tried while the window may be attaching, then a hard failure.
 
     A refusal is the one answer that proves nothing was written, so it is worth
-    another attempt — but the attempts are `slife2.libs.harness.handover`'s rather than a
-    second copy here, and when they are spent the message is *not delivered*
-    rather than quietly dropped or carried somewhere else.
+    another attempt — but the attempts are the registry's
+    (`slife2.helpers.timeouts.timeouts.stream.handover`) rather than a second copy
+    here, and when they are spent the message is *not delivered* rather than
+    quietly dropped or carried somewhere else.
     """
     attempts = 0
 
@@ -922,7 +923,7 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
     with pytest.raises(DeliveryFailed, match="could not be reached"):
         await made.plugin._deliver_to_window("jack", "hello")
 
-    assert attempts == handover._ATTEMPTS
+    assert attempts == _T.timeouts.stream.handover
 
 
 # --- logging out, and two logins at once --------------------------------------

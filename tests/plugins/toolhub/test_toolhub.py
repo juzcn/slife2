@@ -2219,7 +2219,6 @@ async def test_the_family_teardown_survives_a_management_call() -> None:
     """
     gate, entered = asyncio.Event(), asyncio.Event()
     family = Family(
-        default_config(),
         category="mcp",
         entries=[
             ToolServerSettings(name="one", command="in-memory"),

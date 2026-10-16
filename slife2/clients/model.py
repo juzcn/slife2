@@ -23,7 +23,7 @@ from fastmcp import Client
 import slife2.helpers.timeouts as _T
 from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.model.wire import decode_chunk
-from slife2.libs.plugin.protocol import open_server
+from slife2.libs.plugin.protocol import open_server, unreadable
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -148,10 +148,8 @@ class MCPBackend:
             # one hop that does not go through `tool_payload`.  The likely cause
             # is a model server from another build, so the sentence says so.
             if not isinstance(result.data, dict):
-                raise ConnectionError(
-                    f"the model server did not return a stream_chat result (it "
-                    f"said {result.data!r}); a daemon from another build does "
-                    f"this — try `slife2 down`"
+                raise unreadable(
+                    "the model server", "return a stream_chat result", result.data
                 )
             return StreamChatResult.from_wire(result.data)
         finally:

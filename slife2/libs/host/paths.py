@@ -348,12 +348,19 @@ def catalogue_db() -> Path:
     return agents_dir() / "tools.db"
 
 
-def _digest(text: str) -> str:
-    """A short name for a long one, for the file that records a home.
+def digest(text: str) -> str:
+    """A short name for a long one, for a file that is named after it.
 
-    A path is not a file name — it has separators and a drive letter — and the
-    same trick is at work in `slife2.libs.host.runtime`, which digests an agent name
-    and an endpoint for exactly this reason.
+    A path is not a file name — it has separators and a drive letter — and
+    neither is an endpoint or an agent's name, which are the other two callers
+    (`slife2.libs.host.runtime`).  One function, because the three agree about
+    what a name looks like and a second copy is a second length: sixteen hex
+    characters is the number, and the only thing that makes it a *number* is
+    that every file named this way shares it.
+
+    Hex and not base64: these names are compared, printed in a `status` line and
+    used as directory entries, and the one alphabet that is safe in all three
+    without escaping is this one.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -390,7 +397,7 @@ def register_home(root: Path | None = None) -> Path:
             failure is the answer.
     """
     target = (root or data_dir()).resolve()
-    entry = homes_dir() / f"{_digest(str(target))}.json"
+    entry = homes_dir() / f"{digest(str(target))}.json"
     _write_atomically(entry, json.dumps({"home": str(target)}))
     return target
 

@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.plugin.audience import client_meta
-from slife2.libs.plugin.protocol import tool_payload
+from slife2.libs.plugin.protocol import tool_payload, unreadable
 from slife2.libs.turn.messages import ToolSpec
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 from slife2.libs.turn.tools import Tool, ToolFailed
@@ -126,23 +126,6 @@ class UpstreamTool:
         )
 
 
-def _unreadable(what: str, payload: Any) -> ConnectionError:
-    """The loud failure both halves of the hop raise, worded once.
-
-    `what` is what the hub was asked to do — "return a tool list", "answer a
-    call" — because the two are the same diagnosis reached from two sides, and a
-    reader who learns the sentence from one should recognise it in the other.
-    The likely cause is a hub daemon left over from a previous build (DESIGN.md
-    §5), and `slife2 down` is the answer; a payload that is *not* this shape is
-    the only evidence there is that the far end is a different build, so it is
-    quoted rather than summarised.
-    """
-    return ConnectionError(
-        f"the toolhub did not {what} (it said {payload!r}); a daemon from "
-        f"another build does this — try `slife2 down`"
-    )
-
-
 async def remote_tools(
     client: Client, client_id: tuple[str, str] | None = None
 ) -> list[Tool]:
@@ -172,7 +155,7 @@ async def remote_tools(
     # a dict where the deliberate message about a *build* belongs.  The check is
     # the same one for both halves of the shape because the diagnosis is.
     if not isinstance(listed, list):
-        raise _unreadable("return a tool list", payload)
+        raise unreadable("the toolhub", "return a tool list", payload)
     # **And an element with no name is the same diagnosis, not a tool.**  Every
     # missing field becomes `""` in `from_wire`, which is a tolerance for text
     # and a silent hole for the field that is an identity: a hub from another
@@ -181,7 +164,7 @@ async def remote_tools(
     # the element is what is quoted (DESIGN.md §10.1).
     for raw in listed:
         if not isinstance(raw, dict) or not str(raw.get("name") or ""):
-            raise _unreadable("return a tool list", raw)
+            raise unreadable("the toolhub", "return a tool list", raw)
     return [
         Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
         for entry in (UpstreamTool.from_wire(raw) for raw in listed)
@@ -253,15 +236,17 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
 
     **Here rather than in the two servers that trim**, which is where it was:
     the agent server and the agent-task server each carried a byte-identical
-    copy of this function, down to the two messages — which are `_unreadable`'s,
-    spelled out.  The rule belongs with the call whose answer it reads.
+    copy of this function, down to the two messages — which are
+    `slife2.libs.plugin.protocol.unreadable`'s, now one function the four modules
+    that read a peer's answer share.  The rule belongs with the call whose answer
+    it reads.
     """
     names = found.get("unloaded")
     if not isinstance(names, list):
-        raise _unreadable("return the names it unloaded", found)
+        raise unreadable("the toolhub", "return the names it unloaded", found)
     text = found.get("text")
     if not isinstance(text, str):
-        raise _unreadable("return the trim's sentence", found)
+        raise unreadable("the toolhub", "return the trim's sentence", found)
     return [str(name) for name in names], text
 
 
@@ -293,7 +278,7 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
         # *list* comes back wrong.  The contract is `{"text": str, "ok": bool}`,
         # so a payload missing either is a build this one cannot read.
         if "text" not in payload or "ok" not in payload:
-            raise _unreadable("answer a call", payload)
+            raise unreadable("the toolhub", "answer a call", payload)
         text = str(payload.get("text") or "")
         if not payload.get("ok"):
             # Raised rather than returned: the loop's contract is that a tool

@@ -40,8 +40,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
+from slife2.libs.host.paths import schedule_db
+from slife2.libs.store.index import connect_to
 
 #: Every state a run can be in, in the order they can be reached.
 #:
@@ -187,7 +188,6 @@ def database_path(agent: str) -> Path:
     Imported from `slife2.libs.host.paths` rather than spelled out, so that the one
     statement of the layout stays the one statement.
     """
-    from slife2.libs.host.paths import schedule_db
 
     return schedule_db(agent)
 
@@ -266,13 +266,19 @@ class ScheduleStore:
         return str(row["value"]) if row else ""
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=_T.timeouts.storage.sqlite_busy)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            f"PRAGMA busy_timeout={int(_T.timeouts.storage.sqlite_busy * 1000)}"
-        )
-        return connection
+        """A connection to this ledger, opened the way every store opens one.
+
+        **`index.connect_to` and not the four lines it is made of**, which is
+        what this was.  A ledger is opened per call and written by one process,
+        so the pragmas are the same four the turns' store and the cabinet's
+        want — and `slife2.libs.store.index` says in as many words that a second
+        connection path is "a second thing to keep in step" that buys nothing.
+        It was one: this file's, which was the only store in the tree that did
+        not go through the shared one, so a pragma tuned for the writers that
+        contend (the `busy_timeout`, which matters most for a file two processes
+        touch) would have had to be tuned twice.
+        """
+        return connect_to(self.path)
 
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -545,6 +545,37 @@ def tool_payload(result: Any) -> dict[str, Any]:
     return {}
 
 
+def unreadable(peer: str, what: str, payload: Any) -> ConnectionError:
+    """The loud failure a peer's answer that is not its shape raises, worded once.
+
+    **One sentence, written out in eight places until this function existed** —
+    the hub's tool list, the model's `stream_chat` result, the context store's
+    message list, its turn-id list, its rebuild counts and its turn list, each
+    from two or three modules.  Every copy was right; the count was the problem,
+    because the diagnosis is the valuable half and a reader who learns it from one
+    peer should recognise it from another.  What varies is only *who* was asked
+    and *what* they failed to do, so those are the two arguments and the rest is
+    this.
+
+    `peer` is the far end as a reader meets it — "the toolhub", "the context
+    store", "the model server" — with its article, because a sentence assembled
+    from a bare name reads as a log line rather than as an explanation.  `what`
+    is what it was asked for and did not give: "return a message list".
+
+    **The last clause is the point of the sentence.**  A payload of the wrong
+    shape is the only evidence there is that the far end is a *different build*
+    — a daemon left over from a previous one, which `slife2 down` is the answer
+    to (DESIGN.md §5) — so the payload is quoted rather than summarised, and the
+    remedy is named.  Reading it as "no answer" instead is the confident negative
+    DESIGN.md §10.1 forbids: a conversation rebuilt from an unreadable answer is
+    a conversation quietly missing what the answer held.
+    """
+    return ConnectionError(
+        f"{peer} did not {what} (it said {payload!r}); a daemon from another "
+        f"build does this — try `slife2 down`"
+    )
+
+
 def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Namespace:
     """The flags every server here accepts.
 

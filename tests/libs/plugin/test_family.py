@@ -206,7 +206,6 @@ async def test_an_edit_leaves_an_entry_where_the_file_has_it() -> None:
         for name in ("a", "b", "c")
     ]
     family = Family(
-        default_config(),
         category="mcp",
         entries=entries,
         links=Links(),

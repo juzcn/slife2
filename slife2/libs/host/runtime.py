@@ -18,7 +18,6 @@ bug that an `O_EXCL` lockfile has to solve by hand: no stale-lock protocol, no
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -34,7 +33,7 @@ from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import runtime_dir
+from slife2.libs.host.paths import digest, runtime_dir
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +68,9 @@ def normalize_url(url: str) -> str:
     return f"{parts.scheme.lower()}://{host}{path}"
 
 
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
 def endpoint_key(url: str) -> str:
     """The short digest that names this endpoint's files."""
-    return _digest(normalize_url(url))
+    return digest(normalize_url(url))
 
 
 def agent_key(name: str) -> str:
@@ -84,7 +79,7 @@ def agent_key(name: str) -> str:
     Prefixed so an agent called ``http://127.0.0.1:8000/mcp`` cannot collide
     with the server at that address.
     """
-    return _digest(f"agent:{name}")
+    return digest(f"agent:{name}")
 
 
 def config_key(path: Path) -> str:
@@ -95,7 +90,7 @@ def config_key(path: Path) -> str:
     path is neither.  Prefixed so a config file called like an endpoint cannot
     share a lock with it — the same collision `agent_key` is spelled out against.
     """
-    return _digest(f"config:{path}")
+    return digest(f"config:{path}")
 
 
 def log_path(url: str) -> Path:
@@ -696,7 +691,7 @@ def _start_token_ps(pid: int) -> str | None:
         return None
 
     stamp = result.stdout.strip()
-    return _digest(stamp) if stamp else None
+    return digest(stamp) if stamp else None
 
 
 #: One token source per platform.  Split out rather than inlined into a single

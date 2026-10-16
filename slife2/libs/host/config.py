@@ -296,10 +296,6 @@ LOCAL = Net(
     shared_unit=False,
 )
 
-#: Both, in the order they are described in — the remote one first, because it is
-#: the one a machine is on before it has any subagents.
-NETS = (REMOTE, LOCAL)
-
 #: The four tools a network offers the model, by verb.  **Here rather than in the
 #: plugin that serves them**, because one of them is also what the launcher
 #: probes with (`expected_tool`) and a probe looking for a name the server does

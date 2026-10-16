@@ -61,12 +61,6 @@ from slife2.plugins.tui.server import NOTE
 
 logger = logging.getLogger(__name__)
 
-#: How many times a hand-over is tried before it is a failure.  Three, because
-#: what the retry is for is the window's own gap — an agent's window attaches a
-#: moment after its stack comes up — and because the wait between the attempts is
-#: the terminal's own `pacing.reconnect`, the pause before it offers to attach
-#: again.
-_ATTEMPTS = 3
 
 
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
@@ -256,7 +250,7 @@ async def hand_over(
     wait the terminal itself uses — and a call that did not come back is not,
     since its words may be in the conversation already.
     """
-    for attempt in range(1, _ATTEMPTS + 1):
+    for attempt in range(1, _T.timeouts.stream.handover + 1):
         handed = await to_window(config, agent, text, channel, client=window_client)
         if handed is True:
             return
@@ -271,9 +265,9 @@ async def hand_over(
                 f"the hand-over did not come back, so it ({len(text)} characters) "
                 f"was not repeated",
             )
-        if attempt < _ATTEMPTS:
+        if attempt < _T.timeouts.stream.handover:
             await asyncio.sleep(_T.timeouts.pacing.reconnect)
     raise DeliveryFailed(
         agent,
-        f"no window is showing it after {_ATTEMPTS} attempts ({what})",
+        f"no window is showing it after {_T.timeouts.stream.handover} attempts ({what})",
     )

@@ -187,6 +187,18 @@ class Stream:
     #: The embeddings server's.  Zero: an embedding that failed is a caller's
     #: problem to retry, not the server's to repeat.
     retries: int = 0
+    #: Handing a message to a window (`slife2.libs.harness.handover`): how many
+    #: times it is offered before the offer is a failure.  Three, because what
+    #: the retry is for is the window's own gap — an agent's window attaches a
+    #: moment after its stack comes up — and the pause between attempts is
+    #: `pacing.reconnect`, which is the terminal's and not this count's.
+    #:
+    #: **A count, so it is here rather than in `pacing`**: the roles are the
+    #: registry's own rule, and a number that says "how many" is not a cadence
+    #: however close to one it sits.  It was a module constant beside the loop
+    #: that uses it, which is the second seat this file exists to be the only
+    #: one of.
+    handover: int = 3
 
 
 @dataclass

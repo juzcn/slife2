@@ -131,6 +131,7 @@ from slife2.libs.plugin.protocol import (
     open_server,
     serve_plugin,
     tool_payload,
+    unreadable,
 )
 from slife2.libs.store.db import safe_agent_name
 from slife2.libs.turn import attachments
@@ -1346,17 +1347,13 @@ def build_server(
         """
         messages = payload.get("messages")
         if not isinstance(messages, list):
-            raise ConnectionError(
-                f"the context store did not return a message list (it said "
-                f"{payload!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
+            raise unreadable(
+                "the context store", "return a message list", payload
             )
         turn_ids = payload.get("turn_ids")
         if not isinstance(turn_ids, list):
-            raise ConnectionError(
-                f"the context store did not return a turn-id list (it said "
-                f"{payload!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
+            raise unreadable(
+                "the context store", "return a turn-id list", payload
             )
         loop.messages = [Message.from_wire(raw) for raw in messages]
         loop.turn_ids = [int(turn_id) for turn_id in turn_ids]
@@ -1560,10 +1557,8 @@ def build_server(
         _adopt(loop, payload, carried=carried)
         kept, recalled = payload.get("kept"), payload.get("recalled")
         if kept is None or recalled is None:
-            raise ConnectionError(
-                f"the context store did not report the rebuild's counts (it "
-                f"said {payload!r}); a daemon from another build does this — "
-                f"try `slife2 down`"
+            raise unreadable(
+                "the context store", "report the rebuild's counts", payload
             )
         return ContextChosen(kept=int(kept), recalled=int(recalled))
 
@@ -3085,10 +3080,8 @@ def build_server(
         )
         turns = payload.get("turns")
         if not isinstance(turns, list):
-            raise ConnectionError(
-                f"the context store did not return a turn list (it said "
-                f"{payload!r}); a daemon from another build does this — try "
-                f"`slife2 down`"
+            raise unreadable(
+                "the context store", "return a turn list", payload
             )
         return {"turns": turns}
 
