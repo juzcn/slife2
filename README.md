@@ -1039,7 +1039,10 @@ inbound tasks a process died holding, which is what a restart needs to tell an
 orphan from an id it has never seen.
 
 **The broker is started for you if it is not there, and stopped when you are
-done**, which is where this departs from v1. Point `a2a.broker` at an address; if
+done**, which is where this departs from v1. Left out, `a2a.broker` is the
+subagent network's address (`subagent.broker`): one machine meets its subagents
+somewhere, and a remote mesh that names no broker meets there too. Point it at an
+address; if
 nothing is listening there and it is *this* machine, `mosquitto` is started on it
 — and the last `slife2` to exit stops it again (or `slife2 down`, or `slife2
 status` to see it). Only a broker *slife2 started* is ever stopped: the record

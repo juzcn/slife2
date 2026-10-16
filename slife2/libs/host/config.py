@@ -2276,6 +2276,15 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
                 f"would collide as tool names"
             )
 
+    # **The subagent network is parsed first, because the remote one's broker
+    # defaults from it.**  A machine has one broker by default — the local one,
+    # which `subagent:` has to name — and a remote mesh that says nothing about
+    # where to meet meets *there*: the two networks are two namespaces on one
+    # address rather than two machines, and a file that had to write the same
+    # host:port twice could write two different ones by accident.  An `a2a:`
+    # section that names a broker keeps it (`--a2a-broker`, somebody else's,
+    # likewise: it is applied inside `_a2a`, after this).
+    subagent = _subagent(raw.get("subagent"), base.subagent)
     return Config(
         servers=servers,
         providers=providers,
@@ -2285,7 +2294,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         skills=_skills(raw),
         agent=agent,
         agent_task=_agent_task(raw.get("agent-task"), base.agent_task),
-        subagent=_subagent(raw.get("subagent"), base.subagent),
+        subagent=subagent,
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         tool_result=_tool_result(raw.get("tool_result"), base.tool_result),
@@ -2293,7 +2302,14 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         media=_media(raw.get("media"), base.media),
         file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
         a2a=_a2a(
-            raw.get(A2A_KEY), base.a2a, section=A2A_KEY, override=A2A_BROKER_ENV_VAR
+            raw.get(A2A_KEY),
+            base.a2a,
+            section=A2A_KEY,
+            override=A2A_BROKER_ENV_VAR,
+            default_address=(
+                subagent.network.broker_host,
+                subagent.network.broker_port,
+            ),
         ),
         default=str(raw.get("default") or _first_reference(providers)),
     )
@@ -2305,6 +2321,7 @@ def _a2a(
     *,
     section: str = A2A_KEY,
     override: str = "",
+    default_address: tuple[str, int] | None = None,
 ) -> A2ASettings:
     """One `a2a:`-shaped section, defaulted — and the one place `configured` is set.
 
@@ -2312,6 +2329,17 @@ def _a2a(
     `a2a:` and the local one's `a2a-subagent:`, parsed by the same rules and told
     apart by the name every refusal is written with — a `provider:` mistake in
     the local one must not be reported against a key the file does not have.
+
+    **`default_address` is what a broker key left out means**, and it is the
+    caller's rather than this function's: a *subagent* network falls back to the
+    built-in address, and a remote one falls back to the subagent network's
+    (`_build` passes it), because a machine meets its own subagents somewhere and
+    a remote mesh that does not say where it meets meets there — one address, two
+    namespaces, and no second host:port to keep in step.  It is threaded in
+    rather than read here because which section is parsed first is the caller's
+    order, and a fallback that reached for `config.subagent` from inside this
+    function would make the two sections' parse order load-bearing in a place
+    nothing states it.
 
     **`override` names an environment variable only the remote one is given.**
     The local network's broker is this machine's own and is the file's to say
@@ -2375,8 +2403,15 @@ def _a2a(
         broker = {}
     broker = _mapping(broker, f"{section}.broker")
 
-    host = str(broker.get("host") or base.broker_host)
-    port = _int_or(broker.get("port"), base.broker_port, f"{section}.broker.port")
+    # The address a key left out means — the caller's, or this build's own.  Both
+    # halves are read here rather than at their two use sites so the default a
+    # *refusal* quotes is the same one the value would have taken.
+    default_host, default_port = default_address or (
+        base.broker_host,
+        base.broker_port,
+    )
+    host = str(broker.get("host") or default_host)
+    port = _int_or(broker.get("port"), default_port, f"{section}.broker.port")
     if not 0 < port < 65536:
         # **The flag refused this and the file did not.**  `broker_address`
         # refuses `host:0` and `host:70000` for `--a2a-broker`, and the section
@@ -2389,7 +2424,7 @@ def _a2a(
         # failing on the line that named it.
         raise ConfigError(
             f"{section}.broker.port: {port} is not a port (1-65535); leave it "
-            f"out for the default ({base.broker_port})"
+            f"out for the default ({default_port})"
         )
     if override:
         host, port = broker_address(override)

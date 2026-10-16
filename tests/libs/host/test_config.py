@@ -1505,6 +1505,60 @@ def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
     assert not config.a2a.overridden
 
 
+#: A remote section that says nothing about where to meet, and a subagent
+#: network that does — the two sections' addresses differ in the *namespace* and
+#: not in the machine.
+A_MESH_WITHOUT_A_BROKER = (
+    A_PROVIDER
+    + """
+a2a:
+  org: an-org
+  unit: a-unit
+
+subagent:
+  broker:
+    host: 10.0.0.5
+    port: 2883
+"""
+)
+
+
+def test_a_remote_mesh_with_no_broker_meets_where_the_subagent_network_does(
+    tmp_path, monkeypatch
+) -> None:
+    """**One machine, one broker by default, and `subagent:` is where it is said.**
+
+    The subagent network is this machine's own, so the file has to say where it
+    is; a remote mesh that names no broker meets *there* rather than at the
+    built-in address, because the two networks are two namespaces on one address
+    and a file made to write the same `host:port` twice could write two different
+    ones by accident.  Only the address is inherited — the topic namespace stays
+    each network's own, which is what keeps two subagents named `researcher`
+    apart from each other and from a remote peer.
+    """
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+    config = load(write(tmp_path, A_MESH_WITHOUT_A_BROKER))
+
+    assert config.subagent.network.address == "10.0.0.5:2883"
+    assert config.a2a.address == "10.0.0.5:2883"
+    assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
+
+
+def test_a_broker_the_remote_section_names_is_its_own(tmp_path, monkeypatch) -> None:
+    """The subagent network's address is a *default*, not a rule.
+
+    Two networks may meet at two addresses — a team broker for the remote peers
+    and this machine's own for its subagents (`subagent:` says pointing it
+    elsewhere is supported rather than encouraged) — and the file that names the
+    remote one keeps it.
+    """
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+    config = load(write(tmp_path, A_MESH_AND_LOCAL))
+
+    assert config.a2a.address == "localhost:1883"
+    assert config.subagent.network.address == "localhost:1884"
+
+
 def test_the_broker_flag_cannot_turn_the_mesh_on(tmp_path, monkeypatch) -> None:
     """The section's presence is the switch, and the flag is not a second one.
 

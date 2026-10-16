@@ -364,11 +364,16 @@ subagent:
   # path, so a local network left at the remote one's default would be the same
   # network — this machine's own subagents visible to its remote peers.
   #
-  # The broker may be the same one, and by default is: a local network on this
-  # machine's own broker costs nothing extra.  Pointing it somewhere else is
-  # supported rather than encouraged — a subagent is local, so its traffic has no
-  # reason to leave the machine.
-  # broker: {host: localhost, port: 1883}
+  # **This is the section that names the broker**, and `a2a:` below left out means
+  # this address: a machine meets its subagents somewhere, and a remote mesh that
+  # says nothing about where it meets meets there.  Pointing *this* one somewhere
+  # else is supported rather than encouraged — a subagent is local, so its traffic
+  # has no reason to leave the machine — and the two may be two different
+  # addresses when a team's broker is what the remote peers are on.
+  provider: mosquitto
+  broker:
+    host: localhost
+    port: 1883
   org: default
   unit: local
 
@@ -900,14 +905,15 @@ file-tunnel:
 # Agent-to-agent traffic over MQTT, and **the one section whose presence is
 # itself a setting**: a machine with no `a2a:` is a machine that is not on the
 # mesh, the same way the absence of a `wechat:` is the whole of what says a
-# machine does not talk to WeChat.  What it holds is a broker address and the
-# first two segments of the topic namespace (`$a2a/v1/…/{org}/{unit}/{agent}`),
-# which is what tells two groups on one broker apart.
+# machine does not talk to WeChat.  What it holds is the first two segments of
+# the topic namespace (`$a2a/v1/…/{org}/{unit}/{agent}`), which is what tells two
+# groups on one broker apart — and a broker address only when the machine's is
+# somebody else's (see below).
 #
 # **The broker is started for you if it is not there**, and that is this port's
 # one departure from v1, which left mosquitto to the user.  A config that says
 # `a2a:` has said it wants the mesh, so a missing broker is a missing dependency
-# rather than a preference: `mosquitto` is started on `broker.port`, and a
+# rather than a preference: `mosquitto` is started on the address in force, and a
 # broker that will not serve is a *startup failure* naming it and its log — not
 # a mesh that silently is not one.  The broker is left running afterwards,
 # because a broker is a machine's, not a run's.
@@ -916,6 +922,14 @@ file-tunnel:
 # reached exactly the same way, and nothing local can stand in for it — so a
 # remote broker that is down is the same hard failure with no attempt made.
 #
+# **Left out, the address is the subagent network's** (`subagent.broker` above),
+# because one machine meets its subagents somewhere and a remote mesh that says
+# nothing about where it meets meets there: the two networks are two *namespaces*
+# on one address rather than two machines, and a file that had to write the same
+# host:port twice could write two different ones by accident.  Naming one here —
+# or with `--a2a-broker` — is the answer instead, and the two may differ; that is
+# the one case where a machine is on somebody else's broker.
+#
 # `provider` is a hard constraint rather than a default: mosquitto is the only
 # broker this build speaks to, and anything else is refused when the config is
 # read, because the alternative is `a2a_*` tools offered to a model for a mesh
@@ -923,8 +937,6 @@ file-tunnel:
 # `a2a_cancel_task`, `a2a_list_agents` and `a2a_broadcast`.
 a2a:
   provider: mosquitto
-  broker:
-    host: localhost
-    port: 1883
+  # broker: {host: localhost, port: 1883}   # unset: `subagent.broker`'s address
   org: default
   unit: default
