@@ -163,16 +163,26 @@ class _HttpClientMixin:
 
     Both adapters carried verbatim copies of this in v1 — the same double-checked
     lock, the same headers — so it is one class here and the adapters inherit it.
-    Call :meth:`_init_http_client` from ``__init__``.
+    **The ``__init__`` came with the client**, because both adapters had written
+    it out identically: the settings, the client, the saver, in that order.  A
+    docstring that used to say "call :meth:`_init_http_client` from ``__init__``"
+    was an instruction to copy three lines, which is what the second copy was.
 
     **One client for the adapter's life**, because a render is several calls to
     one host and a client per call would handshake for each of them.  The lock
     is what keeps two concurrent tool calls from building two clients.
     """
 
-    #: Set by the concrete adapter's ``__init__`` (a `MediaProviderSettings`);
-    #: the mixin reads `api_key` and `base_url` from it.
+    #: Set by :meth:`__init__` (a `MediaProviderSettings`); the mixin reads
+    #: `api_key` and `base_url` from it.
     _config: Any
+
+    def __init__(self, config: Any) -> None:
+        self._config = config
+        self._init_http_client()
+        #: The one thing an adapter does with a remote's answer: write it down.
+        #: Here rather than per subclass for the same reason the client is.
+        self._saver = ArtifactSaver()
 
     def _init_http_client(self) -> None:
         self._client: httpx2.AsyncClient | None = None
@@ -412,11 +422,6 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
     speech, a data URI for transcription) and a poll for the jobs that take
     minutes.
     """
-
-    def __init__(self, config: Any) -> None:
-        self._config = config
-        self._init_http_client()
-        self._saver = ArtifactSaver()
 
     async def _request(
         self,
@@ -753,11 +758,6 @@ class OpenAICompatAdapter(_HttpClientMixin):
     `NotImplementedError` at the call, with a sentence naming the adapter, which
     is better than a 404 from the vendor and much better than a guess.
     """
-
-    def __init__(self, config: Any) -> None:
-        self._config = config
-        self._init_http_client()
-        self._saver = ArtifactSaver()
 
     async def generate_image(
         self,
