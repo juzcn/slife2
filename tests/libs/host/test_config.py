@@ -18,6 +18,7 @@ from slife2.libs.host.config import (
     API_BACKENDS,
     DEFAULT_TOOL_RESULT_TOKENS,
     MIN_TOOL_RESULT_TOKENS,
+    PLUGINS,
     ConfigError,
     default_config,
     find_config_path,
@@ -80,65 +81,31 @@ def test_every_api_has_a_backend_module() -> None:
         assert module.startswith("slife2.plugins.llm."), api
 
 
-def test_every_declared_server_name_is_the_one_its_module_uses() -> None:
-    """The names here are what a client checks to prove it reached the right
-    server, and they are spelled out rather than imported — the TUI must not
-    pull in a server, and the agent loop must never import `openai_server`.
+def test_every_plugin_row_describes_a_real_server() -> None:
+    """A row of `PLUGINS` names a module, and that module answers to its name.
 
-    Spelling them out is only safe if something notices when one drifts, and
-    that is this: each claimed name against the `SERVER_NAME` the server itself
-    passes to `FastMCP(...)`, which is what actually ends up on the wire.
+    **This used to be fifteen spelled-out assertions**, one per server, because
+    each name was written twice — here and as a `SERVER_NAME` literal in the
+    server's own module — and something had to notice when one of them drifted.
+    The name has one home now, so what is left to check is the half a table
+    cannot check about itself: that the module path is a module, and that the
+    module agrees about the name it puts on the wire (`FastMCP(name)`), which is
+    what a client compares against to prove it reached the server it meant
+    (`slife2.libs.plugin.protocol.identifies`).
+
+    Importing a server module is safe *here* and nowhere else in this file's
+    neighbourhood: the rule the names exist for is that the TUI and the agent
+    loop must not, and this is a test that does nothing else.
     """
     import importlib
 
-    from slife2.libs.host.config import (
-        A2A_SERVER_NAME,
-        AGENT_SERVER_NAME,
-        API_SERVER_NAMES,
-        CLI_SERVER_NAME,
-        CONTEXT_SERVER_NAME,
-        EMBEDDINGS_SERVER_NAME,
-        MCP_TOOLS_SERVER_NAME,
-        RESTAPI_TOOLS_SERVER_NAME,
-        SCHEDULE_SERVER_NAME,
-        SKILLS_SERVER_NAME,
-        TOOLHUB_SERVER_NAME,
-    )
-
-    assert importlib.import_module("slife2.plugins.agent.server").SERVER_NAME == (
-        AGENT_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.plugins.context.server").SERVER_NAME == (
-        CONTEXT_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.plugins.skills.server").SERVER_NAME == (
-        SKILLS_SERVER_NAME
-    )
-    assert (
-        importlib.import_module("slife2.plugins.cli.server").SERVER_NAME
-        == CLI_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.plugins.mcp_tools.server").SERVER_NAME == (
-        MCP_TOOLS_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.plugins.restapi.server").SERVER_NAME == (
-        RESTAPI_TOOLS_SERVER_NAME
-    )
-    assert importlib.import_module("slife2.plugins.toolhub.server").SERVER_NAME == (
-        TOOLHUB_SERVER_NAME
-    )
-    assert importlib.import_module(
-        "slife2.plugins.llm.embeddings_server"
-    ).SERVER_NAME == (EMBEDDINGS_SERVER_NAME)
-    assert importlib.import_module("slife2.plugins.schedule.server").SERVER_NAME == (
-        SCHEDULE_SERVER_NAME
-    )
-    assert (
-        importlib.import_module("slife2.plugins.a2a.server").SERVER_NAME
-        == A2A_SERVER_NAME
-    )
-    for api, module in API_BACKENDS.items():
-        assert importlib.import_module(module).SERVER_NAME == API_SERVER_NAMES[api]
+    for one in PLUGINS:
+        module = importlib.import_module(one.module)
+        assert module.SERVER_NAME == one.name, one.key
+        assert one.module.startswith("slife2.plugins."), one.key
+        assert 0 < one.port < 65536, one.key
+    assert len({one.key for one in PLUGINS}) == len(PLUGINS)
+    assert len({one.name for one in PLUGINS}) == len(PLUGINS)
 
 
 def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:

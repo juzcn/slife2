@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 
 from slife2.clients.gateway import ClientFactory
 from slife2.libs.host.config import (
+    MCP_TOOLS_SERVER_NAME,
     Config,
     ToolServerSettings,
     _tool_server,
@@ -49,7 +50,7 @@ from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-mcp-tools"
+SERVER_NAME = MCP_TOOLS_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name the launcher
 #: starts it under.  It is `mcp-tools` rather than `mcp` because the catalogue

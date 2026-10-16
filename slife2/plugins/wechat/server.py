@@ -80,7 +80,7 @@ from ruamel.yaml import YAML
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
-from slife2.libs.host.config import Config
+from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
 from slife2.libs.host.paths import agent_dir, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
@@ -91,7 +91,7 @@ from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-wechat"
+SERVER_NAME = WECHAT_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name the launcher
 #: starts it under and the hub connects to it by.  Also the `wechat:` section

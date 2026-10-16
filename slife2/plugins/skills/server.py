@@ -41,14 +41,14 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host import configfile
 from slife2.plugins.skills import playbooks as skills
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.host.config import Config, SkillSettings, load_cached
+from slife2.libs.host.config import Config, SKILLS_SERVER_NAME, SkillSettings, load_cached
 from slife2.libs.plugin.protocol import SKILLS_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
 from slife2.libs.plugin.family import Documents, Homes, build_document_server
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-skills"
+SERVER_NAME = SKILLS_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and so the name the
 #: launcher starts it under and the hub connects to it by.

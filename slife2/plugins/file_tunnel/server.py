@@ -49,7 +49,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.config import Config
+from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
@@ -59,7 +59,7 @@ from slife2.plugins.file_tunnel.providers import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-file-tunnel"
+SERVER_NAME = FILE_TUNNEL_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the section it owns.
 CONFIG_KEY = "file-tunnel"

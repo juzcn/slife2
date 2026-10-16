@@ -22,6 +22,14 @@ from __future__ import annotations
 from slife2.libs.host.config import LOCAL
 from slife2.plugins.a2a.server import main as a2a_main
 
+#: The MCP name this process answers as, read off the row `PLUGINS` files this
+#: module under (`Net.server_name` is the same call).  **Declared even though
+#: nothing here reads it**, because it is half of what makes this module a
+#: plugin: `slife2.plugins.a2a.server` takes it from the `net` it is handed, and
+#: a reader — or a test — arriving at the module the launcher starts should find
+#: the name it answers as without having to follow that argument.
+SERVER_NAME = LOCAL.server_name
+
 
 def main(argv: list[str] | None = None) -> int:
     """Serve the local network.  `slife2.libs.host.launcher` starts this."""

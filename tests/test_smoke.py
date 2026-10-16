@@ -91,8 +91,9 @@ def test_the_mesh_url_is_the_key_the_address_is_filed_under() -> None:
     """`a2a`, and not `slife2-a2a` — two names one word apart.
 
     `servers:` is keyed by the short name every plugin's module calls its
-    `CONFIG_KEY`, and `slife2-a2a` is what the *server* answers to (the identity
-    `open_server(name=…)` checks, from `slife2.libs.host.config.SERVER_MODULES`).  Looking
+    `CONFIG_KEY` — a `PLUGINS` row's `key` — and `slife2-a2a` is what the
+    *server* answers to, the `name` of that same row (the identity
+    `open_server(name=…)` checks).  Looking
     up the identity in the key table is a `ConfigError` before the TUI starts,
     which is what this caught: every test of the window passed an address in by
     hand, so nothing exercised the line that reads one out of the file.

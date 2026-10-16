@@ -70,7 +70,7 @@ from fastmcp import Client, Context, FastMCP
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
-from slife2.libs.host.config import API_SERVER_NAMES, Config
+from slife2.libs.host.config import API_SERVER_NAMES, CONTEXT_SERVER_NAME, Config
 from slife2.libs.host.paths import agents_dir, turn_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
 from slife2.libs.plugin.protocol import (
@@ -90,7 +90,7 @@ from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-context"
+SERVER_NAME = CONTEXT_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name the agent
 #: server connects to it by.

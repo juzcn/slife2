@@ -80,6 +80,7 @@ from slife2.clients.toolclient import (
 from slife2.helpers.clock import now
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import (
+    AGENT_TASK_SERVER_NAME,
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
@@ -105,7 +106,7 @@ from slife2.libs.turn.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-agent-task"
+SERVER_NAME = AGENT_TASK_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name of the
 #: section that holds its one number.

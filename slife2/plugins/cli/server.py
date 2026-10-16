@@ -44,6 +44,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
+    CLI_SERVER_NAME,
     CliToolSettings,
     Config,
     ConfigError,
@@ -57,7 +58,7 @@ from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-cli"
+SERVER_NAME = CLI_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and so the name the
 #: launcher starts it under and the hub connects to it by.

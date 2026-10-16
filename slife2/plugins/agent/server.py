@@ -102,6 +102,7 @@ from slife2.libs.harness.dumps import Compress
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
+    AGENT_SERVER_NAME,
     API_BACKENDS,
     API_SERVER_NAMES,
     CABINET_SERVER_NAME,
@@ -153,7 +154,7 @@ from slife2.libs.turn.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-agent"
+SERVER_NAME = AGENT_SERVER_NAME
 
 #: How many messages one loop may have waiting.  The client's per-call timeout
 #: starts when the call is made, not when its turn starts, so an unbounded queue

@@ -40,6 +40,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import (
+    MEDIA_SERVER_NAME,
     Config,
     ConfigError,
     MediaProviderSettings,
@@ -57,7 +58,7 @@ from slife2.plugins.media.adapters import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-media"
+SERVER_NAME = MEDIA_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the section it owns.
 CONFIG_KEY = "media"

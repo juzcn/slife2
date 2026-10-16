@@ -34,6 +34,7 @@ from slife2 import _ensure
 from slife2.libs.host import launcher, runtime
 from slife2.libs.host.config import (
     LOCAL_SERVERS,
+    PLUGINS,
     Config,
     default_config,
     load,
@@ -320,16 +321,23 @@ def test_the_work_is_reported_in_the_order_it_finishes() -> None:
     assert seen == ["fast", "slow"]
 
 
-def test_every_plugin_has_a_module_and_every_module_a_plugin() -> None:
-    """The two lists that could drift, held together.
+def test_the_servers_started_are_the_ones_the_registry_describes(tmp_path) -> None:
+    """What a `status` line prints is `PLUGINS`, and nothing else adds to it.
 
-    `config.LOCAL_SERVERS` says which names a `servers:` section may use and in
-    what order they start; `launcher.SERVER_MODULES` says which module serves
-    each.  A name in one and not the other is a config key that cannot be
-    started or a module nothing starts, and both are silent until somebody edits
-    the other one.
+    **This used to hold two lists together** — `config.LOCAL_SERVERS` and
+    `launcher.SERVER_MODULES` — which is the test that stops existing when the
+    two become one: there is no second list to disagree with the first, and a
+    row is what a spec is built from (`launcher.spec_for`).  What is left worth
+    asserting is that the launcher neither invents a server nor drops one, which
+    is what a derived table can still get wrong.
     """
-    assert set(LOCAL_SERVERS) == set(launcher.SERVER_MODULES)
+    config = load(_config_with_every_protocol(tmp_path))
+    started = [spec.name for spec in launcher.specs(config)]
+    described = [
+        f"{launcher.BACKEND_PREFIX}{one.key}" if one.api else one.key for one in PLUGINS
+    ]
+    assert sorted(started) == sorted(described)
+    assert set(LOCAL_SERVERS) == {one.key for one in PLUGINS if not one.api}
 
 
 def test_the_hub_asks_exactly_what_the_launcher_starts(tmp_path) -> None:

@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from slife2.libs.host.config import ModelSettings
+from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
@@ -43,10 +43,11 @@ from slife2.plugins.llm.server_common import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-llm-anthropic"
 
 #: The wire protocol this process speaks — and the key its address lives under.
 API = "anthropic-messages"
+
+SERVER_NAME = plugin(API).name
 
 #: Output cap when a model entry does not set one.  Anthropic requires the
 #: field, so "absent" cannot mean "omit" here the way it does for sampling.

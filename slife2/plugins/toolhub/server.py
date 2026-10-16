@@ -194,6 +194,7 @@ from slife2.clients.gateway import (
 )
 from slife2.clients.toolclient import UpstreamTool
 from slife2.libs.host.config import (
+    TOOLHUB_SERVER_NAME,
     Config,
     ToolServerSettings,
     for_the_call,
@@ -222,7 +223,7 @@ from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-toolhub"
+SERVER_NAME = TOOLHUB_SERVER_NAME
 
 #: This server's key in the config's `servers:` table — and therefore the one
 #: name in `Config.plugins()` that is not a source of tools.  The hub asks

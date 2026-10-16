@@ -147,35 +147,10 @@ class WrongKindError(ConfigError):
     """
 
 
-#: The wire protocols this distribution implements, and the server module that
-#: speaks each.  `api` selects one; an unknown value is a typo worth reporting
-#: rather than a provider that quietly never starts.
-API_BACKENDS: dict[str, str] = {
-    "openai-completions": "slife2.plugins.llm.openai_server",
-    "anthropic-messages": "slife2.plugins.llm.anthropic_server",
-    # A protocol, not a flag on the one above: the Responses API takes a
-    # different input shape, names its tools differently and streams different
-    # events, so it is a process of its own like every other entry here.
-    # Appended last on purpose — `apis_in_use` preserves this order and the
-    # launcher starts them in it.
-    "openai-responses": "slife2.plugins.llm.openai_responses_server",
-}
-
-#: The MCP name the server for each wire protocol advertises — what
-#: `Client.server_info` reports, and so what a caller compares against to prove
-#: it reached the server it meant rather than some other MCP server on the port.
-#:
-#: Beside `API_BACKENDS` because the same thing decides both: a module is only
-#: reachable through the protocol it speaks.  It cannot be derived from the
-#: module name without importing the module, and importing `openai_server` is
-#: exactly what the agent server must never do, so it is spelled out here — and
-#: `tests/test_config.py` asserts every entry still matches its module's own
-#: `SERVER_NAME`, which is the only way this can drift.
-API_SERVER_NAMES: dict[str, str] = {
-    "openai-completions": "slife2-llm-openai",
-    "anthropic-messages": "slife2-llm-anthropic",
-    "openai-responses": "slife2-llm-openai-responses",
-}
+#: The tool every model server answers to.  One tool for all of them, because a
+#: backend is a backend whatever protocol it speaks: `api` selects the process,
+#: and the request names the provider whose credentials to use.
+MODEL_TOOL = "stream_chat"
 
 #: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
 #: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
@@ -192,72 +167,6 @@ DEFAULT_CONFIG_NAME = "slife2.yaml"
 #: the MCP name of the *process* that serves every agent.  They are one hyphen
 #: apart, which is exactly why both say so here.
 DEFAULT_AGENT = "slife2"
-
-#: The MCP names the servers in this system advertise, as `Client.server_info`
-#: reports them.  A client proves it reached the server it meant by comparing
-#: against these; see `slife2.libs.plugin.protocol.identifies`.
-#:
-#: Spelled out rather than read off the modules, because reading them means
-#: importing them: the TUI and the agent loop must not pull in a server, and the
-#: agent loop in particular must never reach `openai_server`.  `tests/test_config.py`
-#: asserts each still matches its module's own `SERVER_NAME`.
-AGENT_SERVER_NAME = "slife2-agent"
-
-#: The terminal's own inbox, and one of the servers slife2 starts: a message
-#: arriving on another channel is handed to it, and it puts the words down the
-#: stream the window showing that conversation holds open — so they become the
-#: one thing a window already handles, something the person typed
-#: (`slife2.plugins.tui.server`).  It is one process and a session per agent, and the
-#: window is a *client* of it rather than the process hosting it, which is what
-#: makes two windows on one machine both reachable.
-TUI_SERVER_NAME = "slife2-tui"
-CONTEXT_SERVER_NAME = "slife2-context"
-MCP_TOOLS_SERVER_NAME = "slife2-mcp-tools"
-RESTAPI_TOOLS_SERVER_NAME = "slife2-restapi-tools"
-SKILLS_SERVER_NAME = "slife2-skills"
-CLI_SERVER_NAME = "slife2-cli"
-TOOLHUB_SERVER_NAME = "slife2-toolhub"
-EMBEDDINGS_SERVER_NAME = "slife2-llm-embeddings"
-WECHAT_SERVER_NAME = "slife2-wechat"
-CABINET_SERVER_NAME = "slife2-cabinet"
-MEDIA_SERVER_NAME = "slife2-media"
-FILE_TUNNEL_SERVER_NAME = "slife2-file-tunnel"
-
-#: The background tasks: one loop of the calling agent's own per task, run on a
-#: description and answered by a message (`slife2.plugins.agent_task.server`,
-#: DESIGN.md §1.3).  A second agent server in the only sense that matters here —
-#: what it holds is loops — and the reason it is a plugin is the reason the
-#: agent server is: no file is the answer to a running loop.
-AGENT_TASK_SERVER_NAME = "slife2-agent-task"
-
-#: The clock: the one thing here that starts work nobody asked for at the moment
-#: it starts (`slife2.plugins.schedule.server`, DESIGN.md §1.7).  A plugin for the same
-#: reason `agent-task` is one — what it holds is timers, which is state with a
-#: lifetime rather than a file — and it owns no config section at all: v1 had
-#: none for this feature either, and a machine that should not run scheduled
-#: tasks is a machine where nobody writes one.
-SCHEDULE_SERVER_NAME = "slife2-schedule"
-
-#: The A2A mesh: agent-to-agent traffic over MQTT, on the published
-#: A2A-over-MQTT profile (`slife2.plugins.a2a`, DESIGN.md §1.8).  A plugin for §1.1's
-#: first row of the table — what it holds is somebody else's connection, and a
-#: library would put an MQTT session in every importer — and the one plugin here
-#: whose identity is *per agent*: the agent name is the MQTT client id and the
-#: request topic's last segment, so one shared process holds one mesh per agent
-#: it serves rather than one for the machine.
-A2A_SERVER_NAME = "slife2-a2a"
-
-#: The *local* network's server — the other half of §3.5's two.  A name of its
-#: own because identity is what a probe checks
-#: (`slife2.libs.plugin.protocol.identifies`): one machine runs both, and a
-#: `status` that could not tell them apart would be the same as no name at all.
-#:
-#: **Not `slife2-a2a-something`.**  That an agent talks to its own subagents over
-#: the same protocol is a technical fact about this build rather than a meaning
-#: the name should carry: remotely it is A2A — a peer on another machine, on a
-#: broker somebody else runs, is what the protocol is *for* — while locally it is
-#: an agent and the agents it made, which is not a federation of anything.
-SUBAGENT_SERVER_NAME = "slife2-subagent"
 
 #: The topic namespace a local network gets when its section names none.  Its
 #: own rather than `default`, because the two networks can meet on one broker and
@@ -284,15 +193,15 @@ class Net:
     """
 
     #: The section, and the key in `servers:` — the launcher's address for this
-    #: network and the plugin's settings for it are one word.
+    #: network and the plugin's settings for it are one word.  **Also the keys
+    #: this network's plugin is filed under in `PLUGINS`**, which is why
+    #: `server_name` below can read its answer off that table rather than saying
+    #: it a second time.
     key: str
     #: Where this network's settings are on `Config`, as the attributes to walk:
     #: the remote one *is* its section, and the local one is the network half of
     #: a section that also holds what a subagent costs (`SubagentSettings`).
     settings: tuple[str, ...]
-    #: The MCP name this instance answers as.  Different for the two, because
-    #: one machine runs both and a probe has to be able to tell them apart.
-    server_name: str
     #: The four model tools are this plus a verb (`a2a_send_message`).
     prefix: str
     #: What a turn that arrived over this network says it came in on.
@@ -320,6 +229,19 @@ class Net:
     #: `unit_for`, which is where that is used and argued.
     shared_unit: bool = True
 
+    @property
+    def server_name(self) -> str:
+        """The MCP name this instance answers as — `PLUGINS`', not a second copy.
+
+        **A property rather than a field**, and the two networks are why:
+        `A2A_SERVER_NAME` and `SUBAGENT_SERVER_NAME` are the same facts as these,
+        and a field here plus a constant there is the pair of literals that
+        drifts.  Different for the two networks because one machine runs both and
+        a probe has to be able to tell them apart — which is a fact about their
+        rows in `PLUGINS` like every other server's name is.
+        """
+        return plugin(self.key).name
+
     def tool(self, verb: str) -> str:
         """One of this network's tools, named: `tool("list_agents")`."""
         return f"{self.prefix}{verb}"
@@ -343,7 +265,6 @@ class Net:
 REMOTE = Net(
     key="a2a",
     settings=("a2a",),
-    server_name="slife2-a2a",
     prefix="a2a_",
     channel="a2a",
     marker="[PeerAgent:",
@@ -366,7 +287,6 @@ REMOTE = Net(
 LOCAL = Net(
     key="subagent",
     settings=("subagent", "network"),
-    server_name=SUBAGENT_SERVER_NAME,
     prefix="subagent_",
     channel="subagent",
     marker="[SubagentPeer:",
@@ -394,6 +314,417 @@ BROADCAST = "broadcast"
 A2A_KEY = REMOTE.key
 
 
+@dataclass(frozen=True)
+class Plugin:
+    """One server slife2 starts: everything about it that is a fact about *it*.
+
+    **A plugin used to be described five times over**, and this is the one place
+    that replaced them.  Its MCP name was a constant here and a `SERVER_NAME`
+    literal in its own module, held together by an assertion; its module, name
+    and identity tool were a tuple in `slife2.libs.host.launcher`; the order it
+    starts in was `LOCAL_SERVERS` here; and its port was a row of
+    `default_config`'s `servers` table.  Adding a plugin meant finding all five,
+    and replacing one — the thing this arrangement is for — meant finding them
+    again.  Nothing about a plugin except *what it does* lives outside this
+    table now, and a plugin reads its own name out of it (`SERVER_NAME`), so the
+    two spellings that used to drift have one home between them.
+
+    **Spelled out rather than read off the modules, and this is the reason it
+    stays that way.**  Reading them means importing them: the TUI and the agent
+    loop must not pull in a server, and the agent loop in particular must never
+    reach `openai_server`.  So the module is a *string* here, exactly as
+    `API_BACKENDS` was, and the process that serves a plugin is started by name.
+
+    The five fields are what every reader needs and nothing else:
+
+    * `key` — the plugin's key in the `servers:` table, and so the word
+      `config.server(key)` answers to, `slife2 down` stops it by, and a `status`
+      line prints.  Two families' keys carry a suffix the others do not
+      (`skills-server`, `cli-server`) because the *catalogue source* they declare
+      their rows under is `skills`/`cli`, and a source's rows must not share an
+      id with the tools of the server that declares them.
+    * `module` — what `python -m` runs, which is also the file: a plugin is a
+      process and this is the only thing that says which.
+    * `name` — the MCP name the server advertises, which is what a client proves
+      it reached the server it meant with (`slife2.libs.plugin.protocol.identifies`).
+    * `probe` — the tool that identifies it when it advertises no name at all.
+      It has to be one the server certainly serves, and one that answers without
+      anything having happened yet: a server that has just started is the state a
+      probe runs in.
+    * `port` — where it listens when the config's `servers:` block names none.
+
+    **`api` is the one field that is not about the process.**  It says this
+    server speaks one wire protocol rather than serving a capability of its own,
+    and it is what a caller filters on: `API_BACKENDS` and `LOCAL_SERVERS` below
+    are the two halves this table splits into.  A backend is started only when
+    the config has a provider that speaks its protocol, because a protocol no
+    provider uses has nothing to serve and starting it would be a process
+    holding nobody's key.
+    """
+
+    key: str
+    module: str
+    name: str
+    probe: str
+    port: int
+    api: bool = False
+
+
+#: Every server slife2 starts, in the order they are described in.
+#:
+#: **The order of the two halves is load-bearing and this is the whole of it.**
+#: The model backends come first because a model server answering first is what
+#: keeps a first turn from failing and retrying; of those, `openai-responses` is
+#: appended last on purpose, and to its own protocol rather than as a flag on
+#: `openai-completions` — the Responses API takes a different input shape, names
+#: its tools differently and streams different events, so it is a process of its
+#: own like every other row here.  What follows is `LOCAL_SERVERS`' order, which
+#: is a preference rather than a dependency: **the two edges that are
+#: dependencies are not here** — `embeddings` before `context`, because the
+#: context plugin opens the embedder before it serves anything, and every plugin
+#: the hub asks before `toolhub` — because prose is not something a launcher can
+#: act on, and they are a table (`slife2.libs.host.launcher.NEEDS`).  Everything
+#: not named there starts at once, so this order only decides who is first off
+#: the line.
+#:
+#: **There is no `db` here**, and its absence is the design rather than a gap.
+#: It served the turns and the tool catalogue, and neither needed a process: a
+#: store has one writer, and "one writer" is a property of a SQLite file, not of
+#: a server.  The turns are `context`'s now and the catalogue is the hub's, both
+#: out of the same library (`slife2.libs.store.db`) — v1's own answer was the
+#: same, `memdb` shipping as a plugin *and* being imported.
+PLUGINS: tuple[Plugin, ...] = (
+    # One port per wire protocol, not per provider: a process speaks one format,
+    # and `stream_chat(provider=...)` picks whose credentials.
+    Plugin(
+        key="openai-completions",
+        module="slife2.plugins.llm.openai_server",
+        name="slife2-llm-openai",
+        probe=MODEL_TOOL,
+        port=8001,
+        api=True,
+    ),
+    Plugin(
+        key="anthropic-messages",
+        module="slife2.plugins.llm.anthropic_server",
+        name="slife2-llm-anthropic",
+        probe=MODEL_TOOL,
+        port=8002,
+        api=True,
+    ),
+    Plugin(
+        key="openai-responses",
+        module="slife2.plugins.llm.openai_responses_server",
+        name="slife2-llm-openai-responses",
+        probe=MODEL_TOOL,
+        port=8003,
+        api=True,
+    ),
+    # Embeddings are an OpenAI-protocol endpoint and *not* one of the three
+    # above, so they are served by a process of their own rather than borrowed
+    # from `openai-completions`: that process is built from the chat providers,
+    # and there is no chat provider here to attach an embedding model to.  It is
+    # a plugin (rather than a library) for §1.1's reason — it holds a key — and
+    # it identifies itself by `describe`, the tool the db calls before it can
+    # build an index.  See `slife2.plugins.llm.embeddings_server`.
+    Plugin(
+        key="embeddings",
+        module="slife2.plugins.llm.embeddings_server",
+        name="slife2-llm-embeddings",
+        probe="describe",
+        port=8004,
+    ),
+    # A conversation's memory: the turn log, and the decision about which of its
+    # turns a turn runs on.  It identifies itself by `remember`, the write
+    # everything else about a conversation follows from.
+    Plugin(
+        key="context",
+        module="slife2.plugins.context.server",
+        name="slife2-context",
+        probe="remember",
+        port=8010,
+    ),
+    # The two families that are not tools but have to be findable, each owned by
+    # the process that owns its config section: the playbooks in `<data>/skills/`
+    # and the programs the config's `cli:` section records as installed.  They
+    # are plugins all the same, because a family's rows and the tool that reads
+    # them belong to the process that owns the family — and because both have
+    # model-facing tools now, and a tool needs a server to be served from.  Their
+    # identifying tool is what the fallback check looks for when a server reports
+    # no name of its own, so it has to be one they certainly serve: `cli-server`
+    # offers the model four `cli_*` tools and no more, and `list_sources` is the
+    # one the hub asks it for.
+    Plugin(
+        key="skills-server",
+        module="slife2.plugins.skills.server",
+        name="slife2-skills",
+        probe="skill_use",
+        port=8031,
+    ),
+    Plugin(
+        key="cli-server",
+        module="slife2.plugins.cli.server",
+        name="slife2-cli",
+        probe="list_sources",
+        port=8032,
+    ),
+    # The two whose whole job is somebody else's servers: the `mcp:` section and
+    # the `rest-api:` one.  They hold the connections the toolhub used to hold,
+    # and declare what they hold to it — the hub keeps the tool *set* and no link
+    # to anybody.  Neither offers the model anything of its own, so each
+    # identifies itself by the tool it holds them *with*.
+    Plugin(
+        key="mcp-tools",
+        module="slife2.plugins.mcp_tools.server",
+        name="slife2-mcp-tools",
+        probe="list_sources",
+        port=8033,
+    ),
+    Plugin(
+        key="restapi-tools",
+        module="slife2.plugins.restapi.server",
+        name="slife2-restapi-tools",
+        probe="list_sources",
+        port=8034,
+    ),
+    # WeChat, and the one plugin here that is nobody's family: it declares no
+    # catalogue rows and owns no entries, and what it holds is a login per agent
+    # and a conversation with somebody off this machine.  It is a plugin for the
+    # reason §1.1's first table row gives — it holds a credential, and a library
+    # would put the token in every importer — and the only thing written down
+    # about it is an address; a login is scanned rather than configured, and
+    # lives inside the agent's own directory.  It identifies itself by
+    # `wechat_check_status` rather than by a tool the hub asks it for, because
+    # the hub asks it for nothing — and the status tool is the one that works
+    # before any login exists, which is the state it starts in.
+    Plugin(
+        key="wechat",
+        module="slife2.plugins.wechat.server",
+        name="slife2-wechat",
+        probe="wechat_check_status",
+        port=8030,
+    ),
+    # The private cabinet: notes, a diary, saved files and reports, one corpus
+    # per agent under `<data>/agents/<agent>/cabinet/`.  It reads no config
+    # section of its own — a cabinet is written by the model and by a person,
+    # never configured — so what is here is its address.  It identifies itself by
+    # `note_list`, which is a tool it serves before anything has been written to
+    # it: the state a fresh cabinet is in.
+    Plugin(
+        key="cabinet",
+        module="slife2.plugins.cabinet.server",
+        name="slife2-cabinet",
+        probe="note_list",
+        port=8035,
+    ),
+    # Rendering, speech and transcription, behind `media:`.  A plugin for §1.1's
+    # table — it holds a provider's key and speaks to somebody else's endpoint —
+    # and a *family* of endpoints rather than one, which is why it has a module
+    # of its own.  It identifies itself by `generate_image`, the first of the
+    # four capabilities and the one a config is most likely to have.
+    Plugin(
+        key="media",
+        module="slife2.plugins.media.server",
+        name="slife2-media",
+        probe="generate_image",
+        port=8036,
+    ),
+    # A public HTTPS URL for a local file, so something that cannot read this
+    # machine's disk — a vision model, a chat API that takes links — can fetch
+    # one anyway.  A plugin for §1.1's reason: what it holds is somebody else's
+    # connection (an ngrok session, an SSH forward, a cloudflared child), and it
+    # is the one plugin here that serves a second HTTP route beside its MCP
+    # endpoint, because the far end fetches `/share/<token>` through the tunnel.
+    # Its settings are the `file-tunnel:` section; it identifies itself by
+    # `expose_local_image`, the tool it exists for and the one a config is most
+    # likely to have been set up to use.
+    Plugin(
+        key="file-tunnel",
+        module="slife2.plugins.file_tunnel.server",
+        name="slife2-file-tunnel",
+        probe="expose_local_image",
+        port=8038,
+    ),
+    # The terminal's own inbox: where a channel hands a message so that the
+    # window showing that conversation runs it as something the person typed.
+    # One process and a session per agent — the window attaches to it and holds
+    # that call open, and nothing binds a port per terminal.  It has no section:
+    # an address is the whole of what is written down about it, which is also why
+    # it reads no config of its own.  It identifies itself by `attach` — the call
+    # a window holds open for as long as it is showing a conversation, which is
+    # served before any window exists and so is the state this plugin starts in.
+    # The probe only looks for the name in `tools/list`, so naming a tool that
+    # blocks is safe.
+    Plugin(
+        key="tui",
+        module="slife2.plugins.tui.server",
+        name="slife2-tui",
+        probe="attach",
+        port=8005,
+    ),
+    # The model's tools, and the only process that decides what they are.  It
+    # holds no credential and no connection to anybody's server: every plugin
+    # above is asked for a tool list and for the sources it holds, and the two
+    # `*-tools` plugins above are the ones that reach the entries under `mcp:`
+    # and `rest-api:`.  It identifies itself by `list_tools`, the call the agent
+    # loop makes to find out what it may offer.
+    Plugin(
+        key="toolhub",
+        module="slife2.plugins.toolhub.server",
+        name="slife2-toolhub",
+        probe="list_tools",
+        port=8020,
+    ),
+    # The loop itself, shared by every conversation on this machine and
+    # stateless: the agent name is passed in on each call.  A plugin because what
+    # it holds is loops — state with a lifetime rather than a file — and it
+    # identifies itself by `send_message`, the one call everything else about a
+    # conversation is made of.
+    Plugin(
+        key="agent",
+        module="slife2.plugins.agent.server",
+        name="slife2-agent",
+        probe="send_message",
+        port=8000,
+    ),
+    # Background tasks: a loop of the calling agent's own, one per task, answered
+    # by a message in the conversation that asked for it.  A plugin because what
+    # it holds is loops — the same reason the agent server is one — and it
+    # reaches three peers rather than being reached by them: the hub for a tool
+    # list, a model server for the loop, and either the terminal or the agent
+    # server to hand the answer over.  It reads one section of its own,
+    # `agent-task:`, and only for its cap; a task's prompt and step count are the
+    # agent's.  It identifies itself by `agent_task_list`, the one tool it serves
+    # that takes no argument and needs nothing running, which is the state it
+    # starts in.
+    Plugin(
+        key="agent-task",
+        module="slife2.plugins.agent_task.server",
+        name="slife2-agent-task",
+        probe="agent_task_list",
+        port=8037,
+    ),
+    # The clock: the one thing here that starts work nobody asked for at the
+    # moment it starts, and the ledger of what it fired — what one agent has
+    # scheduled, and every run of it, in `<agent>/schedule.db`.  A plugin because
+    # what it holds is timers, and it identifies itself by `schedule_list`, which
+    # takes no argument and needs nothing running — the state this plugin starts
+    # in, like the task server's own probe tool and for the same reason.
+    Plugin(
+        key="schedule",
+        module="slife2.plugins.schedule.server",
+        name="slife2-schedule",
+        probe="schedule_list",
+        port=8039,
+    ),
+    # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT profile.
+    # A plugin for §1.1's reason — what it holds is somebody else's connection —
+    # and the only one here whose *identity* is per agent: the agent name is the
+    # MQTT client id, so one shared process holds one mesh per agent it serves.
+    # Its settings are the `a2a:` section, and **that section's presence is the
+    # machine's opt-in**: a machine that should not be on the mesh is a machine
+    # where nobody writes one, which is the same argument the `wechat` section is
+    # absent by.  It identifies itself by `a2a_list_agents`, by the test that
+    # picked `schedule_list`: the tool takes no argument and works before any
+    # connection exists — the state this plugin starts in on a machine whose
+    # broker is not up yet, which is the state a probe has to be able to name.
+    Plugin(
+        key=REMOTE.key,
+        module="slife2.plugins.a2a.server",
+        name="slife2-a2a",
+        probe=REMOTE.tool(LIST_AGENTS),
+        port=8040,
+    ),
+    # The **local** network: the same module, one port over, and the other half
+    # of sdd §3.5's pair.  It is here rather than absent for `a2a`'s reason read
+    # the other way round: a machine reaches its own subagents, and `subagent_*`
+    # is a feature the config can turn on by writing the section — while the
+    # *port* is nobody's decision, so it is written down with every other one.
+    # A second plugin row rather than a second module because it is the same
+    # protocol and the same mesh: what a subagent's traffic needs is a namespace
+    # and a broker of its own (`Net`).  **Its name is its own** because identity
+    # is what a probe checks: one machine runs both, and a `status` that could
+    # not tell them apart would be the same as no name at all.  It identifies
+    # itself by *its* list tool, which is that probe's whole test — the two
+    # instances are one machine apart and a `status` line has to say which.
+    Plugin(
+        key=LOCAL.key,
+        module="slife2.plugins.a2a.local_server",
+        name="slife2-subagent",
+        probe=LOCAL.tool(LIST_AGENTS),
+        port=8041,
+    ),
+)
+
+#: The table by key, which is how a name is looked up from a key.  Built once,
+#: because every reader below wants it and rebuilding it per call is how a
+#: `plugin()` in a loop becomes a scan.
+_BY_KEY: dict[str, Plugin] = {one.key: one for one in PLUGINS}
+
+
+def plugin(key: str) -> Plugin:
+    """The row *key* names.  **Never raises**, and that is on purpose.
+
+    The keys that reach here are the ones this module wrote down — a `Net`'s own
+    key, a constant's own key — so an unknown one is a programming error inside
+    this file rather than anything a config can cause, and a `KeyError` traceback
+    naming the key is a better answer than a config refusal nobody can act on.
+    A key from *outside* is checked against `Config.server` first, which is the
+    one place a word somebody typed is judged.
+    """
+    return _BY_KEY[key]
+
+
+#: The MCP names the servers in this system advertise, as `Client.server_info`
+#: reports them.  A client proves it reached the server it meant by comparing
+#: against these; see `slife2.libs.plugin.protocol.identifies`.
+#:
+#: **Views over `PLUGINS` and not a second table.**  They are spelled as
+#: constants rather than read out of the rows at each call site because that is
+#: how they were written down before there was a table, and a caller that wants
+#: `AGENT_SERVER_NAME` should not have to know that a registry exists to get it.
+#: Two things follow, and both are the point of the arrangement: a plugin module
+#: binds its own `SERVER_NAME` to the constant rather than to a literal, so the
+#: two spellings that used to drift are one; and `REMOTE`/`LOCAL` read their
+#: `server_name` off the same rows (`Net.server_name`), which is what removed the
+#: last place the mesh's name was written twice.
+AGENT_SERVER_NAME = plugin("agent").name
+TUI_SERVER_NAME = plugin("tui").name
+CONTEXT_SERVER_NAME = plugin("context").name
+MCP_TOOLS_SERVER_NAME = plugin("mcp-tools").name
+RESTAPI_TOOLS_SERVER_NAME = plugin("restapi-tools").name
+SKILLS_SERVER_NAME = plugin("skills-server").name
+CLI_SERVER_NAME = plugin("cli-server").name
+TOOLHUB_SERVER_NAME = plugin("toolhub").name
+EMBEDDINGS_SERVER_NAME = plugin("embeddings").name
+WECHAT_SERVER_NAME = plugin("wechat").name
+CABINET_SERVER_NAME = plugin("cabinet").name
+MEDIA_SERVER_NAME = plugin("media").name
+FILE_TUNNEL_SERVER_NAME = plugin("file-tunnel").name
+AGENT_TASK_SERVER_NAME = plugin("agent-task").name
+SCHEDULE_SERVER_NAME = plugin("schedule").name
+A2A_SERVER_NAME = plugin(REMOTE.key).name
+SUBAGENT_SERVER_NAME = plugin(LOCAL.key).name
+
+#: The plugins that are not model backends, and so have a name of their own
+#: rather than one derived from a wire protocol.  This is the *set* of ours, in
+#: the order `Config.plugins` reads them out in, and it is derived from `PLUGINS`
+#: rather than written down beside it: two lists kept in step by hand is exactly
+#: what this table replaced.
+LOCAL_SERVERS: tuple[str, ...] = tuple(one.key for one in PLUGINS if not one.api)
+
+#: The wire protocols this distribution implements, and the server module that
+#: speaks each.  `api` selects one; an unknown value is a typo worth reporting
+#: rather than a provider that quietly never starts.  Derived from `PLUGINS`, so
+#: that adding a protocol is a row and not a row and a dict entry.
+API_BACKENDS: dict[str, str] = {one.key: one.module for one in PLUGINS if one.api}
+
+#: The MCP name the server for each wire protocol advertises — what
+#: `Client.server_info` reports, and so what a caller compares against to prove
+#: it reached the server it meant rather than some other MCP server on the port.
+API_SERVER_NAMES: dict[str, str] = {one.key: one.name for one in PLUGINS if one.api}
+
+
 def net_settings(config: Config, net: Net) -> A2ASettings:
     """Where one network's settings are: its section, or the network half of one.
 
@@ -413,78 +744,6 @@ def net_settings(config: Config, net: Net) -> A2ASettings:
 #: `slife2.libs.host.paths.apply_data_dir`'s mechanism and its reason: the process
 #: that must end up on that broker is generally not the one that was told.
 A2A_BROKER_ENV_VAR = "SLIFE2_A2A_BROKER"
-
-#: The plugins that are not model backends, and so have a name of their own
-#: rather than one derived from a wire protocol.  This is the *set* of ours, in
-#: the order `slife2.libs.host.config.Config.plugins` reads them out in.
-#:
-#: **The two edges between them are not here any more.**  They were prose in this
-#: comment — `embeddings` before `context`, because the context plugin opens the
-#: embedder before it serves anything; and every plugin the hub asks for tools
-#: before `toolhub` — and prose is not something a launcher can act on, so it
-#: serialised all ten for the sake of two.  They are a table now,
-#: `slife2.libs.host.launcher.NEEDS`, and everything not named there starts at once.
-#:
-#: What is left in this order is a preference rather than a dependency, and it is
-#: the one `plugins()` states: a model server answering first is what keeps a
-#: first turn from failing and retrying.
-#:
-#: **There is no `db` here any more**, and its absence is the design rather than
-#: a gap.  It served the turns and the tool catalogue, and neither needed a
-#: process: a store has one writer, and "one writer" is a property of a SQLite
-#: file, not of a server.  The turns are `context`'s now and the catalogue is the
-#: hub's, both out of the same library (`slife2.libs.store.db`), and v1's own answer was the
-#: same — `memdb` ships as a plugin *and* is imported, and the headless host
-#: restores its session straight from `SessionStore` with no transport in the
-#: path.
-#:
-#: `skills-server` and `cli-server` are the two families with nothing to connect
-#: to — a folder of playbooks and a list of programs already installed.  They are
-#: plugins all the same, because a family's rows and the tool that reads them
-#: belong to the process that owns the family, and because both have a
-#: model-facing tool still to come (DESIGN.md §9).  Their keys carry the suffix
-#: because the *catalogue sources* they declare under are `skills` and `cli`,
-#: which are also their config sections' names — and a source's rows must not
-#: share an id with the tools of the server that declares them.
-#:
-#: `wechat` is the first plugin here that is nobody's *family*, and the first
-#: with no config section at all: it declares no catalogue rows and owns no
-#: entries.  What it holds is a login per agent and a conversation with somebody
-#: who is not on this machine, and it is a plugin for the reason the first table
-#: in DESIGN.md §1.1 gives — it holds a credential, and a library would put the
-#: token in every importer.  The only thing written down about it is an address,
-#: here; a login is scanned rather than configured, and lives inside the agent's
-#: own directory as `<agent>/wechat.yaml` (`slife2.plugins.wechat.server.SESSION_NAME`).
-#:
-#: `tui` is the last one with no section of its own, and it is here for a
-#: narrower reason than the rule above: the *window* is the person's process and
-#: is still nobody's daemon, but the thing a message is handed to is a server,
-#: and a server is started and shared by the launcher like every other one.  So
-#: the exception this project used to carry — "every plugin is an MCP server but
-#: the TUI" — is gone, and what replaced it is a session per agent inside the
-#: plugin: the window attaches, and a channel names the agent it is addressing.
-#: It declares no rows and offers the model no tools, so it is asked for nothing.
-LOCAL_SERVERS = (
-    "embeddings",
-    "context",
-    "skills-server",
-    "cli-server",
-    "mcp-tools",
-    "restapi-tools",
-    "wechat",
-    "cabinet",
-    "media",
-    "file-tunnel",
-    "tui",
-    "toolhub",
-    "agent",
-    "agent-task",
-    "schedule",
-    "a2a",
-    # The **local** network, beside the remote one: two instances of one module,
-    # two sections, and a machine may be on either or both (`Net`).
-    "subagent",
-)
 
 
 def _credstore_lookup(key: str) -> str | None:
@@ -1702,112 +1961,13 @@ def default_config() -> Config:
         },
     )
     return Config(
-        servers={
-            "agent": ServerSettings(port=8000),
-            # A plugin of its own: keeping a conversation's turns — and deciding
-            # which of them it runs on — is one job, and it is not a wire
-            # protocol like the model backends.  This is v1's `memdb`, and it
-            # took the port the db plugin had.
-            "context": ServerSettings(port=8010),
-            # The two families that are not tools but have to be findable, each
-            # owned by the process that owns its config section: the playbooks
-            # in `<data>/skills/` (`slife2.plugins.skills.server`) and the programs the
-            # config's `cli:` section records as installed (`slife2.plugins.cli.server`).
-            # They declare catalogue rows rather than tools, and the hub is what
-            # merges them — see `slife2.libs.plugin.protocol.LIST_SOURCES`.
-            "skills-server": ServerSettings(port=8031),
-            "cli-server": ServerSettings(port=8032),
-            # And the two whose whole job is somebody else's servers: the
-            # `mcp:` section (`slife2.plugins.mcp_tools.server`) and the `rest-api:` one
-            # (`slife2.plugins.restapi.server`).  They hold the connections the toolhub
-            # used to hold, and declare what they hold to it — the hub keeps the
-            # tool *set* and no link to anybody.
-            "mcp-tools": ServerSettings(port=8033),
-            "restapi-tools": ServerSettings(port=8034),
-            # WeChat, and the one plugin here that is nobody's family: it
-            # declares no rows and owns no entries, and what it holds is a login
-            # per agent and a conversation with somebody off this machine.  Port
-            # 8030, which v1's `builtins` had and nothing has had since.
-            "wechat": ServerSettings(port=8030),
-            # The private cabinet: notes, a diary, saved files and reports, one
-            # corpus per agent under `<data>/agents/<agent>/cabinet/`.  It reads
-            # no config section of its own — a cabinet is written by the model
-            # and by a person, never configured — so what is here is its address.
-            "cabinet": ServerSettings(port=8035),
-            # Rendering, speech and transcription, behind `media:`.  A plugin
-            # for the reason §1.1's table gives — it holds a provider's key and
-            # speaks to somebody else's endpoint — and a *family* of endpoints
-            # rather than one, which is why it has a module of its own.
-            "media": ServerSettings(port=8036),
-            # A public HTTPS URL for a local file, so something that cannot
-            # read this machine's disk — a vision model, a chat API that takes
-            # links — can fetch one anyway.  A plugin for §1.1's reason: what
-            # it holds is somebody else's connection (an ngrok session, an SSH
-            # forward, a cloudflared child), and it is the one plugin here that
-            # serves a second HTTP route beside its MCP endpoint, because the
-            # far end fetches `/share/<token>` through the tunnel.  Its
-            # settings are the `file-tunnel:` section below.
-            "file-tunnel": ServerSettings(port=8038),
-            # The terminal's own inbox: where a channel hands a message so that
-            # the window showing that conversation runs it as something the
-            # person typed.  One process and a session per agent — the window
-            # attaches to it and holds that call open, and nothing binds a port
-            # per terminal.  It has no section: an address is the whole of what
-            # is written down about it, which is also why it reads no config of
-            # its own.
-            "tui": ServerSettings(port=8005),
-            # The model's tools, and the only process that decides what they
-            # are.  It holds no credential and no connection to anybody's
-            # server: every plugin above is asked for a tool list and for the
-            # sources it holds, and the two `*-tools` plugins above are the ones
-            # that reach the entries under `mcp:` and `rest-api:`.
-            "toolhub": ServerSettings(port=8020),
-            # Background tasks: a loop of the calling agent's own, one per task,
-            # answered by a message in the conversation that asked for it.  A
-            # plugin because what it holds is loops — the same reason the agent
-            # server is one — and it reaches three peers rather than being
-            # reached by them: the hub for a tool list, a model server for the
-            # loop, and either the terminal or the agent server to hand the
-            # answer over.  It reads one section of its own, `agent-task:`, and
-            # only for its cap; a task's prompt and step count are the agent's.
-            "agent-task": ServerSettings(port=8037),
-            # The clock, and the ledger of what it fired: what one agent has
-            # scheduled, and every run of it, in `<agent>/schedule.db`.  A plugin
-            # because what it holds is timers — the same argument as the line
-            # above — and it reaches two peers rather than being reached by them:
-            # the terminal, or the agent server when no window is showing, to put
-            # a due task in front of the agent as a turn of its own.  It owns no
-            # section: an address is the whole of what is written down about it.
-            "schedule": ServerSettings(port=8039),
-            # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT
-            # profile.  A plugin for §1.1's reason — what it holds is somebody
-            # else's connection — and the only one here whose *identity* is per
-            # agent: the agent name is the MQTT client id, so one shared process
-            # holds one mesh per agent it serves.  Its settings are the `a2a:`
-            # section, and **that section's presence is the machine's opt-in**:
-            # a machine that should not be on the mesh is a machine where nobody
-            # writes one, which is the same argument the `wechat` section is
-            # absent by.
-            "a2a": ServerSettings(port=8040),
-            # The **local** network: the same module, one port over, and the
-            # other half of sdd §3.5's pair.  It is here rather than absent for
-            # `a2a`'s reason read the other way round: a machine reaches its own
-            # subagents, and `subagent_*` is a feature the config can turn on by
-            # writing the section — while the *port* is nobody's decision, so it
-            # is written down with every other one.
-            "subagent": ServerSettings(port=8041),
-            # One port per wire protocol, not per provider: a process speaks one
-            # format, and `stream_chat(provider=...)` picks whose credentials.
-            "openai-completions": ServerSettings(port=8001),
-            "anthropic-messages": ServerSettings(port=8002),
-            "openai-responses": ServerSettings(port=8003),
-            # Embeddings are an OpenAI-protocol endpoint and *not* one of the
-            # chat backends above, so they are served by a process of their own
-            # rather than borrowed from `openai-completions`: that process is
-            # built from the chat providers, and there is no chat provider here
-            # to attach an embedding model to.  See `EmbeddingsSettings`.
-            "embeddings": ServerSettings(port=8004),
-        },
+        # Every server this system starts, from the one table that describes
+        # them (`PLUGINS`): the key it is filed under, the port it listens on
+        # when this file names none, and whether it is a model backend — which
+        # is a fact about *it* rather than about this config and so is not
+        # repeated here.  A `servers:` block still overrides any of it, which is
+        # what the shipped `slife2.yaml` does.
+        servers={one.key: ServerSettings(port=one.port) for one in PLUGINS},
         providers={"deepseek": deepseek},
         mcp={},
         agent=AgentSettings(),
@@ -3121,6 +3281,8 @@ __all__ = [
     "MCP_TOOLS_SERVER_NAME",
     "MEDIA_KINDS",
     "MEDIA_SERVER_NAME",
+    "MODEL_TOOL",
+    "PLUGINS",
     "RESTAPI_TOOLS_SERVER_NAME",
     "SKILLS_SERVER_NAME",
     "TOOLHUB_SERVER_NAME",
@@ -3137,6 +3299,7 @@ __all__ = [
     "MediaProviderSettings",
     "MediaSettings",
     "ModelSettings",
+    "Plugin",
     "ProviderSettings",
     "ServerSettings",
     "SkillSettings",

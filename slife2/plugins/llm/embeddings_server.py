@@ -39,6 +39,7 @@ from fastmcp import FastMCP
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
+    EMBEDDINGS_SERVER_NAME,
     Config,
     EmbeddingProviderSettings,
     find_config_path,
@@ -54,7 +55,7 @@ from slife2.plugins.llm.server_common import unresolved_key
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-llm-embeddings"
+SERVER_NAME = EMBEDDINGS_SERVER_NAME
 
 #: This server's key in the config's `servers:` table.
 CONFIG_KEY = "embeddings"

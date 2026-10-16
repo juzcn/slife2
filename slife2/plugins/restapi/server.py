@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 
 from slife2.clients.gateway import ClientFactory
 from slife2.libs.host.config import (
+    RESTAPI_TOOLS_SERVER_NAME,
     Config,
     ConfigError,
     ToolServerSettings,
@@ -52,7 +53,7 @@ from slife2.libs.plugin.protocol import serve_plugin
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-restapi-tools"
+SERVER_NAME = RESTAPI_TOOLS_SERVER_NAME
 
 #: This server's key in the config's `servers:` table.
 CONFIG_KEY = "restapi-tools"

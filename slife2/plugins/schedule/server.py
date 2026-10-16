@@ -87,7 +87,12 @@ import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound, normalize_bound
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
-from slife2.libs.host.config import AGENT_TASK_SERVER_NAME, Config, load_cached
+from slife2.libs.host.config import (
+    AGENT_TASK_SERVER_NAME,
+    SCHEDULE_SERVER_NAME,
+    Config,
+    load_cached,
+)
 from slife2.libs.host.paths import in_home, schedule_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.protocol import (
@@ -127,7 +132,7 @@ from slife2.plugins.schedule.store import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-schedule"
+SERVER_NAME = SCHEDULE_SERVER_NAME
 
 #: This server's key in the config's `servers:` table.  **It owns no section**,
 #: and that is the whole of what this line means: `wechat` and `tui` are the

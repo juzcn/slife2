@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from slife2.libs.host.config import ModelSettings
+from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
@@ -39,10 +39,11 @@ from slife2.plugins.llm.server_common import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "slife2-llm-openai"
 
 #: The wire protocol this process speaks — and the key its address lives under.
 API = "openai-completions"
+
+SERVER_NAME = plugin(API).name
 
 #: How much of the output budget a thinking model may spend reasoning, when
 #: `compat.thinking: enabled` asks for it.  Half, because the other half is what

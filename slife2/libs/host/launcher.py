@@ -35,30 +35,13 @@ from fastmcp import Client
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import LIST_TOOLS, remote_tools
 from slife2.libs.host.config import (
-    A2A_SERVER_NAME,
-    AGENT_SERVER_NAME,
-    AGENT_TASK_SERVER_NAME,
-    API_BACKENDS,
-    API_SERVER_NAMES,
-    CABINET_SERVER_NAME,
-    CLI_SERVER_NAME,
-    CONTEXT_SERVER_NAME,
-    EMBEDDINGS_SERVER_NAME,
-    FILE_TUNNEL_SERVER_NAME,
-    LIST_AGENTS,
     LOCAL,
     LOCAL_SERVERS,
-    MCP_TOOLS_SERVER_NAME,
-    MEDIA_SERVER_NAME,
-    REMOTE,
-    RESTAPI_TOOLS_SERVER_NAME,
-    SCHEDULE_SERVER_NAME,
-    SKILLS_SERVER_NAME,
-    SUBAGENT_SERVER_NAME,
+    PLUGINS,
     TOOLHUB_SERVER_NAME,
-    TUI_SERVER_NAME,
-    WECHAT_SERVER_NAME,
     Config,
+    Plugin,
+    plugin,
 )
 from slife2.libs.host.paths import data_dir
 from slife2.libs.host.runtime import (
@@ -85,144 +68,10 @@ from slife2.libs.host.runtime import (
 )
 from slife2.libs.plugin.protocol import close_server, identifies, open_server
 
-#: The plugins that are not model backends, keyed by the name the config's
-#: `servers:` section uses for each: the module that serves it, the MCP name
-#: that module advertises, and the tool that identifies it for a server that
-#: reports no name at all.  See `slife2.libs.plugin.protocol.identifies` for why both are
-#: needed.
-#:
-#: In code rather than in the config.  Letting an operator name an arbitrary
-#: command would be a capability nobody asked for and one more thing to get
-#: wrong.  The model backends need no entry here — their module *and* their
-#: advertised name both come from the `api` they speak, which is already a
-#: closed set.
-#:
-#: The *order* these start in is `slife2.libs.host.config.LOCAL_SERVERS`, so that what a
-#: plugin is and when it starts are each said once; `tests/test_launcher.py`
-#: holds the two together.
-AGENT_SERVER = ("slife2.plugins.agent.server", AGENT_SERVER_NAME, "send_message")
-#: A conversation's turn log, and the decision about which of its turns a turn
-#: runs on.  It identifies itself by `remember`, which is the write everything
-#: else about a conversation follows from.
-CONTEXT_SERVER = ("slife2.plugins.context.server", CONTEXT_SERVER_NAME, "remember")
-#: The two plugins whose families are not tools: a folder of playbooks and a
-#: list of programs already installed.  Their identifying tool is what the
-#: fallback check looks for when a server reports no name of its own, so it has
-#: to be one they certainly serve — `cli-server` offers the model nothing at
-#: all, and `list_sources` is the one tool it has.
-SKILLS_SERVER = ("slife2.plugins.skills.server", SKILLS_SERVER_NAME, "skill_use")
-CLI_SERVER = ("slife2.plugins.cli.server", CLI_SERVER_NAME, "list_sources")
-#: The two that hold somebody else's servers, and identify themselves by the
-#: tool they hold them *with*: neither offers the model anything.
-MCP_TOOLS = ("slife2.plugins.mcp_tools.server", MCP_TOOLS_SERVER_NAME, "list_sources")
-RESTAPI_TOOLS = (
-    "slife2.plugins.restapi.server",
-    RESTAPI_TOOLS_SERVER_NAME,
-    "list_sources",
-)
-TOOLHUB_SERVER = ("slife2.plugins.toolhub.server", TOOLHUB_SERVER_NAME, "list_tools")
-#: Not a chat backend, though it lives beside them: it speaks the OpenAI
-#: protocol's `/embeddings` and nothing else, is configured under `embeddings:`
-#: rather than under `providers:`, and is identified by `describe` — the tool
-#: the db calls before it can build an index.  See `slife2.plugins.llm.embeddings_server`.
-EMBEDDINGS_SERVER = (
-    "slife2.plugins.llm.embeddings_server",
-    EMBEDDINGS_SERVER_NAME,
-    "describe",
-)
-#: WeChat, and the only plugin here that is nobody's family: it declares no
-#: catalogue rows.  It identifies itself by `wechat_check_status` rather than by
-#: a tool the hub asks it for, because the hub asks it for nothing — what it
-#: offers the model is its own four tools, and the status tool is the one that
-#: works before any login exists, which is the state it starts in.
-WECHAT_SERVER = (
-    "slife2.plugins.wechat.server",
-    WECHAT_SERVER_NAME,
-    "wechat_check_status",
-)
-#: The cabinet.  It identifies itself by `note_list`, which is a tool it serves
-#: before anything has been written to it — the state a fresh cabinet is in.
-CABINET_SERVER = ("slife2.plugins.cabinet.server", CABINET_SERVER_NAME, "note_list")
-#: The media plugin.  It identifies itself by `generate_image`, which is the
-#: first of the four capabilities and the one a config is most likely to have.
-MEDIA_SERVER = ("slife2.plugins.media.server", MEDIA_SERVER_NAME, "generate_image")
-#: The file tunnel: this machine's port published as a public HTTPS URL.  It
-#: identifies itself by `expose_local_image`, which is the tool it exists for
-#: and the one a config is most likely to have been set up to use.
-FILE_TUNNEL_SERVER = (
-    "slife2.plugins.file_tunnel.server",
-    FILE_TUNNEL_SERVER_NAME,
-    "expose_local_image",
-)
-#: The terminal's inbox: one process, a session per agent.  It identifies itself
-#: by `attach` — the call a window holds open for as long as it is showing a
-#: conversation, which is served before any window exists and so is the state
-#: this plugin starts in.  The probe only looks for the name in `tools/list`
-#: (`slife2.libs.plugin.protocol.identifies`), so naming a tool that blocks is safe.
-TUI_SERVER = ("slife2.plugins.tui.server", TUI_SERVER_NAME, "attach")
-#: The background tasks: one loop of the calling agent's own per task, answered
-#: by a message.  A second agent server in the only sense that matters — what it
-#: holds is loops — and it identifies itself by `agent_task_list`, the one tool
-#: it serves that takes no argument and needs nothing running, which is the
-#: state it starts in.
-AGENT_TASK_SERVER = (
-    "slife2.plugins.agent_task.server",
-    AGENT_TASK_SERVER_NAME,
-    "agent_task_list",
-)
-#: The clock.  It identifies itself by `schedule_list`, which takes no argument
-#: and needs nothing running — the state this plugin starts in, like the task
-#: server's own probe tool and for the same reason.
-SCHEDULE_SERVER = (
-    "slife2.plugins.schedule.server",
-    SCHEDULE_SERVER_NAME,
-    "schedule_list",
-)
-#: The A2A mesh.  It identifies itself by `a2a_list_agents`, by the same test
-#: that picked `schedule_list`: the tool takes no argument and works before any
-#: connection exists — the state this plugin starts in on a machine whose broker
-#: is not up yet, which is the state a probe has to be able to name.
-A2A_SERVER = (
-    "slife2.plugins.a2a.server",
-    A2A_SERVER_NAME,
-    REMOTE.tool(LIST_AGENTS),
-)
-#: The **local** network: the same machine, the same module, one section over.
-#: A second entry rather than a second module because it is the same protocol
-#: and the same mesh — what a subagent's traffic needs is a namespace and a
-#: broker of its own, not a second implementation (`slife2.libs.host.config.Net`).
-#: It identifies itself by *its* list tool, which is the probe's whole test: the
-#: two instances are one machine apart and a `status` line has to say which.
-LOCAL_SERVER = (
-    "slife2.plugins.a2a.local_server",
-    SUBAGENT_SERVER_NAME,
-    LOCAL.tool(LIST_AGENTS),
-)
-
-SERVER_MODULES: dict[str, tuple[str, str, str]] = {
-    "embeddings": EMBEDDINGS_SERVER,
-    "context": CONTEXT_SERVER,
-    "skills-server": SKILLS_SERVER,
-    "cli-server": CLI_SERVER,
-    "mcp-tools": MCP_TOOLS,
-    "restapi-tools": RESTAPI_TOOLS,
-    "toolhub": TOOLHUB_SERVER,
-    "wechat": WECHAT_SERVER,
-    "cabinet": CABINET_SERVER,
-    "media": MEDIA_SERVER,
-    "file-tunnel": FILE_TUNNEL_SERVER,
-    "tui": TUI_SERVER,
-    "agent": AGENT_SERVER,
-    "agent-task": AGENT_TASK_SERVER,
-    "schedule": SCHEDULE_SERVER,
-    "a2a": A2A_SERVER,
-    LOCAL.key: LOCAL_SERVER,
-}
-
 #: The tool every model server answers to, and how they are named.  One tool
 #: and one prefix for all of them, because a backend is a backend whatever
-#: protocol it speaks — adding one changes a dict in the config, not this file.
-MODEL_TOOL = "stream_chat"
+#: protocol it speaks — adding one changes a row of `slife2.libs.host.config.PLUGINS`
+#: and nothing in this file.
 BACKEND_PREFIX = "llm:"
 
 
@@ -310,6 +159,33 @@ class Outcome:
         return self.status in (Status.RUNNING, Status.UNMANAGED, Status.STARTED)
 
 
+def spec_for(config: Config, one: Plugin) -> ServerSpec:
+    """One row of `PLUGINS`, in the launcher's own terms.
+
+    **Everything a spec is comes out of that row**, which is the point of it: the
+    module to run, the name to expect, the tool to probe with and the port to
+    fall back on are all facts about the server, and a second place to spell any
+    of them is a second place for it to be wrong.  What is *not* in the row is
+    where this config puts it, which is `config.server(key)` — a `servers:` block
+    may move any endpoint, and the launcher's job is to start what the file says.
+
+    The one thing the row cannot answer is what the *spec* is called: a backend
+    is named for its protocol with a prefix (`llm:openai-completions`) because
+    that is what a person reads in a `status` line, and every other server is
+    named for its own key.
+    """
+    address = config.server(one.key)
+    return ServerSpec(
+        name=f"{BACKEND_PREFIX}{one.key}" if one.api else one.key,
+        module=one.module,
+        url=address.url,
+        host=address.host,
+        port=address.port,
+        expected_name=one.name,
+        expected_tool=one.probe,
+    )
+
+
 def spec_for_api(config: Config, api: str) -> ServerSpec:
     """The one model server that serves *api*, in the launcher's own terms.
 
@@ -317,21 +193,8 @@ def spec_for_api(config: Config, api: str) -> ServerSpec:
     needs a single backend — the model config tools, which start one when a
     provider is added for a protocol nothing is serving — builds the same spec
     the launcher would rather than a second spelling of it.
-
-    `config.server(api)` answers even for an api the file's `servers:` block
-    does not name: the addresses start from the built-in defaults, so every
-    protocol has one whether or not anybody wrote it down.
     """
-    address = config.server(api)
-    return ServerSpec(
-        name=f"{BACKEND_PREFIX}{api}",
-        module=API_BACKENDS[api],
-        url=address.url,
-        host=address.host,
-        port=address.port,
-        expected_name=API_SERVER_NAMES[api],
-        expected_tool=MODEL_TOOL,
-    )
+    return spec_for(config, plugin(api))
 
 
 def specs(config: Config) -> list[ServerSpec]:
@@ -351,24 +214,8 @@ def specs(config: Config) -> list[ServerSpec]:
     needs it, but a model server answering first is what makes the first turn
     work rather than fail and retry.
     """
-    result: list[ServerSpec] = []
-    for api in config.apis_in_use():
-        result.append(spec_for_api(config, api))
-
-    for name in LOCAL_SERVERS:
-        module, server_name, tool = SERVER_MODULES[name]
-        address = config.server(name)
-        result.append(
-            ServerSpec(
-                name=name,
-                module=module,
-                url=address.url,
-                host=address.host,
-                port=address.port,
-                expected_name=server_name,
-                expected_tool=tool,
-            )
-        )
+    result = [spec_for_api(config, api) for api in config.apis_in_use()]
+    result += [spec_for(config, one) for one in PLUGINS if not one.api]
     return result
 
 
