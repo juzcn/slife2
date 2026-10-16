@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -111,29 +112,41 @@ _WIDE_TOKENS = 1
 _IMAGE_TOKENS = 200
 
 
-def _is_wide(character: str) -> bool:
-    """Whether a character is one a tokenizer spends about one token on.
+#: The ranges a tokenizer spends about one token on — and the single statement of
+#: them, because two copies of a table like this are two answers waiting to
+#: disagree.  They are the ones `wcwidth` calls double-width, which is the
+#: closest thing to a standard answer to this question: Latin, Cyrillic, Greek
+#: and Arabic are not in them and are counted at `_CHARS_PER_TOKEN`; Han, Kana,
+#: Hangul and the fullwidth forms are.
+_WIDE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x1100, 0x115F),  # Hangul Jamo
+    (0x2E80, 0x303E),  # CJK radicals and punctuation
+    (0x3041, 0x33FF),  # Kana, Hangul Compatibility Jamo, CJK
+    (0x3400, 0x4DBF),  # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0xA000, 0xA4CF),  # Yi
+    (0xAC00, 0xD7A3),  # Hangul syllables
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFE30, 0xFE6F),  # CJK compatibility forms
+    (0xFF00, 0xFF60),  # fullwidth forms
+    (0xFFE0, 0xFFE6),  # fullwidth signs
+    (0x20000, 0x3FFFD),  # the supplementary ideographic planes
+)
 
-    The ranges are the ones `wcwidth` calls double-width, which is the closest
-    thing to a standard answer to this question.  Latin, Cyrillic, Greek and
-    Arabic are not in them and are counted at `_CHARS_PER_TOKEN`; Han, Kana,
-    Hangul and the fullwidth forms are.
-    """
-    code = ord(character)
-    return (
-        0x1100 <= code <= 0x115F  # Hangul Jamo
-        or 0x2E80 <= code <= 0x303E  # CJK radicals and punctuation
-        or 0x3041 <= code <= 0x33FF  # Kana, Hangul Compatibility Jamo, CJK
-        or 0x3400 <= code <= 0x4DBF  # CJK Unified Ideographs Extension A
-        or 0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
-        or 0xA000 <= code <= 0xA4CF  # Yi
-        or 0xAC00 <= code <= 0xD7A3  # Hangul syllables
-        or 0xF900 <= code <= 0xFAFF  # CJK compatibility ideographs
-        or 0xFE30 <= code <= 0xFE6F  # CJK compatibility forms
-        or 0xFF00 <= code <= 0xFF60  # fullwidth forms
-        or 0xFFE0 <= code <= 0xFFE6  # fullwidth signs
-        or 0x20000 <= code <= 0x3FFFD  # the supplementary ideographic planes
-    )
+#: The same ranges as one character class, so the scan happens in C rather than
+#: in a Python loop over every character.
+#:
+#: **Not a micro-optimisation.**  `_by_script` is what an offline machine runs
+#: for its whole life, and it is called many times per turn: once for each
+#: candidate a budget measures, and once per step of `clip_to_tokens`'s binary
+#: search, each over a string that may be a megabyte of tool output.  Counting
+#: characters one at a time made this the largest single cost in the project's
+#: own test suite — nine of the ten seconds of its slowest test — *on text with
+#: no wide character in it at all*, because the loop pays per character and not
+#: per match.
+_WIDE = re.compile(
+    "[" + "".join(f"{chr(low)}-{chr(high)}" for low, high in _WIDE_RANGES) + "]"
+)
 
 
 def _by_script(text: str) -> int:
@@ -143,7 +156,10 @@ def _by_script(text: str) -> int:
     measure this module was built on, kept because the machine that needs it is
     the one with no network — which is a supported machine, not a broken one.
     """
-    wide = sum(1 for character in text if _is_wide(character))
+    # `subn` and not `findall`: the count is the same and it builds no match
+    # object per wide character, which on a Chinese document is one per character
+    # of it.
+    _narrowed, wide = _WIDE.subn("", text)
     narrow = len(text) - wide
     return wide * _WIDE_TOKENS + (narrow + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
 

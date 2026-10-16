@@ -103,7 +103,7 @@ import argparse
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -525,6 +525,17 @@ def resolve_secret(value: object) -> str:
     the ``keyring:`` text to travel as the secret itself, which is the
     deformation DESIGN.md §10.1 names.  The failure lands where the secret is
     resolved.
+
+    **A credential that was never stored is a config mistake, and it is said as
+    one.**  credstore answers `KeyError` for that — its documented "not found",
+    as against a store that was asked and refused — and a bare `KeyError` out of
+    `load()` is not something any caller on this path catches: `slife2`'s entry
+    point and `family.py` both answer a bad config with their own one line for
+    `ConfigError` alone, so `env: {TOKEN: 'keyring:slife/a-key-nobody-stored'}`
+    printed a traceback instead of naming the reference, at the one place where
+    naming it is the whole of the fix.  The store that is *there* and refused
+    keeps raising rather than degrading, which is the registered behaviour and
+    the reason this catches the one exception type rather than all of them.
     """
     if not isinstance(value, str):
         return str(value)
@@ -537,7 +548,15 @@ def resolve_secret(value: object) -> str:
         pass
     else:
         if is_keyring_uri(value):
-            return resolve_uri(value)
+            try:
+                return resolve_uri(value)
+            except KeyError as exc:
+                raise ConfigError(
+                    f"{value}: this machine's credential store has no such "
+                    f"credential — store it with "
+                    f"`credstore set {value.removeprefix('keyring:')}`, or write "
+                    f"the value itself"
+                ) from exc
 
     def _replace(match: re.Match[str]) -> str:
         var, default = match.group(1), match.group(2)
@@ -2178,6 +2197,20 @@ def _a2a(
 
     host = str(broker.get("host") or base.broker_host)
     port = _int_or(broker.get("port"), base.broker_port, f"{section}.broker.port")
+    if not 0 < port < 65536:
+        # **The flag refused this and the file did not.**  `broker_address`
+        # refuses `host:0` and `host:70000` for `--a2a-broker`, and the section
+        # that overrides is written in the same shape but was read straight
+        # through, so `broker: {port: 0}` loaded and the mesh dialled
+        # `localhost:0` at every start.  Zero is the value that costs the most
+        # and reads the least like a mistake: the port is not the kernel's to
+        # choose here (nobody binds this end), so it is a connection to a port
+        # no process can hold — the dial hangs until its timeout rather than
+        # failing on the line that named it.
+        raise ConfigError(
+            f"{section}.broker.port: {port} is not a port (1-65535); leave it "
+            f"out for the default ({base.broker_port})"
+        )
     if override:
         host, port = broker_address(override)
 
@@ -2666,7 +2699,7 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
         url=url,
         headers=_secrets(raw.get("headers"), f"mcp.{name}.headers"),
         cwd=str(raw.get("cwd") or ""),
-        enabled=bool(raw.get("enabled", True)),
+        enabled=_enabled(raw, f"mcp.{name}"),
         autoload=raw.get("autoload") is True,
     )
 
@@ -2724,7 +2757,7 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
         args=args,
         env=env,
         cwd=str(raw.get("cwd") or ""),
-        enabled=bool(raw.get("enabled", True)),
+        enabled=_enabled(raw, f"rest-api.{name}"),
         autoload=raw.get("autoload") is True,
     )
 
@@ -2770,7 +2803,7 @@ def _cli_tool(raw: Any, name: str) -> CliToolSettings:
         description=str(raw.get("description") or ""),
         install=str(raw.get("install") or ""),
         source=_provenance(raw.get("source"), f"cli.{name}.source"),
-        enabled=bool(raw.get("enabled", True)),
+        enabled=_enabled(raw, f"cli.{name}"),
     )
 
 
@@ -2795,7 +2828,7 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     return {
         str(name): SkillSettings(
             env=_secrets(spec.get("env"), f"skills.{name}.env"),
-            enabled=bool(spec.get("enabled", True)),
+            enabled=_enabled(spec, f"skills.{name}"),
         )
         for name, spec in entries.items()
     }
@@ -2818,6 +2851,39 @@ def _string_list(raw: Any, where: str) -> tuple[str, ...]:
     if not isinstance(raw, list):
         raise ConfigError(f"{where}: expected a list")
     return tuple(str(item) for item in raw)
+
+
+def _enabled(raw: Mapping[str, Any], where: str) -> bool:
+    """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
+
+    **`bool(raw.get("enabled", True))` read a string as a switch.**  ruamel's
+    loader is YAML 1.2, so `enabled: no` and `enabled: off` are the *strings*
+    `no` and `off` — not the booleans PyYAML would have made of them — and every
+    non-empty string is true to `bool`.  So an entry the operator had switched
+    off came back on, and `family.py` dialled it at every start, because
+    `settings.enabled` is the whole of what decides whether a link is made.  The
+    reading is wrong in the one direction that costs something: the server is
+    started and asked, rather than not.
+
+    **The value is refused rather than guessed at.**  Coercing a string to a
+    boolean is the other half of the same mistake, one spelling over — it
+    replaces "the switch this says is on" with "the switch it did not say"; a
+    quoted `"false"` is a hand-edit that means nothing at all, and a *value that
+    cannot be read is not an absent one*.  Every other field in this module is
+    refused at load with a sentence naming it, and a switch decides whether a
+    process is dialled, so it is refused the same way.  A key that is not there
+    is the one other answer, and it is the documented default: `enabled: true`
+    is what the file never writes and absent is what it means
+    (`slife2.libs.host.configfile.upsert`).
+    """
+    value = raw.get("enabled", True)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"{where}.enabled: expected `true` or `false`, got {value!r} — YAML "
+            f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
+            f"strings; leave the key out for true"
+        )
+    return value
 
 
 def _secrets(raw: Any, where: str) -> dict[str, str]:
@@ -2863,6 +2929,26 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping with host/port/path")
+    host = str(raw.get("host") or default.host)
+    if ":" in host or "/" in host:
+        # **The first of the three fields, and the last to be refused.**  `port`
+        # and `path` are refused below and the host was copied through,
+        # so `host: "::1"` — the natural spelling of an IPv6 loopback, and one
+        # `a2a.broker.host` accepts — built `http://::1:8010/mcp`.
+        # `ServerSettings.url` writes the address as `host:port` and puts no
+        # brackets on it, so the first thing to *read* that URL
+        # (`runtime.normalize_url`'s `urlsplit(...).port`, inside `start_lock`)
+        # raised `ValueError: Port could not be cast to integer value as
+        # ':1:8010'` — after some servers were already up, in a command that
+        # answers every bad field with one sentence and catches `ConfigError`.
+        # A `/` is the same mistake the other way: `host: 0.0.0.0/x` moves the
+        # path into the address, and the port is then not there at all.
+        raise ConfigError(
+            f"{where}.host: {host!r} is not a host — the endpoint is written as "
+            f"`host:port` with no brackets, so an IPv6 address needs the path "
+            f"spelt out another way, and a `/` belongs in `path:`; leave it out "
+            f"for the default ({default.host})"
+        )
     port = _int_or(raw.get("port"), default.port, f"{where}.port")
     if not 0 < port < 65536:
         # Refused rather than defaulted, and rather than passed on: a port is
@@ -2877,8 +2963,8 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         )
     path = str(raw.get("path") or default.path)
     if not path.startswith("/"):
-        # **The third field, and the one nothing checked.**  `host` and `port`
-        # are read one line up and `path` was copied through, so `path: mcp`
+        # **The third field, and the one that was copied through.**  `host` and
+        # `port` are read one line up and `path` was copied through, so `path: mcp`
         # was accepted and `ServerSettings.url` concatenates the two halves
         # with nothing between them: the endpoint became
         # `http://127.0.0.1:8005mcp`, whose *port* is the string `8005mcp`.
@@ -2894,11 +2980,7 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
             f"address and the path together, so it has to start with `/`; "
             f"leave it out for the default ({default.path})"
         )
-    return ServerSettings(
-        host=str(raw.get("host") or default.host),
-        port=port,
-        path=path,
-    )
+    return ServerSettings(host=host, port=port, path=path)
 
 
 def _provider(raw: Any, name: str) -> ProviderSettings:

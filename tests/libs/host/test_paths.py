@@ -334,15 +334,19 @@ def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
     register_home(other)
 
     assert [path.parent.parent.parent.name for path in turn_dbs()] == ["mine", "other"]
-    assert [path.parent.parent.parent.name for path in schedule_dbs()] == [
-        "mine",
-        "other",
-    ]
+    # A ledger comes with the home it is in, because the walker is the only
+    # thing that knows it: the file name is the same in every home, and a
+    # scheduler that has to fire one must do it *in* that home.
+    found = schedule_dbs()
+    assert [one.path.parent.parent.parent.name for one in found] == ["mine", "other"]
+    assert [one.home.name for one in found] == ["mine", "other"]
     # One network's, by name: the walk the remote mesh does, which must not pick
-    # up the local network's file for the same agent (`Net.ledger`).
-    assert [
-        path.parent.parent.parent.name for path in a2a_inbound_paths(REMOTE.ledger)
-    ] == ["mine", "other"]
+    # up the local network's file for the same agent (`Net.ledger`).  Each comes
+    # with its home too, for `schedule_dbs`' reason: what is built out of one
+    # opens *that* file and hands its notice over in that home.
+    walked = a2a_inbound_paths(REMOTE.ledger)
+    assert [one.path.parent.parent.parent.name for one in walked] == ["mine", "other"]
+    assert [one.home.name for one in walked] == ["mine", "other"]
 
 
 def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(

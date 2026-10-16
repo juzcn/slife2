@@ -206,7 +206,10 @@ async def unload_tools(client: Client) -> dict[str, Any]:
 
     Returns:
         The hub's payload: `unloaded` (the names that moved), `refused` and
-        `not_loaded`, and `text` — the same thing in a sentence.
+        `not_loaded`, and `text` — the same thing in a sentence.  **An answer
+        this build cannot read comes back as the empty mapping**, not as one of
+        these: the caller reads it with `trim_answer`, which is where the
+        refusal belongs.
     """
     empty: dict[str, Any] = {
         "unloaded": [],
@@ -221,7 +224,16 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
         logger.warning("the tool list was not trimmed: %s", exc)
         return empty
-    return payload or empty
+    # **`payload or empty` laundered the one case `trim_answer` exists for.**
+    # A hub answering with a shape this build does not know (`tool_payload`'s
+    # `{}`) came back as the well-formed "nothing was unloaded, no sentence"
+    # above, so `trim_answer` read it as an honest no-op and nothing was said —
+    # the exact confusion `trim_answer` was written to remove, and the one the
+    # two servers that trim already have a test for.  `empty` is for the
+    # `except` above: a call that could not be *made* is a trim that did not
+    # happen, and the log line there says so.  An answer that arrived and cannot
+    # be read is damage, and damage is the caller's to refuse.
+    return payload
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:

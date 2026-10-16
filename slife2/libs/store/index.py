@@ -668,26 +668,53 @@ def embed_chunks(
     single paragraph longer than that is truncated rather than split — a
     paragraph that long is machine output, and its tail is what the keyword leg
     is for.
+
+    **`limit` bounds the *packing*, and is not a cut applied to the end.**  The
+    window used to be packed to `chars` and then sliced to `limit`, which is the
+    same thing only when the two are equal: every caller passes the embedder's
+    `max_chars` (`TurnStore.save_turn`, the turn sync, the catalogue, the
+    cabinet), and that is the endpoint's own input limit, so an endpoint with a
+    small one packs a window it will not see the end of.  Everything between the
+    cut and the window's end then sat in **no chunk at all** — not in the vector
+    index, and not in anything else built from these chunks — in silence, since
+    the row still has a vector and still counts as indexed.  Worse than the
+    truncation the docstring above names, which at least holds the head of the
+    paragraph.  So when the limit is the smaller of the two, the window is
+    bounded by it and the paragraphs go to the next chunk instead.
+
+    **The overlap is given up before the paragraph is.**  A carry that leaves no
+    room for the paragraph being packed would put that paragraph's tail past
+    what the model takes, so the carry is dropped — which costs no text, because
+    the previous chunk already holds it.  The paragraph is never dropped that
+    way: an overlap is a repetition and a paragraph is not.
     """
     paragraphs = [found.strip() for found in _PARAGRAPH_RE.split(text) if found.strip()]
     if not paragraphs:
         return []
 
     limit = limit or chars
+    chars = min(chars, limit)
     chunks: list[str] = []
     window: list[str] = []
     size = 0
     for paragraph in paragraphs:
         if window and size + len(paragraph) > chars:
-            chunks.append("\n\n".join(window)[:limit])
+            chunks.append("\n\n".join(window))
             window = (
                 window[-EMBED_OVERLAP_PARAGRAPHS:] if EMBED_OVERLAP_PARAGRAPHS else []
             )
             size = sum(len(kept) for kept in window)
+            if size + len(paragraph) > chars:
+                window = []
+                size = 0
         window.append(paragraph)
         size += len(paragraph)
-    chunks.append("\n\n".join(window)[:limit])
-    return chunks
+    chunks.append("\n\n".join(window))
+    # The one chunk that can still be over the limit is a single paragraph
+    # longer than it, which the docstring above says is truncated rather than
+    # split.  Slicing here rather than at each append is what keeps that from
+    # being true of every chunk, which is the bug this widened.
+    return [chunk[:limit] for chunk in chunks]
 
 
 def _chunk_documents(

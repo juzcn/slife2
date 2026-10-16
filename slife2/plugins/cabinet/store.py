@@ -104,6 +104,7 @@ rebuild rather than a migration.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -388,13 +389,20 @@ def mirror_stem(key: str) -> str:
     write silently replacing the first's markdown while both rows stayed
     correct, and a `note_remove` of either one deleting the other's file.
 
-    **Provably disjoint, which is why the separator is `~`.**  The readable half
-    is only used when `slug(key) == key`, and such a key can hold nothing but
-    word characters and dashes — `_KEEP_RE` would have replaced anything else,
-    and the strip and the collapse would have changed it.  `~` is not one of
-    them, so no digest-carrying name can equal a plain one; within the plain
-    names the identity is `key` itself, and within the digests a collision needs
-    two keys whose slugs *and* whose digests agree.
+    **Disjoint as a *path*, which is why case decides it and the separator is
+    `~`.**  A path is not a string: on a case-insensitive filesystem — Windows,
+    macOS — `Readme.md` and `readme.md` are one file, so "the readable half is
+    only used when `slug(key) == key`" was not enough: `Readme` and `readme` both
+    satisfy it, took both halves of that rule, and shared the file this function
+    exists to keep apart.  A key is therefore readable as itself only when it is
+    *already* spelled the way every case-insensitive lookup of it resolves —
+    casefolded — which makes the readable family a set no two of whose members
+    can collide, and sends every other key to the digest half.  The readable half
+    of a digest-carrying name is still the key's own slug, so `Python~ab12cd34.md`
+    is still read by a person; one key spelled two ways is two files, which is
+    what the collision cost.  `~` is not a character `slug` can keep, so no
+    digest-carrying name can equal a readable one either, and within the digests
+    a collision needs two keys whose slugs *and* whose digests agree.
 
     The digest is of the key and not of the row's id, because the mirror's
     directory is the kind's (`notes/`, `reports/`) and a key is unique inside
@@ -402,7 +410,7 @@ def mirror_stem(key: str) -> str:
     has to be told apart here.
     """
     slugged = slug(key)
-    if slugged == key:
+    if slugged == key and key == key.casefold():
         return slugged
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:_MIRROR_DIGEST_CHARS]
     return f"{slugged}~{digest}"
@@ -683,33 +691,28 @@ class CabinetStore:
 
         Returns the same shape `slife2.libs.store.db`'s `index_status` does: `ready` and
         the `problems` that say why not.
+
+        **Every blocking step hops off the event loop, and it is this method's
+        job rather than its caller's.**  This is the pass that runs when a
+        cabinet is *opened*, and what it can be asked to do is a whole-index
+        rebuild: DDL, a delete-and-reindex of every row's keyword text, and an
+        embed of every document with no vector.  On the loop that is a shared
+        process not answering anything else until it finishes — the first call
+        from one agent holding up every other agent's turn — and the plugin's
+        own `on_thread` cannot reach it, because the embedder is awaited in the
+        middle and a thread cannot await.  So this is `TurnStore.sync_indexes`'
+        shape, one step at a time: the store hops each blocking step itself and
+        keeps the awaits — `to_thread` is `async`, so an inline `await` of a
+        blocking call is exactly the bug, and the hop has to be spelled out per
+        step.
         """
         identity = vector_identity(embedder)
         problems: list[str] = []
-        with self._connect() as connection:
-            recorded = index_meta(connection)
-            text_stale = recorded.get("text_version", "") != textindex.RULES_VERSION
-            # The vectors are a function of the model *and* of the text they were
-            # made from, so a change to either makes every stored vector the
-            # wrong vector for its row.  Dropped rather than kept beside the new
-            # ones: two models' vectors cannot be ranked against each other.
-            #
-            # `slife2.libs.store.index.rebuild_vector_index` is where that happens — the
-            # same call the turn store and the catalogue make, with the one thing
-            # this corpus adds to it: `cabinet_embedded` goes with the vectors,
-            # because a rowid a `vec0` table has freed is reused and a document
-            # that took an old id would read as one already tried.
-            if rebuild_vector_index(
-                connection,
-                vec_table="cabinet_vec",
-                chunk_table="cabinet_chunk",
-                dimension=embedder.dimension,
-                identity=identity,
-                also_delete=("cabinet_embedded",),
-            ):
-                logger.info("cabinet %s: rebuilding the vector index", self.path)
+        text_stale = await asyncio.to_thread(
+            self._mark_stale, identity, embedder.dimension
+        )
         if text_stale:
-            self._rebuild_text_index()
+            await asyncio.to_thread(self._rebuild_text_index)
 
         # **Every document, not one batch of them.**  `embed_missing` is bounded
         # per call so that a call cannot embed a thousand documents before it
@@ -739,16 +742,49 @@ class CabinetStore:
         # on startup, and the reason the docstring calls this the last thing the
         # pass does.  A document with nothing to embed is not one of these; see
         # `_documents_without_vectors`.
-        if missing := self._documents_without_vectors():
-            problems.append(
-                f"{len(missing)} of {self.count()} documents have no vector"
-            )
+        missing = await asyncio.to_thread(self._documents_without_vectors)
+        documents = await asyncio.to_thread(self.count)
+        if missing:
+            problems.append(f"{len(missing)} of {documents} documents have no vector")
         return {
             "ready": not problems,
             "problems": problems,
             "identity": identity,
-            "documents": self.count(),
+            "documents": documents,
         }
+
+    def _mark_stale(self, identity: str, dimension: int) -> bool:
+        """Drop a vector index built for another model, and say if the text is stale.
+
+        One connection, one transaction, and the *blocking* half of `sync` — the
+        DDL that rebuilding the vector index is made of, which is why `sync`
+        calls it on a worker thread.  It answers with the one fact the caller
+        needs afterwards: whether the keyword index was built by different rules
+        (`textindex.RULES_VERSION`) and so has to be rebuilt too.
+        """
+        with self._connect() as connection:
+            recorded = index_meta(connection)
+            text_stale = recorded.get("text_version", "") != textindex.RULES_VERSION
+            # The vectors are a function of the model *and* of the text they were
+            # made from, so a change to either makes every stored vector the
+            # wrong vector for its row.  Dropped rather than kept beside the new
+            # ones: two models' vectors cannot be ranked against each other.
+            #
+            # `slife2.libs.store.index.rebuild_vector_index` is where that happens — the
+            # same call the turn store and the catalogue make, with the one thing
+            # this corpus adds to it: `cabinet_embedded` goes with the vectors,
+            # because a rowid a `vec0` table has freed is reused and a document
+            # that took an old id would read as one already tried.
+            if rebuild_vector_index(
+                connection,
+                vec_table="cabinet_vec",
+                chunk_table="cabinet_chunk",
+                dimension=dimension,
+                identity=identity,
+                also_delete=("cabinet_embedded",),
+            ):
+                logger.info("cabinet %s: rebuilding the vector index", self.path)
+        return text_stale
 
     def _documents_without_vectors(self) -> list[int]:
         """Documents the vector pass finished with and the index does not hold.
@@ -795,33 +831,65 @@ class CabinetStore:
         **"Still to try" is `cabinet_embedded`, not "has no chunk."**  A document
         with nothing to embed places no chunk and never will, so counting chunks
         would hand it back for ever and the caller's loop would not end.
+
+        **Its SQLite hops off the loop, one call at a time.**  This is the loop
+        `sync` runs at open, and the documents it walks are the whole corpus the
+        first time a changed model makes it run: a selection, a placement per
+        document and a count, all of it blocking, all of it on the loop unless
+        each one is sent to a worker (`sync` states why that is this side's job
+        and not its caller's).  The embed between two of them is the one step
+        that stays on the loop, because it is the one step that is already
+        awaited.
         """
         limit = limit or SYNC_BATCH  # read here, so a test can size the batch
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT id, kind, key, body, title, summary, tags, source, file_path"
-                " FROM cabinet_doc"
-                " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
-                " ORDER BY id LIMIT ?",
-                (limit,),
-            ).fetchall()
+        rows = await asyncio.to_thread(self._unembedded, limit)
         if not rows:
             return 0, 0
         done = 0
         for row in rows:
             one = dict(row)
             vectors = await self.vectors(one, embedder)
-            with self._connect() as connection:
-                self.place(connection, int(one["id"]), vectors)
+            await asyncio.to_thread(self._place_one, int(one["id"]), vectors)
             done += 1
+        remaining = await asyncio.to_thread(self._unembedded_count)
+        return remaining, done
+
+    def _unembedded(self, limit: int) -> list[sqlite3.Row]:
+        """One batch of documents the vector pass has not tried yet.
+
+        The selection `embed_missing` walks, blocking and therefore on a worker
+        thread: `cabinet_embedded` is the marker, and "has no chunk" is a
+        question that never ends — see that method for why.
+        """
         with self._connect() as connection:
-            remaining = int(
+            return connection.execute(
+                "SELECT id, kind, key, body, title, summary, tags, source, file_path"
+                " FROM cabinet_doc"
+                " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
+                " ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    def _unembedded_count(self) -> int:
+        """How many documents are still to try, read after the batch was written.
+
+        From its own connection, so it cannot disagree with what was just placed:
+        the count is what `embed_missing` answers the caller's loop with, and a
+        loop that stopped one batch early would leave the tail of the corpus out
+        of the meaning leg in silence.
+        """
+        with self._connect() as connection:
+            return int(
                 connection.execute(
                     "SELECT COUNT(*) AS n FROM cabinet_doc"
                     " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
                 ).fetchone()["n"]
             )
-        return remaining, done
+
+    def _place_one(self, doc_id: int, vectors: Sequence[Sequence[float]]) -> None:
+        """Put one document's vectors in, on a worker thread and its own connection."""
+        with self._connect() as connection:
+            self.place(connection, doc_id, vectors)
 
     def _rebuild_text_index(self) -> None:
         """Rebuild the keyword index, whole, from the rows.
@@ -1618,42 +1686,95 @@ class CabinetStore:
         `matched_in` is `"line"` or `"rest"` and the difference is not a detail:
         a mark whose evidence is not on the page is a mark the reader cannot
         check (`ToolStore._matched_in_line`).  What is printed for a cabinet row
-        is its title, its key and a slice of its body — so the test is whether
-        the words are in *those*, which is a smaller text than the row was
-        indexed by.
+        is its key and its summary or the head of its body (`line_text`), so the
+        test is whether the words are in *those* — a smaller text than the row
+        was indexed by — and `line_text` is the one spelling of it, shared with
+        the renderer that prints it.
+
+        **And the words are the index's, tested by the index's own tokenizer.**
+        A containment test over `textindex.normalize`d Python strings is a second
+        tokenizer, and it disagreed with the first exactly where it mattered: the
+        index is built by `unicode61 remove_diacritics 2`, which folds `Café` to
+        `cafe`, while `normalize` keeps the accent — so a caller asking for
+        `cafe` matched a note at the index and was then reported as having
+        matched *elsewhere*, with the word plainly on the line it had matched.
+        The printed text therefore goes into a temporary FTS5 table built with
+        the same tokenizer (`textindex.FTS_TOKENIZE`), and the caller's own
+        expression is matched against that: one grammar and one tokenizer on
+        both sides, and the scope is the text the line shows.
         """
         if not page or not expression:
             return set()
         placeholders = _marks(page)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT id, title, key, body, summary FROM cabinet_doc"
+                f"SELECT id, key, body, summary FROM cabinet_doc"
                 f" WHERE id IN ({placeholders})",
                 tuple(page),
             ).fetchall()
-            shown = {}
-            for row in rows:
-                text = textindex.normalize(
-                    f"{row['title']}\n{row['key']}\n{str(row['body'] or '')[:400]}"
-                    f"\n{row['summary']}"
+            connection.execute(
+                f"CREATE VIRTUAL TABLE temp.printed USING fts5("
+                f"search, {textindex.FTS_TOKENIZE})"
+            )
+            connection.executemany(
+                "INSERT INTO printed (rowid, search) VALUES (?, ?)",
+                [
+                    (int(row["id"]), textindex.normalize(line_text(dict(row))))
+                    for row in rows
+                ],
+            )
+            return {
+                int(row["rowid"])
+                for row in connection.execute(
+                    "SELECT rowid FROM printed WHERE printed MATCH ?", (expression,)
                 )
-                shown[int(row["id"])] = text
-        terms = _terms(expression)
-        return {
-            doc_id
-            for doc_id, text in shown.items()
-            if terms and all(term in text for term in terms)
-        }
+            }
 
 
-def _terms(expression: str) -> list[str]:
-    """The terms back out of a `MATCH` expression, for a containment test.
+#: How much of a body a search line shows when a row has no summary.  A search
+#: line is a chooser rather than a reader — the whole document is what
+#: `note_read`/`diary_read`/`file_read` are for — and the two places that slice
+#: it (`line_excerpt` below, and the renderer in `slife2.plugins.cabinet.server`)
+#: cut the same text or the mark they produce is uncheckable.
+EXCERPT_CHARS = 120
 
-    The expression is already normalized and quoted by `textindex`, so this
-    undoes exactly that much and nothing more — a second spelling of "what the
-    caller asked for" would be a page marked by one rule and matched by another.
+
+def line_excerpt(row: Mapping[str, Any]) -> str:
+    """What a search line shows *under* one row: its summary, or its body's head.
+
+    **One spelling of the rule**, because two readers have to agree about it:
+    the renderer prints this under the row's key, and `_matched_in_line` asks
+    whether the caller's words are in it.  Written out twice they disagreed —
+    the mark was decided against the first 400 characters and the line printed
+    120, so a note whose word sat at character 300 was marked "matched your
+    words" beside an excerpt that stopped well before it.  The body is
+    whitespace-collapsed first, because that is what is printed: a newline in a
+    note is not a line the reader sees.
     """
-    return [piece.strip('"') for piece in expression.split(" AND ")]
+    summary = str(row.get("summary") or "")
+    if summary:
+        return summary
+    body = " ".join(str(row.get("body") or "").split())
+    return body[:EXCERPT_CHARS] + ("…" if len(body) > EXCERPT_CHARS else "")
+
+
+def line_text(row: Mapping[str, Any]) -> str:
+    """The text a search line prints of one row, as one string.
+
+    **What `_matched_in_line` is allowed to test**, and the whole of it.  The
+    line shows the row's key and `line_excerpt` — nothing else of the document —
+    so a row whose words are only in its *title* is one whose words are not on
+    the line, however searchable the title is (`search_text` indexes it on
+    purpose); marked otherwise it is a mark with no evidence beside it, which is
+    the failure the mark exists not to be.  A row's `title` was in the haystack
+    this replaced, and a file saved with a title and no body answered "matched
+    your words" with every one of them missing from the page.
+
+    The `kind`, the time and the verdict words are deliberately not here: they
+    are the line's chrome, the same for every row, and a term matching the
+    chrome says nothing about *this* document.
+    """
+    return f"{row.get('key') or ''}\n{line_excerpt(row)}"
 
 
 def _found(

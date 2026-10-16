@@ -30,6 +30,7 @@ import re
 import socket
 import threading
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -57,6 +58,13 @@ API_KEY = "e2e-not-a-real-key"
 #: The model's answer, and the one string the whole test turns on.  Two chunks,
 #: so the streaming path carries more than one event.
 ANSWER = "It is 42."
+
+#: What the tool-call test's model asks a *tool* to write, and the string its
+#: assertions read back off disk.  Its own constant because it is a different
+#: conversation's fact: the note is written by the cabinet process, into the
+#: agent's cabinet, and reading it back is how this side of the stack proves the
+#: plugin ran.
+NOTE_BODY = "the note the model asked a tool in another process to write"
 
 #: The embedding model's name, and the input limit its listing reports.  The
 #: limit is not optional: see `_ProviderHandler.do_GET`.
@@ -151,8 +159,8 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             body = {}
         if self.path.endswith("/chat/completions"):
-            self.provider.calls.append(list(body.get("messages") or []))
-            self._answer(body=_sse(self.provider.answer), kind="text/event-stream")
+            self.provider.record(body)
+            self._answer(body=self.provider.next_answer(), kind="text/event-stream")
         elif self.path.endswith("/embeddings"):
             count = len(body.get("input") or [])
             self._answer(body=_json(_embeddings(count)))
@@ -201,6 +209,41 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         """Silence: a stub that writes an access log into the test's output."""
 
 
+@dataclass
+class ToolAsk:
+    """One tool call, as the model writes it: an id, a name, and JSON arguments.
+
+    The three fields a provider's stream carries, and carried here the way a
+    real one sends them — the index, id and name first, the arguments after —
+    because that split is exactly what the model server's accumulator has to
+    fold back together.
+    """
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
+class ChatAnswer:
+    """What the stub answers one chat call with: text, or a request for a tool.
+
+    Those are the two ways a model call ends on this wire, and a script of these
+    is how a test states the shape of a conversation.
+    """
+
+    text: str = ""
+    #: A tool call instead of an answer.  A call and an answer are different
+    #: endings rather than different content, so this is a choice between them
+    #: and not a field beside `text`.
+    tool: ToolAsk | None = None
+
+    def sse(self) -> bytes:
+        if self.tool is not None:
+            return _sse_tool_call(self.tool)
+        return _sse(self.text)
+
+
 class StubProvider:
     """An OpenAI-compatible endpoint, in this process.
 
@@ -209,15 +252,48 @@ class StubProvider:
     `/embeddings` answers the vectors the context store's index is built from.
     Both are the *wire* shapes the real SDKs parse — a stub that answered a
     simplified shape would prove nothing about the server in between.
+
+    **It answers a script rather than one answer**, because one turn is more
+    than one model call: the context store's discriminator is a call of its own
+    before the turn runs, and a turn whose model asks for a tool has another
+    after the tool has answered.  A test that scripts the sequence is stating
+    what it expects to happen; a stub that sends the same answer to every call
+    cannot tell the third call from the first, which is the whole of what a
+    tool-call test is about.  The last entry repeats, so the single-answer
+    script the other tests in this file write is this mechanism's one-entry
+    case rather than a second one beside it.
     """
 
-    def __init__(self) -> None:
-        self.answer = ANSWER
+    def __init__(self, *script: ChatAnswer) -> None:
+        self.script: list[ChatAnswer] = list(script) or [ChatAnswer(text=ANSWER)]
         #: Every chat call it answered, in order, as the messages it was sent —
         #: which is where "the history reached the model" is read from.
         self.calls: list[list[dict]] = []
+        #: The tool names each of those calls was *offered*, in the same order.
+        #: Kept apart from `calls` because a call naming a tool the model was
+        #: never offered is a call the hub would route all the same, so a test
+        #: meaning "the model chose from what it was handed" has to read this
+        #: rather than assume it.
+        self.tool_names: list[list[str]] = []
+        self._served = 0
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    def record(self, body: dict) -> None:
+        """One chat request, as it arrived."""
+        self.calls.append(list(body.get("messages") or []))
+        self.tool_names.append(
+            [
+                str((tool.get("function") or {}).get("name") or "")
+                for tool in body.get("tools") or []
+            ]
+        )
+
+    def next_answer(self) -> bytes:
+        """The next entry of the script — and the last one from then on."""
+        answer = self.script[min(self._served, len(self.script) - 1)]
+        self._served += 1
+        return answer.sse()
 
     @property
     def chats(self) -> int:
@@ -250,28 +326,64 @@ def _json(body: dict) -> bytes:
     return json.dumps(body).encode()
 
 
-def _sse(text: str) -> bytes:
-    """`text` as the two streaming chunks a chat-completions client reads.
+def _chunk(delta: dict, finish: str | None) -> bytes:
+    """One `chat.completion.chunk` frame, as the SSE event carrying it.
 
-    The finish chunk is not decoration: it is what `finish_reason: "stop"`
-    reaches `StreamChatResult.stop_reason` through, and a stream that ended
-    without it would test a path no provider produces.
+    The finish chunk is not decoration: it is what `finish_reason` reaches
+    `StreamChatResult.stop_reason` through, and a stream that ended without one
+    would test a path no provider produces.
     """
+    body = {
+        "id": "e2e",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "e2e-stub",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    return f"data: {json.dumps(body)}\n\n".encode()
 
-    def chunk(delta: dict, finish: str | None) -> bytes:
-        body = {
-            "id": "e2e",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "e2e-stub",
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
-        return f"data: {json.dumps(body)}\n\n".encode()
 
+#: How a stream ends on this wire, after the finish chunk.
+_DONE = b"data: [DONE]\n\n"
+
+
+def _sse(text: str) -> bytes:
+    """`text` as the two streaming chunks a chat-completions client reads."""
     return (
-        chunk({"role": "assistant", "content": text}, None)
-        + chunk({}, "stop")
-        + b"data: [DONE]\n\n"
+        _chunk({"role": "assistant", "content": text}, None)
+        + _chunk({}, "stop")
+        + _DONE
+    )
+
+
+def _sse_tool_call(ask: ToolAsk) -> bytes:
+    """One tool call, as the chunks a real stream sends it in.
+
+    **Two chunks and not one**, because a provider is free to split a call
+    anywhere and the usual place is between the name and the arguments.  A stub
+    sending the call whole would leave the folding in the model server untested,
+    and the folding is where a name that arrives in pieces is either
+    reassembled or mangled into the name of a different tool.
+    """
+    return (
+        _chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": ask.id,
+                        "type": "function",
+                        "function": {"name": ask.name, "arguments": ""},
+                    }
+                ]
+            },
+            None,
+        )
+        + _chunk(
+            {"tool_calls": [{"index": 0, "function": {"arguments": ask.arguments}}]},
+            "tool_calls",
+        )
+        + _DONE
     )
 
 
@@ -454,6 +566,85 @@ async def test_a_second_turn_runs_on_the_first(stack) -> None:
         "remember the number 41" in json.dumps(message)
         for message in stack["provider"].last_messages[:-1]
     ), stack["provider"].last_messages
+
+
+@pytest.mark.asyncio
+async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
+    stack,
+) -> None:
+    """**The round trip the whole arrangement exists for**, over every boundary.
+
+    The model asks for a tool, the loop dispatches it, the hub routes it by
+    name, a *different process* runs it, and what that process answered comes
+    back to the model as a message — which is the one path nothing else in this
+    suite can show.  Every other tool test stops at one edge of it: the loop
+    tests stop at the dispatch, the hub tests at a stubbed upstream, and the
+    plugin tests at the plugin's own server.  Only a real stack has a model on
+    one side and a plugin process on the other with the hub and the catalogue in
+    between, and the pieces in between are exactly what a rearrangement breaks.
+
+    What keeps it from being a demonstration is that both ends are read where
+    this process cannot have written them: the note is a file the cabinet's own
+    process put on disk, and the third request the provider received carries the
+    tool's sentence rather than anything this test composed.
+
+    **Three calls, and the first is not the turn's.**  The context store's
+    discriminator decides what a turn runs on before it runs, and it is a model
+    call of its own; the second is the turn's first step, which asks for the
+    tool; the third is the step after the tool has answered.
+    """
+    provider = stack["provider"]
+    provider.script = [
+        # The discriminator.  `{}` is "nothing changes" — what the context
+        # plugin's own tests answer with, and the one answer that leaves the
+        # conversation this test is about alone.
+        ChatAnswer(text="{}"),
+        ChatAnswer(
+            tool=ToolAsk(
+                id="call_e2e_note",
+                name="note_edit",
+                arguments=json.dumps(
+                    {"subject": "e2e verification", "content": NOTE_BODY}
+                ),
+            )
+        ),
+        ChatAnswer(text="Noted."),
+    ]
+    config = stack["config"]
+    client = MCPAgentClient(config.agent.server.url, agent="e2e-tool")
+    await client.connect()
+    try:
+        answer = await client.run_turn("make a note of that", lambda _event: None)
+    finally:
+        await client.close()
+
+    assert answer == "Noted.", provider.calls
+    # Step by step, so a turn that took a different number of calls says which
+    # one it took rather than failing on a total.
+    assert provider.chats == 3, [len(call) for call in provider.calls]
+
+    # The model was *offered* the tool it called, by the bare name our own
+    # plugins use — so the catalogue reached the model and the name the model
+    # wrote is the name the hub routes by.  Read from the turn's own call and
+    # not the discriminator's, which is a completion and carries no tools.
+    assert "note_edit" in provider.tool_names[1], provider.tool_names[1]
+
+    # And the tool's answer came back into the conversation: the third request
+    # carries a `tool` message the loop built out of what the cabinet process
+    # said.  The loop pairs it with the call by id, which is what the model
+    # needs to see which answer belongs to which request.
+    result = [message for message in provider.calls[2] if message.get("role") == "tool"]
+    assert len(result) == 1, provider.calls[2]
+    assert result[0]["tool_call_id"] == "call_e2e_note", result[0]
+    assert "Saved" in json.dumps(result[0]), result[0]
+
+    # **Written by the cabinet's process**, which is the half this one cannot
+    # fake: nothing here holds that store.  The file is the mirror of the note
+    # the model asked for, and its contents are the model's own words.
+    notes = data_dir() / "agents" / "e2e-tool" / "cabinet" / "notes"
+    written = sorted(notes.glob("*.md")) if notes.is_dir() else []
+    assert len(written) == 1, _files(data_dir())
+    assert NOTE_BODY in written[0].read_text(encoding="utf-8")
 
 
 async def _save_dump(agent: str, call: str, body: str) -> None:

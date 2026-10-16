@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from slife2.helpers import timeutil
 from slife2.helpers.timeutil import BOUND_GRAMMAR, InvalidTimeBound, normalize_bound
 from tests.fakes import StubEmbedder
 
@@ -21,6 +22,27 @@ pytestmark = pytest.mark.unit
 
 def _today() -> date:
     return date.today()
+
+
+#: The day every word-meaning test is asked about.  A fixed date rather than the
+#: runner's, because the alternative is two readings of one clock: the
+#: expectation built with `date.today()` in the test and the answer resolved with
+#: another call inside the module, which disagree whenever a run straddles
+#: midnight — and, for a period word, a month end.  `2026-10-07` is a Wednesday
+#: in the middle of a month and a quarter, which is what the week, month and
+#: quarter tests below need to be interesting.
+DAY = date(2026, 10, 7)
+
+
+@pytest.fixture
+def today(monkeypatch: pytest.MonkeyPatch) -> date:
+    """Pin the module's day, so a word's meaning is a fact rather than a race.
+
+    The module reads its day through `slife2.helpers.timeutil._today` precisely so
+    that this can be done; see that function for why the seam is there.
+    """
+    monkeypatch.setattr(timeutil, "_today", lambda: DAY)
+    return DAY
 
 
 # --- ISO, and the offsets it arrives in ---------------------------------------
@@ -134,8 +156,8 @@ def test_a_bound_that_reaches_the_offset_step_unparseable_is_a_refusal(
     ("word", "offset"),
     [("yesterday", -1), ("today", 0), ("tomorrow", 1)],
 )
-def test_a_day_word_is_that_day(word: str, offset: int) -> None:
-    expected = (_today() + timedelta(days=offset)).isoformat()
+def test_a_day_word_is_that_day(word: str, offset: int, today: date) -> None:
+    expected = (today + timedelta(days=offset)).isoformat()
     assert normalize_bound(word, role="since") == expected
 
 
@@ -146,23 +168,35 @@ def test_case_and_spacing_do_not_matter() -> None:
 # --- period words, which name an edge -----------------------------------------
 
 
-def test_a_period_word_is_a_different_instant_from_each_end() -> None:
+def test_a_period_word_is_a_different_instant_from_each_end(today: date) -> None:
     """The point of `role`, and the thing a reader gets wrong.
 
     `since=last month` is its first day and `until=last month` its last — one
     word bounding a window from either end, rather than naming one instant that
     a caller would then have to know how to extend.
+
+    **Both ends exactly, and not "or the first of this month".**  The line here
+    used to be `since == first-of-this-month or since < until`, which passed on
+    its second clause — the same claim as the line below it — so the one thing
+    this test is named for, that the two roles disagree, was asserted by nothing.
+    `until` is the day *after* last month ends, which is the module's own
+    date-means-a-whole-day rule and worth spelling out here rather than left to
+    the weekday test below.
     """
     since = normalize_bound("last month", role="since")
     until = normalize_bound("last month", role="until")
 
-    assert since == date(_today().year, _today().month, 1).isoformat() or since < until
-    assert since < until
-    assert datetime.fromisoformat(until).date() - datetime.fromisoformat(since).date()
+    # `until` is the day *after* last month ends — the module's date-means-a-
+    # whole-day rule — so the two ends are the 1st and the 1st, one month apart.
+    assert (
+        since == (today.replace(day=1) - timedelta(days=1)).replace(day=1).isoformat()
+    )
+    assert until == today.replace(day=1).isoformat()
     assert datetime.fromisoformat(since).day == 1
+    assert datetime.fromisoformat(until) > datetime.fromisoformat(since)
 
 
-def test_a_period_is_not_today_minus_a_month() -> None:
+def test_a_period_is_not_today_minus_a_month(today: date) -> None:
     """`last month` snaps to the calendar; "a month ago" does not.
 
     For a mid-month today the two differ by twenty-odd days, so this is the
@@ -173,13 +207,13 @@ def test_a_period_is_not_today_minus_a_month() -> None:
     measured = datetime.fromisoformat(normalize_bound("1 month ago", role="since"))
 
     assert snapped.day == 1
-    assert measured.day == _today().day
+    assert measured.day == today.day
 
 
-def test_a_week_starts_on_monday() -> None:
+def test_a_week_starts_on_monday(today: date) -> None:
     monday = datetime.fromisoformat(normalize_bound("this week", role="since")).date()
     assert monday.weekday() == 0
-    assert _today() - monday < timedelta(days=7)
+    assert today - monday < timedelta(days=7)
 
 
 def test_a_quarter_starts_on_a_quarter() -> None:
@@ -192,11 +226,11 @@ def test_a_quarter_starts_on_a_quarter() -> None:
 
 
 @pytest.mark.parametrize("unit", ["day", "week", "month", "year"])
-def test_an_ago_offset_is_measured_back_from_today(unit: str) -> None:
+def test_an_ago_offset_is_measured_back_from_today(unit: str, today: date) -> None:
     resolved = datetime.fromisoformat(
         normalize_bound(f"1 {unit} ago", role="since")
     ).date()
-    assert resolved < _today()
+    assert resolved < today
 
 
 def test_an_ago_offset_clamps_at_a_short_month() -> None:
@@ -235,16 +269,29 @@ def test_a_date_only_until_includes_that_whole_day() -> None:
     assert normalize_bound("2026-10-06", role="since") == "2026-10-06"
 
 
-def test_until_yesterday_reaches_the_end_of_yesterday() -> None:
+def test_until_yesterday_reaches_the_end_of_yesterday(today: date) -> None:
     resolved = datetime.fromisoformat(normalize_bound("yesterday", role="until"))
-    assert resolved.date() == _today()
+    assert resolved.date() == today
     assert resolved.hour == 0
 
 
-def test_now_is_a_time_of_day_and_not_midnight() -> None:
+def test_now_is_a_time_of_day_and_not_midnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`now` is a second, and the test says which one rather than reading a clock.
+
+    Asserting `resolved.hour == datetime.now().hour` compared the module's
+    reading of the clock against the test's own, one line later: an hour boundary
+    crossed in between fails a test about the grammar, and — because the module's
+    answer is *converted* to local time — so does any offset the runner applies
+    differently to the two.  The moment is pinned instead, which also makes the
+    midnight claim exact: `now` is not 00:00 of the pinned day.
+    """
+    monkeypatch.setattr(timeutil, "now", lambda: "2026-10-07T09:31:02+08:00")
+
     resolved = datetime.fromisoformat(normalize_bound("now", role="since"))
-    assert resolved.date() == _today()
-    assert resolved.hour == datetime.now().hour
+    assert resolved.date() == date(2026, 10, 7)
+    assert resolved.hour == 9
 
 
 # --- what it refuses ----------------------------------------------------------

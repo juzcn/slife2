@@ -136,6 +136,17 @@ async def _ask_model(
     agent server's arrangement, for the agent server's reason: a handshake per
     call is a handshake per call.  Keyed by URL because a server speaks one wire
     format for every provider that uses it.
+
+    **An answer this build cannot read is refused, not read as a silent one.**
+    FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
+    structured content, and `StreamChatResult.from_wire(None)` builds an empty
+    result — so a model server from another build arrived here as "the model
+    answered with nothing": `_discriminate` logged `recall_discriminator_unparsed`
+    and kept the context, and every rebuild for the rest of the session did the
+    same, with the log pointing at the model's output rather than at the
+    transport.  `slife2.clients.model` raises for exactly this on the loop's own
+    hop, and this is the same check with the same sentence, because the cause is
+    the same: a daemon from another build.
     """
     name, provider, settings = config.resolve(model)
     url = config.server(provider.api).url
@@ -163,6 +174,12 @@ async def _ask_model(
         },
         timeout=_T.timeouts.work.model_call,
     )
+    if not isinstance(result.data, dict):
+        raise ConnectionError(
+            f"the model server did not return a stream_chat result (it said "
+            f"{result.data!r}); a daemon from another build does this — try "
+            f"`slife2 down`"
+        )
     return StreamChatResult.from_wire(result.data).text
 
 
@@ -462,12 +479,20 @@ def build_server(
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
-        Four of `rebuild`'s five exits are this one outcome — the switch is off, a
-        decision that asks for nothing, a decision that equals what is held, and a
-        selection that cannot be fetched — and they are one dict because they are
-        one thing: nothing was fetched, nothing was written, and the caller's list
-        stands.  Spelled out four times they were four chances to describe that
-        differently, and four places to add a key to.
+        Four of `rebuild`'s five exits are this one outcome — a discriminator
+        that decided nothing, a decision that asks for nothing, a decision that
+        equals what is held, and a selection that cannot be fetched — and they
+        are one dict because they are one thing: nothing was fetched, nothing was
+        written, and the caller's list stands.  Spelled out four times they were
+        four chances to describe that differently, and four places to add a key
+        to.
+
+        It used to name a fifth exit that does not exist, "the switch is off":
+        `ContextSettings` has no switch, and nothing here reads one, so a reader
+        looking for the arm that honours it was looking for an arm nobody had
+        written.  The discriminator that answers nothing is the real fourth, and
+        `rebuild` logs it as its own reason (`no_decision`, not
+        `context_sufficient`) because it is not a decision the model made.
 
         `kept` is what the caller in hand, `recalled` none of it — and the two
         together are what `rebuild` always reports, so a reader of the answer never
@@ -682,11 +707,23 @@ def build_server(
         """
         store = await store_of(agent, subagent)
         decision = await _discriminate(agent, subagent, model, messages, prompt)
-        if decision is None or decision.asks_for_nothing:
-            # The fallback, and the ordinary case: the turns in hand are the
-            # answer.  Nothing is fetched, nothing is rendered, nothing is
-            # written — and the list already on disk still describes what the
-            # caller is holding.
+        # **Two ways to have no decision, and the log keeps them apart.**  Both
+        # fall back to the turns in hand, and neither may be reported as the
+        # other: this line is the only sight anybody gets of the discriminator
+        # (`recall_discriminator_failed` and `_unparsed` are written a moment
+        # above and say *why* there was none), and a single `context_sufficient`
+        # for both made counting "the model decided the context was enough"
+        # count every timeout and every unreadable reply as a decision the model
+        # never made.  A decision that asks for nothing is the model's word; no
+        # decision at all is the transport's silence.
+        if decision is None:
+            logger.info("recall_not_needed reason=no_decision")
+            return _in_hand(messages, turn_ids)
+        if decision.asks_for_nothing:
+            # The ordinary case, and the one this fallback is for: the turns in
+            # hand are the answer.  Nothing is fetched, nothing is rendered,
+            # nothing is written — and the list already on disk still describes
+            # what the caller is holding.
             logger.info("recall_not_needed reason=context_sufficient")
             return _in_hand(messages, turn_ids)
 

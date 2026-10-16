@@ -409,6 +409,29 @@ def test_a_server_path_that_is_not_a_path_is_refused(tmp_path) -> None:
     assert load(path).server("context").url.endswith("/route"), "one address, whole"
 
 
+def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
+    """**A host is the first of `_server`'s three fields, and it was the last one
+    still unchecked.**
+
+    `ServerSettings.url` writes the address as `host:port` with nothing around
+    it, so `host: "::1"` built `http://::1:8010/mcp` — and that is not a URL
+    whose port can be read: `urlsplit("http://::1:8010/mcp").port` raised
+    `ValueError: Port could not be cast to integer value as ':1:8010'` out of
+    `start_lock`, in the start-up loop, after some servers were already up.
+    `host: 0.0.0.0/x` is the same mistake from the other side: the path moves
+    into the address and the port is gone.
+    """
+    for written in ("'::1'", "0.0.0.0/x"):
+        with pytest.raises(ConfigError, match=r"servers\.context\.host"):
+            load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
+
+    one = load(write(tmp_path, "servers:\n  context:\n    host: localhost\n"))
+    assert one.server("context").host == "localhost"
+    assert one.server("context").url.startswith("http://localhost:"), (
+        "the address is the host and the port together"
+    )
+
+
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     """**A typo has to read like every other typo.**
 
@@ -524,8 +547,13 @@ def test_an_empty_providers_section_is_refused(tmp_path) -> None:
     with pytest.raises(ConfigError, match="at least one provider"):
         load(write(tmp_path, "providers: {}\n"))
 
-    # Absent is still the defaults, which is what a fresh checkout starts with.
-    assert load(write(tmp_path, "# nothing here\n")).providers
+    # Absent is still the defaults, which is what a fresh checkout starts with —
+    # and the invariant is the *table*, not "some provider": a loader that
+    # answered with one stray entry would satisfy a bare truthiness test while
+    # having lost the built-in provider a config-less machine runs on.
+    config = load(write(tmp_path, "# nothing here\n"))
+    assert set(config.providers) == {"deepseek"}
+    assert config.default == "deepseek/deepseek-flash"
 
 
 def test_the_defaults_are_one_object_while_there_is_no_file(
@@ -632,7 +660,17 @@ providers:
 def test_missing_config_is_not_an_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """**Two claims, one behaviour — and it was two tests with one body.**
+
+    A data directory with no `slife2.yaml` in it is the shipped configuration: a
+    fresh checkout starts exactly here.  So the absence is a normal answer from
+    `find_config_path` rather than a failure, and `load` answers the built-in
+    defaults rather than refusing.  Written once because it is one path through
+    the loader; written twice, the second copy was a name with no assertion of
+    its own to make.
+    """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
     assert find_config_path() is None
     assert load() == default_config()
 
@@ -650,12 +688,6 @@ def test_env_var_names_the_data_directory(
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     assert find_config_path() == tmp_path / "slife2.yaml"
     assert "local" in load().providers
-
-
-def test_a_data_dir_without_a_config_falls_back(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    assert find_config_path() is None
-    assert load() == default_config()
 
 
 def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
@@ -753,15 +785,59 @@ def test_a_keyring_uri_that_failed_is_not_left_verbatim(
     `keyring:service/key` reference to travel as the secret itself.  Only a host
     with no `credstore` at all degrades to the reference; a backend that is
     there and refused raises where the secret is resolved.
+
+    A store that was asked and refused is the case this test holds, and it is
+    the one exception type `resolve_secret` deliberately does *not* translate —
+    the machine's keyring being locked is not a mistake in the file.
+    """
+    import credstore
+
+    def locked(value: str) -> str:
+        raise RuntimeError("the keyring is locked")
+
+    monkeypatch.setattr(credstore, "resolve_uri", locked)
+    with pytest.raises(RuntimeError, match="locked"):
+        resolve_secret("keyring:slife/deepseek")
+
+
+def test_a_keyring_uri_nobody_stored_is_a_config_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**credstore's "not found" is a config mistake, and it has to read like one.**
+
+    credstore raises a bare `KeyError` for a credential that was never stored,
+    and `KeyError` is not what anything on the load path catches: `slife2`'s
+    entry point and `family.py` each answer a bad config with their own one
+    sentence for `ConfigError` alone, so
+    `env: {TOKEN: 'keyring:slife/nothing-stored'}` printed a traceback out of the
+    console script instead of the refusal naming the reference — at the one
+    place where naming it is the whole of the fix.  Tested through `load` rather
+    than through `resolve_secret` alone, because "out of `load()`" is the
+    failure as it reaches a person.
     """
     import credstore
 
     def missing(value: str) -> str:
-        raise KeyError("Credential 'slife/deepseek' not found in keyring")
+        raise KeyError("Credential 'slife/nothing-stored' not found in keyring")
 
     monkeypatch.setattr(credstore, "resolve_uri", missing)
-    with pytest.raises(KeyError, match="not found"):
-        resolve_secret("keyring:slife/deepseek")
+
+    with pytest.raises(ConfigError) as raised:
+        resolve_secret("keyring:slife/nothing-stored")
+    assert "keyring:slife/nothing-stored" in str(raised.value)
+    assert "credstore set slife/nothing-stored" in str(raised.value), (
+        "the store is named, and so is the way to fill it"
+    )
+
+    text = (
+        "mcp:\n"
+        "  one:\n"
+        "    command: npx\n"
+        "    env:\n"
+        "      TOKEN: keyring:slife/nothing-stored\n"
+    )
+    with pytest.raises(ConfigError, match="nothing-stored"):
+        load(write(tmp_path, text))
 
 
 def test_no_credstore_at_all_leaves_a_keyring_uri_verbatim(
@@ -1072,6 +1148,64 @@ def test_no_cli_section_is_no_cli_entries(tmp_path) -> None:
     config = load(write(tmp_path, A_PROVIDER))
     assert config.cli == {}
     assert default_config().cli == {}
+
+
+# --- the switch, in all four sections that have one ---------------------------
+#
+# `_enabled` is one rule written once for four readers — `_tool_server`,
+# `_rest_api`, `_cli_tool` and `_skills` — and the four are checked together
+# because four separate tests is how four copies of one rule drift apart.  The
+# answers are the three the rule has: a real `false` is off, absent is on, and
+# anything else is refused.
+
+#: section name in the file, the shortest valid entry under it, and where those
+#: entries come back on `Config`.
+ENTRY_SECTIONS = (
+    ("mcp", "    command: npx\n", "mcp"),
+    ("rest-api", "    spec: https://example.test/openapi.json\n", "rest_apis"),
+    ("cli", "    command: gh\n", "cli"),
+    ("skills", "    env: {A: b}\n", "skills"),
+)
+
+
+@pytest.mark.parametrize(("section", "entry", "attr"), ENTRY_SECTIONS)
+def test_the_switch_is_a_boolean_or_it_is_refused(
+    tmp_path, section: str, entry: str, attr: str
+) -> None:
+    """**`enabled: no` is the string `no`, and `bool("no")` is true.**
+
+    ruamel loads YAML 1.2, where `no`, `off` and a quoted `"false"` are strings
+    rather than the booleans PyYAML would have made of them — so
+    `bool(raw.get("enabled", True))` turned every one of them *on*, and
+    `family.py` then dialled an entry the operator had switched off at every
+    start (`settings.enabled` is the whole of what decides whether a link is
+    made).  Handing the string to `bool` was the bug and coercing it to `False`
+    would be the same bug one spelling over: a value that cannot be read is not
+    an absent one, and a switch decides whether a process is dialled, so an
+    unreadable one is refused where every other unreadable field is — at load,
+    naming the entry and the key.
+
+    One case per section, because `_enabled` is one rule with four readers
+    (`_tool_server`, `_rest_api`, `_cli_tool`, `_skills`) and four separate
+    tests is how four copies of one rule drift apart.
+    """
+
+    def switch(text: str) -> bool:
+        return getattr(load(write(tmp_path, text)), attr)["one"].enabled
+
+    assert switch(f"{section}:\n  one:\n{entry}") is True, (
+        "absent means on — the key the file never writes"
+    )
+    assert switch(f"{section}:\n  one:\n{entry}    enabled: false\n") is False
+
+    # Everything a person writes when they mean off in another language or
+    # another YAML draft: the word, the alias, and the quoted boolean.
+    for written in ("no", "off", "'false'", "1", ""):
+        text = f"{section}:\n  one:\n{entry}    enabled: {written}\n"
+        with pytest.raises(ConfigError) as raised:
+            load(write(tmp_path, text))
+        assert f"{section}.one.enabled" in str(raised.value)
+        assert "expected `true` or `false`" in str(raised.value)
 
 
 # --- embeddings: which endpoint answers ---------------------------------------
@@ -1433,6 +1567,31 @@ def test_a_broker_address_that_is_not_one_is_refused(
 
     with pytest.raises(ConfigError, match="a2a-broker"):
         load(write(tmp_path, A_MESH))
+
+
+def test_a_broker_port_in_the_file_is_refused_like_the_one_on_the_flag(
+    tmp_path, monkeypatch
+) -> None:
+    """**`--a2a-broker host:0` was refused and `broker: {port: 0}` was not.**
+
+    The flag's port goes through `broker_address`, which insists on 1-65535, and
+    the section the flag is an override *of* is written in the same shape — but
+    its `port:` was read straight through, so `port: 0` loaded and the mesh
+    dialled `localhost:0` at every start.  That is a port no process can hold
+    (nothing binds this end of a broker connection), so the dial hangs until its
+    timeout instead of failing on the line that named it — the same failure the
+    flag's own refusal exists to prevent.  Both networks are checked because
+    `_a2a` parses both.
+    """
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+
+    for section in ("a2a", "subagent"):
+        for written in ("0", "70000"):
+            text = f"{section}:\n  broker:\n    host: localhost\n    port: {written}\n"
+            with pytest.raises(ConfigError) as raised:
+                load(write(tmp_path, text))
+            assert f"{section}.broker.port" in str(raised.value)
+            assert "is not a port" in str(raised.value)
 
 
 def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -> None:

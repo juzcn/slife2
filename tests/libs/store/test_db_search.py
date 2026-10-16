@@ -152,6 +152,50 @@ def test_a_long_turn_becomes_several_chunks_overlapping_by_a_paragraph() -> None
     assert len(set(chunks)) == len(chunks)
 
 
+def test_a_limit_below_the_chunk_size_bounds_the_packing_and_loses_nothing() -> None:
+    """**A small limit is the window's bound, not a cut taken off its end.**
+
+    Every caller passes the embedder's `max_chars` — the endpoint's own input
+    limit — so an endpoint with a small one used to pack a window of
+    `EMBED_CHUNK_CHARS` and slice it to the limit afterwards.  What the slice
+    removed sat in **no chunk at all**: not in the vector index, and not in
+    anything else built from these chunks, in silence, because the row still had
+    a vector and still counted as indexed.  Four paragraphs against this limit
+    came back as one chunk of five hundred characters with the last two
+    paragraphs simply absent from the file's vectors.
+
+    Both halves of the fix are here, because they trade against each other: a
+    paragraph that fits beside the carried overlap keeps it, and one that does
+    not gets the chunk to itself — giving up the overlap, which is a repetition
+    the previous chunk already holds, rather than the paragraph, which is text
+    that would then be nowhere.
+    """
+    # Three hundred characters each against a limit of five hundred and twelve:
+    # two of them do not fit in one chunk, and neither does the overlap.
+    long_paragraphs = [f"段落{number}" + "内容" * 149 for number in range(4)]
+    long_chunks = embed_chunks("\n\n".join(long_paragraphs), limit=512)
+
+    assert all(len(chunk) <= 512 for chunk in long_chunks), long_chunks
+    # One paragraph each, and each *whole*: the pairing is what says nothing was
+    # cut, and the count is what says nothing was dropped.
+    assert len(long_chunks) == len(long_paragraphs)
+    assert all(
+        paragraph in chunk
+        for paragraph, chunk in zip(long_paragraphs, long_chunks, strict=True)
+    )
+
+    # A hundred and thirteen characters each: several fit, so the overlap fits
+    # too and is still carried — the property the chunker exists for.
+    short_paragraphs = [f"段落{number}" + "内容" * 55 for number in range(6)]
+    short_chunks = embed_chunks("\n\n".join(short_paragraphs), limit=512)
+    packed = "\n\n".join(short_chunks)
+
+    assert all(len(chunk) <= 512 for chunk in short_chunks), short_chunks
+    assert len(short_chunks) > 1
+    assert all(paragraph in packed for paragraph in short_paragraphs)
+    assert short_chunks[0].split("\n\n")[-1] == short_chunks[1].split("\n\n")[0]
+
+
 def test_a_turn_with_nothing_to_embed_gets_no_vector() -> None:
     """A turn whose only message is a tool result renders as nothing.
 
@@ -320,11 +364,13 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     nearest = await store._semantic_hits("工具", embedder, 3)
 
     # A mapping, in nearest-first order: the *order* is what the fusion reads and
-    # the value is the similarity a recall gates on, so the assertion is about
-    # both — `list()` is the ranking it always was.
-    assert list(nearest) == [1, *list(nearest)[1:]]
+    # the value is the similarity a recall gates on, so both halves are asserted
+    # — the first turn is the one about this, and the similarities only ever
+    # fall.  (`list(nearest) == [1, *list(nearest)[1:]]` stood here, which is
+    # `nearest[0] == 1` written out at length, and the line below it says that.)
     assert next(iter(nearest)) == 1
     assert nearest[1] > 0.0
+    assert list(nearest.values()) == sorted(nearest.values(), reverse=True)
 
 
 @pytest.mark.asyncio
@@ -639,29 +685,40 @@ async def test_a_partial_embedding_is_refused_before_the_turn_is_written(
 
 @pytest.mark.asyncio
 async def test_the_loop_keeps_running_while_a_turn_is_embedded(tmp_path) -> None:
-    """Stated the way it matters: something else gets to run during a save."""
+    """Stated the way it matters: something else gets to run during a save.
+
+    **Coordination rather than a stopwatch.**  This counted heartbeat ticks
+    against a wall clock — at least three of them inside a fifty-millisecond
+    sleep — which says what it means only on an idle machine: under `-n auto` on
+    a busy one the heartbeat is scheduled late, the count falls short, and the
+    red test is about the runner rather than about the loop.  The embedder now
+    waits for the heartbeat to have run, so passing does not depend on how fast
+    the machine is, and a loop that really is held fails on a bound no amount of
+    slowness can reach.
+    """
+    ran = asyncio.Event()
 
     class Slow(StubEmbedder):
         async def embed(self, texts):
-            await asyncio.sleep(0.05)
+            # Nothing here completes until another task has run on this loop,
+            # and five seconds is not a timing: it is the point past which the
+            # only explanation left is a held loop, since a free one wakes the
+            # heartbeat in milliseconds however loaded it is.
+            await asyncio.wait_for(ran.wait(), timeout=5)
             return await super().embed(texts)
 
-    store = TurnStore(tmp_path / "jack.turn.db")
-    ticks = 0
-
     async def heartbeat() -> None:
-        nonlocal ticks
-        while True:
-            await asyncio.sleep(0.005)
-            ticks += 1
+        await asyncio.sleep(0.005)
+        ran.set()
 
+    store = TurnStore(tmp_path / "jack.turn.db")
     beat = asyncio.create_task(heartbeat())
     try:
         await store.save_turn(messages=CORPUS[0], embedder=Slow())
     finally:
         beat.cancel()
 
-    assert ticks >= 3, f"the loop was held: {ticks} ticks"
+    assert ran.is_set(), "the loop was held while the turn was embedded"
 
 
 def test_a_python_that_cannot_load_the_extension_says_which_it_is(

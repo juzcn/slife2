@@ -241,6 +241,33 @@ def translate(event: Any) -> list[ProviderEvent]:
             )
         )
 
+    legacy = getattr(delta, "function_call", None)
+    if legacy is not None and not deltas:
+        # **The deprecated spelling of the same call, translated rather than
+        # dropped.**  `function_call` is what the API streamed before
+        # `tool_calls` existed — one call, no index, no id — and a gateway that
+        # still speaks it carries the model's *whole* tool call there.  Reading
+        # only `tool_calls` meant the call vanished: no tool ran, the turn was
+        # recorded as a plain answer, and nothing anywhere said a call had been
+        # made.  The unknown-field warning beside this file exists to refuse
+        # exactly that silence, and the field is not even unknown — the SDK
+        # declares it — so it would not have fired either.
+        #
+        # Translated rather than named, because the field is legible: it holds
+        # what `tool_calls[0].function` holds, index 0 is the only index the
+        # one-call form had, and the id it lacks is synthesised by the
+        # accumulator for every call that arrives without one
+        # (`ToolCallAccumulator.complete`).  `tool_calls` wins where a gateway
+        # sends both, which is a proxy translating for an old endpoint: reading
+        # both would dispatch the same call twice.
+        deltas.append(
+            ToolCallDelta(
+                index=0,
+                name=getattr(legacy, "name", None),
+                arguments_delta=getattr(legacy, "arguments", None) or "",
+            )
+        )
+
     text = getattr(delta, "content", None) or ""
     if text or deltas:
         events.append(Chunk(text=text, tool_call_deltas=tuple(deltas)))

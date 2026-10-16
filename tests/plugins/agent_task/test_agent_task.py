@@ -23,6 +23,7 @@ return value, and it is one turn with exactly one rebuild in it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -37,6 +38,7 @@ from fakes import FakeBackend, StubEmbedder, plugin_transports, text_turn
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.agent_task.server import (
@@ -171,6 +173,20 @@ def build(
         source=lambda: config(**task_overrides),
     )
     return Built(mcp=mcp, backend=backend, window=window)
+
+
+@pytest.fixture
+def a_quick_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Walk `hand_over`'s refusal ladder without waiting out its real pace.
+
+    A refused hand-over is tried three times, `pacing.reconnect` apart — two
+    seconds by design, because the window it is aimed at may be restarting — so
+    a test that *ends* in a refusal spends four seconds on a fact it is not
+    asserting: the run is over, or the answer was not delivered.  The pace is a
+    registry value and patching one is what `slife2.helpers.timeouts` exists for;
+    the ladder's length is the design and is left alone.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
@@ -545,10 +561,116 @@ async def test_asking_never_carries_the_answer(
 # ── the cap, and the name ────────────────────────────────────────────────────
 
 
+async def test_the_cap_is_read_off_the_config_of_the_call(
+    hub: Client, store: Store
+) -> None:
+    """**The count is this home's, so the number it is compared against is too.**
+
+    `running` matches on `(home, agent, name)` — one process serves every home —
+    so a limit read off the *daemon's* boot config bounds a call by a number an
+    operator wrote in a directory this caller has never heard of, and an edit to
+    the file never reaches the call that enforces it.  Every other config read in
+    this server is `live()`'s (`model_for`, `run_loop`), and the sibling agent
+    server reads its own cap the same way.
+
+    Two homes' configs in one assertion: the config this process started on says
+    one task, and the config the call is in says two.  The second start is
+    accepted, which is the live config's number and not the boot config's.
+    """
+    from slife2.plugins.agent_task.server import build_server as build_task
+
+    backend = FakeBackend(
+        text_turn(
+            "never sent",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn(
+            "never sent either",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+    )
+    mcp = build_task(
+        # What the daemon started on...
+        config(max_running=1),
+        backend=backend,
+        context_client=store.client,
+        hub_client=hub,
+        # ...and what this call's home says now.
+        source=lambda: config(max_running=2),
+    )
+    async with Client(mcp) as client:
+        first = await ask(
+            client, AGENT_TASK_START, {"name": "one", "description": DESCRIPTION}
+        )
+        second = await ask(
+            client, AGENT_TASK_START, {"name": "two", "description": DESCRIPTION}
+        )
+        for name in ("one", "two"):
+            await ask(client, AGENT_TASK_CANCEL, {"name": name})
+
+    assert first["status"] == "running"
+    assert second["status"] == "running", "the boot config's number was enforced"
+
+
+async def test_a_cancelled_task_holds_no_handle(
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task that was called off holds nothing, like the two that stop cleanly.
+
+    The three endings share one `finally` for the two things a task holds — the
+    `asyncio.Task` and the answer beside it — and the cancelled path used to
+    re-raise *before* it, from its own `except`, so a cancelled task kept its
+    finished handle for as long as the registry remembered it: a finished
+    `asyncio.Task` holds its result, and that result is the loop's frames.  What
+    is released here is the same megabytes the comment is about, so it is
+    asserted on the object rather than through a tool.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    made: list[Any] = []
+    real_task = module.AgentTask
+
+    def recording(**fields: Any) -> Any:
+        """The task itself, kept so a test can look at what it holds."""
+        task = real_task(**fields)
+        made.append(task)
+        return task
+
+    monkeypatch.setattr(module, "AgentTask", recording)
+    built = build(
+        text_turn(
+            "never sent",
+            delay=5.0,  # timeouts: the value this test is built around, not a budget
+        ),
+        hub=hub,
+        context=store,
+        window=window,
+    )
+    await start(built)
+    handle = made[0].handle
+    async with Client(built.mcp) as client:
+        stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "research"})
+    assert stopped["status"] == "cancelled"
+
+    # The coroutine's own ending, awaited rather than slept away: the release is
+    # in its `finally`, so the assertion below is about a build and not a race.
+    assert handle is not None
+    with contextlib.suppress(asyncio.CancelledError):
+        await handle
+
+    assert made[0].handle is None, "a cancelled task still holds its coroutine"
+    assert made[0].text == ""
+
+
 async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> None:
     built = build(
         text_turn(
             "one",
+            # **One chunk**, because `text_turn` splits its text a character at
+            # a time and the delay is paid per chunk: three characters at a
+            # second each is a turn of four seconds for a test that wants a turn
+            # still running when the next call arrives.
+            chunks=["one"],
             delay=1.0,  # timeouts: the value this test is built around, not a budget
         ),  # timeouts: the value this test is built around, not a budget
         hub=hub,
@@ -568,6 +690,11 @@ async def test_two_tasks_may_not_share_one_name(hub: Client, store: Store) -> No
     built = build(
         text_turn(
             "one",
+            # **One chunk**, because `text_turn` splits its text a character at
+            # a time and the delay is paid per chunk: three characters at a
+            # second each is a turn of four seconds for a test that wants a turn
+            # still running when the next call arrives.
+            chunks=["one"],
             delay=1.0,  # timeouts: the value this test is built around, not a budget
         ),  # timeouts: the value this test is built around, not a budget
         hub=hub,
@@ -670,6 +797,107 @@ async def test_the_cap_counts_only_the_callers_homes_tasks(
     assert mine["status"] == "running", "this home's cap was free"
 
 
+# ── two tasks, one agent ─────────────────────────────────────────────────────
+
+
+async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
+    hub: Client, window: Window
+) -> None:
+    """**`restore` and `rebuild` are one step, and a snapshot is not a decision.**
+
+    A rebuild's target is built from the list its *own* restore read, so a task
+    that interleaves those two calls with another task's writes a list decided
+    against a conversation that has moved — and the writer whose write lands
+    last is the one whose snapshot is older.  What the store then holds is the
+    older decision, and the next `restore` (an idle reap, a restart, a new
+    terminal) rebuilds the conversation from it: a task's work dropped from the
+    context with nothing anywhere saying so.
+
+    The cap allows `max_running` tasks for one agent, so this is a state two
+    calls can reach.  The agent server holds its `Loop.lock` across exactly these
+    two calls; a task is the agent's own work, so this server holds its own lock
+    the same way — one agent's pre-turn work at a time.
+
+    Two turns are in the conversation, and the two tasks decide differently about
+    them: the first keeps one of them, the second clears the context.  What the
+    store holds afterwards is the *second* task's decision — and a build without
+    the lock leaves the first task's, written from a snapshot taken before the
+    second had even read one.
+    """
+    from slife2.libs.host.paths import agent_dir
+    from slife2.libs.store.db import TurnStore
+    from slife2.plugins.context.server import build_server as build_context
+
+    asked: list[str] = []
+    parked = asyncio.Event()
+    second_in = asyncio.Event()
+    gate = asyncio.Event()
+    keep_one = ""
+
+    async def discriminating(
+        agent: str, subagent: str, model: str, messages: Any, prompt: str
+    ) -> str:
+        """The first task parks inside its rebuild; the second clears it."""
+        asked.append(prompt)
+        if len(asked) == 1:
+            parked.set()
+            await gate.wait()
+            return keep_one
+        second_in.set()
+        return '{"context": "clear"}'
+
+    async with Client(
+        build_context(default_config(), embedder=StubEmbedder(), ask=discriminating)
+    ) as context_client:
+        store = Store(client=context_client, ask=Discriminator())
+        async with Client(context_client.transport) as writer:
+            ids = []
+            for word in ("alpha", "beta"):
+                stored = await writer.call_tool(
+                    "remember",
+                    {
+                        "agent": AGENT,
+                        "messages": [{"role": "user", "content": f"{word} is here"}],
+                        "who_helped": AGENT,
+                        "channel": "tui",
+                        "created_at": "2026-10-12T09:00:00+08:00",
+                        "completed_at": "2026-10-12T09:00:01+08:00",
+                    },
+                    meta=client_meta(AGENT),
+                )
+                ids.append(stored.data["turn_id"])
+        # A keep-list for the first task's own decision: one of the two turns,
+        # which is a *write* against the two that are in hand.
+        keep_one = json.dumps({"context": [ids[0]]})
+
+        built = build(
+            text_turn("one answered"),
+            text_turn("two answered"),
+            hub=hub,
+            context=store,
+            window=window,
+        )
+        await start(built, "one")
+        await asyncio.wait_for(parked.wait(), timeout=_T.timeouts.work.hub)
+        await start(built, "two")
+        # **The second task's snapshot is taken here, or not at all.**  Its
+        # rebuild is in flight when the discriminator is asked, so its `restore`
+        # has already read the list — and that read is what the first task's
+        # write would have to land before to be an *interleaving* rather than a
+        # sequence.  With the lock this never arrives, because the second task is
+        # waiting on the first: a bounded wait, so the case the fix removes is a
+        # fact instead of a hope, and the assertion below does not depend on it.
+        for _ in range(100):
+            if second_in.is_set():
+                break
+            await asyncio.sleep(0.01)
+        gate.set()
+        await wait_for_handover(window, 2)
+
+    turns = TurnStore(agent_dir(AGENT) / "turns.db").context_turns()
+    assert turns == [], "the conversation holds the decision that was made last"
+
+
 # ── stopping one ─────────────────────────────────────────────────────────────
 
 
@@ -726,7 +954,10 @@ async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) ->
 
 
 async def test_an_answer_with_no_window_is_undelivered_and_said(
-    hub: Client, store: Store, caplog: pytest.LogCaptureFixture
+    hub: Client,
+    store: Store,
+    caplog: pytest.LogCaptureFixture,
+    a_quick_ladder: None,
 ) -> None:
     """The case a background task exists for: start it, close the window, walk
     away — and the answer reaches nobody.
@@ -783,7 +1014,11 @@ async def test_a_hand_over_that_did_not_come_back_is_not_repeated(
 
 
 async def test_a_refusing_window_is_the_end_of_that_answer(
-    hub: Client, store: Store, dead_window: Window, caplog: pytest.LogCaptureFixture
+    hub: Client,
+    store: Store,
+    dead_window: Window,
+    caplog: pytest.LogCaptureFixture,
+    a_quick_ladder: None,
 ) -> None:
     """And the same for the other answer: a refusal proves nothing was written,
     which used to be the licence to run the answer through the agent server.

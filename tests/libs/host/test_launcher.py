@@ -4,6 +4,15 @@
 outcomes — reuse, start, conflict — are assertions instead of timing.  The one
 thing that does use a second process is the agent-name claim, because a Windows
 mutex is recursive within a thread and an in-process test would prove nothing.
+
+**And that one thing is what the marker has to say.**  `integration` is I/O,
+network or subprocess, and the claim tests here spawn real interpreters and read
+their standard output — so the module was mislabelled `unit`, which is the lane
+documented as "no I/O, no subprocess", and put several seconds of interpreter
+startup into the lane somebody runs precisely because it is the fast one.  The
+tests that need none of that stay with the file: they are the tables this
+launcher is built from (which server each protocol is, what waits for what) and
+a lane is a fact about a file rather than a chance to grade its tests.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.launcher import AgentInUse, ServerSpec, Status
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 #: The checkout, found by the file that names it rather than by counting
 #: directories up: a depth is a number that goes stale in silence.
@@ -50,7 +59,7 @@ REPO = str(
 # --- which servers are needed ------------------------------------------------
 
 
-def test_there_is_one_plugin_per_job() -> None:
+def test_there_is_one_plugin_per_job(tmp_path) -> None:
     """One agent loop, one context store, one hub,
     one process per wire protocol.
 
@@ -63,7 +72,7 @@ def test_there_is_one_plugin_per_job() -> None:
     order they start in, which comes from `launcher.NEEDS` — the two edges are
     asserted just below.
     """
-    config = load(_config_with_every_protocol())
+    config = load(_config_with_every_protocol(tmp_path))
     names = [spec.name for spec in launcher.specs(config)]
     assert names == [
         "llm:openai-completions",
@@ -277,20 +286,38 @@ def test_the_work_is_reported_in_the_order_it_finishes() -> None:
 
     It is also what a caller printing as it goes is watching for: the line that
     appears last is the one that took the time.
+
+    **The slow one is held by an event rather than by a sleep.**  What the test
+    is about is *when* an outcome is handed over, and `time.sleep(0.3)` made that
+    a question about the thread pool instead: on a loaded machine the "slow"
+    worker can start late enough that both finish in `batch` order, and the
+    assertion then fails at a test that is not wrong — while costing a third of a
+    second in the `unit` lane on every run either way.  Held by an event the
+    consumer sets, the order is not a race: the first outcome cannot be yielded
+    until `fast` has returned, because `slow` is still waiting for a signal that
+    only this loop sends — and a `_concurrently` that buffered its results
+    reports that as the assertion inside the worker, bounded, rather than as a
+    test that hangs.
     """
     batch = [
         replace(SPEC, name="slow", url="http://127.0.0.1:8201/mcp"),
         replace(SPEC, name="fast", url="http://127.0.0.1:8202/mcp"),
     ]
+    released = threading.Event()
 
     def work(spec: ServerSpec) -> launcher.Outcome:
-        time.sleep(0.3 if spec.name == "slow" else 0.0)
+        if spec.name == "slow" and not released.wait(timeout=5):
+            # The magnitude is a hang detector, not a budget: five seconds is
+            # long past anything this needs to finish in.
+            raise AssertionError("nothing was yielded until everything had finished")
         return launcher.Outcome(spec, Status.RUNNING)
 
-    assert [o.spec.name for o in launcher._concurrently(work, batch)] == [
-        "fast",
-        "slow",
-    ]
+    seen: list[str] = []
+    for outcome in launcher._concurrently(work, batch):
+        seen.append(outcome.spec.name)
+        released.set()
+
+    assert seen == ["fast", "slow"]
 
 
 def test_every_plugin_has_a_module_and_every_module_a_plugin() -> None:
@@ -305,7 +332,7 @@ def test_every_plugin_has_a_module_and_every_module_a_plugin() -> None:
     assert set(LOCAL_SERVERS) == set(launcher.SERVER_MODULES)
 
 
-def test_the_hub_asks_exactly_what_the_launcher_starts() -> None:
+def test_the_hub_asks_exactly_what_the_launcher_starts(tmp_path) -> None:
     """The third thing that could drift, and the one with teeth.
 
     The hub reaches into our plugins for the model's tools, and it asks every
@@ -315,7 +342,7 @@ def test_the_hub_asks_exactly_what_the_launcher_starts() -> None:
     one the hub asks and nothing starts is a connection that can only fail —
     which, a plugin being required, fails the tool list of every turn.
     """
-    config = load(_config_with_every_protocol())
+    config = load(_config_with_every_protocol(tmp_path))
     started = {
         spec.name.removeprefix(launcher.BACKEND_PREFIX)
         for spec in launcher.specs(config)
@@ -323,14 +350,14 @@ def test_the_hub_asks_exactly_what_the_launcher_starts() -> None:
     assert set(config.plugins()) == started
 
 
-def test_one_server_per_wire_protocol() -> None:
+def test_one_server_per_wire_protocol(tmp_path) -> None:
     """Not one per provider — that is what this replaced.
 
     A process speaks one format, so every OpenAI-compatible provider shares it
     and `stream_chat(provider=...)` says whose credentials to use.  Two
     providers on one protocol is one process.
     """
-    path = _config_with_every_protocol()
+    path = _config_with_every_protocol(tmp_path)
     names = [spec.name for spec in launcher.specs(load(path))]
     assert names == [
         "llm:openai-completions",
@@ -356,10 +383,14 @@ def test_one_server_per_wire_protocol() -> None:
     ]
 
 
-def _config_with_every_protocol():
-    import tempfile
+def _config_with_every_protocol(tmp_path) -> Path:
+    """A config with one provider on each wire protocol, written into *tmp_path*.
 
-    path = Path(tempfile.mkdtemp()) / "all.yaml"
+    The test's own directory rather than `tempfile.mkdtemp()`: four tests read
+    this, so the version that made a directory for itself left four of them in
+    the system temporary directory on every run, and nothing ever removed them.
+    """
+    path = tmp_path / "all.yaml"
     path.write_text(
         """
 providers:
@@ -377,7 +408,7 @@ default: a/m
 def test_the_api_chooses_the_module(tmp_path) -> None:
     modules = {
         spec.name: spec.module
-        for spec in launcher.specs(load(_config_with_every_protocol()))
+        for spec in launcher.specs(load(_config_with_every_protocol(tmp_path)))
     }
     assert modules["llm:openai-completions"] == "slife2.plugins.llm.openai_server"
     assert modules["llm:anthropic-messages"] == "slife2.plugins.llm.anthropic_server"
@@ -594,7 +625,7 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
 
 
 def test_a_spawned_server_is_told_where_the_data_directory_is(
-    monkeypatch: pytest.MonkeyPatch,
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Always, not only when an environment variable happens to be set.
 
@@ -606,16 +637,34 @@ def test_a_spawned_server_is_told_where_the_data_directory_is(
     does not have:
 
         slife2-llm-anthropic: this config has no anthropic-messages provider
+
+    **What is asserted is the value, not the module that wrote it**, and the two
+    are not the same test: the expectation here used to be
+    `str(launcher.data_dir())` — the very call `_argv` makes — so it held for any
+    answer at all, including the checkout the process happened to be sitting in.
+    The two halves are what the docstring claims: the child is handed *this*
+    test's home when the variable names one, and an absolute path to the
+    checkout when it does not.
     """
-    monkeypatch.delenv("SLIFE2_DATA_DIR", raising=False)
     spec = next(
         s for s in launcher.specs(default_config()) if s.name.startswith("llm:")
     )
-    argv = launcher._argv(spec)
 
+    argv = launcher._argv(spec)
     assert "--data-dir" in argv
     given = argv[argv.index("--data-dir") + 1]
-    assert given == str(launcher.data_dir())
+    assert given == str(isolated_runtime.resolve()), (
+        "the child is told this home, and told where it really is"
+    )
+
+    # With no variable to read, `slife2.libs.host.paths` answers the checkout —
+    # which is where a `slife2.yaml` beside the code is looked for, and so the
+    # directory a server has to be told about to find the config this process
+    # read.
+    monkeypatch.delenv("SLIFE2_DATA_DIR", raising=False)
+    argv = launcher._argv(spec)
+    assert "--data-dir" in argv, "and it is told one with nothing to read"
+    assert (Path(argv[argv.index("--data-dir") + 1]) / "pyproject.toml").is_file()
 
 
 def test_a_registered_server_is_reused_and_nothing_is_spawned(
@@ -976,6 +1025,28 @@ def test_the_claim_is_cleared_on_the_way_out() -> None:
     assert runtime.read_claim("eta") is None
 
 
+def test_a_timeout_inside_the_claim_is_not_a_name_someone_holds() -> None:
+    """**The claim's `except TimeoutError` used to wrap the caller's whole body.**
+
+    The `try` opened before `with exclusive(...)` and closed after it, so the
+    `yield` — every line of slife2's start-up and of `app.run()` — was inside it.
+    A `TimeoutError` from anywhere in there (`toolclient.remote_tools` asks the
+    hub under `work.hub`) came out as `AgentInUse("slife2", …) from None`, which
+    is the one sentence a person would act on — "agent 'slife2' is already
+    running (pid …)" — said about a name nothing held, with the real failure
+    discarded by the `from None` on top of it.  The lock's own timeout is the
+    only thing that can mean that, and the name is free.
+    """
+    with pytest.raises(TimeoutError):
+        with launcher.claim_agent("a-name-nothing-holds"):
+            raise TimeoutError("the hub did not answer in time")
+
+    # And the claim is not left behind by the failure that went through it.
+    assert "a-name-nothing-holds" not in launcher._HELD_NAMES
+    with launcher.claim_agent("a-name-nothing-holds"):
+        pass
+
+
 # --- stop --------------------------------------------------------------------
 
 
@@ -1037,3 +1108,42 @@ def test_stop_calls_a_record_whose_process_is_gone_gone(
 
 def _config_with_only_deepseek() -> Config:
     return default_config()
+
+
+def test_stop_keeps_the_record_of_a_process_that_did_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Clearing the record is how a surviving daemon is forgotten.**
+
+    `terminate` answering False means the process is still there — the grace
+    period ran out, or the kill was refused — and that is precisely when the
+    record still has work to do: the pid and the start token in it are the whole
+    of what lets the next `slife2 down` prove the process is ours and signal it
+    again.  Clearing it forgot the daemon, so a second `down` found no record,
+    answered `UNMANAGED` — "(not started by slife2)" — and never touched it
+    again, while `status` said the same about a port that is still held.  The
+    two cases the tree already covers both leave before this line (`same_process`
+    is False for a reused pid and a gone one), so neither of them reached it.
+
+    The record names *this* process with its real start token, so everything
+    above the `terminate` call runs as it does in production and only that call
+    is stubbed.
+    """
+    token = runtime.process_start_token(os.getpid())
+    assert token, "the platform this runs on has no start token to write"
+    runtime.write_record(
+        runtime.ServerRecord(
+            name=SPEC.name, url=SPEC.url, pid=os.getpid(), start_token=token
+        )
+    )
+    monkeypatch.setattr(launcher, "terminate", lambda pid, **k: False)
+
+    # Materialised once: `stop` is a generator, so a second `any` over it would
+    # be asking the servers behind the first one.
+    outcomes = list(launcher.stop(_config_with_only_deepseek()))
+
+    assert any(outcome.status is Status.FAILED for outcome in outcomes)
+    assert any("did not exit" in outcome.detail for outcome in outcomes)
+    assert runtime.read_record(SPEC.url) is not None, (
+        "the record is the only thing that can find that pid again"
+    )

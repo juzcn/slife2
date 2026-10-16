@@ -29,6 +29,7 @@ import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -121,7 +122,19 @@ class Window:
                 raise ConnectionError("the stream dropped mid-call")
             if self.refuse:
                 raise ToolError(f"no window is showing {agent}'s conversation")
-            self.handed.append({"agent": agent, "text": text, "channel": channel})
+            # **The home the call arrived in**, read on this side of the hop: it
+            # is the caller's (`client_meta`'s `data_dir`), applied by the
+            # protocol's own middleware, so a trigger offered to the wrong home
+            # is visible here rather than only in the conversation it never
+            # reached.
+            self.handed.append(
+                {
+                    "agent": agent,
+                    "text": text,
+                    "channel": channel,
+                    "home": str(paths.home()),
+                }
+            )
 
 
 @dataclass
@@ -145,6 +158,8 @@ class Tasks:
     status: str = TASK_RUNNING
     started: list[dict[str, Any]] = field(default_factory=list)
     asked: list[str] = field(default_factory=list)
+    #: The home each `agent_task_list` ask arrived in, in the same order.
+    asked_home: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.mcp: FastMCP = FastMCP("tasks")
@@ -160,7 +175,15 @@ class Tasks:
             if self.refuse:
                 raise ToolError(f"an agent task named {name!r} is already running")
             self.started.append(
-                {"agent": who(ctx), "name": name, "description": description}
+                {
+                    "agent": who(ctx),
+                    "name": name,
+                    "description": description,
+                    # The home the dispatch arrived in, as `Window.handed` reads
+                    # it — a task is an agent's *in a home*, and a shared clock
+                    # that forgot which one starts the work in its own.
+                    "home": str(paths.home()),
+                }
             )
             return {
                 "task_id": f"agent-task:{name}",
@@ -173,6 +196,11 @@ class Tasks:
         @self.mcp.tool
         async def agent_task_list(ctx: Context) -> dict[str, Any]:
             self.asked.append(who(ctx))
+            # The home this ask arrived in — the same fact `started` records,
+            # and the one that decides *which* registry the answer came from: a
+            # shared clock asking in its own home is told about a different
+            # home's tasks, and reads a running one as "no longer held".
+            self.asked_home.append(str(paths.home()))
             return {
                 "tasks": [
                     {
@@ -211,6 +239,21 @@ async def dead_window() -> AsyncIterator[Window]:
     async with Client(node.mcp) as client:
         node.client = client
         yield node
+
+
+@pytest.fixture
+def a_quick_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Walk `hand_over`'s refusal ladder without waiting out its real pace.
+
+    A refused hand-over is tried three times, `pacing.reconnect` apart — two
+    seconds by design, because the window it is aimed at may be restarting — so
+    a test that *ends* in a refusal spends four seconds on a fact it is not
+    asserting.  What it asserts is the ledger: the run is `failed` and the reason
+    travels with it.  The pace is a registry value and patching one is what
+    `slife2.helpers.timeouts` exists for; the ladder's *length* is the design and
+    is left alone.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
@@ -389,10 +432,16 @@ async def test_a_task_is_written_read_back_and_listed() -> None:
 
         fire = datetime.fromisoformat(written["next_run"])
         assert fire.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M") == "09:00"
-        # The other half of the same rule, and the half that says *which* zone
-        # the string came back in: the offset it carries is this machine's for
-        # that instant, compared against the machine rather than named.
-        assert fire.utcoffset() == fire.astimezone().utcoffset()
+        # The other half: the string came back **aware** — it says which zone it
+        # is in rather than leaving a reader to assume one.  That is what every
+        # timezone shares, and it is all this can assert here: *which* offset it
+        # carries is `clock.at`'s contract, stated and tested once in
+        # `tests/helpers/test_timeutil.py`, where a comparison against the
+        # machine's own zone can be written without this file depending on the
+        # runner's.  Asserted here as `utcoffset() == utcoffset()` it was inert
+        # on a UTC runner — true whatever the code did — and meaningful only on
+        # a machine that happens to be offset from UTC.
+        assert fire.utcoffset() is not None, "the stamp says which zone it is in"
 
         listed = await ask(client, SCHEDULE_LIST)
         assert [row["name"] for row in listed["tasks"]] == ["daily"]
@@ -586,6 +635,7 @@ async def test_a_disabled_task_is_never_fired(window: Window) -> None:
 
 async def test_a_run_no_window_could_be_reached_for_is_failed(
     dead_window: Window,
+    a_quick_ladder: None,
 ) -> None:
     """A window that is not showing that agent is a failure, not a detour.
 
@@ -661,7 +711,7 @@ async def test_a_ledger_that_does_not_say_whose_it_is_is_skipped(
     with caplog.at_level(logging.WARNING):
         # The schema, and no owner: what a file left by something that is not
         # this build looks like.
-        ScheduleStore(paths.schedule_db(AGENT))
+        ScheduleStore(paths.schedule_db(AGENT), paths.home())
         did = await poll_once(
             default_config(), window_client=window.client, reference=later(600)
         )
@@ -718,9 +768,13 @@ async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
     assert run["status"] == PENDING
     assert run["agent_task_id"] == "agent-task:daily"
     # Handed over as the agent, under the task's own name, with the description
-    # as the whole of what the work is told.
-    assert tasks.started == [
-        {"agent": AGENT, "name": "daily", "description": DESCRIPTION}
+    # as the whole of what the work is told — and in this home, which is the
+    # caller's and is read here rather than assumed.
+    assert [
+        (one["agent"], one["name"], one["description"]) for one in tasks.started
+    ] == [(AGENT, "daily", DESCRIPTION)]
+    assert [Path(one["home"]).resolve() for one in tasks.started] == [
+        paths.home().resolve()
     ]
 
 
@@ -1180,6 +1234,78 @@ async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
     # The good ledger fired; the bad one was skipped rather than aborting the pass.
     assert [entry["agent"] for entry in window.handed] == [OTHER]
     assert any(OTHER in line for line in did)
+
+
+async def test_a_ledger_in_another_home_is_fired_in_that_home(
+    window: Window, tasks: Tasks, tmp_path: Path
+) -> None:
+    """**A second home's schedule runs in the second home.**
+
+    One shared clock serves every home on the machine — `schedule_dbs` walks them
+    all, and that is what it is for: a schedule fires while nobody is watching,
+    which is exactly a home with no window in it.  But a home is a property of
+    the *request* a shared process is serving, not of the process, so a ledger
+    found in another home has to be fired with that home in force.  Everything a
+    fire reaches for is otherwise the daemon's own: the address `client_meta`
+    stamps on the dispatch, the agent-task peer that starts the work, and the
+    window the trigger is offered to.  Fired in the wrong home, the trigger is
+    handed to a conversation that is not the one the ledger belongs to — the real
+    window refuses it, "no window is showing it" — and the run is settled
+    `failed`, once per due task, for ever.
+
+    The recorders read the home on the *server* side of each call, which is where
+    the difference is observable: it is the caller's, applied from the meta by
+    the protocol's own middleware.
+    """
+    other = tmp_path / "another-home"
+    (other / "agents" / AGENT).mkdir(parents=True)
+
+    async with Client(build(window, tasks)) as client:
+        # **Written through the plugin's own tool, addressed at the other home.**
+        # `client_meta`'s explicit `home` is for exactly this — a caller acting
+        # for a home it is not itself in — so the task lands in a ledger this
+        # process is not living in, which is the whole arrangement under test.
+        await client.call_tool(
+            SCHEDULE_SET,
+            {"name": "daily", "description": DESCRIPTION, "cron": EVERY_MINUTE},
+            meta=client_meta(AGENT, home=str(other)),
+        )
+
+    ledger = other / "agents" / AGENT / "schedule.db"
+    assert ledger.is_file()
+    paths.register_home(other)
+
+    # A run left in flight, so this pass has something to *ask* the task server
+    # about as well as something to fire — the two halves of one passthat have
+    # to happen in the same home, and the two the walk used to get wrong.
+    with paths.in_home(other):
+        store = ScheduleStore.adopt(ledger, other)
+        assert store is not None
+        task = store.task("daily")
+        assert task is not None
+        stamp = now()
+        store.record(task, stamp)
+        store.attach("daily", stamp, "agent-task:daily")
+
+    did = await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
+
+    assert any(AGENT in line for line in did), did
+    assert [one["agent"] for one in window.handed] == [AGENT]
+    assert Path(window.handed[0]["home"]).resolve() == other.resolve(), (
+        "the trigger was offered to the ledger's own home"
+    )
+    # And the ask that closes a run went to the same place: addressed at the
+    # daemon's own home, the task server answers about *its* registry, and a
+    # run that is still going is read as one nothing is holding.
+    assert tasks.asked == [AGENT], tasks.asked
+    assert Path(tasks.asked_home[0]).resolve() == other.resolve(), (
+        "the run in flight was asked after in the ledger's own home"
+    )
 
 
 async def test_a_ledger_that_cannot_be_opened_is_skipped_not_fatal() -> None:

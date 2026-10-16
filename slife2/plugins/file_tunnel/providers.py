@@ -474,9 +474,21 @@ class _TunnelProviderBase:
         cannot answer is not an outage — the caller is deciding whether to
         refuse an exposure, and a broken probe must not be the thing that
         refuses.
+
+        **A URL from the environment has no transport here to probe**, which is
+        the same rule read one step earlier.  :attr:`public_url` falls back to
+        ``SLIFE2_FILE_TUNNEL_URL`` — a tunnel this process did not start, which
+        is the whole point of the variable and what :meth:`share_url_for` hands
+        out — so ``self._public_url`` is ``None`` while ``is_active`` is True.
+        Reading the private field made every such URL unreachable in the same
+        breath as ``is_active`` saying it was running: ``expose_local_image``
+        refused the file with a sentence about the edge answering 530, which is
+        a claim about a transport this process is not running and never probed.
+        With nothing of ours behind the URL there is nothing to ask, so the
+        answer is whether there is a URL at all.
         """
         if self._public_url is None:
-            return False
+            return self.public_url is not None
         try:
             return bool(self.is_alive())
         except Exception:  # noqa: BLE001 — a failed probe must not refuse
@@ -497,9 +509,17 @@ class _TunnelProviderBase:
         A CLI provider adds the resolved ``binary`` path once it has one, so a
         reader can tell *which* program is running and not only its provider
         name.  Absent for an SDK transport, and for a CLI provider still idle.
+
+        **An inherited URL is reported as the active one**, because that is what
+        it is: :attr:`is_active` is True and :meth:`share_url_for` hands it out,
+        so answering ``idle`` with an empty url made `tunnel_status` deny the one
+        URL every other reader in this process was using — the contradiction
+        :meth:`is_reachable` was fixed on, told about the same tunnel.
         """
         if self._public_url is not None:
             state = {"state": "active", "url": self._public_url}
+        elif (inherited := self.public_url) is not None:
+            state = {"state": "active", "url": inherited}
         elif self._starting:
             state = {"state": "starting", "url": ""}
         elif self._failed:
@@ -1135,11 +1155,17 @@ class _CliTunnelProvider(_TunnelProviderBase):
         try:
             assert proc.stdout is not None  # Popen set it above
             for line in proc.stdout:
-                # A superseded attempt must not feed the current one: after a
-                # retry this thread still holds the OLD child's pipe, and a
-                # stale "registered" line arriving after the new attempt reset
-                # its state would mark a dead tunnel ready.
-                if self._proc is not None and proc is not self._proc:
+                # **A reader feeds the current attempt or it feeds nothing.**
+                # After a retry this thread still holds the OLD child's pipe, and
+                # a stale line arriving after the new attempt reset its state
+                # would mark a dead tunnel ready — or, once the child is gone and
+                # `_proc` is None, resurrect the URL of a tunnel `stop` took
+                # down.  The guard used to be `self._proc is not None and proc is
+                # not self._proc`, and that first clause read "this process has
+                # torn the attempt down" as "this reader is the current one":
+                # every stale line written between the termination and the pipe
+                # closing was applied to a tunnel that no longer existed.
+                if proc is not self._proc:
                     break
                 self._recent.append(line.rstrip())
                 # The child narrates what it is doing with the edge ("Retrying
@@ -1187,7 +1213,14 @@ class _CliTunnelProvider(_TunnelProviderBase):
                 e,
             )
         finally:
-            self._eof_event.set()
+            # **`_eof_event` is the *current* attempt's**, and the same guard
+            # decides who may set it.  `_spawn` clears it for the attempt it is
+            # starting, so a superseded reader that died after that clear used to
+            # answer the new attempt's wait loop with "the child closed its
+            # output without a tunnel URL" — a start reported as a failure while
+            # its own child was still coming up.
+            if proc is self._proc:
+                self._eof_event.set()
 
     def _kill_proc(self) -> None:
         """Terminate the child (escalating terminate → kill) and drop the

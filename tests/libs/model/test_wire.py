@@ -257,5 +257,14 @@ def test_preview_truncates_and_marks_it() -> None:
 
 @pytest.mark.asyncio
 async def test_null_observer_accepts_every_event() -> None:
+    """The observer for a turn nobody is watching, and the whole of its contract.
+
+    **Not "it returns `None`"**, which is what this asserted: a method with no
+    return statement answers `None` whatever it is handed, so that line passed
+    for an observer that mangled every event on the way past.  A null observer
+    has to be *usable where an observer is required*, and the only thing that can
+    go wrong is the call — so every event this build can emit is handed to it and
+    none of them raises.  "Nobody is watching" is that and no more.
+    """
     for event in EVENTS:
-        assert await NULL_OBSERVER.on_event(event) is None
+        await NULL_OBSERVER.on_event(event)

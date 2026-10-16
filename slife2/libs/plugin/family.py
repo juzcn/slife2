@@ -509,13 +509,22 @@ class Family:
     async def put(self, settings: ToolServerSettings) -> Held:
         """Hold *settings*, replacing whatever was held under that name.
 
-        **The new entry is in the map before anything is awaited.**  A caller
-        that took the old one out and only then awaited its close would leave a
-        window in which this family declares *nothing* for a name it still
-        holds — and the hub reads a source that has stopped being declared as an
-        entry taken out of the section, so it would delete that server's rows
-        and re-embed every one of them when the next declaration put them back.
-        So the swap is synchronous and the teardown follows it.
+        **The new entry is in the map before anything is awaited, and in the
+        place the old one held.**  A caller that took the old one out and only
+        then awaited its close would leave a window in which this family declares
+        *nothing* for a name it still holds — and the hub reads a source that has
+        stopped being declared as an entry taken out of the section, so it would
+        delete that server's rows and re-embed every one of them when the next
+        declaration put them back.  So the swap is synchronous and the teardown
+        follows it.
+
+        **And the place matters as much as the moment**: `_held` is in file order,
+        which is the order this family declares its sources in and the order the
+        hub keeps them in (`build_family_server`'s `list_sources`), so an edit
+        that moved its entry to the end would re-order the status view against
+        the file `mcp_list`/`rest_api_list` read.  The name is assigned over, and
+        never popped and re-inserted: an assignment to an existing key is the one
+        operation that changes the value without changing the order.
 
         The replacement is a *new* connection rather than a mutated one: a
         connection is what it was built from, and the settings it was built from
@@ -532,7 +541,6 @@ class Family:
         previous = self._held.get(settings.name)
         if previous is not None and previous.settings == settings:
             return previous
-        previous = self._held.pop(settings.name, None)
         one = self._hold(settings)
         self._held[settings.name] = one
         # **An edit to an entry that is already running restarts the server**, for
@@ -631,6 +639,8 @@ class Family:
         tool: str,
         arguments: dict[str, Any],
         meta: dict[str, Any] | None = None,
+        *,
+        words: FamilyWords,
     ) -> tuple[str, bool]:
         """Run one tool of one held entry.  `(text, ok)`, never raises.
 
@@ -642,6 +652,16 @@ class Family:
         off.  The guard is on `call` rather than only on `settled` because this
         is the path a *call* takes, and the whole of what `enabled: false`
         promises is that a call is not a thing that starts it.
+
+        **The refusal ends by naming the tool that switches the entry back on,
+        so `words` comes in with the call.**  That name is the family's
+        (`FamilyWords.enable_tool`, `mcp_set_enabled` / `rest_api_set_enabled`),
+        this class does not hold a vocabulary, and the sentence used to write
+        `set_enabled` out — a tool this system serves under no name at all, in
+        an answer to a model that would go and call it.  Taking it here rather
+        than in the constructor is the same arrangement the four sentence
+        functions use (`apply_and_report`, `switch_entry`): the sentence is
+        shared and the words come from the caller that knows them.
         """
         one = self._held.get(source)
         if one is None:
@@ -652,7 +672,7 @@ class Family:
         if not one.settings.enabled:
             return (
                 f"{source!r} is switched off, so nothing was run. Its "
-                f"`set_enabled` tool turns it on."
+                f"`{words.enable_tool}` tool turns it on."
             ), False
         return await one.call(tool, arguments, meta)
 
@@ -765,21 +785,28 @@ async def apply_and_report(
     )
 
 
-def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> str:
+def tools_as_text(one: Held, name: str, limit: int, *, words: FamilyWords) -> str:
     """One server's tools, capped, with the count it was capped from.
 
     **Three ways to have no list, and they are three answers**: switched off,
-    not answering, and answering with nothing.  Each is the state the `_list`
-    tool prints for the same entry, and folding any two of them together makes
-    this plugin tell a model two things about one entry — the model is the party
-    that cannot check, so it is the party the disagreement costs.
+    not answering, and answering with nothing.  Each is the state the family's
+    own listing tool prints for the same entry, and folding any two of them
+    together makes this plugin tell a model two things about one entry — the
+    model is the party that cannot check, so it is the party the disagreement
+    costs.
 
     The cap is announced rather than applied quietly: a trimmed list that reads
     as the whole list is a model concluding a server cannot do something it can.
 
-    `noun` is the family's own word for what it lists — a REST API exposes
-    *operations*, and the tool that asked for them said so.  The same answer
-    under two names would make a reader wonder whether they are two things.
+    **`words` and not a `noun` beside it**, because every one of the three
+    answers ends by naming the *listing tool* the model should reach for next —
+    and that tool has a different name in each family (`mcp_list`,
+    `rest_api_list`).  The tail was written out here as `` `_list` ``, a tool
+    that exists under no family at all, so a model whose entry was switched off
+    or unanswered was told to call something nothing serves; and the noun beside
+    it was a second parameter of the same sentence, which is the same vocabulary
+    assembled from two halves that have to be kept in step.  It is one object
+    here, the way it is everywhere else in this module.
     """
     rows = list(one.rows or [])
     if not one.settings.enabled:
@@ -793,14 +820,14 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
         # opening.  The word is the same one both of the others use.
         return (
             f"'{name}' is {one.state} — it is switched off, so this process "
-            f"does not connect it and there is no {noun} list to show. The "
-            f"`_list` tool reports its state."
+            f"does not connect it and there is no {words.unit} list to show. The "
+            f"`{words.list_tool}` tool reports its state."
         )
     if not one.usable:
         reason = one.error or "it is not answering yet"
         return (
-            f"'{name}' has no tool list to show — {reason}. The `_list` tool "
-            f"reports its state."
+            f"'{name}' has no tool list to show — {reason}. The "
+            f"`{words.list_tool}` tool reports its state."
         )
     if not rows:
         # **A server that answered with nothing is not a server that is
@@ -813,11 +840,11 @@ def tools_as_text(one: Held, name: str, limit: int, *, noun: str = "tool") -> st
         # `rows == []`, which is what `_listed` records when a server exposes
         # nothing.
         return (
-            f"'{name}' is {one.state} and offers no {noun}s. The "
-            f"`_list` tool reports its state."
+            f"'{name}' is {one.state} and offers no {words.unit}s. The "
+            f"`{words.list_tool}` tool reports its state."
         )
     shown = rows[:limit]
-    lines = [f"{name} — {len(rows)} {noun}(s), showing {len(shown)}:"]
+    lines = [f"{name} — {len(rows)} {words.unit}(s), showing {len(shown)}:"]
     for row in shown:
         text = str(row.get("description") or "").strip().splitlines()
         summary = text[0] if text else ""
@@ -1130,7 +1157,7 @@ async def list_entry_tools(
     # broken entry and one still starting.
     await settled(one)
     return tools_as_text(
-        one, name, limit if limit > 0 else TOOL_LIST_LIMIT, noun=words.unit
+        one, name, limit if limit > 0 else TOOL_LIST_LIMIT, words=words
     )
 
 
@@ -1356,6 +1383,7 @@ def build_family_server(
     instructions: str,
     category: str,
     entries: Callable[[Config], Iterable[ToolServerSettings]],
+    words: FamilyWords,
     source: Callable[[], Config] | None = None,
     transports: Mapping[str, Callable[[ToolServerSettings], Any]] | None = None,
     client_factory: ClientFactory | None = None,
@@ -1392,6 +1420,14 @@ def build_family_server(
 
     `source` is `load_cached` in production: it is what makes a section edited by
     hand, or by one of these management tools, reach the next home that asks.
+
+    **`words` is here rather than only in `management`** because one sentence is
+    the *family's* own and is written without a management tool asking for it:
+    `Family.call`'s refusal of a switched-off entry, which names the tool that
+    switches it back on.  That name differs between the two families
+    (`FamilyWords.enable_tool`), and the call that writes the sentence takes the
+    vocabulary with it — a second copy of the name here would be the drift this
+    class exists to prevent.
     """
     #: **One pool for the process, handed to every home's family.**  The links are
     #: the machine's (`Links`), so this is what makes two homes naming one entry
@@ -1467,7 +1503,7 @@ def build_family_server(
         this process is a second hop on the way there rather than a reader.
         """
         text, ok = await family.current().call(
-            source, tool, arguments, forwarded_client(request_meta(ctx))
+            source, tool, arguments, forwarded_client(request_meta(ctx)), words=words
         )
         return {"text": text, "ok": ok}
 

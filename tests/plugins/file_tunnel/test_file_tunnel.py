@@ -200,6 +200,29 @@ async def test_the_two_tools_are_the_models_and_the_third_is_not() -> None:
     assert not for_the_model(listed["tunnel_status"].meta)
 
 
+@pytest.mark.asyncio
+async def test_the_description_of_an_exposure_says_what_really_ends_it() -> None:
+    """**The description is what the model reads, so it has to be true.**
+
+    It promised the URL stops being served "if the file changes or when the
+    conversation ends", and nothing implements the second half: the registry is
+    process-lifetime and keyed by a token that no conversation owns, and only
+    `unexpose_local_image` or the process exiting takes an entry out of it.  So
+    a model told this leaves a public URL live for the rest of the run, believing
+    the one thing that would have cleaned it up is the conversation ending — and
+    the file it published is the sort of thing this guard list exists to keep in
+    (`is_credential_path`).  The description says what happens, and names the
+    tool that does what the model was told would happen by itself.
+    """
+    async with Client(server_for()) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    description = listed["expose_local_image"].description or ""
+    assert "when the conversation ends" not in description
+    assert "this process is running" in description
+    assert "unexpose_local_image" in description
+
+
 # --- exposing -----------------------------------------------------------------
 
 
@@ -700,16 +723,29 @@ def test_an_unknown_token_looks_up_to_nothing() -> None:
 def test_a_file_deleted_between_the_check_and_the_register(tmp_path: Path) -> None:
     """Every check-then-act has that window, and it has to close as a sentence
     rather than a traceback: `expose_local_image` proves the file exists and
-    then registers it, and the file may be gone by the second step."""
+    then registers it, and the file may be gone by the second step.
+
+    **And the dead link goes with it.**  Re-registering a path whose pin no
+    longer matches mints a new token and retires the old one, which is the half
+    that matters here: the first URL addresses a file that is gone (it answers
+    404, `serve_exposed`), so handing it back — or leaving it in the registry
+    for whoever holds it — is a link nobody can use under a token the caller was
+    told works.  What the old assertion checked was `Exposure.matches(None)`,
+    which answers False on its own first line and cannot fail.
+    """
     picture = tmp_path / "gone.png"
     picture.write_bytes(b"x")
     exposed = Exposed()
-    exposed.register(str(picture), None)
+    first = exposed.register(str(picture), None)
     picture.unlink()
 
     again = exposed.register(str(picture), None)  # must not raise
-    assert again.token
-    assert Exposure("t" * 30, str(picture), None).matches(None) is False
+
+    assert again.token and again.token != first.token, "the dead link was handed back"
+    assert exposed.lookup(first.token) is None, (
+        "a link to the deleted file still serves"
+    )
+    assert exposed.lookup(again.token) is again
 
 
 @pytest.mark.asyncio

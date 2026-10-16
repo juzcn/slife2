@@ -455,10 +455,18 @@ class Catalogue:
         #: One store per home, keyed by the data directory it was opened in.
         self._stores: dict[str, ToolStore] = {}
         self._opening = asyncio.Lock()
-        #: Why the catalogue could not take each source's listing, keyed by
-        #: source — see `failure`, which is the only reader, and `merge`, which
-        #: is where it is written.
-        self._failed: dict[str, str] = {}
+        #: Why the catalogue could not take each source's listing, **by home and
+        #: then by source** — see `failure`, which is the only reader, and
+        #: `_write`, which is where it is written.
+        #:
+        #: The home is the outer key because a write is *to one home's file*:
+        #: `_write` is called with the key of the file it writes, and the fan-out
+        #: in `remember` calls it for every other home as well.  Keyed by source
+        #: alone, a file that will not take a listing in one home failed
+        #: `list_tools` in all of them — with a reason naming a source and no
+        #: home, in a turn whose own catalogue was working, which is the
+        #: module's third failure rule applied to the wrong party.
+        self._failed: dict[str, dict[str, str]] = {}
         #: What the sources **this machine** reaches last said — the hub's own
         #: rows, and every plugin's listing — by source: its category, its rows,
         #: and whether its tools may never be evicted.  See `remember`, which is
@@ -468,7 +476,7 @@ class Catalogue:
 
     @property
     def failure(self) -> str:
-        """Why the catalogue could not take a source's listing, or `""`.
+        """Why the catalogue could not take one of **this home's** listings, or `""`.
 
         **A catalogue that did not work is a broken system, and this is where
         that fact is kept.**  Everything this process answers about the tool set
@@ -492,9 +500,18 @@ class Catalogue:
         listing it could not record as a source that is merely "connecting".  An
         entry goes when a merge for *that* source works, which is exactly when
         the fact stops being true.
+
+        **And reported for the home whose file it was**, which the source alone
+        cannot say: the fan-out writes one listing into every home
+        (`remember`), so a key of source only would carry one home's broken file
+        into every other home's `list_tools` — "the tool catalogue is not working
+        — context: …" in a turn reading a catalogue that is working.  What this
+        home's answer is made of is therefore this home's own entry, and the
+        other homes' are read by their own asks.
         """
         return "; ".join(
-            f"{source}: {reason}" for source, reason in self._failed.items()
+            f"{source}: {reason}"
+            for source, reason in self._failed.get(str(home_dir()), {}).items()
         )
 
     async def store(self) -> ToolStore:
@@ -724,12 +741,16 @@ class Catalogue:
                 # The record answered and said no, which is the catalogue
                 # working: this source is well again as far as it is concerned,
                 # whatever it was told.
-                self._failed.pop(source, None)
+                self._failed.get(key, {}).pop(source, None)
             else:
-                self._failed[source] = f"{type(exc).__name__}: {exc}"
+                # Against the home whose file it was, because that is the only
+                # one that cannot answer for itself (`failure`).
+                self._failed.setdefault(key, {})[source] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
                 logger.warning("the tool catalogue did not take %s: %s", source, exc)
             raise
-        self._failed.pop(source, None)
+        self._failed.get(key, {}).pop(source, None)
         return found
 
     async def _embedder_in(self, key: str) -> Embedder:
@@ -748,8 +769,44 @@ class Catalogue:
             return await self._embedder()
 
     async def source_state(self, source: str, state: str) -> None:
-        """Record the verdict on one source: `enabled` or `error`."""
+        """Record the verdict on one source: `enabled`, `error` or `disabled`.
+
+        **Written to every open store, and the ambient one first**, exactly as a
+        listing is (`remember`), because it is the same fact about the same rows:
+        a source the hub reaches itself has its rows written into every home's
+        file, and a verdict landing in one of them leaves the others telling
+        their models that a broken server's tools are `enabled` and loaded —
+        which is what a `tool_search` in a home that was not asking would go on
+        offering for the life of the process.  A *declared* source's verdict is
+        written the same way and is not a stretch of the rule: the rows it marks
+        are the ones that home's own refresh wrote for the same source, and a
+        home whose config switched that source off is left alone by the store's
+        own `WHERE` (`ToolStore.set_source_state`).
+
+        The ambient home is written first and **through the failure**, which is
+        the one home whose answer cannot be kept for later: it is the home the
+        ask itself is for.  The others are the fan-out's, and one whose file will
+        not take it keeps the reason for its own `list_tools` rather than
+        stopping the rest (`_write`'s rule, and `seed`'s).
+        """
+        here = str(home_dir())
         await self._off_loop((await self.store()).set_source_state, source, state)
+        async with self._opening:
+            for key, store in list(self._stores.items()):
+                if key == here:
+                    continue
+                try:
+                    await self._off_loop(store.set_source_state, source, state)
+                except Exception as exc:  # noqa: BLE001 - kept, and the rest go on
+                    self._failed.setdefault(key, {})[source] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    logger.warning(
+                        "the catalogue at %s did not take the verdict on %s: %s",
+                        store.path,
+                        source,
+                        exc,
+                    )
 
     async def forget_source(self, source: str) -> list[str]:
         """Delete a source's rows, because nothing will declare it again.
@@ -765,9 +822,12 @@ class Catalogue:
 
         Its failure is forgotten here with its rows, because this is the one
         write after which no merge can clear it: nothing will declare the source
-        again, so `failure` would carry it for the life of the process.
+        again, so `failure` would carry it for the life of the process.  The
+        deletion is this home's — `declare` is asked about one home's section and
+        the rows are in that home's file — so the entry forgotten is this home's
+        too.
         """
-        self._failed.pop(source, None)
+        self._failed.get(str(home_dir()), {}).pop(source, None)
         return [
             str(name)
             for name in await self._off_loop((await self.store()).forget_source, source)
@@ -1065,9 +1125,26 @@ class Upstream:
         #: `LIST_SOURCES` either is or is not in what the server offered.  See
         #: `declare`, which is the only thing that reads it.
         self._declares = False
-        #: The source names it declared last time, so that one it has stopped
-        #: holding can be forgotten — see `declare`.
-        self._declared: set[str] = set()
+        #: The source names it declared last time, **per home**, so that one it
+        #: has stopped holding can be forgotten — see `declare`.
+        #:
+        #: Per home because *the answer* is: `declare` asks the plugin for the
+        #: calling home's section (`Connection._call_once` attaches the caller's
+        #: identity, so the plugin's `family.current()` answers that home's
+        #: entries), and a set held for the process is therefore one home's
+        #: answer being read as another's.  The damage is not a wrong row but a
+        #: *deletion*: a home with no `mcp:` entry declares nothing, so the
+        #: difference against a set another home's ask filled is that home's
+        #: sources — and `forget_source` deletes their rows against *this* home's
+        #: catalogue, where they are this home's tools.  The set then held
+        #: nothing, so the home that did hold them can never compute the removal
+        #: a deletion is for: an entry taken out of its section leaves its rows
+        #: in its catalogue for the life of the process, and `tool_search` keeps
+        #: offering tools the row's own text says go the next time the plugin
+        #: that held them answers.  `Declarations.held`/`holders` are per home
+        #: for the same fact seen from the other side, and this is the field that
+        #: was left behind.
+        self._declared: dict[str, set[str]] = {}
         #: Verdicts written without waiting for them.  Held for the reason
         #: `slife2.plugins.agent.server.detach` holds its own: a task nothing
         #: references can be collected before it runs, and its failure is
@@ -1366,7 +1443,14 @@ class Upstream:
         # while slife2 is not running, which is the db's boot pass
         # (`ToolStore.reset`); the two agree, so a removal does not depend on
         # whether a process happened to be up when it was made.
-        for source in sorted(self._declared - {one.name for one in declared}):
+        #
+        # **Against *this* home's last answer**, which is the home the ask was
+        # for and the home these rows are in (`_declared`): comparing against a
+        # set shared with the process would compute the difference across two
+        # sections, and the row it deletes would be one of this home's.
+        here = str(home_dir())
+        held = self._declared.get(here, set())
+        for source in sorted(held - {one.name for one in declared}):
             gone = await self._catalogue.forget_source(source)
             logger.info(
                 "%s: %r is no longer in its section — %d tool(s) removed",
@@ -1374,7 +1458,7 @@ class Upstream:
                 source,
                 len(gone),
             )
-        self._declared = {one.name for one in declared}
+        self._declared[here] = {one.name for one in declared}
         return declared
 
     async def _record(self, raw: Any) -> DeclaredSource | None:

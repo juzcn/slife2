@@ -88,7 +88,7 @@ from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound, normalize_bound
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import AGENT_TASK_SERVER_NAME, Config, load_cached
-from slife2.libs.host.paths import schedule_dbs
+from slife2.libs.host.paths import in_home, schedule_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.protocol import (
     agent_reader,
@@ -251,14 +251,14 @@ def ledgers() -> list[ScheduleStore]:
     go and look at (DESIGN.md §10.2).
     """
     found: list[ScheduleStore] = []
-    for path in schedule_dbs():
+    for ledger in schedule_dbs():
         try:
-            store = ScheduleStore.adopt(path)
+            store = ScheduleStore.adopt(ledger.path, ledger.home)
         except Exception:  # noqa: BLE001 - one unopenable file is not the clock's
             logger.error(
                 "%s could not be opened, so nothing in it will be fired until "
                 "an operator fixes it",
-                path,
+                ledger.path,
                 exc_info=True,
             )
             continue
@@ -266,7 +266,7 @@ def ledgers() -> list[ScheduleStore]:
             logger.warning(
                 "%s does not say whose ledger it is, so nothing in it will be "
                 "fired; it was not written by this build",
-                path,
+                ledger.path,
             )
             continue
         found.append(store)
@@ -463,51 +463,71 @@ async def reconcile(config: Config, *, tasks_client: Client | None = None) -> li
     """
     did: list[str] = []
     for store in ledgers():
-        try:
-            waiting = store.in_flight()
-        except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
-            logger.exception("%s: this ledger was skipped for this pass", store.path)
-            continue
-        if not waiting:
-            continue
-        try:
-            listed = await _tasks_of(config, store.agent, tasks_client)
-        except Exception as exc:  # noqa: BLE001 - a peer that is not there
-            # Nothing is settled: this says nothing about the runs, only about
-            # this process's view of them, and the next poll asks again.
-            logger.warning(
-                "%s: the runs in flight were not checked: %s", store.agent, exc
+        with in_home(store.home):
+            did.extend(await _reconcile_one(config, store, tasks_client=tasks_client))
+    return did
+
+
+async def _reconcile_one(
+    config: Config,
+    store: ScheduleStore,
+    *,
+    tasks_client: Client | None,
+) -> list[str]:
+    """One ledger's runs asked after, **in that ledger's home**.
+
+    The home is entered by the caller rather than here, because the ask and
+    everything it reaches — the agent-task peer, the address `client_meta`
+    stamps, the runs it settles against — are one home's view of one agent, and
+    the walk is what knows which home that is (`schedule_dbs`).
+
+    Returns what it closed, as lines, the way `poll_once` does: the caller is
+    the one walking ledgers, so the caller is the one with something to say.
+    """
+    did: list[str] = []
+    try:
+        waiting = store.in_flight()
+    except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
+        logger.exception("%s: this ledger was skipped for this pass", store.path)
+        return did
+    if not waiting:
+        return did
+    try:
+        listed = await _tasks_of(config, store.agent, tasks_client)
+    except Exception as exc:  # noqa: BLE001 - a peer that is not there
+        # Nothing is settled: this says nothing about the runs, only about
+        # this process's view of them, and the next poll asks again.
+        logger.warning("%s: the runs in flight were not checked: %s", store.agent, exc)
+        return did
+    for run in waiting:
+        found = listed.get(run.agent_task_id)
+        if found is None:
+            store.settle(
+                run.name,
+                run.due_at,
+                FAILED,
+                error=(
+                    "the background task doing this run is no longer held by "
+                    "the agent-task plugin, so its ending was never seen"
+                ),
             )
+        elif found["status"] == TASK_RUNNING:
             continue
-        for run in waiting:
-            found = listed.get(run.agent_task_id)
-            if found is None:
-                store.settle(
-                    run.name,
-                    run.due_at,
-                    FAILED,
-                    error=(
-                        "the background task doing this run is no longer held by "
-                        "the agent-task plugin, so its ending was never seen"
-                    ),
-                )
-            elif found["status"] == TASK_RUNNING:
-                continue
-            elif found["status"] == TASK_FINISHED:
-                store.settle(
-                    run.name,
-                    run.due_at,
-                    RAN,
-                    when=str(found.get("finished_at") or ""),
-                )
-            else:
-                store.settle(
-                    run.name,
-                    run.due_at,
-                    FAILED,
-                    error=f"the background task ended as {found['status']}",
-                )
-            did.append(f"{store.agent}: {run.name} due {run.due_at} closed")
+        elif found["status"] == TASK_FINISHED:
+            store.settle(
+                run.name,
+                run.due_at,
+                RAN,
+                when=str(found.get("finished_at") or ""),
+            )
+        else:
+            store.settle(
+                run.name,
+                run.due_at,
+                FAILED,
+                error=f"the background task ended as {found['status']}",
+            )
+        did.append(f"{store.agent}: {run.name} due {run.due_at} closed")
     return did
 
 
@@ -567,35 +587,48 @@ async def poll_once(
         # the next pass would hit the same row — so every *other* agent's tasks
         # would quietly stop firing while the clock looked healthy.  The ledger is
         # named and skipped; the rest of this pass carries on.
+        #
+        # **And the pass runs in the ledger's own home.**  This process serves
+        # every home on the machine (`schedule_dbs` walks them all), while the
+        # ambient home is the one the daemon was started in — so everything a
+        # fire reaches for is otherwise the *wrong* home's: `client_meta` stamps
+        # the dispatch with it, the agent-task peer starts the work there, and
+        # `hand_over` offers the trigger to a window that is not showing this
+        # agent at all.  `in_home` is what makes the home a property of this
+        # ledger's pass rather than of the process, which is the same move
+        # `slife2-wechat` makes around each of its sessions.
         try:
-            for task in store.tasks(enabled_only=True):
-                verdict = due(task, reference)
-                if verdict is None:
-                    continue
-                kind, due_at = verdict
-                if kind == "missed":
-                    run = store.record(task, due_at)
-                    if run.status == PENDING:
-                        # Recorded and immediately closed: the moment is kept
-                        # because the *gap* is the fact worth keeping, and
-                        # "missed" is what says slife2 was not running rather
-                        # than that it failed.
-                        store.settle(
-                            task.name,
-                            due_at,
-                            MISSED,
-                            error="slife2 was not running when this was due",
-                        )
-                    did.append(f"{store.agent}: {task.name} missed {due_at}")
-                    continue
-                run = await fire(
-                    config,
-                    store,
-                    task,
-                    due_at,
-                    window_client=window_client,
-                )
-                did.append(f"{store.agent}: {task.name} due {due_at} -> {run.status}")
+            with in_home(store.home):
+                for task in store.tasks(enabled_only=True):
+                    verdict = due(task, reference)
+                    if verdict is None:
+                        continue
+                    kind, due_at = verdict
+                    if kind == "missed":
+                        run = store.record(task, due_at)
+                        if run.status == PENDING:
+                            # Recorded and immediately closed: the moment is kept
+                            # because the *gap* is the fact worth keeping, and
+                            # "missed" is what says slife2 was not running rather
+                            # than that it failed.
+                            store.settle(
+                                task.name,
+                                due_at,
+                                MISSED,
+                                error="slife2 was not running when this was due",
+                            )
+                        did.append(f"{store.agent}: {task.name} missed {due_at}")
+                        continue
+                    run = await fire(
+                        config,
+                        store,
+                        task,
+                        due_at,
+                        window_client=window_client,
+                    )
+                    did.append(
+                        f"{store.agent}: {task.name} due {due_at} -> {run.status}"
+                    )
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
             logger.exception("%s: this ledger was skipped for this pass", store.path)
             continue

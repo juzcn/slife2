@@ -348,6 +348,35 @@ def build_server(
     #: starting together do not build two clients for one server.
     opening = asyncio.Lock()
 
+    #: **One pre-turn read-then-write at a time for one conversation**, keyed by
+    #: `(home, agent)` — which is what a conversation is (`AgentTask.key` minus
+    #: the task's name).
+    #:
+    #: `restore` reads the agent's live-context list and `rebuild` writes it back
+    #: (`set_context_turns`), and the two are **one step**: a rebuild's target is
+    #: built from the snapshot its own restore read, so two tasks interleaving
+    #: them write a list decided against a conversation that has moved — the
+    #: task that wrote first runs its turn on a list the store no longer has, and
+    #: the store keeps a decision taken before the other's turn was even in it.
+    #: The cap allows `max_running` tasks for one agent, so this is a state two
+    #: calls can reach rather than a hypothetical.
+    #:
+    #: The agent server holds its own `Loop.lock` across exactly this pair
+    #: (`send_message`, which says why the restore has to be inside it).  This
+    #: process cannot hold *that* lock — the agent's conversation is served by
+    #: another daemon — so what is serialised here is the writers this process
+    #: has: its own tasks, one turn's set-up at a time.
+    conversations: dict[tuple[str, str], asyncio.Lock] = {}
+
+    def conversation(task: AgentTask) -> asyncio.Lock:
+        """This task's agent's lock, made on the first ask."""
+        key = (task.home, task.agent)
+        found = conversations.get(key)
+        if found is None:
+            found = asyncio.Lock()
+            conversations[key] = found
+        return found
+
     #: Whether this build opened the two long-lived clients, and so whether it
     #: is the one that closes them.  An injected client belongs to whoever
     #: handed it in.
@@ -545,9 +574,19 @@ def build_server(
 
         **And it writes only when it changes something.**  A decision that asks
         for what is in hand rebuilds nothing and touches nothing on disk
-        (§5.1's common case), and that is what makes this call safe to make
-        outside the agent's lock: the turn's own writer is the agent server, and
-        this one speaks only when it has something to say.
+        (§5.1's common case) — which is a saving and **not** a licence, and it
+        did not use to be read that way: the argument ran that because this call
+        usually writes nothing it need not be serialised.  The case that *does*
+        write is the one that lands, and it is exactly the case that has to be
+        serialised: `rebuild` replaces the conversation's stored list with one
+        built from the snapshot its caller's `restore` read, so a write landing
+        after another writer's leaves the store holding a decision taken against
+        a conversation that has moved — and the next `restore` (an idle reap, a
+        restart, a new terminal) rebuilds from that list, which is a conversation
+        that comes back one turn short, silently
+        (`slife2/plugins/context/server.py`'s own comment on the write).  So the
+        call is made under the conversation's lock, together with the restore it
+        depends on (`run_loop`).
         """
         carried = max(len(messages) - covered, 0)
         payload = tool_payload(
@@ -607,15 +646,22 @@ def build_server(
         ]
         opening = render(OPENING_TEMPLATE, name=task.name, description=task.description)
 
-        messages, turn_ids, covered = await restore(task, head)
-        messages, covered = await rebuild(
-            task,
-            messages,
-            turn_ids,
-            covered,
-            opening,
-            f"{name}/{settings.model}",
-        )
+        # **The two calls under the conversation's lock**, which is the rule the
+        # agent server states for the same pair: a rebuild's target is built from
+        # the list its own restore read, so a write that lands after the same
+        # conversation's own write is a decision taken against a snapshot that
+        # has moved.  Held here rather than inside `restore`/`rebuild` because
+        # they are one step — the second reads what the first answered.
+        async with conversation(task):
+            messages, turn_ids, covered = await restore(task, head)
+            messages, covered = await rebuild(
+                task,
+                messages,
+                turn_ids,
+                covered,
+                opening,
+                f"{name}/{settings.model}",
+            )
 
         loop = AgentLoop(
             await model_for(task),
@@ -727,33 +773,46 @@ def build_server(
         would leave the conversation waiting for something that will never
         arrive.  Cancellation is the one exception, and it is not one — a task
         that was called off has nothing to report, so it delivers nothing.
+
+        **And the two things a task holds are dropped on every way out.**  The
+        outer `try` is the whole life rather than the delivery alone, because a
+        cancellation re-raises out of the `except` below and used to take the
+        path *past* the `finally` that lets go: a cancelled task kept its
+        finished `asyncio.Task` — and that object holds the cancelled
+        coroutine's frames, and the answer beside them — for as long as the
+        registry remembered it, which is the retained megabytes the comment
+        below exists to release.  It is the same rule for the cancelled ending
+        as for the two that deliver: a task that has stopped holds nothing.
         """
         try:
-            result = await run_loop(task)
-            task.text = (
-                result.text.strip() or "(the task stopped without saying anything)"
-            )
-            task.status = FINISHED
-            task.finished_at = now()
-        except asyncio.CancelledError:
-            # No await anywhere in this path: §3 measured that a plain `await`
-            # in a cancelled scope is cancelled again at its next checkpoint, so
-            # anything awaited here would simply not happen.
-            task.status = CANCELLED
-            task.finished_at = now()
-            raise
-        except Exception as exc:  # noqa: BLE001 - §7's rule, one level down
-            logger.warning("agent task %s failed: %s", task.name, exc)
-            task.text = f"The agent task {task.name!r} failed: {exc}"
-            task.status = FAILED
-            task.finished_at = now()
-        finally:
-            # **A task is over when it stops, not when its answer has been handed
-            # over.**  The hand-over waits on another process, and the cap counts
-            # what has stopped, so retiring here is what keeps "finished" and
-            # "still holding a slot" from being the same thing.
-            retire(task)
-        try:
+            try:
+                result = await run_loop(task)
+                task.text = (
+                    result.text.strip() or "(the task stopped without saying anything)"
+                )
+                task.status = FINISHED
+                task.finished_at = now()
+            except asyncio.CancelledError:
+                # No await anywhere in this path: §3 measured that a plain
+                # `await` in a cancelled scope is cancelled again at its next
+                # checkpoint, so anything awaited here would simply not happen.
+                task.status = CANCELLED
+                task.finished_at = now()
+                raise
+            except Exception as exc:  # noqa: BLE001 - §7's rule, one level down
+                logger.warning("agent task %s failed: %s", task.name, exc)
+                task.text = f"The agent task {task.name!r} failed: {exc}"
+                task.status = FAILED
+                task.finished_at = now()
+            finally:
+                # **A task is over when it stops, not when its answer has been
+                # handed over.**  The hand-over waits on another process, and the
+                # cap counts what has stopped, so retiring here is what keeps
+                # "finished" and "still holding a slot" from being the same
+                # thing.
+                retire(task)
+            # The cancelled ending left through the branch above, so this is
+            # reached by the two that have an answer.
             await deliver(task)
         finally:
             task.handle = None
@@ -922,7 +981,17 @@ def build_server(
                 f"{AGENT_TASK_CANCEL} or wait for its answer."
             )
 
-        limit = config.agent_task.max_running
+        # **The live config, and the two halves of this have to be read the same
+        # way.**  The count below is *this home's* — `running` matches on the
+        # `(home, agent, name)` key — so the number it is compared against has to
+        # be this home's too, or a second home is bounded by a limit an operator
+        # wrote in somebody else's file.  `live()` is the same read the model is
+        # taken with (`model_for`) and the step cap with (`run_loop`), and
+        # `AgentTaskSettings.max_running` is written for it: the section this key
+        # lives in is read by the plugin that enforces it, because the value is a
+        # property of the home the caller is in and of the file as it is now —
+        # the boot config is a snapshot of the daemon's own directory.
+        limit = live().agent_task.max_running
         if running(agent) >= limit:
             raise ToolError(
                 f"{limit} agent tasks are already running for this agent "

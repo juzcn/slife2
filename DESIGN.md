@@ -782,7 +782,7 @@ key, which is the time axis a list orders by, whether a second write appends, an
 where the markdown mirror goes.
 
 **A document is written twice, and the mirror is the half a person reads.**  The
-row is what a search finds; `notes/Python.md`, `diary/2026-10-11.md`,
+row is what a search finds; `notes/会议记录.md`, `diary/2026-10-11.md`,
 `reports/weekly.md` are the same document as a file somebody can open, edit or
 delete without asking a process.  The store owns both writes because they are one
 operation, and the mirror's path is *stored* rather than derived, because two
@@ -790,6 +790,21 @@ subjects slugify to one stem and a derived path would let the second overwrite
 the first's markdown while both rows stayed correct.  A saved file is the one
 kind with no mirror: its bytes are the document, and a text copy of a PDF is a
 copy of something that is not text.
+
+**And a subject is readable as itself only when it is already casefolded**, which
+is the second half of that rule and the one a *path* forced.  Two keys that
+slugify alike were the first case; `Readme` and `readme` are the second, and they
+satisfy every string-shaped test of "the slug is the key" while landing on one
+file on Windows and macOS.  So the readable half is reserved for keys no
+case-insensitive lookup can conflate, and everything else carries a short digest
+of the key beside its slug — `notes/Python~6e3604888c.md`.  *Gives up:* the plain
+filename for a subject with a capital in it, which is most of them; a person still
+reads the name, and a date still reads as a date, because a key `slug` does not
+change is a key that never needs the digest.  The alternative — keeping the plain
+name for whichever key claimed it first — needs the store to answer, and the
+mirror's path is deliberately a **function of the key**: that is what makes the
+row and the file agree without a lookup, and what makes "these two can never be
+one file" something to read rather than something to test.
 
 **A file's bytes are never in the index, and its identity is.**  What is indexed
 and embedded for a file is what it *is* — its name, the paths that place it, and
@@ -1167,6 +1182,25 @@ process learns which agents exist by listing those directories, exactly as
 `wechat` server).  The poll loop is one loop for every agent, which is the second
 half of why this is a plugin: two instances of one agent must not both fire.
 
+**And the walk reaches every *home*, so a ledger carries the home it came from.**
+`schedule_dbs` walks `known_homes()`, which is what makes one clock serve a
+machine's homes rather than the one its daemon was started in — and a home is a
+property of the *request* a shared process is serving, never of the process
+(`slife2.libs.host.paths.in_home`).  So `paths.Ledger` is a pair: the ledger, and
+the home it was found in.  Without the second half every fire reached for the
+daemon's own home instead — the address `client_meta` stamps, the agent-task peer
+that starts the work, and the window the trigger is offered to — and the result
+was a trigger refused by a conversation that exists ("no window is showing it"),
+three hand-over attempts later a run settled `failed`, and a task that therefore
+never fires again.  It is the same defect the sibling plugins had already solved
+and had already written down in their own comments: `wechat` enters each session's
+home around the work it starts (`_spawn_in_home`), and `tui`'s per-window state is
+keyed by the triple that includes the home, with the reason spelled out at
+`slife2/plugins/tui/server.py`'s window table.  `reconcile`'s ask was the other
+half: `agent_task_list` answers about *the caller's* home, so a run legitimately
+dispatched from another home read as "no longer held" while its work was still
+going.
+
 **Whose a ledger is comes from a row inside it, not from the directory's name**,
 and that is the one place this feature contradicts `slife2.libs.host.paths`' rule that
 nothing inside an agent's directory repeats its name.  The rule is about a file
@@ -1225,6 +1259,28 @@ that appears afterwards takes the mesh down rather than fighting for the id, and
 **no winner is picked** — a departing agent's last act is to publish an *offline*
 card on the name's own topic, which would overwrite the survivor's card and
 leave it advertising as offline to every peer.
+
+**And a session is one `(home, agent)`, because a ledger, a card and a window are
+per home.**  A shared daemon serves every home on the machine (`known_homes`), so
+the walk that finds each mesh ledger finds it *in* one — `paths.Ledger`, the pair
+`schedule_dbs` returns and `a2a_inbound_paths` returns for the same reason — and
+the session key is that pair rather than the agent name, with each session's
+writer running inside `in_home` for its whole life.  Keying by the name alone was
+the defect `schedule` had one section over: a peer's message for *another* home's
+`jack` was delivered in this home, where the window refused it, and the orphan
+notice was built against a ledger that was empty.  What has not changed is the
+broker's own answer to two homes' `jack`s: a name is an identity there (§4), the
+collision machinery above refuses the second, and the correct outcome is the
+refusal rather than the second silently attaching to the first one's mesh.
+
+**And a name off the wire is scrubbed before it becomes one of ours.**  A card's
+`agent_name` and an envelope's `from` are written by another process and
+validated by nothing, and each becomes a *channel* (`a2a:jill`), a marker, a
+stored turn and a log line.  So `safe_name` runs at every callback that reads
+one — a name carrying a newline or an escape would otherwise forge a line in
+every window showing that conversation, and in the log beside it.  It is §10.1's
+rule one level over: what a peer sends is data, and data does not get to be the
+shape of our display.
 
 **A peer on this machine and a peer on another one are the same peer.**  Nothing
 in the driver distinguishes them and nothing needs to: a local agent is simply
@@ -2833,6 +2889,28 @@ watching sees it advancing rather than a spinner that says nothing. A rebuild
 from the turn log draws no counter, because the log keeps no such column;
 `restore` is not guessing one.
 
+**A panel's only ending is an event, so every ending settles what it left open.**
+`ToolCallFinished` is what completes a panel — it is the only caller of
+`ToolCallWidget.set_complete` — and the ways a turn stops without one are
+cancelled, failed, and a transport that died mid-call. All three used to leave the
+panel saying `running` for the rest of the session, which is not an edge case: it
+is what pressing escape during a slow call does. Nothing closed it because nothing
+could — `add_tool_start` is guarded by no ticket (the cancel path retires the
+turn's ticket for exactly that reason), and the panel had already been mounted by
+the time the turn ended. So `ChatView.settle_tools` runs from the one place every
+ending passes through, the turn's `finally` rather than the two branches that
+happen to exist today, and the failure path retires its ticket as the cancel path
+does, because a turn that is over must not mount anything either.
+
+What it settles *to* is a fourth state rather than `error`: the window never
+learned how the call ended, and a red ✗ would be this display inventing a verdict
+about a tool that may have run to completion at the far end. `interrupted` says
+the one thing that is known — the turn ended first — and it is drawn in the dim
+colour with a note in the expanded panel. A state that is a claim about *now* is
+the one thing a status may not leave standing after now has passed, which is the
+same rule the presence line is held to (sdd §9.2's two states, and the reasons
+that live in the status tool).
+
 **What the loop is *not* shown is everything around the turn.** The context is
 decided before `run_turn` is called and the turn is recorded after it returns,
 and both are the *agent server's* — the loop is handed a list and asked to
@@ -4063,11 +4141,16 @@ literal — and failing all four leaves the reference **verbatim**, which is a
 credential that fails at the API call rather than at load. *Gives up:* load-time
 certainty about a credential. *Does not cover:* a host with **no** credential
 store, which is the only declared degrade; a store that is present but locked,
-corrupt or unsupported raises where the secret is resolved, because a value that
-cannot be read is not an absent one (§10.1). *Failure goes:* the store's own
-error, out of `resolve_secret`; a reference that resolves to nothing is refused
-by `llm/server_common.unresolved_key`, naming it rather than sending it as a
-token.
+corrupt, unsupported, **or that simply does not hold the credential** raises
+where the secret is resolved, because a value that cannot be read is not an
+absent one (§10.1) — and the last of those is a `ConfigError` naming the
+reference and the way to store it, since a credential nobody ever stored is a
+mistake to be corrected rather than a secret to be carried verbatim to the API
+call. (It was a bare `KeyError`, which `slife2`'s entry point and `family.py`
+both let past their `except ConfigError`, so the one place that names the fix
+printed a traceback instead.) *Failure goes:* the store's own error, out of
+`resolve_secret`; a reference that resolves to nothing is refused by
+`llm/server_common.unresolved_key`, naming it rather than sending it as a token.
 
 **An identity the handshake cannot report is probed by tool presence.**
 `mcp_server.identifies` compares the name the server advertised while

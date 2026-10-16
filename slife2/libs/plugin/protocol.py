@@ -477,6 +477,19 @@ def tool_payload(result: Any) -> dict[str, Any]:
     text is still readable, and one that answered with neither is a caller that
     gets an empty mapping and says so itself.
 
+    **The text block is `result.content`, and it has to be read there.**  The
+    fallback used to look for a `str` in `result.data`, which can never be one
+    of these: `fastmcp.client` fills `data` from `structured_content` alone
+    (`_parse_call_tool_result`), so a result that carried no structured content
+    — an older build of one of our servers, which is the case this tolerance
+    was written for, or any tool whose return the SDK did not wrap — arrives
+    with `data` `None` and the JSON sitting in a text block.  The claim above
+    was therefore false in the one situation it names: the answer was readable
+    all along and the caller was told the far end was a build it could not read.
+    Only the JSON matters, so a text block that is not a mapping — a refusal's
+    message, a tool that answered in prose — is still `{}`, which is the
+    caller's cue to say the shape is wrong.
+
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
     plugins hop to a peer now — the toolhub and the db — and a second copy of
@@ -485,13 +498,19 @@ def tool_payload(result: Any) -> dict[str, Any]:
     data = getattr(result, "data", None)
     if isinstance(data, dict):
         return data
-    if isinstance(data, str) and data.strip():
+    # The text blocks, and then `data` itself when it is a string — a tool
+    # returning a scalar is wrapped by FastMCP, so its JSON arrives there rather
+    # than in the block, and the two spellings are the same value either way.
+    blocks = getattr(result, "content", None) or []
+    found = [getattr(block, "text", None) for block in blocks]
+    for text in (*found, data):
+        if not isinstance(text, str) or not text.strip():
+            continue
         try:
-            decoded = json.loads(data)
+            decoded = json.loads(text)
         except json.JSONDecodeError:
             return {}
-        if isinstance(decoded, dict):
-            return decoded
+        return decoded if isinstance(decoded, dict) else {}
     return {}
 
 

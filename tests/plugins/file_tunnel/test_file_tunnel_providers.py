@@ -356,12 +356,26 @@ def test_stop_clears_the_url_and_the_failed_flag(monkeypatch) -> None:
 
 def test_the_url_travels_through_the_environment(monkeypatch) -> None:
     """So that anything in this process — and anything it starts — can resolve
-    the tunnel without holding the provider."""
+    the tunnel without holding the provider.
+
+    **And the URL is usable, not merely visible.**  This is the v1 arrangement
+    the constant's comment blesses: a tunnel some *other* process started, whose
+    URL this one reads from the environment.  `is_reachable` read the provider's
+    own `_public_url`, which is None for exactly that tunnel, so every inherited
+    URL was reported unreachable in the same breath as `is_active` and
+    `share_url_for` answering with it — and `expose_local_image` refused the file
+    with a sentence about the edge answering HTTP 530, a claim about a transport
+    this process is not running and never probed.  There is nothing here to
+    probe, which is why the answer is not "no"; `tunnel_status` said `idle` with
+    an empty url for the same tunnel, and says `active` with it now.
+    """
     monkeypatch.setenv("SLIFE2_FILE_TUNNEL_URL", "https://shared.test")
     tunnel = NgrokTunnel()
     assert tunnel.is_active is True
     assert tunnel.public_url == "https://shared.test"
     assert tunnel.share_url_for("abc") == "https://shared.test/share/abc"
+    assert tunnel.is_reachable() is True
+    assert tunnel.status() == {"state": "active", "url": "https://shared.test"}
 
 
 def test_sharing_offline_is_none() -> None:
@@ -612,16 +626,63 @@ def test_localhost_run_needs_no_registration_vocabulary(monkeypatch) -> None:
 def test_a_rotated_hostname_is_swapped_in_place() -> None:
     """localhost.run's anonymous tier rotates it every few hours.  A hostname
     that changes under a live tunnel is swapped rather than dropped: a link
-    already handed to a person or a model is worth keeping alive."""
+    already handed to a person or a model is worth keeping alive.
+
+    The child is installed as the *current* one, which is what `_spawn` does
+    before it starts the reader (`self._proc = proc`, then the thread): a reader
+    drives the attempt it belongs to, and one that is not the current child is
+    silent (`test_a_reader_torn_down_with_its_child_does_not_write_to_it`).
+    """
     tunnel = LocalhostRunTunnel()
     tunnel._public_url = "https://old.lhr.life"
     providers.os.environ["SLIFE2_FILE_TUNNEL_URL"] = "https://old.lhr.life"
+    tunnel._proc = FakeProcess(LinesStdout([lhr_line("new.lhr.life")]))
 
-    tunnel._read_output(FakeProcess(LinesStdout([lhr_line("new.lhr.life")])))
+    tunnel._read_output(tunnel._proc)
 
     assert tunnel.public_url == "https://new.lhr.life"
     assert providers.os.environ["SLIFE2_FILE_TUNNEL_URL"] == "https://new.lhr.life"
     assert tunnel.status() == {"state": "active", "url": "https://new.lhr.life"}
+
+
+def test_a_superseded_readers_death_is_not_the_live_attempts_eof() -> None:
+    """**A retry starts a reader that the previous attempt can end.**
+
+    `_spawn` clears `_eof_event` for the attempt it is starting and then starts a
+    new reader, while the old one is still draining the old child's pipe.  When
+    that old reader finally dies its `finally` set the event — the *new*
+    attempt's — so its wait loop raised "closed its output without a tunnel
+    URL" over a child that was still coming up, and the start failed for a
+    reason that had already been fixed.
+    """
+    tunnel = LocalhostRunTunnel()
+    tunnel._proc = FakeProcess(LinesStdout([]))  # the attempt that is live now
+
+    tunnel._read_output(FakeProcess(LinesStdout([lhr_line("stale.lhr.life")])))
+
+    assert not tunnel._eof_event.is_set(), (
+        "the live attempt was told its child had died"
+    )
+    assert tunnel._pending_url is None, "a superseded reader fed the new attempt"
+
+
+def test_a_reader_torn_down_with_its_child_does_not_write_to_it() -> None:
+    """**`_kill_proc` sets `_proc` to None, and that is not "I am current".**
+
+    The guard on the reader used to be `self._proc is not None and proc is not
+    self._proc`, so the window between `stop()` (or a restarted attempt) setting
+    `_proc` to None and the child's pipe closing let every line still in the pipe
+    be applied: a URL from a dead child was written into `_pending_url` and could
+    satisfy the *next* start's URL event with a hostname nobody serves.
+    """
+    tunnel = LocalhostRunTunnel()
+    assert tunnel._proc is None  # torn down, and the reader has not noticed yet
+
+    tunnel._read_output(FakeProcess(LinesStdout([lhr_line("dead.lhr.life")])))
+
+    assert tunnel._pending_url is None
+    assert tunnel._public_url is None
+    assert not tunnel._url_event.is_set()
 
 
 def test_a_dead_reader_warns_and_names_the_child(caplog) -> None:

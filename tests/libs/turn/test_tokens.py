@@ -53,19 +53,29 @@ def test_the_fallback_counts_the_two_scripts_separately() -> None:
         assert tokens._by_script(CHINESE) > tokens._by_script(ENGLISH) / 2
 
 
-def test_a_special_token_spelling_does_not_raise(monkeypatch) -> None:
+def test_a_special_token_spelling_does_not_raise(real_tokenizer) -> None:
     """A conversation may contain any text at all, including a token's own name.
 
     `tiktoken`'s `encode` *refuses* text spelling a special token unless it is
-    told not to, so a message quoting `<|endoftext|>` would raise out of the
-    estimator and fail a turn.  Neither measure is allowed to care.
+    told not to — measured, not assumed: `encode_ordinary` answers 18 tokens for
+    the sentence below where `encode` raises `ValueError` — so a message quoting
+    `<|endoftext|>` would raise out of the estimator and fail a turn.  Neither
+    measure is allowed to care.
+
+    **Both measures, and the vocabulary is the reason the test exists.**  It used
+    to loop over two resolvers that both answered `None` — one patched the seam
+    `no_tokenizer_download` had already pinned to the same thing, the other
+    patched nothing — so both halves measured the fallback, which counts
+    characters and has nothing to refuse.  The one branch `encode_ordinary` was
+    chosen over `encode` for was the branch never run.
     """
     text = "a message that quotes <|endoftext|> and <|im_start|>"
-    for resolver in (lambda: None, None):
-        with pytest.MonkeyPatch.context() as patch:
-            if resolver is not None:
-                patch.setattr(tokens, "_openai_encoding", resolver)
-            assert tokens.estimate_text_tokens(text) > 0
+
+    assert tokens.estimate_text_tokens(text) > 0, "the real BPE over it"
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tokens, "_openai_encoding", lambda: None)
+        assert tokens.estimate_text_tokens(text) > 0, "and the script measure"
 
 
 # --- the real tokenizer -------------------------------------------------------
@@ -92,23 +102,49 @@ def test_the_real_tokenizer_answers_the_same_way_twice(real_tokenizer) -> None:
 # --- what both branches share -------------------------------------------------
 
 
-def test_an_image_is_charged_the_same_way_by_either_measure(monkeypatch) -> None:
+def test_an_image_is_charged_the_same_way_by_either_measure(real_tokenizer) -> None:
     """The one thing a tokenizer cannot answer, so the one thing not to vary.
 
     An attachment is not text; it is charged a flat amount because a part that
     looks free is a part every budget can afford.  Which estimator is in force
     must not change that, or the same conversation would weigh differently
     depending on whether a machine had a network.
+
+    **Both measures are taken, because the name is the claim.**  Only the
+    fallback half was measured here — inside a block that pinned the seam to the
+    same `None` the fixture had already pinned — so "by either measure" was an
+    assertion about one of them, and a tokenizer that charged an image
+    differently (or not at all) could not have failed it.
+
+    What is measured is the *difference* the image makes, rather than the
+    message's total: the two measures disagree about the text by design (that
+    disagreement is the point of the module), so the total is the one number
+    that cannot be compared across them.
     """
-    message = {
+    with_image = {
         "role": "user",
-        "content": [{"type": "image_url", "image_url": {"url": "data:,"}}],
+        "content": [
+            {"type": "text", "text": ENGLISH},
+            {"type": "image_url", "image_url": {"url": "data:,"}},
+        ],
     }
+    text_only = {
+        "role": "user",
+        "content": [{"type": "text", "text": ENGLISH}],
+    }
+
+    def image_costs() -> int:
+        """What the image adds to the message, under whichever measure is in force."""
+        return tokens.estimate_message_tokens(
+            with_image
+        ) - tokens.estimate_message_tokens(text_only)
+
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(tokens, "_openai_encoding", lambda: None)
-        without = tokens.estimate_message_tokens(message)
+        by_script = image_costs()
 
-    assert without == tokens._IMAGE_TOKENS
+    assert by_script == tokens._IMAGE_TOKENS, "the script measure"
+    assert image_costs() == tokens._IMAGE_TOKENS, "and the real tokenizer, the same"
 
 
 def test_a_turn_that_weighs_nothing_is_still_charged_one() -> None:

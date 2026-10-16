@@ -41,6 +41,7 @@ from openai.types.responses import (
     ResponseOutputItemAddedEvent,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
 )
 
 from slife2.libs.host.config import Config, ModelSettings, ProviderSettings
@@ -128,6 +129,73 @@ def test_openai_tool_call_fragments_carry_index_id_and_name() -> None:
     (chunk,) = openai_translate(event)
     (delta,) = chunk.tool_call_deltas
     assert delta == ToolCallDelta(index=0, id="c1", name="calc", arguments_delta='{"e"')
+
+
+def test_openai_a_gateway_streaming_the_deprecated_function_call_is_read() -> None:
+    """**The old spelling of the same call, and it used to vanish.**
+
+    `delta.function_call` is what the API streamed before `tool_calls` existed —
+    one call, no index, no id — and a gateway that still speaks it (or a proxy
+    translating for an endpoint that does) carries the model's whole call there.
+    Reading only `tool_calls` meant the call disappeared: no tool ran, the turn
+    was recorded as a plain answer, and nothing anywhere said a call had been
+    made.  No warning fired either — the field is one the SDK declares, so
+    `_reasoning`'s unknown-field report has nothing to say about it.
+
+    Translated rather than named, because the field is legible: it holds what
+    `tool_calls[0].function` holds, index 0 is the only index the one-call form
+    had, and the id it lacks is the one `ToolCallAccumulator.complete`
+    synthesises for every call that arrives without one.
+    """
+    event = _oa(
+        choices=[
+            {
+                "index": 0,
+                "delta": {"function_call": {"name": "calc", "arguments": '{"e"'}},
+                "finish_reason": None,
+            }
+        ]
+    )
+    (chunk,) = openai_translate(event)
+    assert chunk.tool_call_deltas == (
+        ToolCallDelta(index=0, name="calc", arguments_delta='{"e"'),
+    )
+    # And the fragments are one call once assembled, id and all.
+    accumulator = ToolCallAccumulator()
+    for delta in chunk.tool_call_deltas:
+        accumulator.add(delta)
+    accumulator.add(ToolCallDelta(index=0, arguments_delta=': "6*7"}'))
+    (call,) = accumulator.complete()
+    assert (call.name, call.arguments, call.id) == ("calc", {"e": "6*7"}, "call_0")
+
+
+def test_openai_a_chunk_carrying_both_spellings_is_one_call() -> None:
+    """A proxy translating for an old endpoint can send both, and the modern
+    field is the one that is authoritative — reading both would dispatch the
+    same call twice."""
+    event = _oa(
+        choices=[
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "calc", "arguments": "{}"},
+                        }
+                    ],
+                    "function_call": {"name": "calc", "arguments": "{}"},
+                },
+                "finish_reason": None,
+            }
+        ]
+    )
+    (chunk,) = openai_translate(event)
+    assert chunk.tool_call_deltas == (
+        ToolCallDelta(index=0, id="c1", name="calc", arguments_delta="{}"),
+    )
 
 
 def test_openai_finish_reason_becomes_a_finish_event() -> None:
@@ -700,6 +768,81 @@ def test_responses_fills_in_arguments_that_never_streamed() -> None:
     ]
 
 
+def _text_done(text: str) -> ResponseTextDoneEvent:
+    return ResponseTextDoneEvent.model_validate(
+        {
+            "type": "response.output_text.done",
+            "content_index": 0,
+            "item_id": "i",
+            "logprobs": [],
+            "output_index": 0,
+            "sequence_number": 2,
+            "text": text,
+        }
+    )
+
+
+def _message_item(text: str) -> dict[str, Any]:
+    """The assembled answer, as `response.output` carries it."""
+    return {
+        "type": "message",
+        "id": "m1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def test_responses_fills_in_the_text_that_never_streamed() -> None:
+    """**The text half of the argument back-fill, and it was missing.**
+
+    The turn's answer is assembled from `response.output_text.delta` and from
+    nothing else, so an endpoint that assembles the text and sends it whole —
+    a gateway implementing this API partially, which this module treats as real
+    for `store` — left the text parts empty.  A `Finish` still arrives from
+    `response.completed`, so the cut-stream check passes and the turn is stored
+    and displayed with the *authoritative* answer `""`: a blank reply recorded
+    as the model's whole output, with nothing anywhere saying a thing was lost.
+    """
+    event = _completed(output=[_message_item("forty-two")])
+
+    assert responses_translate(event) == [
+        Chunk(text="forty-two"),
+        Finish(stop_reason="stop"),
+    ]
+    # An index that *did* stream is left alone: the whole text appended after its
+    # own deltas would be the same answer twice.
+    assert responses_translate(event, streamed={0}) == [Finish(stop_reason="stop")]
+
+
+def test_responses_reads_the_answer_a_gateway_sends_whole() -> None:
+    """The same endpoint's other half: `response.output_text.done`.
+
+    A real event of this API, with the text and its `output_index`, and the one
+    an endpoint that sends no per-token deltas has to send its answer in.
+    """
+    assert responses_translate(_text_done("forty-two")) == [Chunk(text="forty-two")]
+    assert responses_translate(_text_done("forty-two"), streamed={0}) == []
+
+
+def test_responses_a_stream_that_delivered_its_text_is_not_answered_twice() -> None:
+    """The memory is per stream, and it is what the terminal event reads.
+
+    Every event of one stream shares one `streamed` set, exactly as the plugin's
+    streamer drives it: a gateway that sends the deltas *and* the assembled
+    answer — which the real API does — must reach the transcript once.
+    """
+    streamed: set[int] = set()
+
+    assert responses_translate(_text_delta("forty"), streamed=streamed) == [
+        Chunk(text="forty")
+    ]
+    assert responses_translate(_text_done("forty-two"), streamed=streamed) == []
+    assert responses_translate(
+        _completed(output=[_message_item("forty-two")]), streamed=streamed
+    ) == [Finish(stop_reason="stop")]
+
+
 def test_responses_a_truncated_response_says_length() -> None:
     """Cut off at the output cap is an ordinary outcome, not an error.
 
@@ -819,6 +962,63 @@ def test_responses_several_system_turns_are_joined() -> None:
         ]
     )
     assert instructions == "one\n\ntwo"
+
+
+def test_responses_a_system_turn_of_parts_contributes_its_text() -> None:
+    """**One input, three adapters, one answer.**
+
+    `Message.content` permits a list of parts, and the chat-completions adapter
+    passes a non-string through and the Anthropic one extracts its text and
+    *warns* about what it cannot carry — with a comment naming exactly this
+    failure.  This adapter read only `str` content, so a system turn carrying
+    blocks contributed nothing at all, with no word anywhere: a prompt the caller
+    wrote left the request and the model answered a question nobody had asked
+    (DESIGN.md §10.1).
+    """
+    instructions, items = to_responses_input(
+        [
+            Message(
+                role="system",
+                content=[
+                    {"type": "text", "text": "be "},
+                    {"type": "text", "text": "nice"},
+                ],
+            ),
+            Message(role="user", content="hi"),
+        ]
+    )
+    assert instructions == "be nice"
+    assert items == [{"role": "user", "content": "hi"}]
+
+
+def test_responses_a_system_turn_names_the_part_it_cannot_carry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A block `instructions` has no field for is dropped *and named* — the
+    alternative is an attachment that vanishes with nothing anywhere saying so,
+    which is the failure the part converter refuses one function up."""
+    caplog.set_level(
+        logging.WARNING, logger="slife2.plugins.llm.openai_responses_server"
+    )
+    instructions, _ = to_responses_input(
+        [
+            Message(
+                role="system",
+                content=[
+                    {"type": "text", "text": "be nice"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,eA=="},
+                    },
+                ],
+            )
+        ]
+    )
+    assert instructions == "be nice", "the text beside it is still the prompt"
+    assert any(
+        "system turn carries input_image" in record.getMessage()
+        for record in caplog.records
+    ), "the part that could not be carried left no trace"
 
 
 def test_responses_a_plain_message_stays_a_plain_string() -> None:

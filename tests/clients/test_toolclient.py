@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import types
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,9 +19,11 @@ from fastmcp.exceptions import ToolError
 
 from slife2.clients.toolclient import (
     CALL_TOOL,
+    FUNC_TOOL_UNLOAD,
     LIST_TOOLS,
     UpstreamTool,
     remote_tools,
+    trim_answer,
     unload_tools,
 )
 from slife2.libs.host.config import Config, ToolServerSettings, default_config
@@ -445,6 +446,37 @@ async def test_a_trim_that_cannot_happen_does_not_fail_the_turn() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_an_unreadable_trim_answer_is_not_a_trim_that_took_nothing() -> None:
+    """**A hub that answered, and unreadably, is not a hub that unloaded none.**
+
+    `return payload or empty` turned the one answer this pair of functions is
+    built to refuse — `tool_payload`'s `{}`, which is what a shape this build
+    does not know reads as — into the well-formed "nothing was unloaded, no
+    sentence" the `except` above is for.  `trim_answer` then saw an honest
+    no-op, wrote no pair, and the caller logged nothing: the model went on
+    believing it held the tools that had gone, which is the confusion
+    `trim_answer` was written to remove and the sibling paths pin with a test.
+    A call that could not be *made* is still the empty answer; an answer that
+    arrived and cannot be *read* is damage, and damage is the caller's to
+    refuse.
+    """
+
+    class Unreadable(FakeHub):
+        async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
+            if name == FUNC_TOOL_UNLOAD:
+                # A hub from another build answering in prose: no payload this
+                # build can read out of it, which is the empty mapping.
+                return answer("the tool list is within its budget")
+            return await super().call_tool(name, arguments)
+
+    found = await unload_tools(Unreadable())
+
+    assert found == {}, "the unreadable answer is passed on as it is"
+    with pytest.raises(ConnectionError, match="names it unloaded"):
+        trim_answer(found)
+
+
 def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
     """各司其职, as a property of the import graph rather than a promise.
 
@@ -456,14 +488,18 @@ def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
     machinery under it.  A `sqlite3` import here would be the hub writing SQL of
     its own, which is the overlap this test exists to catch — the same failure
     it always caught, one level down.
+
+    **Read off the module, not off its text**, which is what the guard used to
+    do: "no sqlite3" read off a source file is as true of a comment as of an
+    import, and "the store, not the module" was a claim about a spelling rather
+    than about what the hub reaches.  An import is a name bound in the module's
+    own namespace and a class shared with the rest of the build, so those are
+    what is asserted — and a `ToolStore` that stopped being the catalogue's own
+    would be a second catalogue, which is the drift this is really about.
     """
+    import slife2.libs.store.catalogue as catalogue
     import slife2.plugins.toolhub.server as hub
 
-    source = Path(hub.__file__).read_text(encoding="utf-8")
-    assert "sqlite3" not in source
-    assert "from slife2.libs.store.catalogue import" in source, (
-        "the catalogue is this process's"
-    )
-    assert "import slife2.libs.store.catalogue" not in source, (
-        "the store, not the module"
-    )
+    assert "sqlite3" not in vars(hub), "no SQL of the hub's own"
+    assert "slife2" not in vars(hub), "the store, and not the package around it"
+    assert hub.ToolStore is catalogue.ToolStore, "the one store, and this process's"

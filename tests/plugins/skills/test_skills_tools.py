@@ -225,6 +225,45 @@ async def test_a_name_that_resolves_into_a_dot_directory_is_refused_too(
 
 
 @pytest.mark.asyncio
+async def test_a_name_that_is_not_one_directory_is_refused(
+    isolated_runtime: Path,
+) -> None:
+    """**A skill is one directory directly under `skills/`, and `scan` says so.**
+
+    `scan` lists the folder's *direct children*, so a name carrying a separator
+    installed where nothing looks: `skill_set("a/b", …)` wrote `skills/a/b` —
+    the per-file `mkdir(parents=True)` had made `skills/a` on the way — renamed
+    it into place successfully and answered "`a/b` is installed … a search finds
+    it from your next one", while there was no `skill_list` line, no catalogue
+    row, and `skill_use("a/b")` answered that no skill was called that.  A
+    trailing separator was the same failure one step along: the name landed in
+    `one` while the staging directory was built from the spelling, so `one/`
+    staged through `skills/.one` — a dot-directory `scan` skips by rule — and
+    the `finally` removed the stage while leaving that behind for good.
+
+    Both are refused now, before anything is created, which is what makes the
+    last assertion here the whole of the guarantee: a refused install leaves no
+    directory at all, not even the one the staging path would have made.
+    """
+    config_on_disk(isolated_runtime)
+
+    async with Client(build_server(load())) as client:
+        for name in ("a/b", "one/", "a/./b"):
+            with pytest.raises(ToolError) as raised:
+                await client.call_tool(
+                    "skill_set",
+                    {"name": name, "files": files(manifest("x"))},
+                )
+            assert "one skill directory" in str(raised.value), name
+        listed = await ask(client, "skill_list")
+
+    skills = isolated_runtime / "skills"
+    folders = {path.name for path in skills.iterdir()} if skills.is_dir() else set()
+    assert folders == set(), f"nothing installed, nothing left behind: {folders}"
+    assert "No skills are installed" in listed
+
+
+@pytest.mark.asyncio
 async def test_a_skill_with_no_manifest_is_refused(isolated_runtime: Path) -> None:
     """The manifest is what makes a directory a skill (`scan`), so a set of files
     without one is an install that would report success and install nothing

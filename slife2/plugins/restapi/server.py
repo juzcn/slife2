@@ -324,6 +324,7 @@ def build_server(
         instructions=INSTRUCTIONS,
         category=CATEGORY,
         entries=lambda theirs: theirs.rest_apis.values(),
+        words=WORDS,
         transports=transports,
         client_factory=client_factory,
         management=register_management,

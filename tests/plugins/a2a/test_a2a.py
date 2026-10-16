@@ -48,7 +48,13 @@ from slife2.libs.host.config import (
     A2ASettings,
     default_config,
 )
-from slife2.libs.host.paths import a2a_inbound_path, a2a_inbound_paths
+from slife2.libs.host.paths import (
+    a2a_inbound_path,
+    a2a_inbound_paths,
+    home,
+    in_home,
+    register_home,
+)
 from slife2.libs.host.runtime import read_record
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.a2a import broker
@@ -478,7 +484,7 @@ def test_a_ledger_without_an_owner_belongs_to_nobody() -> None:
 def test_the_ledger_is_how_a_shared_process_finds_the_agents_it_serves() -> None:
     InboundStore.open(AGENT, LEDGER)
     InboundStore.open("someone-else", LEDGER)
-    found = {InboundStore.at(p).agent for p in a2a_inbound_paths(LEDGER)}  # type: ignore[union-attr]
+    found = {InboundStore.at(one.path).agent for one in a2a_inbound_paths(LEDGER)}  # type: ignore[union-attr]
     assert found == {AGENT, "someone-else"}
 
 
@@ -512,8 +518,10 @@ def test_each_network_keeps_its_own_ledger() -> None:
     assert TASK in ours["pending"], "the other network's task survived"
 
     assert REMOTE.ledger != LOCAL.ledger
-    assert {path.name for path in a2a_inbound_paths(LOCAL.ledger)} == {LOCAL.ledger}
-    assert {path.name for path in a2a_inbound_paths(REMOTE.ledger)} == {REMOTE.ledger}
+    assert {one.path.name for one in a2a_inbound_paths(LOCAL.ledger)} == {LOCAL.ledger}
+    assert {one.path.name for one in a2a_inbound_paths(REMOTE.ledger)} == {
+        REMOTE.ledger
+    }
 
 
 def test_the_ledger_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,15 +646,36 @@ def test_a_terminal_task_is_not_un_set_by_a_late_result() -> None:
 
 
 def test_the_task_store_forgets_terminal_records_first() -> None:
+    """**A finished task is the one nothing is waiting on**, so the prune spends
+    it before it spends a pending one — which is the record a late result still
+    has to be routed to.
+
+    The test that claimed to check this never did.  It filled the store with
+    *pending* records and marked its own record completed after the last prune,
+    so the sort's terminal-first clause was never consulted — every record the
+    prune could see was pending — and its final assertion was unfailable besides
+    (the record it looked for was the newest, and a prune takes the oldest).
+    The finished record is seeded before the prune that has to choose, and it is
+    the *newest* record in the store: only the terminal-first clause can pick it.
+    """
     store = TaskStore()
-    for index in range(TaskStore.MAX_RECORDS + 20):
-        store.record_send(f"t{index}", PEER)
-    assert len(store._records) <= TaskStore.MAX_RECORDS
+    for index in range(TaskStore.MAX_RECORDS - 1):
+        store.record_send(f"pending{index}", PEER)
+    finished = store.record_send("finished", PEER)
+    store.record_result("finished")
+    assert finished.status == "completed"
+    assert len(store._records) == TaskStore.MAX_RECORDS, "the cap has not been reached"
+
+    # One more send is what pushes the store over the cap, and therefore what
+    # prunes it.
     store.record_send("last", PEER)
-    # A finished task is the one nothing is waiting on, so it goes before a
-    # pending one — which is the record a late result still has to be routed to.
-    store.record_result("last")
-    assert store.get("last") is not None
+
+    assert len(store._records) <= TaskStore.MAX_RECORDS
+    assert store.get("finished") is None, "a finished task outlived a pending one"
+    assert store.get("last") is not None, "the record just written was pruned"
+    # And the pending records went in age order after it: the oldest first.
+    assert store.get("pending0") is None
+    assert store.get("pending50") is not None
 
 
 # ── the broker: probed, started, or fatal ───────────────────────────────────
@@ -831,6 +860,43 @@ def test_the_broker_a_start_brought_up_is_stopped_by_the_record_it_wrote() -> No
     assert killed == [os.getpid()]
     # And the record goes with it, so a second take-down has nothing to act on.
     assert read_record(broker.log_url(settings())) is None
+
+
+def test_a_broker_that_did_not_exit_keeps_the_record_that_finds_it() -> None:
+    """**A record cleared too early is a live broker nothing can find again.**
+
+    `stop` cleared the record and *then* read `kill`'s answer, so the one case
+    that most needs the record — a mosquitto that would not exit — was the case
+    that lost it.  The next `slife2 down` reads no record, probes the port and
+    answers "not started by slife2; left alone": a sentence about somebody
+    else's daemon, about a process this one started and could not stop.  The
+    launcher's own stop keeps the record for exactly this reason, and the answer
+    says so, because the operator reading it is the one who has to go and look.
+    """
+    answers = iter([False, True])
+
+    class Child:
+        returncode = None
+        pid = os.getpid()
+
+        def poll(self) -> None:
+            return None
+
+    broker.ensure(
+        settings(),
+        listening=lambda host, port: next(answers),
+        which=lambda name: "/usr/bin/mosquitto",
+        start=lambda argv, *, url: Child(),
+    )
+    assert read_record(broker.log_url(settings())) is not None
+
+    said = broker.stop(settings(), kill=lambda pid: False)
+
+    assert "did not exit" in said and "the record is kept" in said
+    kept = read_record(broker.log_url(settings()))
+    assert kept is not None and kept.pid == os.getpid(), (
+        "the surviving pid is the one the next take-down has to signal"
+    )
 
 
 def test_a_broker_that_was_not_ours_is_never_stopped() -> None:
@@ -1029,6 +1095,125 @@ async def test_a_broadcast_arrives_as_an_event(window: Window) -> None:
     text = window.handed[-1]["text"]
     assert a2a_message_type(text) == "broadcast"
     assert text.endswith("the build is green")
+
+
+#: What a peer calls itself when it wants to be mistaken for a line of the
+#: window's own drawing: a name that ends the bubble it is the prefix of, opens
+#: one of somebody else's, and carries an ESC.
+FORGED_PEER = "jill\n✗ offline\x1b[31m"
+
+
+@pytest.mark.asyncio
+async def test_no_wire_peer_can_forge_a_line_in_the_channel_a_message_arrives_on(
+    window: Window,
+) -> None:
+    """**The peer's name *becomes* the channel**, and the channel is drawn.
+
+    `safe_name`'s own docstring gives the reason — these fields come off the
+    wire with nothing having validated them, and a control character in one lets
+    a peer "break out of a single display line in a handed-over message, the
+    TUI, or logs" — and only one of the four callbacks applied it.  The other
+    three pass their peer into `session.post` untouched, and that string is the
+    second half of `channel_for`: what the window renders verbatim as the bubble
+    prefix (`slife2.tui.widgets.channel_prefix`), what the turn row stores, and
+    what the writer's log lines name.  So a peer calling itself `jill` plus a
+    newline and `✗ offline` forged an arrival line and a departure line in every
+    window showing the agent's conversation.  The marker itself is safe —
+    `json.dumps` escapes the control characters — which is why this asserts on
+    the channel, the stored peer and the log rather than on the text.
+
+    Three callbacks in one test because they are one rule: the fourth
+    (`on_agent_change`) already scrubs, and a rule applied by three of four
+    callers is the bug.
+    """
+    session = wired(window=window)
+    session.mesh.on_inbound_task(FORGED_PEER, "hello", TASK)
+    session.mesh.on_peer_cancel(TASK, FORGED_PEER)
+    session.mesh.on_broadcast_event(FORGED_PEER, "the build is green")
+    await drain_until_idle(session, window=window)
+
+    assert len(window.handed) == 3, "the three arrivals, and nothing else"
+    safe = safe_name(FORGED_PEER)
+    assert safe != FORGED_PEER, "the fixture is not a name that needed scrubbing"
+    for handed in window.handed:
+        assert handed["channel"] == f"{CHANNEL}:{safe}"
+        assert "\n" not in handed["channel"] and "\x1b" not in handed["channel"], (
+            "a peer's name opened a line of its own in the window"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_log_line_for_an_arrival_names_the_scrubbed_peer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The channel is not the only reader: `what` is the writer's own line.
+
+    A delivery that reaches no conversation is logged with the peer it was for
+    (`a2a_delivery_unreachable`), and that line is read in a terminal — so the
+    name in it has to be the same scrubbed one the window was given, not the
+    name off the wire.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
+    refusing = Window(refuse=True)
+    async with Client(refusing.mcp) as refusing_client:
+        refusing.client = refusing_client
+        session = wired(window=refusing)
+        session.mesh.on_broadcast_event(FORGED_PEER, "hello")
+        await writer_until(
+            session,
+            lambda: any(
+                "a2a_delivery_unreachable" in record.getMessage()
+                for record in caplog.records
+            ),
+            window=refusing,
+        )
+
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("a2a_delivery_unreachable")
+    ]
+    assert said, "a refused delivery left no line naming the peer"
+    for line in said:
+        assert f"peer={safe_name(FORGED_PEER)} " in line
+        assert "\n" not in line and "\x1b" not in line, "the log line was forged too"
+
+
+@pytest.mark.asyncio
+async def test_the_line_a_presence_note_logs_is_scrubbed_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fourth callback, and the one whose `what` is a sentence rather than a name.
+
+    `on_agent_change` scrubbed the peer it *stores* and left the raw
+    `card.agent_name` in the delivery's own description — which reaches a log
+    line on the one path a presence note has when nobody is looking
+    (`a2a_note_no_window … line=<what>`).  A name carrying a newline forged that
+    line, which is the third reader `safe_name`'s docstring names and the same
+    defect the three arrival callbacks were fixed for.
+
+    The window is not the exposure here: `format_presence_line` renders the
+    scrubbed name, so what is asserted is the log alone.
+    """
+    from slife2.plugins.a2a.mesh import AgentCard
+
+    caplog.set_level(logging.DEBUG, logger="slife2.plugins.a2a.server")
+    session = wired()  # no window: the note is drawn nowhere and said to the log
+    session.mesh.on_agent_change(
+        AgentCard(agent_name=AgentName(FORGED_PEER), status="online"), "online"
+    )
+    await drain_until_idle(session)
+
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("a2a_note_no_window")
+    ]
+    assert said, "the note reached no window and left no line saying so"
+    for line in said:
+        assert f"line={safe_name(FORGED_PEER)} is online" in line
+        assert "\n" not in line and "\x1b" not in line, "the log line was forged too"
 
 
 @pytest.mark.asyncio
@@ -1239,6 +1424,100 @@ async def test_a_publish_that_never_left_is_not_a_rung_of_the_ladder(
         f"{len(published)} of {_MAX_ATTEMPTS - 1} rungs reached the broker"
     )
     assert send.attempts == _MAX_ATTEMPTS, "the rungs that landed are not counted"
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A broker blip must not eat a message the conversation was promised.**
+
+    A connect attempt on a mesh whose link had just dropped began with
+    `disconnect()`, which cancelled every `_deliver` task and cleared the
+    correlation routes — so a send that was between two rungs of its ladder
+    (with both `a2a_send_message`'s "The result will arrive in this
+    conversation" and the retry profile still standing) died there: no terminal
+    reply could route afterwards (`a2a_reply_unknown_corr`, its correlation
+    gone), no `UNREACHABLE` notice came out of the ladder, and the task row
+    stayed `pending` for ever.  The teardown a *reconnect* makes is a revival —
+    the mesh is being rebuilt, not abandoned — so the ladder rides over it and
+    the message goes out when the link is back.
+
+    The connect is driven to its teardown and no further: the name probe is what
+    runs next, and a name held elsewhere is a `RuntimeError` with no broker to
+    dial.
+    """
+
+    async def the_name_is_taken() -> str:
+        return "another A2A instance holds the name"
+
+    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    monkeypatch.setattr(mesh, "_probe_own_name", the_name_is_taken)
+    send = _OutboundSend("task-in-flight-over-a-reconnect", PEER, "session", "{}")
+    mesh._sends[send.task_id] = send
+
+    published: list[str] = []
+    down = True
+
+    async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        published.append(topic)
+
+    real_attempt = mesh._publish_attempt
+
+    async def a_link_that_is_down(send_: _OutboundSend, corr: str) -> None:
+        if down:
+            raise RuntimeError("A2A mesh is not connected.")
+        await real_attempt(send_, corr)
+
+    monkeypatch.setattr(mesh, "_publish_props", lands)
+    monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_is_down)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
+    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+
+    loop = asyncio.create_task(mesh._deliver(send))
+    send.loops.add(loop)
+    await asyncio.sleep(0.05)  # it is on the ladder, and its rung cannot land
+
+    with pytest.raises(RuntimeError, match="holds the name"):
+        await mesh.connect()
+
+    assert not loop.done(), "the connect attempt destroyed a send that was in flight"
+    assert loop in send.loops and send.task_id in mesh._sends
+
+    # The link comes back, and the rung the send was owed reaches the broker.
+    down = False
+    await asyncio.wait_for(loop, timeout=5.0)
+    assert published, "the send was never published once the mesh was back"
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_that_ends_a_send_tells_the_conversation(
+    window: Window,
+) -> None:
+    """**A cancellation was the one exit that reached nobody.**
+
+    `_deliver`'s contract is that the ladder's ending is told to the
+    conversation and not only to the log — a task row stays `pending` for ever
+    otherwise, over a message `a2a_send_message` promised a result for.  A
+    teardown that ends a ladder takes the same callback a terminal reply takes,
+    wearing `UNREACHABLE`: no peer said anything, and whether the peer has the
+    message is exactly what is unknown once the mesh has gone.
+    """
+    session = wired(window=window)
+    send = _OutboundSend(TASK, PEER, "session", "{}")
+    session.mesh._sends[send.task_id] = send
+    loop = asyncio.create_task(session.mesh._deliver(send))
+    send.loops.add(loop)
+    await asyncio.sleep(0)  # on the ladder, waiting out its first interval
+
+    await session.mesh.disconnect()
+    await drain_until_idle(session, window=window)
+
+    text = window.handed[-1]["text"]
+    assert a2a_message_type(text) == "task_response"
+    assert f'"task_id": "{TASK}"' in text, "the id the model was given is here"
+    assert "never reached" in text, "it must not read as a peer's answer"
+    assert "mesh went down while this was still being sent" in text
 
 
 class _OneMessageBroker:
@@ -1675,6 +1954,76 @@ async def test_a_start_that_fails_after_building_a_session_still_tears_down(
     assert left == [AGENT]
 
 
+@pytest.mark.asyncio
+async def test_another_homes_orphan_is_announced_in_that_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**The walk finds every home's ledger, and the announcement has to be that
+    home's too.**
+
+    One process serves every home, and the walk that finds the ledgers spans
+    them all — but the session built out of what it finds was keyed by the agent
+    name alone and built in the ambient home, so a start in home A that found
+    home B's `jack` ledger did four wrong things at once: its mesh opened a
+    *different* file (`<A>/agents/jack/a2a.yaml`, usually absent, which is why
+    the notice was empty), the notice about B's peer — who is still owed an
+    answer — was handed to A's conversation, a stray empty ledger was written
+    in A, and the session cached under `jack` was the one B's own window then
+    joined: B's agent came online on the broker with A's ambient home behind it,
+    and every inbound task was handed over in A.
+
+    So this asserts the two halves that are visible from outside: the notice is
+    delivered at all, and the home it is delivered in is the ledger's.
+    """
+    other = tmp_path / "other-home"
+    with in_home(other):
+        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
+    register_home(other)
+
+    #: What `hand_over` would have been called with, and the home it would have
+    #: been called *in* — which is what decides the conversation it reaches
+    #: (`client_meta` stamps `paths.home()` on the call the window receives).
+    said: list[dict[str, str]] = []
+
+    async def recorded(
+        config: Any,
+        agent: str,
+        text: str,
+        channel: str,
+        *,
+        what: str,
+        window_client: Any = None,
+    ) -> None:
+        said.append(
+            {"agent": agent, "channel": channel, "text": text, "home": str(home())}
+        )
+
+    monkeypatch.setattr(a2a_server, "hand_over", recorded)
+    monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
+
+    config = default_config()
+    object.__setattr__(config, "a2a", settings())
+    mcp = build_server(config, source=lambda: config, connecting=True)
+
+    async with Client(mcp):
+        deadline = (  # timeouts: the value this test is built around, not a budget
+            asyncio.get_running_loop().time() + 5.0
+        )  # timeouts: the value this test is built around, not a budget
+        while not said:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("the orphan notice was never handed over")
+            await asyncio.sleep(0.01)
+
+    assert said[0]["home"] == str(other), "the notice was handed over in another home"
+    assert said[0]["agent"] == AGENT
+    assert TASK in said[0]["text"] and PEER in said[0]["text"]
+    # And the daemon's own home is not where the ledger was opened: an agent
+    # named in another home's ledger leaves nothing behind here.
+    assert not (home() / "agents" / AGENT).exists(), (
+        "a session for another home's agent wrote its ledger into this one"
+    )
+
+
 # ── the plugin: what it offers, and to whom ─────────────────────────────────
 
 
@@ -1896,7 +2245,7 @@ async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
         await until(lambda: joined == [AGENT], "the join never reached the mesh")
         assert left == [], "the mesh went down while the window was still holding it"
         holding.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        with contextlib.suppress(asyncio.CancelledError):
             await holding
 
     assert window.noted == [], "the agent's own arrival is not news to itself"
@@ -1975,7 +2324,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
         holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
         await until(lambda: joined == [AGENT], "the join never reached the mesh")
         holding.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        with contextlib.suppress(asyncio.CancelledError):
             await holding
         await until(
             lambda: any(
@@ -2035,7 +2384,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
             # client that held it is closed — which is `SlifeApp.on_unmount`'s
             # two lines, and the whole of what a departure is.
             holding.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await holding
             await mesh.close()
 
@@ -2049,7 +2398,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
                 seconds=30.0,
             )
         finally:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 holding.cancel()
                 await holding
             with contextlib.suppress(Exception):

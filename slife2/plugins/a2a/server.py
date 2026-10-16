@@ -71,6 +71,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
@@ -91,7 +92,7 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import a2a_inbound_paths
+from slife2.libs.host.paths import a2a_inbound_paths, home, in_home
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
 from slife2.libs.turn.prompt import render
@@ -434,6 +435,18 @@ def _wire(session: Session) -> None:
         # The marker's `from` names the sending peer — never the receiver — and
         # its task id, so the model can attribute the turn and reference the
         # task it is responding to instead of making one up.
+        #
+        # **Scrubbed first, and the channel is the reason.**  `source` comes off
+        # the MQTT wire with nothing having validated it, and it becomes not only
+        # the marker's `from` but the *channel* the message is handed over on
+        # (`channel_for`), which the window draws verbatim as the bubble prefix
+        # (`slife2.tui.widgets.channel_prefix`), which is stored in the turn row
+        # and which the log lines below name.  A peer calling itself `jill` plus a
+        # newline and `✗ offline`, or carrying an ESC, forges lines in every
+        # window showing this agent's conversation — the shape `safe_name` exists
+        # to refuse, and every callback here has to pass its peer through it or
+        # the one that does not is the hole.
+        source = safe_name(source)
         marker_id = (task_id or None) if kind == "task" else None
         marker_type = "message" if kind != "task" else "task_request"
         session.post(
@@ -517,10 +530,18 @@ def _wire(session: Session) -> None:
         text = format_presence_line(card, event)
         if text is None:
             return
+        # **Scrubbed once and used for both**, rather than scrubbed for the peer
+        # and left raw in the sentence beside it.  `what` is the delivery's own
+        # name for itself and it reaches log lines, which is the third place the
+        # module's `safe_name` docstring names — so a card whose name carries a
+        # newline was still forging a line there while the peer beside it was
+        # clean.  `text` is safe on its own: `format_presence_line` scrubs the
+        # name it renders, which is why this is the log and not the window.
+        name = safe_name(card.agent_name)
         session.post(
             text,
-            safe_name(card.agent_name),
-            f"{card.agent_name} is {event}",
+            name,
+            f"{name} is {event}",
             note=True,
         )
 
@@ -532,7 +553,13 @@ def _wire(session: Session) -> None:
         knows whether it is still working on that task — decides what to do with
         it.  The one constraint rides the marker: the completion bridge died with
         the task, so a `task_response` for it is refused.
+
+        **The peer is scrubbed here too**, for the reason `on_inbound_task`
+        gives: a withdrawal is handed over like any other message, so its
+        `peer` is the channel this line arrives on and the name in the log —
+        both of them drawn or written verbatim.
         """
+        peer = safe_name(peer)
         session.post(
             f"{marker(session.net, peer, task_id, type='cancel_task')}"
             f"The sender withdrew this task — stop working on it.",
@@ -541,6 +568,10 @@ def _wire(session: Session) -> None:
         )
 
     def on_broadcast_event(sender: str, text: str) -> None:
+        # **And the third one.**  A broadcast carries the same untrusted sender
+        # as everything else on this wire, and it takes the same road into a
+        # channel, a stored turn and a log line.
+        sender = safe_name(sender)
         session.post(
             f"{marker(session.net, sender, type='broadcast')}{text}",
             sender,
@@ -716,7 +747,9 @@ def build_server(
     the config says rather than with a connection nobody asked for.
     """
     live: Callable[[], Config] = source or load_cached
-    sessions: dict[str, Session] = {}
+    #: One session per **(home, agent)** — see `session_of` for why the name
+    #: alone is not the identity this process serves.
+    sessions: dict[tuple[str, str], Session] = {}
 
     def mesh_settings() -> A2ASettings:
         """This network's settings, as the config has them *now*.
@@ -742,8 +775,41 @@ def build_server(
             replace(found, unit=net.unit_for(found.unit, member)), member, net.ledger
         )
 
-    def session_of(agent: str) -> Session:
+    async def writer_in(root: Path, session: Session) -> None:
+        """Run *session*'s writer **in its own home**, for the life of this process.
+
+        **A loop outlives the call that started it**, so by the time it resolves
+        a path the ambient home is the daemon's own — and everything this writer
+        does resolves one: `hand_over` stamps the caller's home on the call it
+        makes to the window (`client_meta`), and the window it reaches is the one
+        showing *that* home's conversation.  Leaving the home to the ambient one
+        is what handed another home's message to this one's window, which the tui
+        refuses with `a2a_delivery_unreachable` while the peer is told nothing.
+        The shape is `slife2.plugins.wechat.server.Wechat._spawn_in_home`'s, for the
+        same reason.
+        """
+        with in_home(root):
+            await _drain(session, live(), window_client)
+
+    def session_of(agent: str, root: Path | None = None) -> Session:
         """This agent's mesh, built on first use and kept.
+
+        **Keyed by the home as well as by the name, because a name is not an
+        identity here.**  One process serves every home, two homes may each be
+        running an agent called `jack`, and a table keyed by the name alone
+        answers the second home with the first one's mesh — the arrangement
+        `slife2.libs.plugin.audience.client_key` and `slife2.plugins.tui.server.Windows`
+        exist to prevent, and here it cost the mesh itself: the session's writer
+        ran in whichever home the *first* caller was in, so every message found
+        for the second home's agent was handed to the first home's conversation,
+        and the mesh's own ledger was opened there — a file that either does not
+        exist or says something else (`announce_ledgers`).
+
+        *root* is the home the caller means, and it is what the mesh and the
+        writer resolve their files in.  A caller inside a served call passes
+        nothing and gets the ambient home, which `slife2.libs.plugin.protocol.serve`
+        has already made the caller's; the startup walk passes the home each
+        ledger was *found* in.
 
         Built rather than connected, and the difference is the whole of what
         enrollment means here: building writes the agent's ledger
@@ -752,12 +818,18 @@ def build_server(
         about who is here now.  What connects is `join` (a window is showing the
         agent) or the first `a2a_*` call that needs the mesh.
         """
-        found = sessions.get(agent)
+        where = root or home()
+        found = sessions.get((str(where), agent))
         if found is None:
-            found = Session(agent=agent, net=net, mesh=mesh_for(agent))
+            # Both of these resolve a home's own files — the mesh opens the
+            # agent's ledger at `agents/<agent>/a2a.yaml` — so the home goes
+            # around the build rather than being read off whatever directory the
+            # daemon happens to be started in.
+            with in_home(where):
+                found = Session(agent=agent, net=net, mesh=mesh_for(agent))
             _wire(found)
-            found.writer = asyncio.create_task(_drain(found, live(), window_client))
-            sessions[agent] = found
+            found.writer = asyncio.create_task(writer_in(where, found))
+            sessions[(str(where), agent)] = found
         return found
 
     async def connected(agent: str, reason: str) -> Session:
@@ -858,10 +930,10 @@ def build_server(
         # (`slife2/plugins/a2a/broker.py`).
         logger.info("a2a_broker %s", ensure_broker(config_now.a2a))
 
-        for path in a2a_inbound_paths(net.ledger):
-            store = InboundStore.at(path)
+        for ledger in a2a_inbound_paths(net.ledger):
+            store = InboundStore.at(ledger.path)
             if store is None:
-                logger.warning("a2a_ledger_without_an_owner path=%s", path)
+                logger.warning("a2a_ledger_without_an_owner path=%s", ledger.path)
                 continue
             # Queued rather than sent from here: this start's peers cannot run a
             # turn yet — a turn's first step is the hub, and the hub waits for
@@ -869,7 +941,12 @@ def build_server(
             # which is also where the retries come from.  The session is built,
             # not connected: the notice needs the agent's queue and its writer,
             # and being on the mesh is not what a notice is for.
-            announce_orphans(session_of(store.agent))
+            #
+            # **In the home the ledger was found in**, which is the half the walk
+            # is for: the notice is about work *that* home's peer is owed, and
+            # the session it goes to opens its mesh on that home's file and hands
+            # over in that home (`session_of`).
+            announce_orphans(session_of(store.agent, ledger.home))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:

@@ -75,14 +75,25 @@ class ToolCall:
         unparseable arguments should get an error *from its own tool call*, not
         kill the turn.  The tool then reports the problem back to the model,
         which is the loop's normal feedback path.
+
+        **"Malformed" includes the JSON that parses and is not an object.**  A
+        model that emitted `[]`, `null` or `5` as its arguments produced JSON —
+        `json.loads` is happy with all three — and they are not a dict, so
+        assigning them left the class's invariant ("`arguments` is always a
+        parsed dict") broken everywhere downstream: `split_meta` calls
+        `.items()` on it inside the loop, which has no handler for the
+        `AttributeError`, so one bad call took the whole turn down instead of
+        being reported back to the model as a bad call.  Degrading these the way
+        invalid JSON is degraded is what this docstring said it did all along.
         """
         function = raw.get("function") or {}
         raw_args = function.get("arguments")
         if isinstance(raw_args, str):
             try:
-                arguments = json.loads(raw_args) if raw_args.strip() else {}
+                decoded = json.loads(raw_args) if raw_args.strip() else {}
             except json.JSONDecodeError:
-                arguments = {}
+                decoded = {}
+            arguments = decoded if isinstance(decoded, dict) else {}
         elif isinstance(raw_args, dict):
             arguments = raw_args
         else:

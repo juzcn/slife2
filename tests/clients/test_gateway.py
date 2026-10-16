@@ -520,18 +520,21 @@ def test_an_entry_with_no_cwd_of_its_own_gets_the_one_it_was_given() -> None:
 
 
 def test_the_gateway_holds_no_catalogue_and_no_database() -> None:
-    """The module's claim, as a property of its imports rather than a promise.
+    """The module's claim, read off the module rather than off its text.
 
-    What a tool list *means* is the caller's, so a `sqlite3` import here — or a
+    What a tool list *means* is the caller's, so a `sqlite3` binding here — or a
     reach into the db plugin — would be the first sign that the connection and
-    the catalogue had started to overlap half way.
+    the catalogue had started to overlap half way.  This read the module's
+    *source* until now, where "no sqlite3" was as true of a comment as of an
+    import and "no catalogue" was a claim about a spelling; what an import
+    actually does is bind a name in the module's own namespace, so that is what
+    is read, and the names are the ones an import of either would leave.
     """
+    held = vars(gateway)
 
-    source = Path(gateway.__file__).read_text(encoding="utf-8")
-    assert "sqlite3" not in source
-    assert "from slife2.libs.store.db import" not in source
-    assert "import slife2.libs.store.db" not in source
-    assert "Catalogue" not in source
+    assert "sqlite3" not in held
+    assert "slife2" not in held, "nor the package the db and its catalogue sit in"
+    assert not [name for name in held if "Catalogue" in name]
 
 
 def test_the_gateway_names_no_time_value_that_does_not_exist() -> None:
@@ -543,6 +546,11 @@ def test_the_gateway_names_no_time_value_that_does_not_exist() -> None:
     the attempts it started, `_T.timeouts.ready.list_settle`).  The registry is
     the one seat for a time value; a name that lives only in a sentence is a
     second seat for a number nobody can find.
+
+    **The text is the thing under test here**, which is the one place in this
+    file where that is true: a symbol named in a *sentence* has no namespace to
+    be read off, and the errand the reader was sent on is the whole failure.  A
+    module-level constant would be caught by importing it.
     """
 
     source = Path(gateway.__file__).read_text(encoding="utf-8")

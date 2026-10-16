@@ -414,6 +414,18 @@ subagent is found by looking rather than by being listed anywhere
   back to the last exchange that finished, because a maker calls `subagent_set`
   *as* a tool call and a conversation ending mid-exchange is one no provider
   accepts.
+  - **The maker's list is read under the maker's lock only when the maker still
+    has to be restored**, and that qualifier is load-bearing rather than an
+    optimisation. `restore_into` is the only writer that replaces a conversation
+    wholesale, so a fork racing it would overwrite a list the maker has already
+    appended its message to — the reason the lock is taken at all. But
+    `send_message` holds that same lock for the length of its **whole turn**, not
+    for its restore, so a fork that took it unconditionally waited out the
+    maker's turn: for ever when the maker is parked on `_approve` with nobody
+    answering yet. A maker that is already restored has had that one wholesale
+    writer run, so what is there is a conversation, and a turn in flight on it is
+    not the race this rule is about. The claim is re-read inside the lock, so a
+    maker that restores while the fork waits is not restored twice.
 
 **The only entry is a message.** A subagent has no window, so the road every
 channel delivers along (§8) is held for it by its maker: the maker's window
@@ -708,6 +720,15 @@ that matter:
   that took the call and went quiet hung that step for ever with the
   conversation's lock held, where the same silence fails a turn in the stall
   window.
+- **A provider that does not stream the answer has still answered.** Each
+  adapter back-fills what the terminal event carries — the Responses adapter
+  reads the assembled text out of `response.completed` as it already read tool
+  arguments that never streamed, and the chat-completions adapter reads a
+  gateway's deprecated `delta.function_call` — because the alternative is a
+  turn whose authoritative result is empty while the provider's own words sit in
+  an event nobody unpacked. **A part a request cannot carry is named, not
+  dropped**: a system turn whose content is a list of parts contributes its text
+  and warns about the rest, in all three adapters.
 
 **A provider difference is config, not a branch.** `thinking`, `reasoning` and
 `store` are fields of a model's entry, and each server sends only what its config
@@ -1053,7 +1074,14 @@ decides what to do about it.
 the prefix is decided in one function (§4.4). A tool call is drawn as a line with
 its argument; the harness's own lines — history restored, a turn cancelled, a
 peer online — come from one place (`tui/notes.py`), so a producer cannot invent a
-fourth spelling of one. **A connection has two states on screen and no more**:
+fourth spelling of one. **A tool call's panel says one of four things** —
+`running`, `done`, `error`, `interrupted` — and the fourth is the one that is
+about the *turn* rather than about the call: the turn ended, cancelled or failed,
+while the window was still waiting on it, so no result exists and none is coming.
+It is drawn apart from `error` because the tool did not fail — the window never
+learned how the call ended. It is also what keeps a panel from saying `running`
+for the rest of the session, which would be a claim about right now that stopped
+being true. **A connection has two states on screen and no more**:
 the reasons live in the status tool, and a line that tried to say them would be a
 line about the plugin's internals.
 
@@ -1131,7 +1159,13 @@ is no images. What is not tolerated is a section that is there and wrong: an
 unknown provider, an unknown `api`, a port that is not a port are each refused by
 name at load, because a refusal is cheaper than a paid call that fails later —
 and a *model* of the wrong kind for the capability asked for is refused too,
-rather than quietly replaced by the first model of that kind.
+rather than quietly replaced by the first model of that kind. Two more of the
+same kind, and each is refused for where the failure would otherwise land: a
+`servers:` **host** that is not a host (`host: "::1"` builds a URL whose port
+cannot be parsed at all, so the failure would surface inside a locksmith's error
+rather than in the file), and a **switch** written as anything but `true`/`false`
+— YAML 1.2 made `no` and `off` plain strings, so reading one is guessing at a
+decision somebody wrote down.
 
 **The file is read per turn for everything a conversation can see** (§4.5), and
 cached by identity: a reader asks "did an edit happen" with one comparison
@@ -1146,7 +1180,13 @@ unresolved reference is **left verbatim** so the failure lands where the name ca
 be said. `config.unresolved_reference` is the one reader of "this is still a
 reference", and the rule it exists for is that a reference must never travel as
 the secret (§2.4). A keyring that is *installed* and refuses is an error rather
-than a "not found", because reading it as absent would send the reference itself.
+than a "not found", because reading it as absent would send the reference itself
+— and the *shape* of that error is the config's business, not the store's: a
+credential the store simply does not hold is a `ConfigError` naming the reference
+and the command that stores it, since that is a mistake to correct rather than a
+secret to carry; a store that was asked and failed keeps raising its own error,
+which is the value that cannot be read (§10.1's rule, and the one case the
+refusal must not swallow).
 
 ### 10.3 The data directory, and the machine's runtime
 
@@ -1260,7 +1300,9 @@ of a double.
   config written into a temporary data directory, driven through the real client
   against an OpenAI-compatible endpoint served by the test itself. What it proves
   is what no in-memory test can: that the launch order works, that every child
-  reads the same config, that a turn crosses five process boundaries, that the
+  reads the same config, that a turn crosses five process boundaries, that a
+  model's tool call is routed by the hub to the plugin process that owns it and
+  its answer comes back into the conversation as a `tool` message, that the
   answer arrives both as a result and over the progress channel, and that the
   conversation it produced is still there for the next turn.
 

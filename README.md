@@ -611,7 +611,11 @@ belongs in the reader.
 
 `enabled: false` keeps an entry configured but never connects it, which is the
 lever worth knowing: everything enabled is a process at startup and its tools in
-every request. `servers()` reports it as `off`, so "why is my tool missing" has
+every request. It is a **real boolean, or the file does not load**: `no`, `off`
+and `'false'` are strings to this YAML reader (YAML 1.2 dropped the boolean
+spellings), and reading one as "off" — or worse, as "on" — would be this system
+guessing at a value somebody wrote down; the refusal names the entry and the key.
+`servers()` reports it as `off`, so "why is my tool missing" has
 an answer even for an entry that was switched off before it ever ran — and the
 tools it offered while it was on stay in the catalogue, marked `disabled`, so a
 search still finds them. `slife2 down` takes those a step further — a plugin it
@@ -682,7 +686,10 @@ unexpose_local_image(token)   → that URL stops working
 The file is not moved or copied: it is served from where it is, for as long as
 the tunnel is up. The link stops working the moment the **file changes** (so a
 path swapped underneath a link can never serve new bytes to whoever holds the
-old one) and when the process exits. A private key, a `.env` or a saved password
+old one), when `unexpose_local_image` is called on its token, and when the
+process exits — those three are the whole list, and ending with a *conversation*
+is not on it: a share outlives the turn that made it, so it is the model's or
+the operator's to withdraw. A private key, a `.env` or a saved password
 is refused by name — a share URL is public while the tunnel is up, so that would
 be publishing it.
 
@@ -750,9 +757,14 @@ own notes should be ranked against.
 
 **Everything is written twice**, and one of the two is for you: the row is what
 `cabinet_search` reads, and the same document lands as markdown under
-`agents/<agent>/cabinet/` — `notes/Python.md`, `diary/2026-10-11.md`,
+`agents/<agent>/cabinet/` — `notes/会议记录.md`, `diary/2026-10-11.md`,
 `reports/weekly.md` — which is what you open, edit or delete without asking
-anybody. A saved file's bytes live there too (`<category>/`) and are never
+anybody. **A subject that is not already lower-case carries a short digest in its
+filename** (`notes/Python~6e3604888c.md`), because a path is not a string:
+`Python.md` and `python.md` are *one file* on Windows and macOS, and two notes
+sharing one file is the one thing this directory may not do — the second write
+would replace the first's markdown while both rows stayed correct. The readable
+half of the name survives, and a date never needs the digest. A saved file's bytes live there too (`<category>/`) and are never
 put in the index: `file_read` returns a file's *text*, and refuses a PDF or an
 image by saying what it is rather than decoding it into a page of replacement
 characters. Text in another encoding is read and the encoding named on the first
@@ -1217,7 +1229,7 @@ lanes and the default one is fast:
 uv run pytest                  # unit + integration, every module, across cores
 uv run pytest -m unit          # the fast lane on its own
 uv run pytest -m integration   # the tests that bind a socket or spawn a process
-uv run pytest -m e2e           # the whole stack as processes (~75s)
+uv run pytest -m e2e           # the whole stack as processes (~70s)
 uv run ruff check . && ruff format --check .
 uv run pyright                 # a dev dependency, wired into CI
 ```
@@ -1225,7 +1237,10 @@ uv run pyright                 # a dev dependency, wired into CI
 `uv run pytest` runs the suite on every core (`-n auto`, from `addopts`) and
 leaves out `e2e`, which is the one lane that starts the real stack: seventeen
 daemons, a config on disk and a stub provider, driven end to end
-(`tests/e2e/`). Both lanes run in CI.
+(`tests/e2e/`). What it drives is the ways a conversation actually goes: a turn,
+a second turn that runs on the first, **a turn whose model calls a tool** — routed
+by the hub to the plugin process that owns it, answered there, and read back —
+and an output too large for the window, saved and paged. Both lanes run in CI.
 
 **Nothing in the fast lane needs an API key or a running server.** The model is
 faked, and the servers are driven over FastMCP's **in-memory transport** — real

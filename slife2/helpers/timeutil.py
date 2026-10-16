@@ -173,6 +173,21 @@ def _canonical(value: str) -> str | None:
         return None
 
 
+def _today() -> date:
+    """Today, as this module reads it — **and the seam a test pins it through**.
+
+    A function rather than an inline `date.today()` in `normalize_bound` for the
+    same reason `slife2.libs.turn.tokens` resolves its vocabulary through one:
+    a test that asserts what "yesterday" means has to say *which day* it is
+    asking about.  Reading the runner's clock from both sides — the expectation
+    built with `date.today()` in the test and the answer resolved with another
+    call in here — makes a run whose two readings straddle midnight, or a month
+    end, fail for a reason that has nothing to do with the grammar.  Pinning this
+    is what turns "yesterday" into a fact.
+    """
+    return date.today()
+
+
 def normalize_bound(value: str, *, role: str = "since") -> str:
     """A model-written bound, as a string the `created_at` column compares with.
 
@@ -193,7 +208,7 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
     # call, so a server that has been up for weeks cannot answer with the date
     # it started on.
     key = " ".join(value.strip().lower().split())
-    today = date.today()
+    today = _today()
 
     if key == "now":
         # A time of day, not a calendar date — so `since=now` is this second

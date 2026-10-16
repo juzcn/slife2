@@ -166,10 +166,44 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
 
     for message in messages:
         if message.role == "system":
-            # `instructions` is a string parameter, so a system message carrying
-            # content parts has nothing to contribute — no API takes blocks here.
-            if isinstance(message.content, str) and message.content:
-                instructions.append(message.content)
+            # `instructions` is a string parameter, so a system turn's content
+            # parts have no field to live in — the text in them is taken and the
+            # rest is named.
+            #
+            # **Taken, and not dropped.**  Reading only `str` content meant a
+            # system turn carrying blocks contributed nothing at all, with no
+            # word anywhere: a prompt the caller wrote left the request, and the
+            # model answered a question nobody had asked (DESIGN.md §10.1).  It
+            # is the same neutral `Message` the Anthropic adapter reads and the
+            # same failure it fixed on its own side, so this is the same answer:
+            # the parts come from the converter the other roles use, so a `str`
+            # is one text part and a list is what it says it is, and a part that
+            # is not text is dropped *with a warning*, because no field of
+            # `instructions` can carry it.
+            if isinstance(message.content, str):
+                if message.content:
+                    instructions.append(message.content)
+                continue
+            parts = to_responses_parts(message.content)
+            text = "".join(
+                str(part.get("text") or "")
+                for part in parts
+                if part.get("type") == "input_text"
+            )
+            other = [
+                str(part.get("type"))
+                for part in parts
+                if part.get("type") != "input_text"
+            ]
+            if other:
+                logger.warning(
+                    "openai-responses: a system turn carries %s, which the "
+                    "`instructions` parameter has no field for — the text beside "
+                    "it is kept and these are left out",
+                    ", ".join(other),
+                )
+            if text:
+                instructions.append(text)
             continue
 
         if message.role == "tool":
@@ -320,6 +354,16 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
     of produces no events rather than an exception — the API's event list grows,
     and a new `response.*` event is not a reason to fail a turn.
 
+    `streamed` is the caller's memory of which **output indexes this stream has
+    already delivered content for** — the function-call arguments and the answer
+    text that arrived as deltas.  It is written here and not at the call site,
+    because this is the only place that knows an event's `output_index`: a
+    `Chunk` carries the index of a *tool call* and nothing at all about which
+    text item it belongs to.  What reads it is the terminal event, which carries
+    both kinds of content in full, and which would otherwise repeat an answer
+    that already streamed (`_arguments_that_never_streamed`,
+    `_text_that_never_streamed`).
+
     Two events here are errors rather than results, and both **raise**:
     `response.failed` and a bare `error`.  The alternative — returning an empty
     result with a stop reason — is indistinguishable from a successful empty
@@ -333,6 +377,22 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
     if kind == "response.output_text.delta":
         text = getattr(event, "delta", "") or ""
         if text:
+            _note_streamed(streamed, event)
+            events.append(Chunk(text=text))
+
+    elif kind == "response.output_text.done":
+        # **The text half of the back-fill below, per part.**  An endpoint that
+        # assembles the answer and sends it whole has only this event to send it
+        # in: the per-token deltas never came, so `text_parts` stays empty while
+        # a `Finish` — the event the cut-stream check reads
+        # (`server_common.stream_chat_impl`) — arrives from `response.completed`
+        # anyway, and the turn's *authoritative* answer is recorded as `""`.
+        # The text this event carries is that answer, so an index that never
+        # streamed is filled in from it, on `_arguments_that_never_streamed`'s
+        # rule and for its reason.
+        text = getattr(event, "text", "") or ""
+        if text and read_int(event, "output_index") not in (streamed or set()):
+            _note_streamed(streamed, event)
             events.append(Chunk(text=text))
 
     elif kind in (
@@ -367,12 +427,19 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         # Keyed by `output_index`, not by the item id: each call is its own
         # output item, so the index is stable and unique for the whole
         # response — the job Anthropic's content-block index does.
+        arguments = getattr(event, "delta", "") or ""
+        # **An empty delta is not content**, and remembering it as if it were
+        # would skip `_arguments_that_never_streamed` for an index whose
+        # arguments are only in the terminal response — which is exactly the
+        # endpoint that back-fill exists for.
+        if arguments:
+            _note_streamed(streamed, event)
         events.append(
             Chunk(
                 tool_call_deltas=(
                     ToolCallDelta(
                         index=read_int(event, "output_index"),
-                        arguments_delta=getattr(event, "delta", "") or "",
+                        arguments_delta=arguments,
                     ),
                 )
             )
@@ -382,6 +449,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         response = getattr(event, "response", None)
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
+        events.extend(_text_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_stop_reason(response)))
 
@@ -392,6 +460,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         response = getattr(event, "response", None)
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
+        events.extend(_text_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_incomplete_reason(response)))
 
@@ -405,6 +474,54 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         message = getattr(event, "message", "") or "the provider reported an error"
         raise RuntimeError(f"{SERVER_NAME}: {message}")
 
+    return events
+
+
+def _note_streamed(streamed: set[int] | None, event: Any) -> None:
+    """Remember that this event's output index has delivered its content now.
+
+    One line, and it is a function because it is written in three places for one
+    rule: an *output index* is the position of an item in `response.output`, and
+    both kinds of item — a function call and a message — own exactly one index
+    (see `translate`'s `streamed`).  A stream that never had a memory handed to
+    it is not an error: `translate` is callable without one, and a caller that
+    passes none is a caller with one event and no terminal to back-fill.
+    """
+    if streamed is not None:
+        streamed.add(read_int(event, "output_index"))
+
+
+def _text_that_never_streamed(
+    response: Any, streamed: set[int] | None
+) -> list[ProviderEvent]:
+    """The answer text of a response whose deltas never came.
+
+    **The text half of `_arguments_that_never_streamed`, one function up**: the
+    turn's answer is assembled from `response.output_text.delta` and from nothing
+    else, so an endpoint that sends the text whole — a gateway that implements
+    the Responses API partially, which this module already treats as real for
+    `store` (`store_parameter`) — left `text_parts` empty.  A `Finish` arrives
+    regardless, so the cut-stream check passes, and the turn is stored and shown
+    with the answer `""`: a blank reply recorded as the model's whole output,
+    with nothing anywhere saying a thing was lost.
+
+    The message items in the completed response carry the text, so every output
+    index whose text never streamed is read from here.  One `Chunk` per item
+    rather than one per content part, because that is what the deltas would have
+    been: a string the accumulator appends to the same answer, in order.
+    """
+    seen = streamed or set()
+    events: list[ProviderEvent] = []
+    for index, item in enumerate(getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "message" or index in seen:
+            continue
+        text = "".join(
+            str(getattr(part, "text", "") or "")
+            for part in getattr(item, "content", None) or []
+            if getattr(part, "type", "") == "output_text"
+        )
+        if text:
+            events.append(Chunk(text=text))
     return events
 
 
@@ -527,22 +644,17 @@ def _make_streamer() -> Streamer:
     """
 
     def make_translator() -> Translate:
-        """One stream's translation, remembering which calls streamed."""
-        # Which calls streamed their arguments.  Kept here and not in
-        # `translate`, which stays a pure function of one event — see
-        # `_arguments_that_never_streamed`.
+        """One stream's translation, remembering which output items streamed.
+
+        `streamed` is what a *later* event needs to know about an earlier one —
+        which is why it lives across the stream rather than inside `translate`,
+        whose own contract is that it is a function of the event in front of it
+        (`_arguments_that_never_streamed`, `_text_that_never_streamed`).
+        """
         streamed: set[int] = set()
 
         def one(event: Any) -> Iterable[ProviderEvent]:
-            for out in translate(event, streamed=streamed):
-                # One raw event produces both kinds — a usage chunk and a
-                # `Finish` — and `Finish` carries no deltas, so the union has
-                # to be narrowed before one is read off it.
-                if isinstance(out, Chunk):
-                    for delta in out.tool_call_deltas:
-                        if delta.arguments_delta:
-                            streamed.add(delta.index)
-                yield out
+            return iter(translate(event, streamed=streamed))
 
         return one
 

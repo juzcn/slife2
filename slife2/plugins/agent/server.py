@@ -531,6 +531,28 @@ class Loop:
     #: because of that rule, and it is what lets a rebuild replace the turns
     #: without destroying a message that has no turn to be replaced by.
     covered: int = 0
+    #: The write of a turn that ended in a failure, kept until the turn that
+    #: follows it can take up the id it answered with — see `settle_record`.
+    #:
+    #: **The id is what makes the run backed, and the write is where it is.**  A
+    #: failed turn is recorded like every other (`remember_turn`) but its id
+    #: cannot be claimed *here*: the write is detached, because a cancellation
+    #: would cancel an awaited one at its next checkpoint, so by this line it has
+    #: not answered.  Left unclaimed for good, the turn's messages stay in the
+    #: carried run — and once one turn has left a run there, the guard below
+    #: (`covered == before`) is never true again, because a rebuild re-appends
+    #: the run at the end of a list `covered` does not count.  Every later turn
+    #: would then be unaddressable *and* recallable: its id never joins
+    #: `turn_ids`, so `annotate_turn` never writes a footnote the model can name
+    #: it by, while the row is in the log for a query recall to find — and the
+    #: store would render that turn from its row and re-append the same messages
+    #: verbatim, so the exchange appears twice in the list the turn runs on.
+    #:
+    #: Set only when the failed turn began on a wholly backed list
+    #: (`covered == before`), because that is what makes its id describe the
+    #: whole of what follows that prefix — the same condition the success branch
+    #: states, for the same reason.
+    record_pending: asyncio.Task[Any] | None = None
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
     #: conversation whose model is later edited out of the config still runs: the
@@ -627,6 +649,12 @@ def build_server(
     #: The cabinet, on the same terms — though it is opened on one path only: a
     #: tool result too large for the conversation it was called in.
     cabinet_conn: Client | None = cabinet_client
+    #: And whether *we* opened it, which the lifespan needs for the same reason
+    #: it needs the other two: this client has no `clients` entry to be swept up
+    #: with (it is a peer this server reaches itself, not a model server), so a
+    #: connection left in it is one the next session is handed already shut —
+    #: `lifespan`'s own comment is where that failure is named.
+    cabinet_owned = cabinet_client is None
     #: The peer a background result is *handed* to rather than asked of — the
     #: window (`slife2.libs.harness.handover`).  Injected only by a test: in production it is
     #: opened per hand-over, because that is once per finished call rather than
@@ -798,14 +826,39 @@ def build_server(
             window = current().tool_result.tokens
             if estimate_text_tokens(text) <= window:
                 return text
+            # **The question comes first, and the dump is written once.**
+            # `mime` is what the cabinet's `dump_read` refuses to open a row by
+            # (`slife2/plugins/cabinet/server.py`, the `not startswith("text/")`
+            # arm), and the one party that can say an output has no lines in it
+            # is the model being asked here: a payload is a `str` either way, so
+            # nothing else in this process — this server, the loop, the tool that
+            # produced it — knows the difference.  Writing the row before the
+            # answer would therefore leave it claiming to be readable, and the
+            # `binary` window says in the conversation that `dump_read` will not
+            # open it — a promise the same turn's row would then break.  The row
+            # is written under one key, so a second write to correct it is a
+            # second write to keep in step; asking first is what keeps it one.
+            decision = await _asked(backend, call, text, messages, window=window)
             client = await cabinet()
             await client.call_tool(
                 "dump_save",
-                {"call": call.id, "output": text, "tool": call.name},
+                {
+                    "call": call.id,
+                    "output": text,
+                    "tool": call.name,
+                    # `NOT_TEXT` rather than a media type, and empty rather than
+                    # a guess: the store's own answer for a row nobody has a type
+                    # for is `""`, and what the model says when it *is* not text
+                    # is the word this module already uses for that judgement.
+                    "mime": (
+                        dumps.NOT_TEXT
+                        if not isinstance(decision, dumps.Rejected) and decision.binary
+                        else ""
+                    ),
+                },
                 meta=client_meta(*client_id),
                 timeout=_T.timeouts.work.hub,
             )
-            decision = await _asked(backend, call, text, messages, window=window)
             if isinstance(decision, dumps.Rejected):
                 logger.info("compact_discriminator_unparsed call=%s", call.id)
                 return await _first_page(client, call.id, client_id)
@@ -1183,7 +1236,7 @@ def build_server(
         """
         return client_key("")[0]
 
-    def detach(coro: Coroutine[Any, Any, Any]) -> None:
+    def detach(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         """Run a write that must outlive the cancellation that prompted it.
 
         Measured against the real Streamable HTTP transport: from a cancelled
@@ -1191,16 +1244,22 @@ def build_server(
         record written that way is simply lost.  A task created here is outside
         the cancelled scope and does land.  We cannot wait for it, so its
         failures are logged rather than dropped on the floor.
+
+        **Handed back rather than dropped**, so a caller that *can* wait for it
+        later has something to wait on: a turn's record answers with its id, and
+        the turn after a failed one is where that id can still be claimed
+        (`Loop.record_pending`).
         """
-        task = asyncio.ensure_future(coro)
+        task: asyncio.Task[Any] = asyncio.ensure_future(coro)
         background.add(task)
 
-        def done(finished: asyncio.Task[None]) -> None:
+        def done(finished: asyncio.Task[Any]) -> None:
             background.discard(finished)
             if not finished.cancelled() and (exc := finished.exception()):
                 logger.warning("recording a cancelled turn failed: %s", exc)
 
         task.add_done_callback(done)
+        return task
 
     def recorded_model(loop: Loop, outcome: Outcome) -> str:
         """What to write in the `what_model` column.
@@ -1297,6 +1356,38 @@ def build_server(
         loop.turn_ids = [int(turn_id) for turn_id in turn_ids]
         loop.covered = len(loop.messages) - carried
 
+    async def settle_record(loop: Loop) -> None:
+        """Take up the id of a turn whose write the caller could not wait for.
+
+        **The step that turns an unbacked run back into a turn**, and it is here
+        — at the start of the next turn, inside the lock — because the record of
+        a *failed* turn is detached (`send_message`'s handler says why), so its
+        id is only knowable once somebody can wait for that write.  A loop that
+        never takes it up is a loop whose `covered` can never advance again: the
+        turn's messages stay in the carried run, and the rebuild that re-appends
+        that run leaves every later turn's id unclaimed too, since the ids have
+        to describe a prefix of `messages` and a carried run in front of them is
+        not one.
+
+        Nothing appends to `messages` between the failed turn and this, so the
+        id covers the whole of what follows `covered` — which is what
+        `record_pending` being set at all says: the failed turn began on a
+        wholly backed list, and its own messages were the whole of the unbacked
+        tail.  `None` is a store that refused, and it leaves the run where it
+        was: an id that does not exist cannot back anything, and the next
+        rebuild carries those messages verbatim rather than fetching a turn
+        nobody wrote.
+        """
+        pending = loop.record_pending
+        if pending is None:
+            return
+        loop.record_pending = None
+        turn_id = await pending
+        if turn_id is None:
+            return
+        loop.turn_ids.append(turn_id)
+        loop.covered = len(loop.messages)
+
     async def restore_into(loop: Loop) -> None:
         """Put a conversation back on the context it had when it last stopped.
 
@@ -1355,12 +1446,46 @@ def build_server(
         is where those words are, and this is why they have to be *words*: a
         model reading somebody else's conversation under its own name with
         nothing said is a model answering as somebody it is not.
+
+        **The maker's list is read under the maker's lock when it still has to be
+        restored**, which is the rule `Loop.restored` states and not a precaution.
+        `restore_into` replaces the maker's messages wholesale, and the maker's
+        own `send_message` may be running that same restore under that same lock
+        at this moment — it is the state where the maker's loop is in `loops` and
+        not yet restored, which is every fresh conversation and every one the
+        idle sweep has just let go.  Two restores of one list is one answer
+        landing on top of the other: the fork's, arriving late, would replace a
+        list the maker has already appended its user message to — the turn then
+        advances the orphaned list while `loop.messages` holds one that never saw
+        it, and `covered`/`turn_ids` are computed against a conversation the turn
+        is not in.
+
+        **And only when it has to be restored, because the lock is held for a
+        whole turn.**  `send_message` takes this lock for the length of its turn —
+        not for its restore — so a fork that waited on it unconditionally waited
+        out the maker's *entire* turn, which is for ever when the maker is parked
+        on `_approve` with nobody answering yet.  That is not a hypothetical: it
+        is `test_a_fork_is_taken_from_a_maker_that_is_mid_turn`, which hangs.  A
+        maker that is already restored has had the only wholesale writer of its
+        list run, so what is there is a conversation and a turn in flight on it is
+        not the race this rule is about — the copy ends at the last exchange that
+        finished, which is what a fork is for.  The claim is re-read *inside* the
+        lock, so a maker that restores while this waits is not restored twice.
         """
         maker = conversation(loop.agent, "", "")
-        if not maker.restored:
-            await restore_into(maker)
-            maker.restored = True
-        body = settled_messages(maker.messages)
+        if maker.restored:
+            body = settled_messages(maker.messages)
+        else:
+            async with maker.lock:
+                if not maker.restored:
+                    await restore_into(maker)
+                    maker.restored = True
+                body = settled_messages(maker.messages)
+        # Copied on the way out either way, for the reason the copy is a copy at
+        # all (below): two loops must not share a message object, and a message
+        # the maker's turn rewrites while it is being read here would be copied
+        # from one state and stored in another.
+        body = [Message.from_wire(message.to_wire()) for message in body]
         if body and body[0].role == "system":
             body = body[1:]
         # Copied, not aliased: the two loops must not share a message object.
@@ -1369,9 +1494,7 @@ def build_server(
         # would have its own copy rewritten when the maker's turn failed.  `_adopt`
         # copies for the same reason, the same way — a message list handed to two
         # conversations is a message list with two owners.
-        loop.messages = loop.messages + [
-            Message.from_wire(message.to_wire()) for message in body
-        ]
+        loop.messages = loop.messages + body
         # Nothing in this list is backed by a turn this conversation can name —
         # it has no log — so the carried tail is empty and this is the whole of
         # it.  `rebuild`'s `carried` is the only reader, and a fork never runs a
@@ -1935,7 +2058,7 @@ def build_server(
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        nonlocal context_conn, hub_conn
+        nonlocal context_conn, hub_conn, cabinet_conn
         try:
             yield {}
         finally:
@@ -1961,6 +2084,18 @@ def build_server(
             if hub_owned and hub_conn is not None:
                 await close_server(hub_conn)
                 hub_conn = None
+            # The third client this server opens for itself, and it is one for
+            # the same rule and not one more than for symmetry: `cabinet()` is
+            # reached only by a turn with a result past `tool_result.tokens` —
+            # and a session that ran one of those used to end with the cabinet
+            # still open and still held, so the *next* session's oversized result
+            # called `dump_save` on a shut client.  `compress_for` deliberately
+            # does not catch a failed write ("nothing else here falls back"), so
+            # that was not a lost dump: it was every such turn failing at its
+            # first hop.
+            if cabinet_owned and cabinet_conn is not None:
+                await close_server(cabinet_conn)
+                cabinet_conn = None
 
             # `loops` is deliberately **not** cleared here.  It is state the
             # process owns, and this hook is not the process's lifetime: over
@@ -2671,12 +2806,19 @@ def build_server(
                 # is what the rest of this block is for.
                 if item.result is not None:
                     return _injected_reply(item)
-                # Ours, and its turn is starting now.  A message waiting in
+                # **Ours, and its turn is starting now.**  A message waiting in
                 # the inbox is *not* in `messages`: `AgentLoop.run_turn`
                 # re-reads the list every step, so an early append would be
                 # seen by the running turn as steering nobody asked for.
                 with contextlib.suppress(ValueError):
                     loop.inbox.remove(item)
+                # **Before the restore and the rebuild, which is the half that
+                # matters here.**  This is where the previous turn's record is
+                # taken up when it could not be waited for at the time — and the
+                # rebuild below reads `turn_ids` and `covered` to decide whether
+                # this turn can be addressed by an id at all, so an id picked up
+                # after it would be picked up a turn too late (`settle_record`).
+                await settle_record(loop)
                 # **Inside the lock, and here rather than when the loop is
                 # built.**  Both halves are the same correction.  A restore
                 # replaces the message list wholesale, so it has to happen before
@@ -2765,11 +2907,16 @@ def build_server(
                     # thing that is gone, where waiting on it would replace the
                     # error the caller needs to see with the one it caused.
                     #
-                    # Its id is deliberately dropped: this turn's messages are left
-                    # **unbacked**, so the next rebuild carries them verbatim
-                    # rather than fetching a turn whose id the list on disk may or
-                    # may not have by then.  Appending here would race that write
-                    # and could count the same messages twice.
+                    # Its id is **not** claimed here, and the difference is the
+                    # whole of what `settle_record` is for.  The write has not
+                    # answered yet — that is why it was detached — so appending
+                    # an id now would be appending one nobody has: the next
+                    # rebuild would fetch a turn whose id the list on disk may or
+                    # may not have by then.  What is kept instead is the *task*,
+                    # and the turn after this one waits for it and takes the id
+                    # up — which is what stops this turn's messages joining the
+                    # carried run for good, where no later turn could be
+                    # addressed (`Loop.record_pending`).
                     # **Repaired before it is recorded**, so the row and the live
                     # conversation are one list and not two: the record writes
                     # `outcome.messages`, which holds this same list's own
@@ -2778,7 +2925,34 @@ def build_server(
                     # disagreement `repaired_error` exists to prevent.
                     repaired = repaired_error(loop, exc)
                     if outcome.messages:
-                        detach(record(loop, item, outcome))
+                        written = detach(record(loop, item, outcome))
+                        # **Kept, so the next turn can claim this turn's id.**
+                        # A failed turn is written like any other, and its
+                        # messages stay in the carried run only because the id
+                        # cannot be known here; `settle_record` is where it is
+                        # picked up, and an id nobody picks up is a run that
+                        # never becomes backed again (`Loop.record_pending`).
+                        #
+                        # Two conditions, and each is a different fact.  The
+                        # guard is the one the success branch states: an id backs
+                        # a *prefix*, so it can only be claimed when this turn
+                        # began on a wholly backed list — where it began being
+                        # `before`, re-derived rather than read because a failure
+                        # *inside the rebuild* reaches this handler with the name
+                        # unbound (and with no messages of its own, which is what
+                        # the `if` above says).
+                        #
+                        # And a *cancellation* is left out of it, because its
+                        # live list is deliberately not the row: a cancelled
+                        # turn keeps the user's message with its picture for the
+                        # retry (`repaired_error` says so, and `strip_images`
+                        # means the row holds a note where the image was), so an
+                        # id that made a later rebuild re-render this turn from
+                        # the log would be the copy dropping the very thing the
+                        # retry is for.
+                        began = len(loop.messages) - len(outcome.messages)
+                        if isinstance(exc, Exception) and loop.covered == began:
+                            loop.record_pending = written
                     if repaired is exc:
                         raise
                     raise repaired from exc

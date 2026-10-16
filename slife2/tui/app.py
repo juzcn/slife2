@@ -734,12 +734,28 @@ class SlifeApp(App[None]):
                     self._transcript.add_note(notes.cancelled(), ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
+                    # The same retirement the cancel branch makes, for the same
+                    # reason: a turn that is over has no business mounting
+                    # anything, and a `ToolCallStarted` still in the pump would
+                    # mount a panel under the line below — where `settle_tools`
+                    # has already been and gone, so it would say "running" for
+                    # the rest of the session.  A failed turn is as over as a
+                    # cancelled one.
+                    self._ticket += 1
                     self._transcript.add_error(str(exc))
                 else:
                     self._transcript.finish_assistant(final)
                 finally:
                     self._interrupting = False
                     self._turn = None
+                    # **Whatever the turn was still waiting on has no ending
+                    # coming.**  A tool call ends through `ToolCallFinished`, and
+                    # the three ways out of here that skip it — cancelled, failed,
+                    # and a transport that died mid-call — all leave the panel
+                    # that opened for it claiming to be running.  Done here rather
+                    # than in the two branches because it is a fact about *every*
+                    # ending, including the next one somebody adds.
+                    self._transcript.settle_tools()
                     self._refresh_status()
         finally:
             self._draining = False

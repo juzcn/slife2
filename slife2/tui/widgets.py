@@ -760,6 +760,24 @@ class ChatView(VerticalScroll):
         )
         self.follow_tail()
 
+    def settle_tools(self) -> None:
+        """Close out whatever a finished turn left running.
+
+        **Every path that ends a turn comes through here**, because a panel
+        showing "running" is a claim about right now and there is no longer
+        anything running it: a call's only ending is a `ToolCallFinished` event,
+        and a turn that was cancelled or that failed stops receiving them.  Left
+        alone, the panel keeps that claim for the rest of the session — the
+        ordinary "cancel a slow render" path, and the one a reader is most likely
+        to take.
+
+        The map is not cleared: `add_user` owns that, at the next turn's open, and
+        an id has to stay addressable for as long as its turn is on screen.  What
+        is cleared is the *claim*, which is the part that goes stale.
+        """
+        for widget in self._tools.values():
+            widget.settle_interrupted()
+
     # --- for tests -----------------------------------------------------------
 
     def plain_text(self) -> str:
@@ -960,6 +978,10 @@ class ToolCallWidget(VerticalScroll):
         self._result_chars = 0
         self._is_error = False
         self._done = False
+        #: Set when the turn this call belongs to ended before the call did.
+        #: Terminal, and the only one of these four that says something about the
+        #: *window* rather than about the call (`_status`).
+        self._interrupted = False
         #: Wall time the call took, from the event.  Zero while it is running,
         #: and zero for a call whose duration nobody reported.
         self._elapsed_ms = 0
@@ -979,7 +1001,19 @@ class ToolCallWidget(VerticalScroll):
         The word is a key rather than the state's own name: `running` is what
         this widget's vocabulary calls the state and `运行中` is what the screen
         says about it, and only the first of those belongs in the code.
+
+        **Four states, and the fourth is not an error.**  `interrupted` is a call
+        the window was still waiting on when its turn ended — cancelled, or the
+        turn failed — so the answer never arrived and never will.  It is drawn
+        apart from both of the others because it is neither: the call did not
+        fail, and saying it had would be this widget inventing a verdict about a
+        tool that may have run to completion on the server.  A panel left in
+        `running` for the rest of the session is the alternative, and that is the
+        one thing a status may not be — a claim about right now that stopped
+        being true.
         """
+        if self._interrupted:
+            return GLYPHS["interrupted"], PALETTE["dim"], t("tool_interrupted")
         if not self._done:
             return GLYPHS["running"], PALETTE["amber"], t("tool_running")
         if self._is_error:
@@ -1048,7 +1082,9 @@ class ToolCallWidget(VerticalScroll):
         else:
             line.append(f"\n  {t('tool_no_arguments')}", PALETTE["muted"])
 
-        if self._done:
+        if self._interrupted:
+            line.append(f"\n\n{t('tool_interrupted_note')}", f"italic {PALETTE['dim']}")
+        elif self._done:
             if self._is_error:
                 line.append(f"\n\n{t('tool_error_heading')}", f"bold {PALETTE['red']}")
                 line.append("\n" + self._result, PALETTE["red"])
@@ -1087,6 +1123,19 @@ class ToolCallWidget(VerticalScroll):
         self._result_chars = result_chars
         self._elapsed_ms = elapsed_ms
         self._done = True
+        self._refresh_display()
+
+    def settle_interrupted(self) -> None:
+        """Say the turn ended before this call did — and say it once.
+
+        Called by the view when a turn is over, on every panel the turn opened
+        and never closed.  A call that already has a result keeps it: the events
+        and the ending race (`slife2.tui.app`), and a result that arrived is the
+        answer, whichever of the two got there first.
+        """
+        if self._done:
+            return
+        self._interrupted = True
         self._refresh_display()
 
     @property

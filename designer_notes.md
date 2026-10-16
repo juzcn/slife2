@@ -100,7 +100,7 @@ A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。�
 - 代码级 review, 目的是保持code clean
 
 1、codereview， find bugs, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）
-2、良好设计和完善的pytest是设计能够codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
+2、良好设计和完善的pytest是系统运行和升级的保障。 do codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
 
 - Fallback code-review
 
@@ -122,5 +122,3 @@ A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。�
     - 工具名称、描述和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。例外：_check_new_input
 
 2、codereview, find duplicate and dead codes, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）.
-
-4、codereview for fallback,fix them one by one , update docs（README.zh-CN.md， sdd, design, readme.md）

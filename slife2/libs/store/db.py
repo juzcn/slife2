@@ -1125,9 +1125,8 @@ class TurnStore:
                     (
                         int(row["rowid"]),
                         searchable_text(
-                            _loads(
+                            _messages(
                                 row["messages"],
-                                [],
                                 what=f"turn {row['rowid']}'s messages",
                             ),
                             row["summary"],
@@ -1174,11 +1173,7 @@ class TurnStore:
             for row in rows
             if (
                 text := embed_text(
-                    _loads(
-                        row["messages"],
-                        [],
-                        what=f"turn {row['rowid']}'s messages",
-                    )
+                    _messages(row["messages"], what=f"turn {row['rowid']}'s messages")
                 )
             ).strip()
         ]
@@ -1460,8 +1455,9 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     **A damaged list is refused rather than read as empty.**  The empty list
     means something here — "this conversation's context has not been recorded",
     which is every file predating the table, and one of the three things a
-    rebuild may decide — and it is also what `_loads` would answer for a
-    `turn_ids` whose JSON will not parse.  Those are not the same fact, and the
+    rebuild may decide — and it is also what `_messages` would answer for a
+    `turn_ids` whose JSON will not parse, or parses to something that is not a
+    list of turn ids at all.  Those are not the same fact, and the
     difference is not academic: `append_context` reads this list and appends to
     it, so a damaged list read as `[]` becomes a **one-turn context** on the
     next save, permanently and without a word.  `_structural` is the refusal,
@@ -1513,15 +1509,15 @@ def append_context(connection: sqlite3.Connection, turn_id: int) -> list[int]:
 
 
 def _row_to_record(row: sqlite3.Row) -> TurnRecord:
-    """Rebuild a record, tolerating a row whose JSON will not parse.
+    """Rebuild a record, tolerating a row whose `messages` will not read.
 
     A corrupt row is one turn, and refusing to read *any* history because one
     row is damaged would turn a small problem into a total one.
     """
     return TurnRecord(
         turn_id=int(row["turn_id"]),
-        messages=_loads(
-            row["messages"], [], what=f"turn {int(row['turn_id'])}'s messages"
+        messages=_messages(
+            row["messages"], what=f"turn {int(row['turn_id'])}'s messages"
         ),
         summary=str(row["summary"] or ""),
         tags=str(row["tags"] or ""),
@@ -1535,27 +1531,43 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
     )
 
 
-def _loads(raw: Any, default: Any, *, what: str) -> Any:
-    """A stored value, tolerating one that will not parse.
+def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
+    """A stored turn's `messages`, tolerating one that will not read as them.
 
     **For a field, and never for a structure.**  A turn whose `messages` are
     damaged is one damaged turn, and refusing to read any history because of it
-    would turn a small problem into a total one — so the caller's default is the
+    would turn a small problem into a total one — so the empty list is the
     answer and the warning is the report.  `_structural` is the other half, and
     the question that tells them apart is what the empty value *means*: here it
     means "this one turn's body is unreadable", which is a smaller claim than
     the damaged value made.  There it means something the damage did not
     (DESIGN.md §10.1).
 
+    **The *shape* is damage too, and it is the half that was missing.**  A
+    stored value that parses to a string, a number, or a list of strings is
+    readable JSON and is not `messages`, and every reader of one asks it for a
+    key: `to_listing`'s two halves, `embed_text`, `searchable_text`.  Each of
+    them used to fail with `<type> object has no attribute 'get'` from inside a
+    comprehension — and a failure is not the one damaged turn this tolerance
+    trades for, it is the whole history, plus the whole `slife2-context` plugin,
+    which lists and indexes every turn file it knows of as it comes up.  That is
+    strictly worse than the total loss this function exists to avoid, so a value
+    that is not a list of mappings is refused exactly as one that will not parse
+    is: they are the same fact about the row, and the same answer is honest for
+    both.
+
     `what` is not decoration: a damaged row that is read as empty leaves a log
     line as the only trace of it, so the line has to say *which* row — the
     alternative is an operator counting rows by hand.
     """
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (TypeError, ValueError):
-        logger.warning("%s did not parse; reading it as empty", what)
-        return default
+        parsed = None
+    if isinstance(parsed, list) and all(isinstance(one, dict) for one in parsed):
+        return parsed
+    logger.warning("%s did not read as a list of messages; reading it as empty", what)
+    return []
 
 
 def _structural(raw: Any, *, what: str) -> Any:

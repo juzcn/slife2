@@ -215,7 +215,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "zh": "答复未能送达：{err}",
     },
     # ── a tool call's panel (`slife2.tui.widgets`) ────────────────────────
-    # The three states of a call, as the collapsed header row's trailing word.
+    # The four states of a call, as the collapsed header row's trailing word.
+    # The fourth is not a failure: it says the turn ended while the window was
+    # still waiting, which is a fact about the turn and not about the tool —
+    # so it is drawn in the dim colour, with no verdict attached.
     "tool_running": {
         "en": "running",
         "zh": "运行中",
@@ -227,6 +230,19 @@ _STRINGS: dict[str, dict[str, str]] = {
     "tool_error": {
         "en": "error",
         "zh": "错误",
+    },
+    "tool_interrupted": {
+        "en": "interrupted",
+        "zh": "已中断",
+    },
+    # The line under it, in the expanded panel.  It says the one thing the window
+    # knows — the turn ended first — and deliberately does not distinguish a
+    # cancellation from a failure: the difference is the turn's business and is
+    # already on screen above it, and what a reader of *this* panel needs is why
+    # there is no result under it.
+    "tool_interrupted_note": {
+        "en": "The turn ended before this call answered, so there is no result to show.",
+        "zh": "本轮在此调用返回前就已结束，因此没有结果可显示。",
     },
     "tool_arguments": {
         "en": "Arguments",

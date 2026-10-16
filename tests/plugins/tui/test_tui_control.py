@@ -71,15 +71,6 @@ async def until(
     raise AssertionError("the background loop did not get there in time")
 
 
-def free_port() -> int:
-    """A port nothing is listening on, which is all a test needs it to be."""
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
 @contextlib.asynccontextmanager
 async def attached(server: Any, agent: str = "jack") -> AsyncGenerator[list]:
     """A window holding its session open, and the hand-overs it was handed.
@@ -111,7 +102,7 @@ async def attached(server: Any, agent: str = "jack") -> AsyncGenerator[list]:
             yield seen
         finally:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
 
 
@@ -416,7 +407,7 @@ async def test_the_session_ends_when_the_window_stops_holding_it() -> None:
                 # The window stops holding the call — closing the client ends the
                 # stream, which is the only detach this system has.
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
                 await window.__aexit__(None, None, None)
 

@@ -530,6 +530,14 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
     is what makes a directory a skill (`scan`): writing three files and no
     `SKILL.md` would be an install that reports success and installs nothing
     anything can find.
+
+    **And the name is one directory, spelled as itself.**  Everything below is
+    keyed on the name, and two spellings of it are two different things to every
+    reader afterwards: `scan` lists the *direct* children of `skills/`, so a name
+    carrying a separator installs where nothing looks, and a name that is not the
+    directory it lands in (`one/`) answers about a skill `skill_use` cannot find
+    — both of which reported success.  Refused here, before anything is created,
+    where the caller is still the party that can change it.
     """
     root = skills_dir()
     final = _within(root, name)
@@ -556,8 +564,33 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
             f"never lists one, so this would be a skill nothing could find. Name "
             f"it without a dot."
         )
-    staging = root / f".{name}.installing"
-    previous = root / f".{name}.replacing"
+    # **A skill is one directory directly under `skills/`, and its name is that
+    # directory's own.**  Same failure as the dot rule, two other spellings, and
+    # both used to install.  `scan` walks the *direct children*, so `a/b` landed
+    # at `skills/a/b` — the per-file `mkdir(parents=True)` made `skills/a` on the
+    # way — and the tool answered "`a/b` is installed … a search finds it from
+    # your next one", while there was no `skill_list` line, no catalogue row, and
+    # `skill_use("a/b")` answered that no skill was called that.  And a trailing
+    # separator staged through `skills/.one`, which nothing removed: the name
+    # landed in `one`, but the answer named `one/`, a spelling no reader of the
+    # folder ever matches.  Checked on `inside`, so it is the location that
+    # decides — `a/./b` and `a/b` are refused alike — and before anything is
+    # created, so a refusal leaves no directory behind at all.
+    if len(inside.parts) != 1 or inside.as_posix() != name:
+        raise ValueError(
+            f"{name!r} does not name one skill directory: a skill lives at "
+            f"`skills/<name>/`, and `scan` lists only the direct children — so "
+            f"this would install where nothing looks for it, or answer about a "
+            f"name nothing matches. Name it as the one directory it is."
+        )
+    # **The swap's own directories are named from the resolved location**, not
+    # from the string the caller gave: the name has to be the directory it lands
+    # in (the check above), and deriving them from `final.name` is what keeps
+    # them beside the skill they belong to rather than nested under a spelling of
+    # it — a stage built as `.{name}.installing` from `one/` was `skills/.one`,
+    # and the `finally` below removed the stage while leaving that behind.
+    staging = root / f".{final.name}.installing"
+    previous = root / f".{final.name}.replacing"
     shutil.rmtree(staging, ignore_errors=True)
     try:
         for one in files:

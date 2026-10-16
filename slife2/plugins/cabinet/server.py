@@ -81,6 +81,7 @@ from slife2.plugins.cabinet.store import (
     CabinetStore,
     discard_file,
     index_path,
+    line_excerpt,
     parse_tags,
     resolve,
     store_of,
@@ -1304,13 +1305,14 @@ def _found_text(found: dict[str, Any]) -> str:
             state.append("matched your words elsewhere in the document")
         if isinstance(row.get("similarity"), float):
             state.append(f"meaning {row['similarity']:.2f}")
-        body = " ".join(str(row.get("body") or "").split())
-        excerpt = body[:120] + ("…" if len(body) > 120 else "")
         lines.append(f"{index}. {row['key']}  ({'; '.join(state)})")
-        if row.get("summary"):
-            lines.append(f"   {row['summary']}")
-        elif excerpt:
-            lines.append(f"   {excerpt}")
+        # **The one rule for what a line shows**, shared with the test that
+        # decides whether the caller's words are on it (`cabinet_store
+        # .line_excerpt`): a mark is evidence about *this* text, and the two
+        # halves disagreeing — 400 characters tested, 120 printed — put "matched
+        # your words" beside an excerpt the words were not in.
+        if shown := line_excerpt(row):
+            lines.append(f"   {shown}")
     return "\n".join(lines)
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import sqlite3
 import time
 import types
 from collections.abc import Mapping
@@ -893,9 +894,12 @@ async def test_two_plugins_cannot_offer_one_name() -> None:
     }
     assert len([one for one in owners.values() if one["state"] == "ready"]) == 1
     refused = next(one for one in owners.values() if one["state"] != "ready")
-    # And the report says why, which it is the tool for: "a plugin is not
-    # answering" is the wrong answer for a plugin that answered.
-    assert refused["error"]
+    # And the report says why, which it is the tool for.  The sentence is
+    # asserted rather than merely required to exist: **"not answering" is the
+    # wrong answer for a plugin that answered**, which is this comment's whole
+    # claim and the half a bare truthiness check left to the reader.
+    assert refused["error"], "the report says why a plugin was refused"
+    assert "not answering" not in refused["error"], refused["error"]
 
 
 @pytest.mark.asyncio
@@ -1198,7 +1202,9 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     assert "Nothing here matches" in nothing["text"], nothing["text"]
 
     rows = [line for line in found["text"].split("\n") if line[:1].isdigit()]
-    assert rows, "every row begins at the margin with its number"
+    # The precondition, not the claim: what the message used to state is
+    # asserted of each row below, and an empty list would make that loop vacuous.
+    assert rows, "there are result rows to read"
     for line in rows:
         assert "meaning " in line, f"and carries its number: {line!r}"
     assert "cli:x" in found["text"]
@@ -1274,8 +1280,9 @@ async def test_a_search_says_how_to_load_what_it_found() -> None:
             hub, "tool_search", {"keywords": [], "sentences": ["run a command"]}
         )
 
-    assert answer["text"], "a hit answers with the rows it found"
-    assert "func_tool_load" in answer["text"]
+    # No bare truthiness here: naming `func_tool_load` in the answer is the
+    # claim, and it cannot hold of an empty one.
+    assert "func_tool_load" in answer["text"], answer["text"]
 
 
 @pytest.mark.asyncio
@@ -1836,8 +1843,10 @@ async def test_an_unknown_name_says_what_is_available() -> None:
         result = await call(hub, "weather")
 
     assert result["ok"] is False
-    assert "weather" in result["text"]
-    assert "turn_list" in result["text"]
+    # Not `"weather" in result["text"]`: `unknown_tool` interpolates the name it
+    # was asked for into every answer, so that line passed whatever the answer
+    # said.  Naming an alternative is the claim, and it is the check below.
+    assert "turn_list" in result["text"], result["text"]
 
 
 @pytest.mark.asyncio
@@ -2288,6 +2297,23 @@ def a_catalogue_that_cannot_record(source: str) -> tuple[Any, dict[str, bool]]:
         return await working(self, source_id, category, rows, **kwargs)
 
     return merge, state
+
+
+def a_catalogue_that_cannot_record_in(path: Path) -> Any:
+    """A catalogue that cannot take *any* listing into one home's file.
+
+    `a_catalogue_that_cannot_record`'s seam, keyed by the file rather than by the
+    source — because the claim is about which *home* a fault belongs to, and the
+    source in question is the same one in both.
+    """
+    working = ToolStore.merge
+
+    async def merge(self, source_id, category, rows, **kwargs):
+        if self.path == path:
+            raise RuntimeError("that home's catalogue file is locked")
+        return await working(self, source_id, category, rows, **kwargs)
+
+    return merge
 
 
 @pytest.mark.asyncio
@@ -2857,3 +2883,171 @@ async def test_a_listing_that_lands_during_an_open_reaches_that_store(
     assert opened.route("late__one") is not None, (
         "the listing landed in every home but the one that was opening"
     )
+
+
+class DeclaringPerHome:
+    """A plugin whose answer is the *caller's* list, the way a family plugin's is.
+
+    **The shape a process-global set gets wrong.**  What a plugin holds is its
+    section of the caller's `slife2.yaml`, so the same server holds one home's
+    list and answers nothing at all for another's — which the stubs that answer
+    one fixed list for everybody cannot express.  `home_dir()` inside the call is
+    the caller's (`slife2.libs.plugin.audience.with_home` is what puts it there),
+    and the answer is looked up in it.
+    """
+
+    def __init__(self) -> None:
+        #: By the home the call is for, which is what a section is.
+        self.per_home: dict[str, dict[str, Any]] = {}
+
+    def server(self) -> FastMCP:
+        server = FastMCP("declaring-per-home")
+        per_home = self.per_home
+
+        @server.tool(name=LIST_SOURCES)
+        def list_sources() -> dict[str, Any]:
+            """Declare what *this* home holds, and nothing for any other."""
+            return per_home.get(str(home_dir()), {"sources": []})
+
+        return server
+
+
+@pytest.mark.asyncio
+async def test_a_source_one_home_stopped_holding_is_forgotten(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**"What it held last time" is per home, because the answer is.**
+
+    `declare` asks a plugin for the *calling* home's section, so the names it
+    answers with are that home's entries.  A set kept for the process is
+    therefore one home's answer read as another's — and the damage is not a
+    wrong row but a *deletion*: a home that holds nothing declares nothing, so
+    the difference against a set another home's ask filled is that home's
+    sources, and `forget_source` runs against *this* home's catalogue, where the
+    rows are this home's tools.  The set then holds nothing, so the home that
+    did hold them can never compute the removal a deletion is for: an entry
+    taken out of its section leaves its rows standing for the life of the
+    process, and a search keeps offering tools the row's own text says go the
+    next time the plugin that held them answers.
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    plugin = DeclaringPerHome()
+    plugin.per_home[str(mine)] = one_source(name="cli")
+
+    async def asked(hub: Client, home: Path, query: str) -> str:
+        """One search as the caller in *home*: the meta is what names it."""
+        with in_home(home):
+            answer = await hub.call_tool(
+                "call_tool",
+                {
+                    "name": "tool_search",
+                    "arguments": {"keywords": [query], "sentences": []},
+                },
+                meta=client_meta("jack", home=str(home)),
+            )
+        return str(answer.data["text"])
+
+    async with Client(
+        hub_for(connected={"cli-server": lambda settings: plugin.server()})
+    ) as hub:
+        held = await asked(hub, mine, "cli:thing")
+        # **The other home asks, and holds nothing.**  Its answer is about its
+        # own section, which is empty — and this is the ask that used to empty
+        # the set the first home's removal is computed against.
+        nothing = await asked(hub, theirs, "cli:thing")
+        # Then the operator takes the entry out of the first home's section.
+        plugin.per_home[str(mine)] = {"sources": []}
+        gone = await asked(hub, mine, "cli:thing")
+
+    assert "cli:thing" in held, "the entry was in this home's catalogue"
+    assert "cli:thing" not in nothing, "the other home never held it"
+    assert "cli:thing" not in gone, "a source it stopped holding kept its rows"
+
+
+@pytest.mark.asyncio
+async def test_a_fault_in_one_homes_catalogue_is_not_anothers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The fault belongs to the file it was written to.**
+
+    `_write` is called for one home's file — including the fan-out writes
+    `remember` makes into every open store — and it kept the reason keyed by
+    source alone, so a catalogue that would not take a listing in one home
+    failed `list_tools` in *all* of them, with a reason naming a source and no
+    home: a turn reading a file that was working, refused with "the tool
+    catalogue is not working", which is the third failure rule pointed at the
+    wrong party.
+    """
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config_file(mine, MINE_CLI)
+    config_file(theirs, THEIRS_CLI)
+    base = default_config()
+    with in_home(theirs):
+        broken = catalogue_db()
+    monkeypatch.setattr(ToolStore, "merge", a_catalogue_that_cannot_record_in(broken))
+
+    hub = build_hub(
+        base,
+        source=load_cached,
+        transports=plugin_transports(base, {}, None),
+        embedder=StubEmbedder(),
+    )
+    async with Client(hub) as client:
+        with in_home(theirs):
+            with pytest.raises(ToolError, match="that home's catalogue file is locked"):
+                await client.call_tool("list_tools", {}, meta=client_meta("jack"))
+        with in_home(mine):
+            listed = await client.call_tool("list_tools", {}, meta=client_meta("jack"))
+
+    assert "turn_read" in names(listed.data), "this home's catalogue is working"
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_is_written_into_every_homes_catalogue(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A source the hub reaches itself has its rows in every home.**
+
+    `remember` writes a plugin's listing into every home's file, because one set
+    of links serves them all — so the *verdict* on that source has to travel the
+    same way.  Written into the ambient home alone, the other ones go on reading
+    that tool as `enabled` (and a search goes on offering it) while the server
+    behind it is down, for the life of the process: the rows and the verdict are
+    two halves of one fact about one source.
+
+    Driven at the catalogue, which is where the fan-out lives: two homes' files
+    with the same source in them, and one verdict.
+    """
+    from slife2.plugins.toolhub.server import Catalogue
+
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+
+    async def open_store() -> ToolStore:
+        return ToolStore(catalogue_db(), threshold=100)
+
+    async def embedder() -> Any:
+        return StubEmbedder()
+
+    catalogue = Catalogue(open_store, embedder)
+    rows = [{"name": "serper__search", "description": "Search the web."}]
+    for home in (mine, theirs):
+        with in_home(home):
+            await catalogue.store()
+            await catalogue.merge("serper", "mcp", rows, autoload=False)
+    with in_home(mine):
+        await catalogue.source_state("serper", "error")
+
+    def status(home: Path) -> str:
+        with in_home(home):
+            path = catalogue_db()
+        with sqlite3.connect(path) as connection:
+            row = connection.execute(
+                "SELECT status FROM tool WHERE source_id = ?", ("serper",)
+            ).fetchone()
+        return str(row[0])
+
+    assert status(mine) == "error"
+    assert status(theirs) == "error", "the other home still reads that tool as up"

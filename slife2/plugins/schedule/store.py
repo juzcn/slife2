@@ -200,8 +200,15 @@ class ScheduleStore:
     keep in step with a restart.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, home: Path) -> None:
         self.path = path
+        #: **The home this ledger lives in**, kept because a shared process
+        #: serves every home and a ledger is not enough to say which one: the
+        #: file name is `schedule.db` in all of them.  Everything the poll does
+        #: with a ledger — dispatching its run, handing its trigger to a window,
+        #: asking the task server what became of the work — has to be done in
+        #: this home, or the work lands in the daemon's own (`paths.in_home`).
+        self.home = home
         self._ensure_schema()
 
     # ── opening ──────────────────────────────────────────────────────────
@@ -213,8 +220,14 @@ class ScheduleStore:
         This is the only way a ledger comes into existence, and the reason the
         stamp is trustworthy: a file it did not make has no `meta` row, and
         `adopt` refuses one.
+
+        The home is the ambient one, which is right here and not at `adopt`: a
+        ledger is *created* by somebody in the home they are working in, and is
+        *found* by a walk over every home.
         """
-        store = cls(database_path(agent))
+        from slife2.libs.host.paths import home
+
+        store = cls(database_path(agent), home())
         with store._connect() as connection:
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES('agent', ?) "
@@ -224,14 +237,19 @@ class ScheduleStore:
         return store
 
     @classmethod
-    def adopt(cls, path: Path) -> ScheduleStore | None:
+    def adopt(cls, path: Path, home: Path) -> ScheduleStore | None:
         """The ledger at this path, if it is one — for the loop, which walks.
 
         `None` rather than a guess for a `schedule.db` whose owner is not written
         down: the whole point of the `meta` row is that the directory name is not
         the agent's name, so a file without one cannot be fired for anybody.
+
+        `home` is the walker's to say (`slife2.libs.host.paths.Ledger`): the path
+        is the same file name in every home, so a store that read it back out of
+        the directory layout would be a second implementation of a rule the walk
+        already applied.
         """
-        store = cls(path)
+        store = cls(path, home)
         with store._connect() as connection:
             row = connection.execute(
                 "SELECT value FROM meta WHERE key = 'agent'"

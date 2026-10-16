@@ -105,6 +105,29 @@ class MediaAdapterError(Exception):
         self.status_code = status_code
 
 
+def _decoded(encoded: Any, field: str) -> bytes:
+    """A vendor's base64 field as bytes, or a `MediaAdapterError`.
+
+    **`b64decode` raises out of the adapter, and `_run` converts neither of the
+    two it raises**: `binascii.Error` — a `ValueError` — for a payload that is
+    not base64, and `TypeError` for a field that is not a string at all.  Both
+    are the far end answering with something malformed rather than this
+    process's fault, which is the same class of answer `_json_object` exists to
+    turn into a sentence one function up: a truncated `b64_json` left the model
+    with a raw traceback and the plugin's own `[failed] …` wording nowhere.
+
+    `field` is the vendor's own name for what it sent — `b64_json`, `data` — so
+    the sentence says which part of the answer was unusable, and a model reading
+    it can tell a mangled payload from a provider that returned nothing.
+    """
+    try:
+        return base64.b64decode(encoded)
+    except (ValueError, TypeError) as exc:
+        raise MediaAdapterError(
+            f"the answer's {field} is not valid base64 ({exc})"
+        ) from exc
+
+
 def _json_object(response: Any, what: str) -> dict[str, Any]:
     """A response body decoded to a JSON object, or a `MediaAdapterError`.
 
@@ -167,6 +190,21 @@ class _HttpClientMixin:
         nobody's mistake.  Every other reader of a credential in this system
         refuses first and says which name is missing; this is the same answer,
         one capability later (`slife2.libs.host.config.unresolved_reference`).
+
+        **A provider with no key at all gets no `Authorization` header, and that
+        is deliberate.**  Unlike the LLM and embeddings servers — which refuse an
+        empty key (`slife2.plugins.llm.server_common.unresolved_key`), because a chat
+        endpoint that takes no credential is not a thing they can serve — a media
+        provider is commonly a server on this machine or this network (an
+        OpenAI-compatible images API in front of a local model), where `api_key`
+        is simply not part of the config: `MediaProviderSettings.api_key_ref`
+        defaults to `""`.  The header this used to send in that case was
+        `Authorization: Bearer ` — a credential field *present and empty*, which
+        a gateway is entitled to read as a bad credential and answer 401, so a
+        local endpoint that wanted no key was refused by a header nobody asked
+        for.  Sending nothing is what "this endpoint needs no key" looks like on
+        the wire.  An empty key is therefore the one state that is not a mistake;
+        a reference that did not resolve still is, and is refused above.
         """
         if self._client is None:
             async with self._client_lock:
@@ -183,7 +221,7 @@ class _HttpClientMixin:
                             _T.timeouts.transport.media_request,
                             connect=_T.timeouts.transport.media_connect,
                         ),
-                        headers={"Authorization": f"Bearer {key}"},
+                        headers={"Authorization": f"Bearer {key}"} if key else {},
                     )
         return self._client
 
@@ -656,7 +694,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         # default format.
         if encoded := audio.get("data"):
             path = await self._saver.save_bytes(
-                base64.b64decode(encoded), "audio", "wav", outputs_dir
+                _decoded(encoded, "audio.data"), "audio", "wav", outputs_dir
             )
             return str(path)
         raise MediaAdapterError(f"no audio in the answer: {str(output)[:300]}")
@@ -761,7 +799,7 @@ class OpenAICompatAdapter(_HttpClientMixin):
             raise MediaAdapterError(f"no image in the answer: {str(data)[:300]}")
         if encoded := item.get("b64_json"):
             path = await self._saver.save_bytes(
-                base64.b64decode(encoded), "image", "png", outputs_dir
+                _decoded(encoded, "b64_json"), "image", "png", outputs_dir
             )
             return str(path)
         if url := item.get("url"):

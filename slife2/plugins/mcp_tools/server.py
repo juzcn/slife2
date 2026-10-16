@@ -277,6 +277,7 @@ def build_server(
         instructions=INSTRUCTIONS,
         category=CATEGORY,
         entries=lambda theirs: theirs.mcp.values(),
+        words=WORDS,
         transports=transports,
         client_factory=client_factory,
         management=register_management,

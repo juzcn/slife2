@@ -883,9 +883,24 @@ async def test_the_message_is_handed_to_the_window_with_its_channel(
     }
 
 
+@pytest.fixture
+def a_quick_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Walk `hand_over`'s refusal ladder without waiting out its real pace.
+
+    A refused hand-over is tried three times, `pacing.reconnect` apart — two
+    seconds by design, because the window it is aimed at may be restarting — so
+    a test that *ends* in a refusal spends four seconds on a fact it is not
+    asserting: the run is over, or the answer was not delivered.  The pace is a
+    registry value and patching one is what `slife2.helpers.timeouts` exists for;
+    the ladder's length is the design and is left alone.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
+
+
 @pytest.mark.asyncio
 async def test_a_window_that_is_not_there_fails_the_hand_over(
     monkeypatch: pytest.MonkeyPatch,
+    a_quick_ladder: None,
 ) -> None:
     """Tried while the window may be attaching, then a hard failure.
 

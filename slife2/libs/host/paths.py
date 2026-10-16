@@ -117,6 +117,7 @@ import tempfile
 from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
+from typing import NamedTuple
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
@@ -514,8 +515,31 @@ def turn_dbs() -> list[Path]:
 _SCHEDULE_DB = "schedule.db"
 
 
-def schedule_dbs() -> list[Path]:
-    """Every agent's ledger on this machine.
+class Ledger(NamedTuple):
+    """One agent's ledger file — a schedule's or a mesh's — **and the home it
+    belongs to**.
+
+    The pair travels together because the walker is the only thing that knows
+    the second half: it comes from `known_homes`, and a caller handed a bare path
+    could only guess it back out of the directory layout.  That is not a
+    convenience.  A shared scheduler fires *every* home's ledgers and a shared
+    mesh announces the orphans in every home's (`schedule_dbs`,
+    `a2a_inbound_paths`), and everything either does with one — dispatching the
+    run, handing the trigger to a window, opening the file the task's completion
+    bridge lives in, handing the notice to a conversation — has to be done **in
+    that ledger's home**, because a home is a property of the request in front of
+    a shared process (`in_home`) rather than of the process.  Dropping it here is
+    what let a task written in one home be fired at another home's conversation,
+    and a peer's message for another home's agent be announced or re-opened in
+    the daemon's own — the failure this type exists to make unspellable.
+    """
+
+    home: Path
+    path: Path
+
+
+def schedule_dbs() -> list[Ledger]:
+    """Every agent's ledger on this machine, each with the home it is in.
 
     **This is how one shared process finds the agents it serves.**  There is no
     registry of agents anywhere — a login, a conversation and a schedule all
@@ -529,7 +553,7 @@ def schedule_dbs() -> list[Path]:
     which is what a schedule is for.
     """
     return [
-        path
+        Ledger(home=root, path=path)
         for root in known_homes()
         for path in sorted((root / "agents").glob(f"*/{_SCHEDULE_DB}"))
     ]
@@ -551,8 +575,9 @@ def schedule_db(agent: str) -> Path:
     return agent_dir(agent) / _SCHEDULE_DB
 
 
-def a2a_inbound_paths(ledger: str) -> list[Path]:
-    """Every agent's *ledger* on this machine — one network's, not both.
+def a2a_inbound_paths(ledger: str) -> list[Ledger]:
+    """Every agent's *ledger* on this machine — one network's, not both — each
+    with the home it is in.
 
     **The same mechanism `schedule_dbs` is, and it is a walk for the same
     reason**: a ledger is a file per agent and there is no registry of agents to
@@ -564,6 +589,15 @@ def a2a_inbound_paths(ledger: str) -> list[Path]:
     (`slife2.plugins.a2a.server.join`), and every home's for the reason
     `schedule_dbs` walks every home's.
 
+    **Each with its home, and that half is what the walk is for.**  A session is
+    built out of what is found here, and building one opens *this* file and gives
+    the mesh a home to hand messages over in — so a bare path left the caller to
+    rebuild the home it came from, and the only thing it could rebuild it from
+    was the ambient one.  That is the daemon's own, which is a different file:
+    another home's orphan was announced to nobody while a stray empty ledger was
+    written in the daemon's home, and the session cached under that agent's bare
+    name then answered the other home's window with it (`session_of`).
+
     **The name is the caller's, and it is `Net.ledger`'s** — this walk reads the
     ledgers of the network the caller is serving and never the other one's.  One
     name for both networks (which is what this was) meant the process serving
@@ -571,7 +605,7 @@ def a2a_inbound_paths(ledger: str) -> list[Path]:
     and told the model a live task could not be completed.
     """
     return [
-        path
+        Ledger(home=root, path=path)
         for root in known_homes()
         for path in sorted((root / "agents").glob(f"*/{ledger}"))
     ]

@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -148,9 +149,11 @@ async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
 
     assert "second" in read
     assert "first" not in read
-    assert (bag() / "notes" / "Python.md").read_text(encoding="utf-8") == (
-        "# Python\n\nsecond\n"
-    )
+    # The path is the stem's to decide (`mirror_stem`), and that rule has a test
+    # of its own: what this one is about is that the file was rewritten, not
+    # what it is called.
+    written = bag() / "notes" / f"{cabinet_store.mirror_stem('Python')}.md"
+    assert written.read_text(encoding="utf-8") == "# Python\n\nsecond\n"
 
 
 @pytest.mark.asyncio
@@ -372,6 +375,90 @@ async def test_the_two_legs_answer_different_questions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_mark_is_about_what_the_line_shows() -> None:
+    """**A mark the reader cannot check is not evidence.**
+
+    `matched_in` is the one piece of a cabinet search that is certain rather
+    than graded — the cosine is a measurement and the rank is an order, and this
+    says "your words are *there*".  So "there" has to be the line it is printed
+    on, and the scope it was decided against was not: the store tested
+    `title + key + body[:400] + summary` while the line prints `key` and
+    `summary` *or* `body[:120]`.  A saved file whose words are only in its title
+    was therefore marked "matched your words" on a line that never prints a
+    title, and a note whose words sit at character 300 was marked beside an
+    excerpt that stops at 120.  Both are the same failure — a claim the reader
+    cannot check — and both are answered `elsewhere in the document`, which is
+    where those words really are.
+    """
+    source = data_dir() / "attached.txt"
+    source.write_text("nothing to do with the words\n", encoding="utf-8")
+    # The word at 300, so the printed excerpt (the first 120) cannot show it.
+    async with Client(cabinet()) as client:
+        await ask(client, "file_save", paths=[str(source)], title="quarterly figures")
+        await ask(client, "note_edit", subject="deep", content=f"{'x' * 300} {WORD}")
+        by_title = await ask(client, "cabinet_search", keywords=["quarterly"])
+        by_tail = await ask(client, "cabinet_search", keywords=[WORD])
+
+    assert "elsewhere in the document" in by_title, "the title is not on the line"
+    assert "elsewhere in the document" in by_tail, "nor is character 300"
+
+
+@pytest.mark.asyncio
+async def test_a_mark_is_decided_by_the_index_s_own_tokenizer() -> None:
+    """**One grammar on both sides of the mark.**
+
+    The store's half of "are the words here" was a containment test in Python
+    over `textindex.normalize`d strings, and the index's half is
+    `unicode61 remove_diacritics 2` — which folds `Café` to `cafe`, while
+    `normalize` keeps the accent.  So a caller asking for `cafe` matched a note
+    at the index, was tested against a copy of the printed text that still said
+    `Café`, and was reported as having matched *elsewhere* with the word plainly
+    on the line.  The printed text now goes through the index's own tokenizer,
+    which is the only way the two can be the same rule.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_edit", subject="spelling", content="A Café on the wall")
+        answer = await ask(client, "cabinet_search", keywords=["cafe"])
+
+    assert "matched your words" in answer, "the index found it, so the line has it"
+    assert "elsewhere" not in answer
+
+
+@pytest.mark.asyncio
+async def test_the_open_pass_runs_on_another_thread() -> None:
+    """**Opening a cabinet must not hold the loop while it rebuilds.**
+
+    What `sync` can be asked to do is a whole-index rebuild — DDL, a
+    delete-and-reindex of every row's keyword text, and an embed of every
+    document with no vector — and it runs on the first call from an agent whose
+    index is stale, which is to say while other agents are being served: on the
+    loop it is the shared process answering nothing else until it finishes.
+    Asserting the thread rather than the timing is deliberate: it is the
+    mechanism, and it does not depend on how slow the machine is.
+    """
+    store = store_of(index_path("jack"))
+    seen: dict[str, int] = {}
+    stale = store._mark_stale
+    batch = store._unembedded
+
+    def spy_stale(*args: Any) -> bool:
+        seen["stale"] = threading.get_ident()
+        return stale(*args)
+
+    def spy_batch(*args: Any) -> Any:
+        seen["batch"] = threading.get_ident()
+        return batch(*args)
+
+    store._mark_stale = spy_stale  # type: ignore[method-assign]
+    store._unembedded = spy_batch  # type: ignore[method-assign]
+    seen["loop"] = threading.get_ident()
+    await store.sync(StubEmbedder())
+
+    assert seen["stale"] != seen["loop"], "the DDL and the vector rebuild"
+    assert seen["batch"] != seen["loop"], "and the walk over the corpus"
+
+
+@pytest.mark.asyncio
 async def test_a_window_narrows_without_deciding() -> None:
     """A range removes rows from the page; it does not re-rank what is left."""
     async with Client(cabinet()) as client:
@@ -554,7 +641,6 @@ def test_a_slug_keeps_what_a_person_reads_and_never_collides_silently() -> None:
     """A mirror is browsed by a person, so a Chinese subject keeps its name."""
     assert slug("会议 记录/2026") == "会议-记录-2026"
     assert slug("///").startswith("doc-"), "a name with no word in it is still a name"
-    assert slug("///") == slug("///"), "and the same one twice, across processes"
 
 
 def test_a_file_is_what_it_is_when_it_has_nothing_else() -> None:
@@ -699,7 +785,7 @@ def test_a_mirror_is_a_function_of_the_key_and_not_of_its_slug() -> None:
     replaced the first's markdown, and a remove of either one unlinked the
     other's file.
     """
-    assert cabinet_store.mirror_stem("Python") == "Python", "the readable case stays"
+    assert cabinet_store.mirror_stem("python") == "python", "the readable case stays"
     assert slug("a b") == slug("a/b") == "a-b", "what the slug is, and is not"
     assert cabinet_store.mirror_stem("a b") != cabinet_store.mirror_stem("a/b")
     assert cabinet_store.mirror_stem("a b") == cabinet_store.mirror_stem("a b")
@@ -708,6 +794,41 @@ def test_a_mirror_is_a_function_of_the_key_and_not_of_its_slug() -> None:
     # merely unlikely to meet.
     assert "~" in cabinet_store.mirror_stem("a b")
     assert cabinet_store.mirror_stem("2026-10-11") == "2026-10-11", "a day is a day"
+
+
+def test_two_keys_that_differ_only_by_case_are_two_paths() -> None:
+    """**A path is not a string, and the readable stem was chosen as one.**
+
+    `Readme` and `readme` both satisfy `slug(key) == key`, so both took the
+    readable half of `mirror_stem` — and on the filesystems this runs on
+    (Windows, macOS) those are one file: the second write replaced the first's
+    markdown while both rows stayed correct, and `note_remove` of either one
+    unlinked the other's file.  That is verbatim the failure the digest exists
+    to prevent, arriving through the one door the digest did not cover, which is
+    why a readable stem now requires the key to be *already* spelled the way a
+    case-insensitive lookup of it resolves.
+
+    Asserted as the invariant the fix establishes — no two distinct keys may
+    fold to one path — and not as what this machine's filesystem does with them:
+    its own answer is the one that cannot be trusted here, since an Ubuntu
+    runner keeps both files and sees the bug as green.
+    """
+    for one, other in [
+        ("Readme", "readme"),
+        ("Python", "python"),
+        ("A-B", "a-b"),
+        ("Notas de reunión", "notas de reunión"),
+    ]:
+        first = cabinet_store.mirror_stem(one)
+        second = cabinet_store.mirror_stem(other)
+        assert first != second, (one, other)
+        assert first.casefold() != second.casefold(), (one, other)
+    assert cabinet_store.mirror_stem("readme") == "readme", (
+        "the canonical spelling keeps the readable name"
+    )
+    assert cabinet_store.mirror_stem("会议记录") == "会议记录", (
+        "and a key with no case in it at all"
+    )
 
 
 @pytest.mark.asyncio
@@ -873,9 +994,19 @@ async def test_two_writes_of_one_day_both_survive() -> None:
     await store.write(DIARY, day, body="seed", embedder=seeded)
     embedder = _Interleaving()
 
-    await asyncio.gather(
-        store.write(DIARY, day, body="morning", embedder=embedder),
-        store.write(DIARY, day, body="evening", embedder=embedder),
+    # **Bounded, because a test that hangs reports nothing.**  The interleaving
+    # below is what the stub waits for, and a write that never reaches its
+    # embedding would leave the first caller waiting on an event the second one
+    # never sets — with the suite stopped rather than failed.  The bound is this
+    # file's (`test_sync_ends_with_a_document_that_has_nothing_to_embed`): long
+    # enough that only a deadlock reaches it, and named as the value the test is
+    # built around rather than as a budget.
+    await asyncio.wait_for(
+        asyncio.gather(
+            store.write(DIARY, day, body="morning", embedder=embedder),
+            store.write(DIARY, day, body="evening", embedder=embedder),
+        ),
+        timeout=5.0,  # timeouts: the value this test is built around, not a budget
     )
 
     row = store.get(DIARY, day)

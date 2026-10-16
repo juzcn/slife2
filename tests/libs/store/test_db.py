@@ -132,11 +132,38 @@ async def test_turns_are_newest_first(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "damage",
+    [
+        # Will not parse, which is the half this tolerance always covered.
+        "not json",
+        # Parses, and is not a list of messages: a string, a number, a list of
+        # things that have no keys.
+        '"hello"',
+        "5",
+        "[1, 2]",
+        "null",
+    ],
+)
+async def test_a_damaged_row_does_not_hide_the_others(tmp_path, caplog, damage) -> None:
     """One unreadable turn is one turn, not a history that cannot be read.
 
     Refusing to return anything because one row's JSON is half-written turns a
     small problem into a total one, and the rows either side of it are fine.
+
+    **"Unreadable" is the shape as well as the parse.**  `'"hello"'` parses, so
+    it used to be handed on as `messages` — and every reader of a turn asks the
+    list for keys, so `to_listing` here, and `index_status` and `sync_indexes`
+    below, died of `'str' object has no attribute 'get'` inside a comprehension.
+    That is not one damaged turn: it is the whole history, plus the whole
+    `slife2-context` plugin, which lists and indexes every turn file as it comes
+    up — strictly worse than the total loss the tolerance exists to prevent.
+    The row is the one the sync would embed as well (`turn_chunk` deleted), so
+    both paths that read a stored turn are asked here.
+
+    The warning is asserted because it is the only trace a damaged row leaves:
+    a line that does not say *which* row leaves an operator counting rows by
+    hand.
     """
     path = tmp_path / "jack.turn.db"
     store = TurnStore(path)
@@ -144,11 +171,24 @@ async def test_a_damaged_row_does_not_hide_the_others(tmp_path) -> None:
     await store.save_turn(embedder=EMBEDDER, messages=[{"role": "assistant", "c": 2}])
 
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE turn SET messages = 'not json' WHERE rowid = 1")
+        connection.execute("UPDATE turn SET messages = ? WHERE rowid = 1", (damage,))
+        # Nothing else about the row is damaged, so it is the sync's to find.
+        connection.execute("DELETE FROM turn_chunk WHERE turn_id = 1")
 
-    records, _ = store.turns()
+    with caplog.at_level(logging.WARNING, logger="slife2.libs.store.db"):
+        records, _ = store.turns()
+        listing = records[1].to_listing()
+        status = store.index_status(EMBEDDER)
+        await store.sync_indexes(EMBEDDER)
+
     assert [r.messages for r in records] == [[{"role": "assistant", "c": 2}], []]
     assert records[1].messages == []
+    assert listing["user_message"] == "" and listing["turn_id"] == 1
+    # A row with no readable text owes no vector — the same state a turn that
+    # held nothing to embed is in — so the file is indexed, and the plugin that
+    # refuses to serve an unready one still comes up.
+    assert status["ready"] is True, status["problems"]
+    assert "turn 1's messages" in caplog.text
 
 
 def test_an_insert_that_recorded_nothing_is_not_a_rowid_of_zero() -> None:

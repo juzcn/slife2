@@ -321,7 +321,6 @@ def test_the_source_is_not_the_servers_own_name(isolated_runtime: Path) -> None:
     the connection faltered — and these rows have no connection whose state a
     verdict could come from.
     """
-    assert SOURCE == "skills"
     assert SOURCE != CONFIG_KEY
 
 

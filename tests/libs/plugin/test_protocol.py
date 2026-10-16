@@ -19,13 +19,20 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import client_meta
-from slife2.libs.plugin.protocol import house_server, identifies, open_server
+from slife2.libs.plugin.protocol import (
+    house_server,
+    identifies,
+    open_server,
+    tool_payload,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -125,6 +132,42 @@ def test_house_server_carries_instructions_and_omits_empty_ones() -> None:
         "Read me."
     )
     assert not house_server("slife2-test").instructions
+
+
+# --- reading what a tool call answered ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_result_with_no_structured_content_is_read_from_its_text() -> None:
+    """**`result.data` is the structured half, and only ever that.**
+
+    `fastmcp.client` fills `CallToolResult.data` from `structured_content`
+    alone, so the text fallback that looked for a `str` *there* could never fire
+    — a result carrying no structured content arrives with `data` `None` and the
+    JSON in a text block.  That is exactly the case the fallback names (an older
+    build of one of our own servers, whose tools sent their dict as text), and
+    the claim was false in it: the answer was readable all along and every
+    caller was told the far end was a build it could not read.  Measured over a
+    real server rather than a hand-built namespace, because the whole finding is
+    about what the SDK does and does not put in `data`.
+    """
+
+    server: FastMCP = FastMCP("slife2-text-only")
+
+    @server.tool
+    def answers() -> ToolResult:
+        """Answer in a text block and nowhere else."""
+        return ToolResult(content=[TextContent(type="text", text='{"tools": []}')])
+
+    async with Client(server) as client:
+        result = await client.call_tool("answers", {})
+
+    assert result.data is None, "the premise: nothing but the text block has it"
+    assert tool_payload(result) == {"tools": []}
+    # The fallback reads *JSON* and does not invent a payload: prose is not one,
+    # and the empty mapping is how a caller is told the shape is wrong.
+    prose = SimpleNamespace(data=None, content=[SimpleNamespace(text="all fine")])
+    assert tool_payload(prose) == {}
 
 
 # --- connecting: the rule every client follows -------------------------------

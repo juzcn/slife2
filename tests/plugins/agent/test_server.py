@@ -39,7 +39,7 @@ from fakes import (
     keep_the_context,
     text_turn,
 )
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from ruamel.yaml import YAML
 
@@ -462,6 +462,35 @@ class UnreadableStore:
         return SimpleNamespace(data=self.answers[name])
 
 
+class ParkedRestore:
+    """The real context store, with `restore` answering only when told to.
+
+    The window `adopt_maker` walks into is one store round trip wide, and a test
+    that hoped to land inside it would pass for the wrong reason whichever way it
+    went — so the round trip is held open instead, and *when* each of the two
+    restores lands is a fact.  `entered` counts them, `arrived` is set by the
+    first, and each waits on its own event of `release`.
+
+    Real underneath rather than a stub: what is under test is which loop's
+    `restore` gets to replace which list, and a store answering a made-up list
+    would say nothing about that.
+    """
+
+    def __init__(self, inner: Client) -> None:
+        self.inner = inner
+        self.entered = 0
+        self.arrived = asyncio.Event()
+        self.release = [asyncio.Event(), asyncio.Event()]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name == "restore":
+            mine = self.entered
+            self.entered += 1
+            self.arrived.set()
+            await self.release[mine].wait()
+        return await self.inner.call_tool(name, arguments)
+
+
 @pytest.mark.asyncio
 async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     hub,
@@ -531,6 +560,18 @@ async def test_a_transcript_read_of_an_unreadable_turn_list_is_refused(hub) -> N
 
 @pytest.mark.asyncio
 async def test_a_turn_returns_the_final_text(context, hub) -> None:
+    """The result, and this call is the *no-token* case of it.
+
+    `send` passes no progress handler, so this is also the half of the contract
+    that a non-streaming client depends on: the observer's `report_progress` is a
+    silent no-op without a token, and the answer arrives anyway.  This test and
+    `test_a_turn_works_without_a_progress_handler` used to be two: same server,
+    same call, same assertion, and the second's stated subject — "the server does
+    no extra work" — asserted by nothing, because a `send` without a handler is
+    what both of them already were.  The pair that claim needs is this one and
+    `test_events_arrive_as_progress_notifications`, which sends *with* a handler
+    and reads the events out.
+    """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
@@ -958,7 +999,7 @@ async def test_a_cancelled_message_leaves_the_lock_free(context, hub) -> None:
     queued = asyncio.create_task(send(server, "doomed"))
     await asyncio.sleep(0.02)
     queued.cancel()
-    with pytest.raises((asyncio.CancelledError, Exception)):
+    with pytest.raises(asyncio.CancelledError):
         await queued
 
     # The one that was already running is untouched, and the loop still works.
@@ -1001,7 +1042,7 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
     interrupted = asyncio.create_task(send(server, "one"))
     await wait_for_streams(backend)
     interrupted.cancel()
-    with pytest.raises((asyncio.CancelledError, Exception)):
+    with pytest.raises(asyncio.CancelledError):
         await interrupted
 
     await send(server, "two")
@@ -1038,7 +1079,7 @@ async def test_an_interrupted_turn_is_still_recorded(
         interrupted = asyncio.create_task(send(server, "one"))
         await wait_for_streams(backend)
         interrupted.cancel()
-        with pytest.raises((asyncio.CancelledError, Exception)):
+        with pytest.raises(asyncio.CancelledError):
             await interrupted
         # The write is detached from the cancelled request, so give it a moment
         # to land rather than racing it.
@@ -1107,22 +1148,30 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
 async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
     hub,
 ) -> None:
-    """**`carried` is a count of the *tail*, so `turn_ids` has to be a prefix.**
+    """**The turn after a failed one takes up the failed turn's id.**
 
-    A turn whose `record` answered nothing is left unbacked — a failed turn, a
-    cancelled one, or a store that refused the write — and the next rebuild
-    carries its messages verbatim.  That is only expressible while the unbacked
-    run is still at the end of the list: a *later* turn that does get an id sits
-    behind messages its id does not describe, and `covered` can no longer be read
-    as a prefix.  Reading `len(messages) - covered` off the wrong end then took
-    the newest turn's own tail, re-appended it *after* a list the log had just
-    rebuilt it into, and silently dropped the message the mechanism exists to
-    keep.
+    A turn whose `record` could not be waited for — a failed turn, whose write is
+    detached because a cancelled handler cannot await — is left unbacked for one
+    turn, and the next rebuild carries its messages verbatim.  That is only
+    expressible while the unbacked run is still at the end of the list: a
+    *later* turn that does get an id sits behind messages its id does not
+    describe, and `covered` can no longer be read as a prefix.  Reading
+    `len(messages) - covered` off the wrong end then took the newest turn's own
+    tail, re-appended it *after* a list the log had just rebuilt it into, and
+    silently dropped the message the mechanism exists to keep.
+
+    **And the id has to be picked up, or the run never becomes backed at all.**
+    Left unclaimed, `covered` can never advance again — the guard a turn joins
+    `turn_ids` by is never true once a carried run exists, and a rebuild
+    re-appends that run at the end of a list `covered` does not count — so every
+    later turn is unaddressable *and* recallable: the store holds its row, and a
+    recall that names it renders that turn from the row and re-appends the same
+    messages verbatim.  The exchange then appears twice in the list the turn runs
+    on, which is what the recall below is here to catch: it names the recorded
+    turn, and the same conversation is asserted to come out of it once.
 
     Asserted through the model, which is the only reader that matters: the third
-    turn is sent the whole conversation, in order, once.  `{"context": "clear"}`
-    is what forces the rebuild — the decision has to *change* the context, or the
-    in-hand list stands and nothing is ever re-derived.
+    turn is sent the whole conversation, in order, once.
     """
     from slife2.plugins.context.server import build_server as build_context
 
@@ -1136,7 +1185,7 @@ async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
             return super().stream(messages, tools)
 
     backend = RefusesOnce(text_turn("second answer"), text_turn("third answer"))
-    answers = iter(["{}", "{}", '{"context": "clear"}'])
+    answers = iter(["{}", "{}", '{"recall": {"query": "one"}}'])
 
     async def ask(agent, subagent, model, messages, prompt) -> str:
         return next(answers)
@@ -1224,7 +1273,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
         # fails the test instead of hanging it.
         await asyncio.wait_for(entered.wait(), timeout=_T.timeouts.work.hub)
         interrupted.cancel()
-        with pytest.raises((asyncio.CancelledError, Exception)):
+        with pytest.raises(asyncio.CancelledError):
             await interrupted
         # No sleep to race: the fix settles the turn *before* the cancellation
         # is re-raised, so the row is written by the time `await` above returns.
@@ -2036,15 +2085,6 @@ async def test_progress_values_are_a_monotonic_counter(context, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_works_without_a_progress_handler(context, hub) -> None:
-    """A non-streaming client gets the same answer and the server does no extra work."""
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
-    )
-    result = await send(server, "x")
-    assert result.data["text"] == "It is 42."
-
-
 @pytest.mark.asyncio
 async def test_a_broken_observer_does_not_lose_the_message(
     context, hub, monkeypatch
@@ -2149,21 +2189,43 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
 
 @pytest.mark.asyncio
 async def test_report_progress_is_a_no_op_without_a_token() -> None:
-    """Asserted directly because the failure it guards is invisible.
+    """The token, and not this module, is what decides whether a stream exists.
 
-    `report_progress` checks for a progress token itself.  If that ever changed,
-    every non-streaming client would start raising — and the symptom would look
-    like a bug in the loop, not in the observer.
+    `ProgressObserver.on_event` calls `ctx.report_progress` unconditionally, and
+    the whole of what makes a non-streaming client safe is that **FastMCP's own
+    `Context` checks for a progress token itself**.  That is a claim about
+    somebody else's code, so it is asserted against somebody else's code: a real
+    server, a real `Context`, the observer's own call — once with a client that
+    sent no token, and once with one that did.  The test this replaces handed the
+    observer a duck-typed context whose `report_progress` returned `None`, so it
+    could not fail whatever FastMCP did, and a regression that made
+    `report_progress` raise without a token would have surfaced as turns failing
+    for every client that is not streaming.
     """
-
-    class NoTokenContext:
-        async def report_progress(self, *args, **kwargs):
-            return None
-
     from slife2.libs.turn.events import TextDelta
 
-    observer = ProgressObserver(NoTokenContext())  # type: ignore[arg-type]
-    await observer.on_event(TextDelta("x"))  # must not raise
+    server: FastMCP = FastMCP("progress")
+
+    @server.tool
+    async def report(ctx: Context) -> str:
+        await ProgressObserver(ctx).on_event(TextDelta("x"))
+        return "reported"
+
+    # No token: the observer's call is the no-op that has to be silent.
+    async with Client(server) as client:
+        assert (await client.call_tool("report", {})).data == "reported"
+
+    # A token: the same call reaches the handler, which is what makes the first
+    # half about the token rather than about the call never doing anything.
+    seen: list[tuple[float, float | None, str | None]] = []
+
+    async def on_progress(progress, total, message):
+        seen.append((progress, total, message))
+
+    async with Client(server) as client:
+        await client.call_tool("report", {}, progress_handler=on_progress)
+
+    assert [one[0] for one in seen] == [1]
 
 
 # --- everything above, over a real socket ------------------------------------
@@ -2280,7 +2342,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
             await wait_for_streams(backend)
 
             interrupted.cancel()
-            with pytest.raises((asyncio.CancelledError, Exception)):
+            with pytest.raises(asyncio.CancelledError):
                 await interrupted
 
         # A fresh connection, which also shows the server was not poisoned by
@@ -2826,7 +2888,15 @@ async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> No
     await asyncio.wait_for(parked.wait(), timeout=10)
 
     await set_subagent(server, "researcher", fork=True)
-    await send(server, "three", subagent="researcher")
+    # **Bounded, because the way this test fails is a deadlock.**  A fork that
+    # waits on the maker's lock waits out the maker's *whole turn*, and the
+    # maker here is parked on an approval this test cannot answer until after
+    # this line — so the regression is not a wrong value or an exception, it is
+    # a lane that never finishes.  A timeout is that deadlock saying so.
+    await asyncio.wait_for(
+        send(server, "three", subagent="researcher"),
+        timeout=10,  # timeouts: the value this test is built around, not a budget
+    )  # timeouts: the value this test is built around, not a budget
 
     assert prompts_seen(backend, 2) == [
         "user:one",
@@ -2843,6 +2913,71 @@ async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> No
             {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
         )
     assert (await turn).data["text"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_fork_made_while_the_maker_is_live_keeps_its_message(
+    context, hub, monkeypatch
+) -> None:
+    """**The maker's conversation is read under the maker's lock.**
+
+    `adopt_maker` restores the maker's loop when the maker has not restored it
+    yet, and that is a state a live maker is in for one store round trip: the
+    loop is in `loops` from the moment `conversation` made it, and `send_message`
+    sets `restored` only once the store has answered.  A fork arriving in that
+    window ran the same `restore_into` as the maker — *not* under the maker's
+    lock, which the maker is holding — and two restores of one list are one
+    answer landing on top of the other: the fork's, arriving late, replaces a
+    list the maker has already appended its user message to.  The turn then
+    advances the orphaned list while `loop.messages` holds one that never saw it,
+    so `outcome.messages` comes out empty, nothing is recorded, and the fork is
+    handed a copy that never had the maker's message in it.
+
+    **Parked rather than raced.**  The maker's restore and the fork's are each
+    held open on an event, so *when* each lands is a fact this test knows instead
+    of a hope: the maker's is released first and its turn is proved running
+    before the fork's is let go.  With the lock the fork cannot be in its restore
+    at all until the maker's turn has ended, which is why the fork's copy is
+    taken from the live list — the maker's finished turn and all.
+    """
+    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
+    store = ParkedRestore(context)
+    server = build_server(
+        config(), context_client=store, hub_client=hub, backend=backend
+    )
+
+    maker = asyncio.create_task(send(server, "one"))
+    await asyncio.wait_for(store.arrived.wait(), timeout=_T.timeouts.work.hub)
+    await set_subagent(server, "researcher", fork=True)
+    fork = asyncio.create_task(send(server, "two", subagent="researcher"))
+    # **Where the two builds part company.**  Without the lock the fork is in
+    # its own restore by now — the maker's is parked and holds nothing — and this
+    # wait sees two; with it the fork is parked on the maker's lock and is not in
+    # a restore at all.  Nothing below depends on which of those happened.
+    for _ in range(100):
+        if store.entered == 2:
+            break
+        await asyncio.sleep(0.01)
+    store.release[0].set()
+    # The maker's turn is running — its user message is appended and the model
+    # has been asked — which is the moment the fork's restore used to land on
+    # top of it.
+    await wait_for_streams(backend, 1)
+    store.release[1].set()
+
+    assert (await maker).data["text"] == "the maker's answer"
+    assert (await fork).data["text"] == "the fork's"
+    # The copy the fork runs on: the maker's whole finished turn, then its own
+    # message.  An empty copy is the fork having read a list the maker's own
+    # restore had just replaced.
+    assert prompts_seen(backend, 1) == [
+        "user:one",
+        "assistant:the maker's answer",
+        "user:two",
+    ]
+    # ...and the maker's turn is in its own log, which is the other half of the
+    # same damage: a turn that advanced an orphaned list records nothing.
+    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1
 
 
 def test_an_unfinished_exchange_is_what_a_copy_leaves_off() -> None:

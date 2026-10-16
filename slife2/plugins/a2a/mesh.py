@@ -583,6 +583,11 @@ class A2AMesh:
         self._outbound: aiomqtt.Client | None = None
         self._connected = False
         self._closing = False
+        #: Whether the teardown in force is the first half of a rebuild
+        #: (:meth:`disconnect`).  It is what tells a send's retry ladder apart
+        #: from one this process is abandoning, since both set `_closing` while
+        #: the connection goes down.
+        self._reviving = False
         #: Set when another agent turns out to hold our name — the mesh then
         #: leaves the broker (see :meth:`_note_collision`).
         self._collision = ""
@@ -659,8 +664,17 @@ class A2AMesh:
         that agent's session over and duplicate every task sent to the name.
         The same check raises when it cannot run at all, rather than letting a
         probe that failed pass for a name that is free.
+
+        **The teardown it begins with is a *reviving* one** (`disconnect`):
+        whatever the last attempt left behind is being replaced rather than
+        abandoned, so a send still on its retry ladder keeps its place — its
+        loop, its correlation routes and the row the conversation is waiting on
+        — and carries on over the rebuilt connection.  Tearing those down here
+        is what a broker blip cost the conversation: a call landing in the
+        reconnect gap dialled again, and the send died between two rungs of a
+        ladder it would have completed seconds later.
         """
-        await self.disconnect()
+        await self.disconnect(reviving=True)
         self._closing = False
         self._collision = ""
         self._ready = asyncio.Event()
@@ -777,29 +791,110 @@ class A2AMesh:
         self._collision = claim
         logger.error("a2a_name_collision %s", claim)
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, reviving: bool = False) -> None:
         """Stop both connections; inflight inbound tasks get cancelled by the
         SDK (their cancel noise is suppressed by the ``_closing`` gate).
 
         Never cancels its own caller: a mesh task tearing the mesh down (the
         outbound loop, on a name collision) must be skipped, or it would
         cancel itself mid-teardown.
+
+        **`reviving` says this teardown is the first half of the next
+        `connect()`**, which is the only caller that passes it: the mesh is
+        being rebuilt, not abandoned, so the sends still on the retry ladder
+        ride over the gap.  Their loops keep running and their correlation
+        routes are kept, and the ladder carries on the moment the link is back —
+        which is what the requester profile is *for*, and what a broker blip
+        while a task was outstanding used to destroy: a call landing in the
+        reconnect gap took the `not is_connected` branch, `connect()` tore the
+        sends down, and the conversation was left waiting for an answer that
+        nothing would ever bring (its correlation route had gone too, so the
+        peer's real reply landed as `a2a_reply_unknown_corr`).
+
+        **Every other teardown ends the ladders, and tells the conversation**
+        (`_end_send`).  `_deliver`'s contract is that the ladder's ending reaches
+        the conversation and not just the log; a cancellation was the one exit
+        that reached nobody, leaving the task row `pending` for ever over a
+        message `a2a_send_message` had promised a result for.
         """
         self._closing = True
+        self._reviving = reviving
         current = asyncio.current_task()
         tasks, self._tasks = self._tasks, []
-        loops = [loop for send in self._sends.values() for loop in send.loops]
+        # The ladders this teardown is about to end.  Taken before the cancel,
+        # and only the ones still running: a send whose reply arrived, or whose
+        # ladder already reported itself exhausted, has had its ending and
+        # `_deliver`'s `finally` has taken it out of `send.loops`.
+        ending = (
+            []
+            if reviving
+            else [
+                send
+                for send in self._sends.values()
+                if any(not loop.done() for loop in send.loops)
+            ]
+        )
+        loops = (
+            []
+            if reviving
+            else [loop for send in self._sends.values() for loop in send.loops]
+        )
         mine = [t for t in tasks + loops if t is not current]
         for task in mine:
             if not task.done():
                 task.cancel()
         if mine:
             await asyncio.gather(*mine, return_exceptions=True)
-        self._sends.clear()
-        self._corr_to_task.clear()
-        self._pending.clear()  # artifact texts for tasks that never completed
+        if not reviving:
+            self._sends.clear()
+            self._corr_to_task.clear()
+            self._pending.clear()  # artifact texts for tasks that never completed
+            for send in ending:
+                self._end_send(send)
         self._connected = False
         self._outbound = None
+
+    @property
+    def _ladder_over(self) -> bool:
+        """Whether a send's retry ladder is to stop with this mesh.
+
+        ``_closing`` is set by *every* teardown, and that is exactly what a
+        ladder must not read: a teardown that is the first half of a rebuild
+        (`disconnect`'s ``reviving``) leaves the connection down for a second or
+        two and the ladder has rungs left, so stopping there is the silent loss
+        this property exists to tell apart from the real one.  An abandoned mesh
+        — shutdown, a deliberate departure, a connect that failed — is the only
+        one where the ladder is over.
+        """
+        return self._closing and not self._reviving
+
+    def _end_send(self, send: _OutboundSend) -> None:
+        """Tell the conversation that *send*'s ladder ended with the mesh.
+
+        `UNREACHABLE` and not one of the three peer verdicts, because no peer
+        said anything: this is the requester's failure, and rendering it as an
+        answer is the confident negative `slife2.libs.turn.loop` would act on
+        instead of re-sending (DESIGN.md §10.1).  The words do not claim what
+        cannot be known — the ladder had not run out, so whether the peer has the
+        message is exactly what is unknown.
+
+        **The record is left alone, and that is `_deliver`'s rule rather than an
+        omission.**  No reply arrived, so the peer's real ending is unknown, and
+        a row marked `failed` would be a verdict this process has no business
+        giving (§10.1).  The correlation routes do go with the teardown, so a
+        terminal reply from a peer that did receive the message lands as
+        `a2a_reply_unknown_corr` — which is the second thing the notice says: the
+        sender has to send it again.
+        """
+        self.on_task_completion(
+            send.task_id,
+            "the A2A mesh went down while this was still being sent, so it is "
+            "not known whether the peer received it. Send it again if it still "
+            "matters.",
+            UNREACHABLE,
+            send.agent,
+            "task" if send.record else "message",
+        )
 
     async def _run_responder(self) -> None:
         """The SDK responder: own connection, presence, inbound lifecycle.
@@ -1182,15 +1277,18 @@ class A2AMesh:
         publish retries the *same* rung now, and ``unsent`` is what makes that
         retry back off instead of spinning: it rides the same ladder delay, so a
         send that cannot be published retries on the profile's capped cadence
-        until the mesh carries it — or until the mesh goes down, which is where
-        this loop ends (``_closing``, and ``disconnect`` cancels ``send.loops``).
+        until the mesh carries it — or until the mesh is *abandoned*, which is
+        where this loop ends (``_ladder_over``, and ``disconnect`` cancels
+        ``send.loops``).  A mesh that is only being rebuilt is not that: the
+        teardown `connect` makes is a reviving one, and the ladder rides over it
+        exactly as it rides over a rung whose publish did not leave.
         """
         try:
             try:
                 await asyncio.sleep(_T.timeouts.deliver.reply_first)
             except asyncio.CancelledError:
                 raise
-            while not (self._closing or send.delivered):
+            while not (self._ladder_over or send.delivered):
                 if send.attempts >= _MAX_ATTEMPTS:
                     logger.warning(
                         "a2a_delivery_exhausted task=%s peer=%s attempts=%d",
@@ -1212,7 +1310,7 @@ class A2AMesh:
                     )
                     return
                 await asyncio.sleep(_backoff_delay(send.attempts - 1 + send.unsent))
-                if self._closing or send.delivered:
+                if self._ladder_over or send.delivered:
                     return
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex[:16])

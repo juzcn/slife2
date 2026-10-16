@@ -4,6 +4,15 @@ The lock tests deliberately use **two processes**.  A Windows named mutex is
 recursive for the thread that owns it and a POSIX `flock` belongs to the open
 file description, so an in-process test would acquire the same lock twice and
 pass while proving nothing at all.
+
+**Which is the lane this module is in.**  `integration` is I/O, network or
+subprocess, and there are five real interpreters here — the lock holder, the
+holder that gets killed, the child that outlives its spawner, and the two pid
+liveness checks that need a process nobody is waiting for — so this is not a
+file that can be run somewhere processes cannot be spawned.  The module used to
+say `unit`, which put six seconds of interpreter startup into a lane documented
+as "no I/O, no subprocess"; the tests that need none of it are about the same
+subject (the record and claim files, the start token) and stay with it.
 """
 
 from __future__ import annotations
@@ -22,7 +31,7 @@ import pytest
 from slife2.libs.harness import handover
 from slife2.libs.host import runtime
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 #: The checkout, found by the file that names it rather than by counting
 #: directories up: a depth is a number that goes stale in silence.
@@ -442,11 +451,33 @@ def test_the_ps_token_survives_ps_being_missing(
     assert runtime._start_token_ps(4321) is None
 
 
-def test_every_platform_has_a_token_source() -> None:
-    """A platform with no source silently disables `down`, so name them."""
+def test_a_platform_with_no_source_of_its_own_falls_back_to_ps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A platform with no source silently disables `down`, so name them.
+
+    The table holds the two platforms with a cheap and exact answer; everything
+    else — macOS, the BSDs, whatever comes next — has to reach `ps`, and reaching
+    nothing answers "cannot prove" for every pid, which is a `down` that stops
+    nothing and says why to nobody.
+
+    **The fall-through is exercised rather than pointed at.**  What stood here
+    was `assert runtime._start_token_ps is not None` on an unconditional
+    module-level `def`, which is true of any process that imported this file and
+    would have gone on being true if `process_start_token` stopped calling it.
+    Emptying the table is the platform nobody has a source for, simulated
+    honestly: the call has to arrive at `ps`.
+    """
     assert set(runtime._START_TOKEN_SOURCES) == {"win32", "linux"}
-    # Everything else falls through to `ps`, which macOS and the BSDs have.
-    assert runtime._start_token_ps is not None
+
+    monkeypatch.setattr(runtime, "_START_TOKEN_SOURCES", {})
+    asked: list[int] = []
+    monkeypatch.setattr(
+        runtime, "_start_token_ps", lambda pid: asked.append(pid) or "a-token"
+    )
+
+    assert runtime.process_start_token(4321) == "a-token"
+    assert asked == [4321]
 
 
 # --- a process that has exited and was never waited for ----------------------

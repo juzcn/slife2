@@ -604,6 +604,123 @@ async def test_an_http_error_carries_its_status(monkeypatch) -> None:
     assert caught.value.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_a_payload_that_is_not_base64_is_a_failure_not_a_traceback(
+    monkeypatch, tmp_path
+) -> None:
+    """**Both wires decode a field they did not write, and neither `_run`.**
+
+    `base64.b64decode` raises `binascii.Error` — a `ValueError` — for a payload
+    that is not base64 and `TypeError` for a field that is not a string at all,
+    and `slife2.plugins.media.server._run` converts only `NotImplementedError`,
+    `MediaAdapterError` and `FileNotFoundError`.  So a vendor answering with a
+    truncated `b64_json` (or an `audio.data` that is an object) reached the model
+    as a raw traceback instead of the `[failed] …` sentence §1.5 promises —
+    exactly the class of answer `_json_object` exists to eliminate one line up.
+    """
+    images = OpenAICompatAdapter(settings().providers["test"])
+    monkeypatch.setattr(
+        images, "_ensure_client", _posting({"data": [{"b64_json": "not base64!"}]})
+    )
+    with pytest.raises(MediaAdapterError, match="b64_json"):
+        await images.generate_image(model="img", prompt="x", outputs_dir=tmp_path)
+
+    speech = dashscope()
+
+    async def fake_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        return {"output": {"audio": {"data": {"nested": "not a string"}}}}
+
+    monkeypatch.setattr(speech, "_request", fake_request)
+    with pytest.raises(MediaAdapterError, match="audio.data"):
+        await speech.text_to_speech(model="say", text="hi", outputs_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_with_no_key_sends_no_authorization_header() -> None:
+    """**A local media endpoint needs no key, and `Bearer ` is not "no key".**
+
+    Unlike the LLM and embeddings servers, this plugin's `api_key` defaults to
+    `""` (`MediaProviderSettings`) — a media provider is commonly a server on
+    this machine, where a key is not part of the config at all.  What the header
+    used to be in that case was `Authorization: Bearer ` — a credential *present
+    and empty*, which a gateway is entitled to read as a bad credential and
+    answer 401 to, so the local endpoint that wanted no key was refused by a
+    header nobody asked for.  A key that is configured still travels, and a
+    `${...}` that did not resolve is still refused rather than sent.
+    """
+    unkeyed = MediaProviderSettings(
+        name="local", api="openai-images", base_url="https://x/v1"
+    )
+    adapter = OpenAICompatAdapter(unkeyed)
+    client = await adapter._ensure_client()
+    try:
+        assert "authorization" not in {name.lower() for name in client.headers}, (
+            "an empty credential was sent as a header nobody asked for"
+        )
+    finally:
+        await adapter.close()
+
+    keyed = OpenAICompatAdapter(settings().providers["test"])
+    client = await keyed._ensure_client()
+    try:
+        assert client.headers["authorization"] == "Bearer k"
+    finally:
+        await keyed.close()
+
+    unresolved = OpenAICompatAdapter(
+        MediaProviderSettings(
+            name="p",
+            api="openai-images",
+            base_url="https://x/v1",
+            api_key_ref="${NO_SUCH_VARIABLE_ANYWHERE}",
+        )
+    )
+    with pytest.raises(MediaAdapterError, match="did not resolve"):
+        await unresolved._ensure_client()
+
+
+@pytest.mark.asyncio
+async def test_a_video_that_outruns_its_timeout_names_the_job_it_left_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The tool's own words and the code have to say the same thing.**
+
+    The description promised that a render outrunning `timeout` "answers with
+    the job's id", and nothing implements that: the call *fails*, with the id
+    inside the refusal — which is where it is worth having, because the only
+    thing the id is for is asking the provider about a render this call has
+    stopped waiting for.  A model told the id arrives as an answer would look
+    for a file that does not exist and pay for the render twice; so the
+    description says what happens, and this asserts both halves.
+    """
+    async with Client(server_for()) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+    description = listed["generate_video"].description or ""
+    assert "answers with the job's id" not in description, (
+        "the description still promises an answer the code does not give"
+    )
+    assert "provider's job id in the message" in description
+
+    adapter = dashscope()
+
+    async def fake_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        return {"output": {"task_id": "t-1", "task_status": "RUNNING"}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    monkeypatch.setattr(adapters.asyncio, "sleep", _no_sleep())
+    config = replace(load(), media=settings())
+
+    async with Client(build_server(config, adapters={"test": adapter})) as client:
+        answer = await ask(client, "generate_video", prompt="x", timeout=0.05)
+
+    assert answer.startswith("[failed] video:"), "a timeout is a refusal, not a path"
+    assert "t-1" in answer, "the job the provider is still running is not named"
+
+
 def _client_returning(client: Any):
     async def ensure() -> Any:
         return client
@@ -639,15 +756,25 @@ def _posting(body: Any, status_code: int = 200, text: str = "{}"):
 async def test_the_images_only_adapter_refuses_the_other_three(
     monkeypatch, tmp_path
 ) -> None:
-    """Four capabilities behind two wires, and the refusal names the gap."""
+    """Four capabilities behind two wires, and the refusal names the gap.
+
+    `match` on each, because the subject of the docstring above is the
+    *sentence*: a bare `pytest.raises(NotImplementedError)` passes for any
+    `NotImplementedError` from any capability, so an adapter that answered
+    `raise NotImplementedError` with nothing in it would satisfy this — and the
+    plugin builds its `[refused] this provider cannot make a <capability>: …`
+    answer out of exactly this text (`test_a_capability_the_adapter_lacks_names_
+    the_adapter`).  Each one names its own capability, which is the half a model
+    needs: what it cannot have, not merely that something is missing.
+    """
     adapter = OpenAICompatAdapter(
         MediaProviderSettings(name="o", api="openai-images", base_url="https://x/v1")
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="video"):
         await adapter.generate_video(model="m", prompt="x", outputs_dir=tmp_path)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="speech"):
         await adapter.text_to_speech(model="m", text="x", outputs_dir=tmp_path)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="transcription"):
         await adapter.transcribe_audio(model="m", audio_path=tmp_path / "a.wav")
 
 

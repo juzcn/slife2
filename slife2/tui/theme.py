@@ -58,6 +58,11 @@ GLYPHS: dict[str, str] = {
     "running": "◌",  # dotted circle
     "done": "●",  # filled circle
     "error": "●",
+    # The fourth state of a call's panel: the turn it belonged to ended while the
+    # window was still waiting on it.  A glyph of its own rather than a second use
+    # of one of the two above, because it answers neither of their questions —
+    # nothing is running and nothing came back (`slife2.tui.widgets._status`).
+    "interrupted": "⊘",  # circled division slash
     "failed": "✗",
     "check": "✓",  # the other half of `failed`
     "up": "↑",

@@ -256,7 +256,12 @@ async def test_describe_answers_over_the_wire() -> None:
 
     assert described["dimension"] == 8
     assert described["model"] == "mystery"
-    assert described["max_chars"] > 0
+    # **The number the endpoint reported, not merely a positive one.**  The
+    # ladder exists because the limit belongs to the endpoint
+    # (`_input_limit_of`): a table guess here, the listing there, and this
+    # fixture's listing says 4096 — so `> 0` passed for every rung of it,
+    # including the ones that would be wrong.
+    assert described["max_chars"] == 4096
 
 
 # --- the index identity the client half records -------------------------------

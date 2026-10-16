@@ -673,26 +673,42 @@ def claim_agent(name: str, *, headless: bool = False) -> Generator[None]:
     if name in _HELD_NAMES:
         raise AgentInUse(name, read_claim(name))
 
+    # **The acquire is translated on its own, and the caller's body is not
+    # inside it.**  This used to be one `try:` around the whole `with
+    # exclusive(...)`, `yield` and all, so the `except TimeoutError` covered
+    # everything the window ever did: a `TimeoutError` raised anywhere in
+    # slife2's start-up or in `app.run()` — `toolclient.remote_tools` asks the
+    # hub under `work.hub`, and an ask that runs out of time raises exactly this
+    # — came back out as `AgentInUse(name, …) from None`, which says "agent
+    # 'slife2' is already running (pid …)" about a name nothing was holding and
+    # throws the real failure away.  The docstring above is the contract, and it
+    # is about the *claim*: the only thing that can say "another live instance
+    # already answers to this name" is `exclusive`'s own timeout.
+    held = contextlib.ExitStack()
     try:
-        with exclusive(agent_key(name), timeout=_T.timeouts.ready.agent_claim):
-            _HELD_NAMES.add(name)
-            try:
-                # Everything after the `add` is inside the `try`, including the
-                # bookkeeping.  A name that is added and then not released
-                # because something between the two raised is a name this
-                # process can never claim again — and "released however the
-                # body exits" is the whole point of holding it.
-                write_claim(AgentClaim.now(name, headless=headless))
-                client = register_client(name)
-                try:
-                    yield
-                finally:
-                    unregister_client(client)
-            finally:
-                clear_claim(name)
-                _HELD_NAMES.discard(name)
+        held.enter_context(
+            exclusive(agent_key(name), timeout=_T.timeouts.ready.agent_claim)
+        )
     except TimeoutError:
         raise AgentInUse(name, read_claim(name)) from None
+
+    with held:
+        _HELD_NAMES.add(name)
+        try:
+            # Everything after the `add` is inside the `try`, including the
+            # bookkeeping.  A name that is added and then not released
+            # because something between the two raised is a name this
+            # process can never claim again — and "released however the
+            # body exits" is the whole point of holding it.
+            write_claim(AgentClaim.now(name, headless=headless))
+            client = register_client(name)
+            try:
+                yield
+            finally:
+                unregister_client(client)
+        finally:
+            clear_claim(name)
+            _HELD_NAMES.discard(name)
 
 
 def others_running() -> list[ClientRecord]:
@@ -988,9 +1004,22 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         )
 
     gone = terminate(record.pid)
+    if not gone:
+        # **The record is the only thing that says the pid is ours, so it stays
+        # while the pid does.**  Clearing it here forgot a live process: the next
+        # `slife2 down` found no record, answered `UNMANAGED` — "(not started by
+        # slife2)" — and never signalled the daemon again, and `slife2 status`
+        # said the same about a server that is still listening.  A server that
+        # did not exit is precisely the one whose record is still needed; it is
+        # cleared when the process really did go, or by the `same_process` branch
+        # above once the pid is no longer the one we started.
+        return Outcome(
+            spec,
+            Status.FAILED,
+            detail=(
+                f"pid {record.pid} did not exit; the record is kept, so "
+                f"`down` can find it again"
+            ),
+        )
     clear_record(spec.url)
-    return Outcome(
-        spec,
-        Status.STOPPED if gone else Status.FAILED,
-        detail="" if gone else f"pid {record.pid} did not exit",
-    )
+    return Outcome(spec, Status.STOPPED)

@@ -345,8 +345,18 @@ def stop(
         return f"the broker at {settings.address} is no longer pid {record.pid} ({why})"
 
     gone = kill(record.pid)
-    clear_record(url)
     if not gone:
-        return f"pid {record.pid} did not exit"
+        # **The record is kept when the process did not exit**, which is the same
+        # rule the launcher's own stop follows: the pid is still out there, and
+        # the record is the only thing that knows it is *ours*.  Clearing it
+        # first — what this did — left a live mosquitto nobody could find again:
+        # the next `down` reads no record, probes the port, and answers "not
+        # started by slife2; left alone", so the one process that most needs
+        # signalling is the one nothing will signal.
+        return (
+            f"pid {record.pid} did not exit; the record is kept, so `down` can "
+            f"find it again"
+        )
+    clear_record(url)
     logger.info("a2a_broker_stopped address=%s pid=%d", settings.address, record.pid)
     return f"stopped {MOSQUITTO} on {settings.address}"

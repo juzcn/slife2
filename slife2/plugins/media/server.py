@@ -252,8 +252,10 @@ def build_server(
     ) -> str:
         """Render a video from a description, and say where it was written.
 
-        A render takes minutes; one that outruns `timeout` answers with the
-        job's id, and the render carries on at the provider.
+        A render takes minutes: one that outruns `timeout` fails, with the
+        provider's job id in the message so the same render can be asked after
+        there instead of paid for twice. Nothing here fetches it back — a call
+        that outran its own patience is told what became of it and nothing more.
 
         Args:
             prompt: What happens in the video.

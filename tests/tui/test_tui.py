@@ -624,16 +624,35 @@ async def test_a_failed_tool_says_error() -> None:
 
 
 async def test_a_running_tool_says_running() -> None:
-    """Before the result lands the row has to say something is happening."""
+    """Before the result lands the row has to say something is happening.
 
-    def respond(prompt: str, on_event):
+    **Read while the turn is still going**, which is the only time this state is
+    true of a panel.  A turn that is over settles whatever it left open
+    (`ChatView.settle_tools`), so the same panel read after the turn ended says
+    `interrupted` — see the two tests above.  The earlier spelling of this test
+    had the client return immediately, so the turn it read the panel in was
+    already over.
+    """
+    started = asyncio.Event()
+
+    async def calls_then_hangs(prompt, on_event, *, channel="tui", images=None):
         on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "1"}))
+        started.set()
+        await asyncio.sleep(30)
         return ""
 
-    app = make_app(respond)
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = calls_then_hangs  # type: ignore[method-assign]
+
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "go")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
         assert "running" in app.query_one(ToolCallWidget).plain_text()
+        await pilot.press("escape")
 
 
 async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
@@ -1983,6 +2002,119 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
     assert "LATE-FRAGMENT" not in text, "a late delta reopened the cancelled turn"
     assert names == [], "a late tool call mounted a panel under the cancel"
     assert text.index("partial") < text.index("[cancelled]")
+
+
+async def test_a_tool_panel_still_running_is_settled_by_the_cancel() -> None:
+    """A call the turn was waiting on must not claim to be running afterwards.
+
+    **The panel's only ending is a `ToolCallFinished` event**, and a cancelled
+    turn stops receiving them — so the panel that opened for the call keeps
+    saying "running" for the rest of the session, which is the ordinary "cancel
+    a slow render" path rather than an edge case.  A status is a claim about
+    right now, and this one stops being true the moment the turn is given up on.
+
+    What it becomes is **not** an error: the tool did not fail, and the window
+    never learned whether it finished on the server.  So the fourth state says
+    the one thing that is known — the turn ended first — and the glyph and the
+    wording are both apart from the two that carry a verdict.
+
+    The second half is the same seam from the failure side: a turn that raises
+    is as over as one that was cancelled, so its late `ToolCallStarted` must not
+    mount a fresh panel either — it would mount *under* the error line, after
+    the settling pass, and say "running" for ever.
+    """
+    started = asyncio.Event()
+
+    async def calls_then_hangs(prompt, on_event, *, channel="tui", images=None):
+        on_event(ToolCallStarted("c1", "slow_tool", {"path": "x"}))
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = calls_then_hangs  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
+        ticket = app._ticket
+        panel = app.query_one(ToolCallWidget)
+        assert "running" in panel.plain_text(), "the call is in flight to begin with"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Read from the panel that was already there, and not from a fresh query:
+        # what is under test is that this one stopped claiming to run.
+        assert "[cancelled]" in shown(app)
+        settled = app.query_one(ToolCallWidget)
+        assert settled is panel, "the panel was settled, not replaced"
+        assert "running" not in settled.plain_text()
+        assert "interrupted" in settled.plain_text()
+        # The note is only drawn when the panel is expanded, like every other
+        # detail: a collapsed row is one line and says its state in one word.
+        settled.action_toggle_detail()
+        assert "no result to show" in settled.plain_text()
+        assert "error" not in settled.plain_text()
+
+        # A call arriving after the cancel mounts nothing: the ticket is retired
+        # by the cancel itself, so this is dropped rather than settled later.
+        app.post_message(TurnEventMessage(ticket, ToolCallStarted("late", "sneak", {})))
+        await pilot.pause()
+        names = [widget.tool_name for widget in app.query(ToolCallWidget)]
+
+    assert names == ["slow_tool"], "a late tool call mounted a panel after the cancel"
+
+
+async def test_a_tool_panel_still_running_is_settled_by_the_failure() -> None:
+    """A failed turn is as over as a cancelled one, and settles the same way.
+
+    The failure branch used to leave the ticket live, so a `ToolCallStarted` the
+    client posted as it unwound mounted a panel under the `[✗ …]` line — below the
+    settling pass, and so never settled itself, saying "running" for the rest of
+    the session.  This is that panel.
+
+    **The failure is held open until the ticket has been read**, because the turn
+    ending is what moves the ticket: posting the late call afterwards is what
+    makes it late, and a test that read the ticket after the turn failed would be
+    posting an event for *this* turn and proving the opposite.
+    """
+    started = asyncio.Event()
+    fail = asyncio.Event()
+
+    async def calls_then_fails(prompt, on_event, *, channel="tui", images=None):
+        on_event(ToolCallStarted("c1", "slow_tool", {}))
+        started.set()
+        await fail.wait()
+        raise RuntimeError("the provider said no")
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = calls_then_fails  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
+        ticket = app._ticket
+
+        fail.set()
+        await pilot.pause()
+
+        app.post_message(TurnEventMessage(ticket, ToolCallStarted("late", "sneak", {})))
+        await pilot.pause()
+        text = shown(app)
+        names = [widget.tool_name for widget in app.query(ToolCallWidget)]
+
+    assert "the provider said no" in text, "the turn failed"
+    assert "interrupted" in text, "the panel the turn left open was settled"
+    assert names == ["slow_tool"], "a late tool call mounted a panel after the failure"
 
 
 async def test_escape_cancels_and_stops_there() -> None:

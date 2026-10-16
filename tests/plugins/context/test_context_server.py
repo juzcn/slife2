@@ -13,23 +13,29 @@ other rather than assumed.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sqlite3
+from typing import Any
 
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import default_config
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+from slife2.libs.host.paths import agent_dir
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
-from slife2.plugins.context.server import build_server
+from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
+
+#: The logger every assertion about a reason below reads.
+CONTEXT_LOGGER = "slife2.plugins.context.server"
 
 #: The store embeds every turn it writes, so driving it needs an embedder.  A
 #: stub rather than an endpoint: what these tests are about is the plugin's own
@@ -80,9 +86,8 @@ async def _seed(client: Client, agent: str, *exchanges: tuple[str, str]) -> list
 
 
 @pytest.mark.asyncio
-async def test_a_turn_goes_in_and_comes_back(tmp_path, monkeypatch) -> None:
+async def test_a_turn_goes_in_and_comes_back() -> None:
     """The write and the read are one contract, so they are tested as one."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     messages = [
         {"role": "user", "content": "what is 2+2?"},
         {"role": "assistant", "content": "It is 42."},
@@ -115,14 +120,13 @@ async def test_a_turn_goes_in_and_comes_back(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_saved_turn_joins_the_live_context(tmp_path, monkeypatch) -> None:
+async def test_a_saved_turn_joins_the_live_context() -> None:
     """The append is the store's, inside the turn's own transaction.
 
     Which is what makes the list trustworthy: a turn that is stored but not in
     the list is a turn the next restore silently drops, and the window in which
     that is true is exactly the window between two transactions.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         first = await client.call_tool(
@@ -138,9 +142,7 @@ async def test_a_saved_turn_joins_the_live_context(tmp_path, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_an_agent_name_that_cannot_be_a_file_is_refused(
-    tmp_path, monkeypatch
-) -> None:
+async def test_an_agent_name_that_cannot_be_a_file_is_refused() -> None:
     """The one refusal the agent server tells apart from a dead transport.
 
     `server.py` reads a `ToolError` as "this one request, from this one caller"
@@ -148,7 +150,6 @@ async def test_an_agent_name_that_cannot_be_a_file_is_refused(
     gone.  That distinction only holds if a bad name really does come back as a
     `ToolError` rather than as a dropped connection.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError):
@@ -156,7 +157,7 @@ async def test_an_agent_name_that_cannot_be_a_file_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
+async def test_the_model_tools_name_no_agent() -> None:
     """The schema is the boundary, not the system prompt.
 
     An `agent` argument would make "read my history" into "read anybody's", with
@@ -165,7 +166,6 @@ async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
     (`slife2.libs.plugin.audience`), so there is no argument to get wrong — and this is the
     check that none comes back.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
@@ -180,7 +180,7 @@ async def test_the_model_tools_name_no_agent(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_none_of_the_harness_tools_is_the_models(tmp_path, monkeypatch) -> None:
+async def test_none_of_the_harness_tools_is_the_models() -> None:
     """The audience mark, and which side of it each tool is on.
 
     A model may read its own history and may not decide what its context is: the
@@ -188,7 +188,6 @@ async def test_none_of_the_harness_tools_is_the_models(tmp_path, monkeypatch) ->
     it can call changes the selection.  That is a claim about the marks rather
     than about the code, so it is asserted here.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
@@ -200,11 +199,8 @@ async def test_none_of_the_harness_tools_is_the_models(tmp_path, monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_a_model_reads_the_history_it_is_calling_from(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_model_reads_the_history_it_is_calling_from() -> None:
     """Two conversations, one server, and neither sees the other's turns."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         for agent, question in (
@@ -242,10 +238,9 @@ async def test_a_model_reads_the_history_it_is_calling_from(
 
 
 @pytest.mark.asyncio
-async def test_a_call_that_says_nobody_is_refused(tmp_path, monkeypatch) -> None:
+async def test_a_call_that_says_nobody_is_refused() -> None:
     """Better told than quietly served: the hub forwards an identity it was
     given, so a call arriving without one did not come through the hub."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="did not say whose"):
@@ -253,9 +248,8 @@ async def test_a_call_that_says_nobody_is_refused(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_browsing_pages_and_reports_a_total(tmp_path, monkeypatch) -> None:
+async def test_browsing_pages_and_reports_a_total() -> None:
     """What the model gets back for a page: four fields a turn and the count."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("q0", "a0"), ("q1", "a1"), ("q2", "a2"))
@@ -270,7 +264,7 @@ async def test_browsing_pages_and_reports_a_total(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_the_page_reports_the_limit_that_built_it(tmp_path, monkeypatch) -> None:
+async def test_the_page_reports_the_limit_that_built_it() -> None:
     """`limit` in the answer is the capped one, not the one asked for.
 
     The docstring tells a model to page with `offset + len(entries) < total`,
@@ -278,7 +272,6 @@ async def test_the_page_reports_the_limit_that_built_it(tmp_path, monkeypatch) -
     with: answering a request for 1000 with `limit: 1000` and two hundred rows
     makes the next request skip the eight hundred in between.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("q0", "a0"))
@@ -292,11 +285,8 @@ async def test_the_page_reports_the_limit_that_built_it(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_a_bound_the_grammar_does_not_know_is_a_refusal(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_bound_the_grammar_does_not_know_is_a_refusal() -> None:
     """A `ToolError` the model reads and corrects, not an empty page."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="invalid since bound"):
@@ -306,10 +296,7 @@ async def test_a_bound_the_grammar_does_not_know_is_a_refusal(
 
 
 @pytest.mark.asyncio
-async def test_reading_a_turn_that_is_not_there_says_which_one(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+async def test_reading_a_turn_that_is_not_there_says_which_one() -> None:
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="no turn 7"):
@@ -322,13 +309,12 @@ async def test_reading_a_turn_that_is_not_there_says_which_one(
 
 
 @pytest.mark.asyncio
-async def test_a_new_conversation_restores_its_own_head(tmp_path, monkeypatch) -> None:
+async def test_a_new_conversation_restores_its_own_head() -> None:
     """Nothing recorded yet: the caller gets back exactly what it sent.
 
     The honest answer for a key that is genuinely new, and the one that keeps
     `restore` from needing a branch at every call site in the agent server.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         answer = await client.call_tool(
@@ -339,15 +325,12 @@ async def test_a_new_conversation_restores_its_own_head(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_a_restore_replays_the_list_and_names_its_turns(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_restore_replays_the_list_and_names_its_turns() -> None:
     """The context at exit, in the list's order, with a footnote per turn.
 
     The footnote is how a turn id reaches the model at all, and therefore how a
     keep-list is expressible: the ids it writes back are the ids it read here.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         ids = await _seed(client, "jack", ("first", "one"), ("second", "two"))
@@ -402,16 +385,13 @@ def test_the_footnote_a_screen_shows_is_the_one_the_model_reads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_restore_keeps_the_lists_order_and_not_the_rowids(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_restore_keeps_the_lists_order_and_not_the_rowids() -> None:
     """A selection need not be contiguous, so the list *is* the ordering.
 
     Written by hand rather than by a rebuild, because this is about what a read
     does with a list it did not produce: replaying it as it stands is the whole
     contract, and a read that re-sorted would silently undo every recall.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         ids = await _seed(client, "jack", ("first", "1"), ("second", "2"))
@@ -427,16 +407,13 @@ async def test_a_restore_keeps_the_lists_order_and_not_the_rowids(
 
 
 @pytest.mark.asyncio
-async def test_a_restore_drops_a_turn_that_is_no_longer_stored(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_restore_drops_a_turn_that_is_no_longer_stored() -> None:
     """The answer is what the log can produce, and the caller adopts it.
 
     A list naming a row that is gone is a file that was rebuilt or pruned
     underneath, and a restore that refused to run over one absent id would turn
     a partial loss into a total one.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("kept", "yes"))
@@ -450,14 +427,13 @@ async def test_a_restore_drops_a_turn_that_is_no_longer_stored(
 
 
 @pytest.mark.asyncio
-async def test_a_restore_repairs_an_orphaned_tool_call(tmp_path, monkeypatch) -> None:
+async def test_a_restore_repairs_an_orphaned_tool_call() -> None:
     """The one history shape every provider rejects, fixed where it can appear.
 
     A tool call with no result is a 400, and the repair is idempotent — running
     it on a healthy list changes nothing — which is what makes it safe to run
     unconditionally rather than only where a problem is suspected.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await client.call_tool(
@@ -511,16 +487,13 @@ async def _rebuild(client: Client, reply: str, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_a_decision_to_keep_everything_rebuilds_nothing(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     """The common case, and the one that keeps a costly call from being free.
 
     `{}` means the turns in hand are enough, so nothing is fetched, nothing is
     rendered and nothing is written — the answer is the caller's own list,
     handed back.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
     async with Client(
@@ -544,16 +517,13 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_clear_empties_the_context_and_is_published(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_clear_empties_the_context_and_is_published() -> None:
     """`"clear"` is one of the three things `context` can say, and it means none.
 
     The system prompt survives it — that is the head, not a turn — and the store
     is written, because a clear that only happened in memory is a restart away
     from not having happened.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(
         build_server(
@@ -578,16 +548,13 @@ async def test_a_clear_empties_the_context_and_is_published(
 
 
 @pytest.mark.asyncio
-async def test_a_keep_list_intersects_with_what_is_in_hand(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_keep_list_intersects_with_what_is_in_hand() -> None:
     """A model that names a turn it can no longer see has made a mistake.
 
     There is no turn to refuse it with, so the id is dropped rather than obeyed
     — keeping a turn the conversation does not have would mean fetching one from
     outside the selection, which is a recall wearing a keep-list's clothes.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(
         build_server(
@@ -618,13 +585,12 @@ async def test_a_keep_list_intersects_with_what_is_in_hand(
 
 
 @pytest.mark.asyncio
-async def test_a_recall_adds_to_what_was_kept(tmp_path, monkeypatch) -> None:
+async def test_a_recall_adds_to_what_was_kept() -> None:
     """The union, which is what makes "keep this and add that" expressible.
 
     Joined by id and sorted, so a turn both kept and recalled is one turn and
     the answer is always in time order.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(
         build_server(
@@ -656,7 +622,7 @@ async def test_a_recall_adds_to_what_was_kept(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_a_context_list_that_cannot_be_written_fails_the_turn(
-    tmp_path, monkeypatch
+    monkeypatch,
 ) -> None:
     """The list is authoritative, so a publish that did not land must not pass.
 
@@ -668,7 +634,6 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
     (DESIGN.md §5.1: the list is authoritative).  The old guard did not even buy
     the tolerance it named — a busy or full disk raised out of `rebuild` anyway.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     def refuse(self, turn_ids, **kwargs):
         raise sqlite3.OperationalError("database is locked")
@@ -700,9 +665,7 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> None:
     """A query with no indexable term used to be turned into no query at all.
 
     With an `anchor` (or a `since`/`until`) beside it, that ran the recall as a
@@ -711,7 +674,6 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened(
     is dropped instead, which is §5.1's outcome when a rebuild cannot do its job:
     the decision's keep-list runs on its own and the context it had stands.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     hold = [SYSTEM, {"role": "user", "content": "two"}]
     reply = '{"recall": {"query": "***", "anchor": "oldest"}}'
 
@@ -730,9 +692,9 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened(
 
 
 @pytest.mark.asyncio
-async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_count(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_count() -> (
+    None
+):
     """`except Exception` around `config.resolve` could not tell a declared-absent
     window from a broken config.
 
@@ -742,7 +704,6 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
     count cap; a window that cannot be asked for is loud (DESIGN.md §10.1: a
     weaker path is not a substitute for a missing capability).
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(
         build_server(
@@ -766,14 +727,13 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_reply_keeps_the_context(tmp_path, monkeypatch) -> None:
+async def test_an_unreadable_reply_keeps_the_context() -> None:
     """Degrading, not retrying: the fallback is perfectly good.
 
     A timeout, a provider failure and a reply that is not the requested object
     all arrive as the same answer, and the price of guessing wrong is a context
     nobody decided on.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
     async with Client(
@@ -792,9 +752,7 @@ async def test_an_unreadable_reply_keeps_the_context(tmp_path, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_recall_bound_the_grammar_does_not_know_is_dropped(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
     """The same fallback as an unreadable reply, and for the same reason.
 
     A reply of the right *shape* whose `since` is in no grammar this build speaks
@@ -806,7 +764,6 @@ async def test_a_recall_bound_the_grammar_does_not_know_is_dropped(
     the reply is dropped where dropping is still something a caller can decide —
     and the fallback is the same perfectly good one.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     hold = [SYSTEM, {"role": "user", "content": "one"}]
     reply = '{"context": "clear", "recall": {"query": "one", "since": "whenever"}}'
 
@@ -824,14 +781,13 @@ async def test_a_recall_bound_the_grammar_does_not_know_is_dropped(
 
 
 @pytest.mark.asyncio
-async def test_the_carried_tail_survives_a_rebuild(tmp_path, monkeypatch) -> None:
+async def test_the_carried_tail_survives_a_rebuild() -> None:
     """Messages no turn accounts for are put back verbatim.
 
     A cancelled turn leaves the user's own message in the list with no row
     behind it, and a rebuild that replaced the list wholesale would delete it —
     silently, and only for the user whose turn was interrupted.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     tail = {"role": "user", "content": "a message nobody answered"}
 
     async with Client(
@@ -855,15 +811,12 @@ async def test_the_carried_tail_survives_a_rebuild(tmp_path, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_forget_clears_the_context_and_keeps_the_turns(
-    tmp_path, monkeypatch
-) -> None:
+async def test_forget_clears_the_context_and_keeps_the_turns() -> None:
     """A reset must not restore the conversation it just forgot.
 
     Dropping the in-memory loop is not enough any more, because the next message
     under that key restores — so the list is cleared and the log is left alone.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("one", "1"))
@@ -884,13 +837,12 @@ async def test_forget_clears_the_context_and_keeps_the_turns(
 
 
 @pytest.mark.asyncio
-async def test_startup_leaves_a_current_index_alone(tmp_path, monkeypatch) -> None:
+async def test_startup_leaves_a_current_index_alone() -> None:
     """The ordinary start costs nothing: the identity matches, so no embedding.
 
     Worth asserting because it is the difference between a server that starts in
     milliseconds and one that re-embeds a history every time it is launched.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     store = TurnStore(agent_dir("jack") / "turns.db")
     for said in ("工具", "trump"):
         await store.save_turn(
@@ -905,16 +857,13 @@ async def test_startup_leaves_a_current_index_alone(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_startup_reindexes_every_turn_when_the_model_changed(
-    tmp_path, monkeypatch
-) -> None:
+async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
     """The cost of changing the embedding model, paid once at start.
 
     Every turn has to be embedded again — vectors from two models cannot be
     ranked against each other — and the thing that decides it is the identity
     recorded in the file, not anything remembered across restarts.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     first = StubEmbedder()
     store = TurnStore(agent_dir("jack") / "turns.db")
     for said in ("工具", "trump", "792"):
@@ -989,3 +938,125 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
         '{"context": [1e999]}',
     ):
         assert parse(not_an_id) is None, not_an_id
+
+
+# --- the four ways a rebuild keeps the context, and what the log says ---------
+
+
+@pytest.mark.asyncio
+async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
+    caplog,
+) -> None:
+    """**Four ways to keep the context, and the log may not fold any two of them.**
+
+    `rebuild`'s `_in_hand` is one answer for four situations — a discriminator
+    that decided nothing, a decision that asks for nothing, a decision that
+    equals what is held, and a selection that cannot be fetched.  The line it
+    writes is the only sight anybody gets of the discriminator, and it reported
+    the first as the second: "no decision at all" was logged
+    `reason=context_sufficient`, so every timeout and every unreadable reply —
+    each named on the line above with its own reason — counted as the model
+    having decided the context was enough.  Whoever counts decisions by that
+    word was counting failures.
+
+    The docstring named a fifth exit that does not exist, "the switch is off":
+    `ContextSettings` has no such field and nothing here reads one, so the four
+    below are the whole of it.
+    """
+    caplog.set_level(logging.INFO, logger=CONTEXT_LOGGER)
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+    # One server, one scripted discriminator, four calls: an unreadable reply,
+    # a decision that asks for nothing, a decision equal to what is held, and a
+    # keep-list naming a turn the log does not have.
+    replies = Replies(
+        "I could not decide.", "{}", '{"context": [1]}', '{"context": [99]}'
+    )
+    answers = []
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        answers.append(
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+            )
+        )
+        answers.append(
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+            )
+        )
+        answers.append(
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+            )
+        )
+        answers.append(
+            await client.call_tool(
+                "rebuild",
+                {
+                    "agent": "jack",
+                    # 99 is in the caller's list and nowhere in the log, which
+                    # is the disagreement this exit exists for.
+                    "messages": [SYSTEM, {"role": "user", "content": "one"}],
+                    "turn_ids": [1, 99],
+                    "prompt": "hi",
+                },
+            )
+        )
+
+    for answer in answers:
+        assert answer.data["changed"] is False, "nothing was fetched or written"
+        assert answer.data["recalled"] == 0
+    said = [record.getMessage() for record in caplog.records]
+    assert "recall_discriminator_unparsed" in said, "the failure is named"
+    assert "recall_not_needed reason=no_decision" in said, "and it is not a decision"
+    assert "recall_not_needed reason=context_sufficient" in said
+    assert "recall_not_needed reason=context_unchanged" in said
+    assert "recall_abandoned reason=unfetchable" in said
+    # It stayed [1] throughout: `_in_hand` is the answer that writes nothing.
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+# --- the transport, which the discriminator cannot see from where it sits ------
+
+
+class NoStructuredContent:
+    """A model server from another build: it answers with no wire format.
+
+    FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
+    structured content, which is exactly what this returns — `self`, whose
+    `data` is `None`.
+    """
+
+    data: Any = None
+
+    async def call_tool(self, *_args: Any, **_kwargs: Any) -> Any:
+        return self
+
+
+@pytest.mark.asyncio
+async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() -> None:
+    """**An unreadable answer is not an empty one**, on this hop too.
+
+    `StreamChatResult.from_wire(None)` builds a result with no text, so a model
+    server from another build reached `_discriminate` as "the model answered
+    with nothing": it logged `recall_discriminator_unparsed` and kept the
+    context, and so did every rebuild for the rest of the session — pointing
+    whoever read the log at the model's output rather than at the transport.
+    `slife2.clients.model` raises for this on the loop's own hop, and this is
+    the same check with the same sentence.
+    """
+    config = default_config()
+    _, provider, _ = config.resolve("")
+    # Seeded, so no client is ever opened: what is under test is the shape of
+    # the answer, and a real dial would make the test about somebody's daemon.
+    clients: dict[str, Any] = {config.server(provider.api).url: NoStructuredContent()}
+
+    with pytest.raises(ConnectionError, match="another build"):
+        await _ask_model(
+            config, clients, asyncio.Lock(), "jack", "", "", [], "and then?"
+        )

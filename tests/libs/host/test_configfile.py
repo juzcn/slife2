@@ -246,21 +246,32 @@ def test_a_removal_takes_the_entry_and_says_whether_it_was_there(tmp_path) -> No
 
 
 def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
-    """A reader who sees the mtime move should be able to believe something did.
+    """A reader who sees the file change should be able to believe something did.
 
     The removal of an entry that is not there is the case that makes this worth
     asserting: it is a normal answer to a normal request — two callers removing
     the same server — and it must not read as a write.
+
+    **The inode is the assertion, and the text is the corroboration.**  Equal
+    bytes are not proof that nothing was written: a rewrite that happened to
+    render the same document would satisfy that alone, and the mtime — the
+    obvious second witness — is only as sharp as the filesystem's clock, so on a
+    coarse one both edits are stamped in the same tick and the claim quietly
+    degrades to the text comparison above it.  Every write goes through
+    `_swap`'s `mkstemp` and rename, so a write that happened is always a
+    *different file*, at any granularity: the number the operating system gives
+    the document is what a state-changing edit moves.
     """
     path = write(tmp_path)
     before = path.read_text(encoding="utf-8")
-    stamp = path.stat().st_mtime_ns
+    stamp = path.stat()
 
     assert remove("mcp", "nothing-here", path=path) is False
     assert set_enabled("mcp", "nothing-here", False, path=path) is False
 
     assert path.read_text(encoding="utf-8") == before
-    assert path.stat().st_mtime_ns == stamp
+    assert path.stat().st_ino == stamp.st_ino, "the file was rewritten"
+    assert path.stat().st_mtime_ns == stamp.st_mtime_ns
 
 
 def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
@@ -365,6 +376,84 @@ def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
     assert "Describes tail" in after
     assert after.index("Describes tail") < after.index("tail:")
     assert list(load(path).mcp) == ["tail"]
+
+
+def test_an_entry_that_ends_on_a_sequence_keeps_the_next_comment(tmp_path) -> None:
+    """**The shape every entry in `slife2.yaml` actually has, and the walk that
+    stopped one node too early.**
+
+    `_tail_of` used to descend only while a value was a mapping, and the
+    trailing block is not stored on the key when that key holds a *block
+    sequence*: the parser keeps "the comment above the next entry" on the last
+    *item* of the sequence (`ca.items[i][0]`, which is not the slot a mapping
+    uses either).  So `slow-one`'s `args:` made the walk stop at `args`,
+    `ca.items["args"]` was empty, nothing was taken — and the block went out with
+    the sequence when the entry was replaced or deleted, in a write that
+    reported success.
+
+    This is not a corner: `args:` ends every `mcp:` entry in the file this
+    module edits, `models:` ends every `providers:` one, and `model_add` writes
+    through exactly that path.  All three operations are exercised here because
+    each one reaches the walk from a different place — `_swap_entry` takes it
+    before writing a fresh mapping, `update_entry` writes through that same
+    caller, and `_drop_entry` takes it before the `del` that would free it.
+    """
+    path = tmp_path / "slife2.yaml"
+    sequence_ending = (
+        "mcp:\n"
+        "  # Describes slow-one, which is written again.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "    args:\n"
+        "      - -y\n"
+        "      - some-server\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n"
+        "    args:\n"
+        "      - -x\n"
+        "  # Describes tail, which stays.\n"
+        "  tail:\n"
+        "    command: tail\n"
+        "    args:\n"
+        "      - -f\n"
+    )
+
+    def kept(entry: str, after: str) -> None:
+        """The block describes *entry*, and prints above the entry it describes."""
+        text = path.read_text(encoding="utf-8")
+        assert after in text, f"the block introducing {entry} was destroyed"
+        assert text.index(after) < text.index(f"{entry}:"), "and it is not stranded"
+
+    # `upsert` replaces the first entry outright, taking the survivor off it
+    # first — which is the block "Describes filesystem" lives in.
+    path.write_text(sequence_ending, encoding="utf-8")
+    upsert("mcp", "slow-one", {"command": "uvx", "args": ["other-server"]}, path=path)
+    kept("filesystem", "Describes filesystem")
+    kept("tail", "Describes tail")
+
+    # `update_entry` goes through the same caller with a different edit.
+    path.write_text(sequence_ending, encoding="utf-8")
+    update_entry(
+        "mcp", "slow-one", lambda current: {**current, "args": ["-z"]}, path=path
+    )
+    kept("filesystem", "Describes filesystem")
+
+    # `remove` deletes the middle entry, so the block that has to be re-hung is
+    # the one introducing `tail` — and its holder is the doomed entry's own
+    # sequence, which the `del` frees.
+    path.write_text(sequence_ending, encoding="utf-8")
+    assert remove("mcp", "filesystem", path=path) is True
+    text = path.read_text(encoding="utf-8")
+    assert "Describes filesystem" not in text, "its own comment goes with it"
+    kept("tail", "Describes tail")
+    assert list(load(path).mcp) == ["slow-one", "tail"]
+
+    # And the first key, where the survivor is re-hung above the new first entry.
+    path.write_text(sequence_ending, encoding="utf-8")
+    assert remove("mcp", "slow-one", path=path) is True
+    kept("filesystem", "Describes filesystem")
+    assert list(load(path).mcp) == ["filesystem", "tail"]
 
 
 def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.tokens import CommentToken
 
@@ -383,9 +383,20 @@ def _empty_section(document: CommentedMap, section: str) -> None:
         comments[3] = None
 
 
-def _tail_of(container: CommentedMap, name: str) -> tuple[Any, str]:
-    """The `(mapping, key)` *trailing* slot that carries the block introducing
-    the entry after `name`.
+#: Which slot of a `ca.items` entry holds the block that *follows* a value, by
+#: the kind of node the walk in `_tail_of` ended on.  A mapping keeps it third
+#: (`ca.items[k][2]`); a block sequence keeps it on the **first slot of its last
+#: item** (`ca.items[i][0]`), because that is where the parser puts a comment
+#: that comes after an item.  The two are not the same slot, and the difference
+#: is not written down anywhere ruamel points a reader at: a block written into
+#: the wrong one renders as nothing at all, which is silent loss rather than a
+#: visible mistake.
+_TRAILING_SLOT = {CommentedMap: 2, CommentedSeq: 0}
+
+
+def _tail_of(container: CommentedMap, name: str) -> tuple[Any, Any, int]:
+    """The `(holder, key, slot)` that carries the block introducing the entry
+    after `name`.
 
     **ruamel does not store "the comment above `k2`" on `k2`.**  It stores it as
     the comment that follows the last value of `k1` — or, when the commented
@@ -395,34 +406,58 @@ def _tail_of(container: CommentedMap, name: str) -> tuple[Any, str]:
     the deepest last position of that entry's value: a nested mapping's last
     key, not the mapping itself.  Everything below is the consequence of that
     one fact, which is not documented anywhere ruamel points a reader at.
+
+    **A last value that is a block sequence is the case that walk used to stop
+    on**, and stopping there loses the block rather than misplacing it.
+    `mcp:` entries end in `args:` and `providers:` entries end in `models:` —
+    the shape `slife2.yaml` itself is written in — and the comment introducing
+    the entry *below* one of those is trailing the sequence, not the key that
+    holds it: `while isinstance(node, dict)` read `slow-one`'s own mapping,
+    found `ca.items["args"]` empty, took nothing, and the sequence that really
+    held "Describes filesystem" went out with the replaced or deleted entry.
+    So the walk goes into a sequence too and reports the slot that kind of node
+    uses (`_TRAILING_SLOT`), and `_take_intro`/`_put_intro` read and write that
+    one rather than always the third.
+
+    The walk ends on a node that keeps no comments at all — a plain `dict` or
+    `list`, which is what a value handed in by `upsert` is until ruamel writes
+    it.  There is no comment below such a value, and asking one for its `ca` is
+    an `AttributeError` rather than an empty answer.
     """
     holder: Any = container
-    key = name
+    key: Any = name
+    slot = _TRAILING_SLOT[CommentedMap]
     node = container[name]
-    while isinstance(node, dict) and node:
-        inner = list(node)[-1]
-        holder, key, node = node, inner, node[inner]
-    return holder, key
+    while node:
+        if isinstance(node, CommentedSeq):
+            holder, key, slot = node, len(node) - 1, _TRAILING_SLOT[CommentedSeq]
+        elif isinstance(node, CommentedMap):
+            key, slot = list(node)[-1], _TRAILING_SLOT[CommentedMap]
+            holder = node
+        else:
+            break
+        node = node[key]
+    return holder, key, slot
 
 
 def _take_intro(container: CommentedMap, name: str) -> Any:
     """Lift off the comment block that introduces the entry after `name`."""
-    holder, key = _tail_of(container, name)
+    holder, key, at = _tail_of(container, name)
     slot = holder.ca.items.get(key)
-    if slot is None or len(slot) < 3 or slot[2] is None:
+    if slot is None or len(slot) <= at or slot[at] is None:
         return None
-    taken = slot[2]
-    slot[2] = None
+    taken = slot[at]
+    slot[at] = None
     return taken
 
 
 def _put_intro(container: CommentedMap, name: str, block: Any) -> None:
     """Hang *block* off `name`, where the entry that follows it will read it."""
-    holder, key = _tail_of(container, name)
+    holder, key, at = _tail_of(container, name)
     slot = holder.ca.items.setdefault(key, [None, None, None, None])
-    while len(slot) < 4:
+    while len(slot) <= at:
         slot.append(None)
-    slot[2] = block
+    slot[at] = block
 
 
 def _as_pending(block: Any) -> Any:

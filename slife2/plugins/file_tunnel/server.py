@@ -434,8 +434,10 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         picture, a chat API that only accepts links.
 
         The file is not moved or copied: it is served from where it is, for as
-        long as this process is running, and it stops being served if the file
-        changes or when the conversation ends.
+        long as this process is running. It stops being served the moment the
+        file changes, and `unexpose_local_image` stops it sooner — call that
+        when the file is no longer wanted out there, and expect the URL to
+        outlive the conversation otherwise.
 
         Args:
             path: The file on this machine, as an absolute path or one

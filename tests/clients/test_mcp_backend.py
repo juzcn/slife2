@@ -161,8 +161,18 @@ async def test_cancelling_the_drain_cancels_the_call() -> None:
             break  # walk away mid-stream
 
         assert [c.text for c in received] == ["first"]
-        # The generator's finally cancelled the call; nothing should now hang.
-        with pytest.raises((asyncio.CancelledError, Exception)):
+        # **Abandoned the way a cancelled turn abandons it.**  A `break` merely
+        # leaves the generator suspended, so the `finally` that cancels the call
+        # has not run yet — and this test asserted `(CancelledError, Exception)`
+        # around a bounded `wait_for`, so the one outcome it was written to catch
+        # (the call still running, `result` never answering, `wait_for` raising
+        # `TimeoutError`, which *is* an `Exception`) was the outcome that passed
+        # it.  What a real cancellation does is throw into the generator at its
+        # `yield`, which is what `aclose()` does, so this is that path and not an
+        # imitation of it: the call is cancelled, and awaiting it says so rather
+        # than waiting for the ten seconds below.
+        await stream.chunks.aclose()
+        with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(
                 stream.result,
                 timeout=1.0,  # timeouts: the value this test is built around, not a budget
