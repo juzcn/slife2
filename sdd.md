@@ -355,9 +355,14 @@ two are peers. A subagent has every capability its maker has — the same tool
 set, the same system prompt, the same memory of its own — and only three things
 distinguish it, each of them about *status* rather than about ability:
 
-- **It is not an instance.** No process, no claim on a name (§3.3), no window,
-  and nothing to start: it exists because it was named, and it runs when
-  something sends it a message.
+- **It is not an instance.** No process, no claim on a name (§3.3), nothing to
+  start, and no window: it exists because it was named, and it runs when
+  something sends it a message. **Not even the terminal-less window `--headless`
+  runs** — that is still a window, held by a process that is the agent (§1.9),
+  and a subagent is none of those things. It is headless in the sense of having
+  no window at all, which is why nothing about it goes through the terminal: not
+  its turns, not its answers, and not the road that runs them (sdd §9's channel
+  is what its maker's own window draws, after the fact).
 - **It is addressed by the second half of a client id** (§2.2): `(jack,
   researcher)`, which every server already keys its state by. Nothing about the
   id is new; what is new is that an agent is allowed to be one.
