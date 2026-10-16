@@ -479,7 +479,7 @@ class ToolStore:
         **No migration layer, for the reason `db.py` gives for the turns**, and
         one thing more: the only column here that is not derived from a server
         is `load_status`, so a stale file costs the model its loaded set — one
-        `tool_search` and a `tool_func_load` each to get back — where an upgrade
+        `tool_search` and a `func_tool_load` each to get back — where an upgrade
         in place would be a permanent second way to build these tables.  v1
         reported the stale file and asked a person to delete it; this deletes
         and rebuilds, because a rebuild is a statement this layer can run

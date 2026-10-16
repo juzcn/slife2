@@ -166,6 +166,21 @@ async def ask(client: Client, tool: str, **arguments: Any) -> str:
     return "".join(getattr(block, "text", "") for block in result.content or [])
 
 
+async def ask_json(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    """One model-facing call, as the model reads it: the tool's JSON object.
+
+    `result.data` is what FastMCP parsed out of the answer, so an assertion
+    built on it is about the URL and the token rather than about the sentence
+    that used to carry them.  `ask` stays for `tunnel_status`, which is nobody's
+    tool and answers a JSON *document* as text — the two are read differently
+    because they are two different things, and a reader that guessed which it
+    held would be reading a shape rather than a fact.  A refusal raises
+    `ToolError`, which the refusal tests assert.
+    """
+    result = await client.call_tool(tool, arguments, meta=client_meta("jack"))
+    return result.data
+
+
 async def fetch(app: Any, path: str) -> httpx2.Response:
     """One GET against the real ASGI app — no socket, no tunnel."""
     transport = httpx2.ASGITransport(app=app)
@@ -173,9 +188,11 @@ async def fetch(app: Any, path: str) -> httpx2.Response:
         return await http.get(path)
 
 
-def exposed_url(answer: str) -> str:
-    """The URL out of what `expose_local_image` says."""
-    return answer.splitlines()[1].strip()
+def exposed_url(answer: dict[str, Any]) -> str:
+    """The URL out of what `expose_local_image` answers."""
+    url = answer["url"]
+    assert isinstance(url, str)
+    return url
 
 
 # --- the surface --------------------------------------------------------------
@@ -232,11 +249,14 @@ async def test_exposing_answers_with_a_public_url(tmp_path: Path) -> None:
     picture.write_bytes(b"png-bytes")
 
     async with Client(server_for()) as client:
-        answer = await ask(client, "expose_local_image", path=str(picture))
+        answer = await ask_json(client, "expose_local_image", path=str(picture))
 
-    assert "photo.png" in answer
+    assert answer["file"] == "photo.png"
     assert exposed_url(answer).startswith("https://tunnel.test/share/")
-    assert len(exposed_url(answer).rsplit("/", 1)[-1]) == 30
+    # The token is the URL's last part and the key `unexpose_local_image` takes,
+    # so it is answered as a field of its own rather than left to be cut out.
+    assert answer["token"] == exposed_url(answer).rsplit("/", 1)[-1]
+    assert len(answer["token"]) == 30
 
 
 @pytest.mark.asyncio
@@ -248,8 +268,8 @@ async def test_the_same_file_twice_is_the_same_link(tmp_path: Path) -> None:
     picture.write_bytes(b"png-bytes")
 
     async with Client(server_for()) as client:
-        first = await ask(client, "expose_local_image", path=str(picture))
-        second = await ask(client, "expose_local_image", path=str(picture))
+        first = await ask_json(client, "expose_local_image", path=str(picture))
+        second = await ask_json(client, "expose_local_image", path=str(picture))
 
     assert exposed_url(first) == exposed_url(second)
 
@@ -261,9 +281,9 @@ async def test_a_changed_file_gets_a_new_link(tmp_path: Path) -> None:
     picture = tmp_path / "photo.png"
     picture.write_bytes(b"one")
     async with Client(server_for()) as client:
-        first = await ask(client, "expose_local_image", path=str(picture))
+        first = await ask_json(client, "expose_local_image", path=str(picture))
         picture.write_bytes(b"two, and longer")
-        second = await ask(client, "expose_local_image", path=str(picture))
+        second = await ask_json(client, "expose_local_image", path=str(picture))
 
     assert exposed_url(first) != exposed_url(second)
 
@@ -412,12 +432,17 @@ async def test_unexposing_stops_the_link(tmp_path: Path) -> None:
     app = server.http_app()
 
     async with Client(server) as client:
-        token = exposed_url(
-            await ask(client, "expose_local_image", path=str(picture))
-        ).rsplit("/", 1)[-1]
+        token = (await ask_json(client, "expose_local_image", path=str(picture)))[
+            "token"
+        ]
         assert (await fetch(app, f"/share/{token}")).status_code == 200
 
-        await ask(client, "unexpose_local_image", token=f"https://x/share/{token}")
+        # A whole share URL works as well as the token, and the answer names the
+        # token it actually withdrew rather than what it was handed.
+        answer = await ask_json(
+            client, "unexpose_local_image", token=f"https://x/share/{token}"
+        )
+        assert answer == {"token": token}
 
     assert (await fetch(app, f"/share/{token}")).status_code == 403
 
@@ -449,9 +474,9 @@ async def test_one_conversation_cannot_revoke_anothers_link(tmp_path: Path) -> N
     server = server_for()
 
     async with Client(server) as client:
-        token = exposed_url(
-            await ask(client, "expose_local_image", path=str(picture))
-        ).rsplit("/", 1)[-1]
+        token = (await ask_json(client, "expose_local_image", path=str(picture)))[
+            "token"
+        ]
         result = await client.call_tool(
             "unexpose_local_image",
             {"token": token},
@@ -595,11 +620,9 @@ async def test_the_route_serves_what_the_tool_exposed(tmp_path: Path) -> None:
     app = server.http_app()
 
     async with Client(server) as client:
-        token = exposed_url(
-            await ask(client, "expose_local_image", path=str(picture))
-        ).rsplit("/", 1)[-1]
+        answer = await ask_json(client, "expose_local_image", path=str(picture))
 
-    response = await fetch(app, f"/share/{token}")
+    response = await fetch(app, f"/share/{answer['token']}")
     assert response.status_code == 200
     assert response.content == payload
     assert response.headers["Content-Type"].startswith("application/octet-stream")

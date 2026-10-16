@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import (
     Config,
@@ -119,14 +120,14 @@ async def test_a_config_handed_in_is_the_config_every_home_gets(
 
 # --- the family's own vocabulary ----------------------------------------------
 #
-# Two sentences a family writes are about *tools*, and the tool has a different
-# name in each family: the one that switches an entry back on (`call`'s refusal)
-# and the one that reports an entry's state (`tools_as_text`'s three "no list"
-# answers).  Both used to be written out in this module with a name that no
-# family serves — `set_enabled`, `_list` — so a model reading either was told to
-# call a tool that does not exist.  These drive the *real* family plugins,
-# because what is wrong is the wire from the plugin's vocabulary to the family's
-# sentence and not the sentence alone.
+# What a family says in its own words is now a *field*: which noun a row of its
+# listing sits under, what one exposed item is called, and which listing tool a
+# refusal points at.  All three differ between the two connection families, and
+# all three used to be written out in this module with a name no family serves —
+# `set_enabled`, `_list` — so a model reading either was told to call a tool that
+# does not exist.  These drive the *real* family plugins, because what is wrong
+# is the wire from the plugin's vocabulary to the family's answer and not the
+# answer alone.
 
 
 def only_entry(config: Config, section: str, name: str) -> Config:
@@ -166,15 +167,15 @@ async def test_a_switched_off_call_names_the_tool_that_switches_it_on() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_no_list_answer_names_the_family_s_own_list_tool() -> None:
-    """**Three ways to have no list, and every one of them points somewhere.**
+async def test_a_page_with_no_tools_says_which_kind_of_nothing_it_is() -> None:
+    """**Three ways to have no tools, and one word says which.**
 
-    Switched off, not answering, and answering with nothing are three answers
-    (`tools_as_text`) and each ends by naming the tool that reports the entry's
-    state — so a model that asked what a server offers has somewhere to go next.
-    All three said `` `_list` ``, which is no family's tool: the MCP family's is
-    `mcp_list` and the REST family's is `rest_api_list`, and the whole point of
-    `FamilyWords` is that this module does not get to guess either of them.
+    Switched off, not answering and answering with nothing are three answers
+    (`tools_payload`), and each used to be a sentence ending by naming the tool
+    that reports the entry's state — all three said `` `_list` ``, which no
+    family serves.  The state *is* the answer now, in the same words the listing
+    and the hub use, and the rows sit under the family's own word for one: a
+    `tool` here, an `operation` next door.
     """
     mcp = only_entry(default_config(), "mcp", "off")
     rest = only_entry(default_config(), "rest-api", "off")
@@ -183,9 +184,36 @@ async def test_a_no_list_answer_names_the_family_s_own_list_tool() -> None:
     async with Client(build_restapi(rest)) as client:
         asked_rest = await client.call_tool("rest_api_list_tools", {"name": "off"})
 
-    assert "mcp_list" in str(asked.data)
-    assert "rest_api_list" in str(asked_rest.data)
-    for answer in (str(asked.data), str(asked_rest.data)):
+    assert asked.data["state"] == "off", "the switch, and the word the listing uses"
+    assert asked_rest.data["state"] == "off"
+    assert asked.data["tools"] == [] and asked.data["total"] == 0
+    assert asked_rest.data["operations"] == []
+    assert "tools" not in asked_rest.data, "the other family's word for a row"
+    assert "`_list`" not in str(asked.data), "no family serves a tool called that"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_names_the_family_s_own_list_tool() -> None:
+    """**The name differs per family, so the family supplies it.**
+
+    A name this process does not hold is refused rather than answered with an
+    empty page — `total: 0` would read as a server that offers nothing — and the
+    sentence points at the listing tool, which is `mcp_list` here and
+    `rest_api_list` next door.  Both were once written out in this module as
+    `` `_list` ``, a name no family serves.
+    """
+    mcp = only_entry(default_config(), "mcp", "off")
+    rest = only_entry(default_config(), "rest-api", "off")
+    async with Client(build_mcp_tools(mcp)) as client:
+        with pytest.raises(ToolError) as asked:
+            await client.call_tool("mcp_list_tools", {"name": "nowhere"})
+    async with Client(build_restapi(rest)) as client:
+        with pytest.raises(ToolError) as asked_rest:
+            await client.call_tool("rest_api_list_tools", {"name": "nowhere"})
+
+    assert "mcp_list" in str(asked.value)
+    assert "rest_api_list" in str(asked_rest.value)
+    for answer in (str(asked.value), str(asked_rest.value)):
         assert "`_list`" not in answer, "no family serves a tool called that"
 
 

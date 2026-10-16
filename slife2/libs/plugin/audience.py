@@ -303,30 +303,6 @@ UNADDRESSED = (
     "This call did not say which conversation it is for, so there is no {what} — {why}"
 )
 
-#: How a tool says no **in an answer** rather than by raising, and it is a word
-#: rather than a sentence because a *caller* has to be able to recognise it: the
-#: window must not adopt a model a server has just refused
-#: (`slife2.tui.client.switch_model`), and what tells it apart from a note is
-#: this prefix.  A refusal that arrived as prose would be adopted either way.
-#:
-#: **Here and not in the window**, which is where it was written down: the
-#: plugins are what *produce* it — the agent server's `model_switch` returns it
-#: six times over, the family's write tools nine — and a word the producers spell
-#: and a client parses belongs with `UNADDRESSED` above, which is the same thing
-#: for the tool that raises instead.  Nothing about it is the terminal's.
-REFUSAL = "[refused]"
-
-
-def refused(answer: str) -> bool:
-    """Whether a tool's answer is a refusal rather than a result.
-
-    Takes the answer rather than a result, so this stays a leaf: the two callers
-    are the window's client (which has a string) and its app (which has the same
-    string), and neither has to reach for a transport to ask.
-    """
-    return answer.startswith(REFUSAL)
-
-
 #: The tail four of the five use: the shared process cannot guess, and the thing
 #: asked for belongs to the agent the call did not name.
 AGENTS_OWN = "one process serves every agent, and {own} is the agent's"

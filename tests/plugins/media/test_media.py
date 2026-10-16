@@ -118,7 +118,25 @@ def server_for(adapter: FakeAdapter | None = None) -> FastMCP:
     return build_server(config, adapters={"test": adapter or FakeAdapter()})
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
+async def ask(client: Client, tool: str, **arguments: Any) -> Any:
+    """One tool call, on behalf of a conversation: the tool's own answer.
+
+    `result.data` is the object FastMCP parsed out of the tool's JSON, which is
+    the answer as the model reads it — so an assertion here is about a fact
+    rather than about the spelling of one.  A refusal raises (`ToolError`),
+    which `refused` is for.
+    """
+    result = await client.call_tool(tool, arguments, meta=client_meta("jack"))
+    return result.data
+
+
+async def refused(client: Client, tool: str, **arguments: Any) -> str:
+    """A refusal, as the model reads it: the sentence in the error result.
+
+    **A second reader on purpose.**  `ask` is the success path and raises for a
+    call that failed — a test that read a refusal out of it could not tell one
+    from an answer — so the tests that are *about* a refusal come through here.
+    """
     result = await client.call_tool(
         tool, arguments, meta=client_meta("jack"), raise_on_error=False
     )
@@ -152,7 +170,7 @@ async def test_an_image_call_reaches_the_configured_default() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "generate_image", prompt="a cat", size="1024*1024")
 
-    assert answer == "Image written to /media/a.png"
+    assert answer == {"path": "/media/a.png"}
     call = adapter.calls["image"]
     assert call["model"] == "img", "`defaults.image` names it"
     assert call["prompt"] == "a cat"
@@ -193,15 +211,16 @@ async def test_a_folder_is_a_subdirectory_of_the_media_root() -> None:
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
         await ask(client, "generate_image", prompt="x", folder="project")
-        escaped = await ask(
+        escaped = await refused(
             client, "generate_image", prompt="x", folder="../../elsewhere"
         )
 
     assert (
         adapter.calls["image"]["outputs_dir"] == agent_dir("jack") / "media" / "project"
     )
-    assert "[refused]" in escaped, "a model does not choose where to write"
-    assert "not a folder inside the media directory" in escaped
+    assert "not a folder inside the media directory" in escaped, (
+        "a model does not choose where to write"
+    )
 
 
 @pytest.mark.asyncio
@@ -210,8 +229,62 @@ async def test_a_transcript_is_the_answer_and_writes_nothing() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "transcribe_audio", path="a.wav")
 
-    assert answer == "hello home"
+    assert answer["text"] == "hello home"
+    assert answer["total"] == len("hello home")
+    assert answer["offset"] == 0, "the whole of it was in one page"
     assert adapter.calls["asr"]["audio_path"] == Path("a.wav")
+
+
+class Says(FakeAdapter):
+    """An adapter whose transcript is whatever a test hands it."""
+
+    def __init__(self, transcript: str) -> None:
+        super().__init__()
+        self.transcript = transcript
+
+    async def transcribe_audio(self, **kwargs: Any) -> str:
+        self.calls["asr"] = kwargs
+        return self.transcript
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_is_read_in_pages() -> None:
+    """**The one answer here whose length is the recording's.**  An hour of
+    speech is a text no single answer may carry, so a page is read by offset and
+    `offset + len(text) < total` is how the next one is asked for.
+    """
+    async with Client(server_for(Says("abcdefghij"))) as client:
+        first = await ask(client, "transcribe_audio", path="a.wav", limit=4)
+        second = await ask(
+            client,
+            "transcribe_audio",
+            path="a.wav",
+            offset=first["offset"] + len(first["text"]),
+            limit=4,
+        )
+
+    assert first["text"] == "abcd"
+    assert first["total"] == 10, "the whole transcript, not the page"
+    assert second["text"] == "efgh"
+    assert second["offset"] == 4
+    assert second["offset"] + len(second["text"]) < second["total"], "more remains"
+
+
+@pytest.mark.asyncio
+async def test_a_page_never_outgrows_the_tool_result_budget() -> None:
+    """**`limit` counts characters and the budget counts tokens**, so the budget
+    is the last word: a page of Chinese is several times what a page of English
+    of the same length costs, and an answer over `tool_result.tokens` would be a
+    result the harness had to shorten again — our own reader feeding our own
+    shortening.
+    """
+    whole = "字" * 9000
+    async with Client(server_for(Says(whole))) as client:
+        page = await ask(client, "transcribe_audio", path="a.wav")
+
+    assert page["total"] == 9000
+    assert len(page["text"]) < 9000, "the budget cut the page short"
+    assert "do not fit" in page["text"], "and the cut is announced"
 
 
 # --- the refusals -------------------------------------------------------------
@@ -223,8 +296,8 @@ async def test_a_size_is_checked_before_the_call_is_paid_for() -> None:
     at the provider, where the refusal arrives after the call has been billed."""
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
-        bad = await ask(client, "generate_image", prompt="x", size="1024")
-        small = await ask(client, "generate_image", prompt="x", size="10x10")
+        bad = await refused(client, "generate_image", prompt="x", size="1024")
+        small = await refused(client, "generate_image", prompt="x", size="10x10")
 
     assert "is not a size" in bad
     assert "too small" in small
@@ -239,9 +312,8 @@ async def test_a_capability_the_adapter_lacks_names_the_adapter() -> None:
     and the sentence has to say which half is missing."""
     failing = Failing(NotImplementedError("speech (this adapter draws images only)"))
     async with Client(server_for(failing)) as client:
-        answer = await ask(client, "generate_image", prompt="x")
+        answer = await refused(client, "generate_image", prompt="x")
 
-    assert "[refused]" in answer
     assert "cannot make a image" in answer, "the noun names what was asked for"
     assert "Another `api:`" in answer, "and the answer says what would fix it"
 
@@ -264,9 +336,8 @@ async def test_a_provider_failure_is_a_failure_not_a_transcript_entry() -> None:
 async def test_no_media_section_is_a_sentence_not_a_crash() -> None:
     config = replace(load(), media=MediaSettings())
     async with Client(build_server(config)) as client:
-        answer = await ask(client, "generate_image", prompt="x")
+        answer = await refused(client, "generate_image", prompt="x")
 
-    assert "[refused]" in answer
     assert "No image model configured" in answer
     assert "`media:`" in answer
 
@@ -276,7 +347,7 @@ async def test_an_unknown_api_is_a_sentence_not_a_raw_error() -> None:
     """**A config with `api: typo` loads cleanly** — the loader only requires the
     key to be there — and then fails at the first call, where `create_adapter`
     raises.  Resolving the adapter *outside* `_run` let that failure escape as a
-    raw exception instead of the `[failed] …` sentence §1.5 promises, so the
+    raw exception instead of the sentence §1.5 promises, so the
     resolution is inside the guard and this checks the sentence is what arrives.
     """
     section = {
@@ -291,10 +362,9 @@ async def test_an_unknown_api_is_a_sentence_not_a_raw_error() -> None:
     }
     config = replace(load(), media=settings(section))
     async with Client(build_server(config)) as client:
-        answer = await ask(client, "generate_image", prompt="x")
+        answer = await refused(client, "generate_image", prompt="x")
 
-    assert "[failed]" in answer
-    assert "unknown media api" in answer
+    assert "unknown media api" in answer, "the sentence, not a raw exception"
 
 
 def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
@@ -615,7 +685,7 @@ async def test_a_payload_that_is_not_base64_is_a_failure_not_a_traceback(
     and `slife2.plugins.media.server._run` converts only `NotImplementedError`,
     `MediaAdapterError` and `FileNotFoundError`.  So a vendor answering with a
     truncated `b64_json` (or an `audio.data` that is an object) reached the model
-    as a raw traceback instead of the `[failed] …` sentence §1.5 promises —
+    as a raw traceback instead of the sentence §1.5 promises —
     exactly the class of answer `_json_object` exists to eliminate one line up.
     """
     images = OpenAICompatAdapter(settings().providers["test"])
@@ -715,9 +785,11 @@ async def test_a_video_that_outruns_its_timeout_names_the_job_it_left_running(
     config = replace(load(), media=settings())
 
     async with Client(build_server(config, adapters={"test": adapter})) as client:
-        answer = await ask(client, "generate_video", prompt="x", timeout=0.05)
+        answer = await refused(client, "generate_video", prompt="x", timeout=0.05)
 
-    assert answer.startswith("[failed] video:"), "a timeout is a refusal, not a path"
+    assert answer.startswith("the video call failed:"), (
+        "a timeout is a refusal, not a path"
+    )
     assert "t-1" in answer, "the job the provider is still running is not named"
 
 
@@ -762,7 +834,7 @@ async def test_the_images_only_adapter_refuses_the_other_three(
     *sentence*: a bare `pytest.raises(NotImplementedError)` passes for any
     `NotImplementedError` from any capability, so an adapter that answered
     `raise NotImplementedError` with nothing in it would satisfy this — and the
-    plugin builds its `[refused] this provider cannot make a <capability>: …`
+    plugin builds its `this provider cannot make a <capability>: …`
     answer out of exactly this text (`test_a_capability_the_adapter_lacks_names_
     the_adapter`).  Each one names its own capability, which is the half a model
     needs: what it cannot have, not merely that something is missing.

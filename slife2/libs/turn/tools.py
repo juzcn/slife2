@@ -87,6 +87,7 @@ three are argued.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections.abc import Awaitable, Callable, Mapping
@@ -97,9 +98,56 @@ from slife2.libs.turn.messages import ToolCall, ToolSpec
 
 logger = logging.getLogger(__name__)
 
-#: How a tool is implemented: arguments in, result text out.  Returning text
-#: rather than raising is the convention — see the module docstring.
-ToolFunc = Callable[[dict[str, Any]], Awaitable[str]]
+#: How a tool is implemented: arguments in, and **the answer** out — text, or an
+#: object this layer says as JSON (`as_tool_text`).  An object rather than text
+#: serialised at the tool is the convention for everything the model reads, and
+#: it is one *place* rather than each tool's own `json.dumps`: a function that
+#: answers a `dict` is a function whose fields a reader can check, and the
+#: rendering is a fact about the model's message rather than about the tool.
+#:
+#: A refusal is raised (`ToolFailed`), because a call that did not do what was
+#: asked is a *failure* the transcript and the window both branch on, and text
+#: returned as if it were an answer is a success they would have to un-believe.
+ToolFunc = Callable[[dict[str, Any]], Awaitable[str | dict[str, Any]]]
+
+
+def as_tool_text(answer: Any) -> str:
+    """One tool answer, as the text a model's message carries.
+
+    **The one renderer**, and it has three callers that used to have two
+    spellings between them: the loop (`ToolRegistry.execute`, which is what a
+    tool *this* process runs answers through), the hub's own tools (`call_tool`,
+    which is the same question one process over) and the two LLM adapters
+    (`slife2.plugins.llm.server_common.render_tool_result`, which builds a
+    request field by field).  Two spellings of it were two chances for one of
+    them to answer `""` for a result that was not already a string — beneath a
+    comment saying a non-string result is a bug upstream — which is how a
+    tool's whole output once vanished from a request with nothing said.
+
+    `None` is the empty string rather than the text `"null"`, which is a result
+    that is not there; a `str` passes through byte for byte; everything else is
+    JSON, with `default=str` so that an object the encoder does not know becomes
+    text instead of failing the turn (DESIGN.md §10.2's register, where what
+    that gives up is named).
+
+    **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape
+    every character outside ASCII — a note written in Chinese would reach the
+    model as six characters per word, and be *counted* that way against
+    `tool_result.tokens`, which is a bound this system spends on purpose and not
+    on escapes.  The `backslashreplace` is the half that keeps the choice safe:
+    a lone surrogate — which a provider's JSON can hand us in an argument, and
+    which `json.dumps(ensure_ascii=False)` will happily put back in the string —
+    cannot be encoded at all, so a turn would fail on the transport rather than
+    render.  It becomes the `\\uXXXX` escape it would have been, which is text
+    the model reads and a request that is still sendable.
+    """
+    if answer is None:
+        return ""
+    if isinstance(answer, str):
+        return answer
+    text = json.dumps(answer, ensure_ascii=False, default=str)
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
 
 #: The mark of a harness tool — a name the machinery calls rather than one the
 #: model chooses.  Spelled once because four modules ask about it, and the
@@ -440,6 +488,11 @@ class ToolRegistry:
 
         Never raises.  An unknown name, bad arguments, or a tool that throws all
         come back as `ok=False` with a message a model can act on.
+
+        The answer is rendered here rather than by each tool (`as_tool_text`),
+        which is what lets a tool answer an object: what a model's message
+        carries is text on every wire, and the tool that produced the fields has
+        nothing to do with that.
         """
         tool = self._tools.get(call.name)
         if tool is None:
@@ -447,7 +500,7 @@ class ToolRegistry:
             return f"Error: unknown tool {call.name!r}. Available tools: {known}", False
 
         try:
-            return await tool.run(call.arguments), True
+            return as_tool_text(await tool.run(call.arguments)), True
         except ToolFailed as exc:
             logger.warning("tool %s failed: %s", call.name, exc)
             return f"Error: {exc}", False

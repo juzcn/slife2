@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import threading
 from collections.abc import AsyncIterator, Iterable
@@ -636,7 +635,9 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     result = [message for message in provider.calls[2] if message.get("role") == "tool"]
     assert len(result) == 1, provider.calls[2]
     assert result[0]["tool_call_id"] == "call_e2e_note", result[0]
-    assert "Saved" in json.dumps(result[0]), result[0]
+    # The cabinet's own JSON, rendered by `as_tool_text` on its way into the
+    # request: the row it wrote, not a sentence about it.
+    assert json.loads(result[0]["content"])["key"] == "e2e verification", result[0]
 
     # **Written by the cabinet's process**, which is the half this one cannot
     # fake: nothing here holds that store.  The file is the mirror of the note
@@ -661,10 +662,16 @@ async def _save_dump(agent: str, call: str, body: str) -> None:
     await store.write(DUMP, call, body=body, embedder=embedder)
 
 
-async def _read(client: Client, agent: str, **arguments: Any) -> str:
-    """One `dump_read`, on behalf of a conversation, as the model reads it."""
+async def _read(client: Client, agent: str, **arguments: Any) -> dict[str, Any]:
+    """One `dump_read`, on behalf of a conversation, as the model reads it.
+
+    The answer is an object (`cabinet.server`), and `data` is how a tool's JSON
+    reaches this side of the hop.
+    """
     result = await client.call_tool("dump_read", arguments, meta=client_meta(agent))
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    answer = getattr(result, "data", None)
+    assert isinstance(answer, dict), answer
+    return answer
 
 
 @pytest.mark.asyncio
@@ -696,29 +703,31 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
 
     async with Client(config.server("cabinet").url) as client:
         first = await _read(client, "e2e", call="call_e2e")
-        following = re.search(r"offset (\d+)", first)
-        assert following is not None, first
-        offset = int(following.group(1))
+        offset = first.get("next")
+        assert isinstance(offset, int), first
         second = await _read(client, "e2e", call="call_e2e", offset=offset)
         found = await _read(client, "e2e", call="call_e2e", pattern="line 39")
         huge = await _read(client, "e2e", call="call_e2e", pattern="z" * 100_000)
 
     for answer in (first, second, found, huge):
-        assert estimate_text_tokens(answer) <= budget, answer[:300]
+        assert estimate_text_tokens(json.dumps(answer)) <= budget, str(answer)[:300]
 
     # A window, and the address of the next one: the numbers in it are lines of
     # the output rather than of the page it was shown.
-    assert "line 1 of a tool output" in first
-    assert f"of {lines}" in first and "the next window starts at offset" in first
-    assert f"line {offset} of a tool output" in second
+    assert "line 1 of a tool output" in first["text"]
+    assert first["total"] >= lines, "the whole output is counted, not the window"
+    assert f"line {offset} of a tool output" in second["text"]
     # Finding is the same reader, and it counts the whole output rather than the
     # window it fitted.
-    assert "line 39 of a tool output" in found and "lines containing" in found
+    assert "line 39 of a tool output" in found["text"]
+    assert found["matched"], "and says how many lines the pattern is on"
     # **The path where a window is easiest to lose**: an argument that is not a
-    # pattern at all is answered with rather than echoed.
-    assert "do not fit" in huge, "a 100,000-character pattern is clipped, not quoted"
+    # pattern at all is answered with rather than echoed.  Nothing the caller
+    # wrote is quoted back any more, so a 100,000-character pattern is simply a
+    # pattern this output does not contain.
+    assert huge["matched"] == 0
 
     # And the whole of it is a file, which is what the marker will promise.
     dumps = data_dir() / "agents" / "e2e" / "cabinet" / "dumps"
     assert dumps.is_dir() and list(dumps.iterdir()), _files(data_dir())
-    assert "cabinet" in first, first[:200]
+    assert "cabinet" in str(first), first

@@ -1344,7 +1344,9 @@ class CabinetStore:
 
         The envelope is `turn_list`'s — `total`, `limit`, `offset` and the rows
         — because two listings in one system that disagree about how a page is
-        described are two things a model has to learn.  `category` narrows to a
+        described are two things a model has to learn.  **Each entry is a
+        `choice_row` and not a document**: a page is a thing to choose from, and
+        the whole of one is what a read tool is for.  `category` narrows to a
         directory of saved files, which is the one filter a kind has that the
         others do not (v1's `file_list`).
 
@@ -1381,7 +1383,7 @@ class CabinetStore:
             "total": total,
             "limit": limit,
             "offset": max(0, offset),
-            "entries": [dict(row) for row in rows],
+            "entries": [choice_row(dict(row)) for row in rows],
         }
 
     def _window(
@@ -1717,10 +1719,10 @@ class CabinetStore:
         `matched_in` is `"line"` or `"rest"` and the difference is not a detail:
         a mark whose evidence is not on the page is a mark the reader cannot
         check (`ToolStore._matched_in_line`).  What is printed for a cabinet row
-        is its key and its summary or the head of its body (`line_text`), so the
-        test is whether the words are in *those* — a smaller text than the row
-        was indexed by — and `line_text` is the one spelling of it, shared with
-        the renderer that prints it.
+        is the row itself (`line_text`, which is built from `choice_row`), so the
+        test is whether the words are in *that* — a smaller text than the row
+        was indexed by — and `line_text` is the one spelling of it, derived from
+        the row the answer shows rather than written out beside it.
 
         **And the words are the index's, tested by the index's own tokenizer.**
         A containment test over `textindex.normalize`d Python strings is a second
@@ -1738,9 +1740,11 @@ class CabinetStore:
             return set()
         placeholders = _marks(page)
         with self._connect() as connection:
+            # The whole row, because `line_text` is built from the row the answer
+            # shows (`choice_row`) and a column left out here would be one the
+            # mark could not see.
             rows = connection.execute(
-                f"SELECT id, key, body, summary FROM cabinet_doc"
-                f" WHERE id IN ({placeholders})",
+                f"SELECT * FROM cabinet_doc WHERE id IN ({placeholders})",
                 tuple(page),
             ).fetchall()
             connection.execute(
@@ -1762,24 +1766,24 @@ class CabinetStore:
             }
 
 
-#: How much of a body a search line shows when a row has no summary.  A search
-#: line is a chooser rather than a reader — the whole document is what
-#: `note_read`/`diary_read`/`file_read` are for — and the two places that slice
-#: it (`line_excerpt` below, and the renderer in `slife2.plugins.cabinet.server`)
-#: cut the same text or the mark they produce is uncheckable.
+#: How much of a body a chooser shows when a row has no summary.  A chooser is a
+#: picker rather than a reader — the whole document is what
+#: `note_read`/`diary_read`/`file_read` are for — and the one text it slices is
+#: `choice_row`'s `excerpt`, which is the whole of what a listing and a search
+#: print of a row.
 EXCERPT_CHARS = 120
 
 
 def line_excerpt(row: Mapping[str, Any]) -> str:
-    """What a search line shows *under* one row: its summary, or its body's head.
+    """What a chooser row shows *under* one row's key: its summary, or its body's head.
 
     **One spelling of the rule**, because two readers have to agree about it:
-    the renderer prints this under the row's key, and `_matched_in_line` asks
+    `choice_row` carries it as the row's `excerpt`, and `_matched_in_line` asks
     whether the caller's words are in it.  Written out twice they disagreed —
-    the mark was decided against the first 400 characters and the line printed
-    120, so a note whose word sat at character 300 was marked "matched your
-    words" beside an excerpt that stopped well before it.  The body is
-    whitespace-collapsed first, because that is what is printed: a newline in a
+    the mark was decided against the first 400 characters and the excerpt shown
+    stopped at 120, so a note whose word sat at character 300 was marked
+    "matched your words" beside an excerpt the words were not in.  The body is
+    whitespace-collapsed first, because that is what is shown: a newline in a
     note is not a line the reader sees.
     """
     summary = str(row.get("summary") or "")
@@ -1790,22 +1794,88 @@ def line_excerpt(row: Mapping[str, Any]) -> str:
 
 
 def line_text(row: Mapping[str, Any]) -> str:
-    """The text a search line prints of one row, as one string.
+    """The text one row shows a reader, as one string.
 
-    **What `_matched_in_line` is allowed to test**, and the whole of it.  The
-    line shows the row's key and `line_excerpt` — nothing else of the document —
-    so a row whose words are only in its *title* is one whose words are not on
-    the line, however searchable the title is (`search_text` indexes it on
-    purpose); marked otherwise it is a mark with no evidence beside it, which is
-    the failure the mark exists not to be.  A row's `title` was in the haystack
-    this replaced, and a file saved with a title and no body answered "matched
-    your words" with every one of them missing from the page.
+    **What `_matched_in_line` is allowed to test**, and the whole of it — and the
+    rule it keeps is the one this function has always kept: *the haystack is
+    what the answer prints, and nothing else*.  A row's `title` was once in a
+    haystack beside a line that printed only the key and the excerpt, so a file
+    saved with a title and no body answered "matched your words" with every one
+    of them missing from the page; the row is now the answer — `choice_row`, in
+    JSON — and the title is printed with it.
 
-    The `kind`, the time and the verdict words are deliberately not here: they
-    are the line's chrome, the same for every row, and a term matching the
-    chrome says nothing about *this* document.
+    So the scope is derived from the row that is shown rather than written out
+    again here: a field added to `choice_row` is one this cannot fall behind,
+    and there is no second list to keep in step.  A term matching the row's
+    *chrome* — its kind, its time, the path of its mirror — is a mark the reader
+    can check as readily as any other, which is the whole of what the mark is
+    for; a mark they cannot is the failure it exists not to be.
     """
-    return f"{row.get('key') or ''}\n{line_excerpt(row)}"
+    return "\n".join(str(value) for value in choice_row(row).values())
+
+
+#: The columns a *kind* has and the others do not: `size`, `mime` and `source`
+#: are a saved file's — what the bytes are and where they came from — and
+#: `period_*` a report's.  A kind that cannot have one answers nothing about it
+#: rather than answering "0" and "", which a model reads as a fact about the
+#: document.
+_EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
+    FILE: ("size", "mime", "source"),
+    REPORT: ("period_start", "period_end"),
+}
+
+
+def facts(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One document's own fields, as a model reads them — no text, no excerpt.
+
+    **One place that says what a document is**, shared by every answer that
+    describes one: a read adds its text to this, a write answers it, and
+    `choice_row` adds the line a chooser shows.  The keys are fixed rather than
+    "whatever is not empty", which is this schema's own rule — *the columns the
+    kinds do not use are empty rather than absent* — so a model reading a note
+    is not left wondering whether an absent `size` means zero or means "not
+    asked".
+
+    **One time, and it is the column the kind is *ordered* by** (`SPECS.time`),
+    not two stamps under two names: a diary's axis is the day it is *about* and
+    a note's is when it was last written, and a payload carrying both
+    `created_at` and `updated_at` makes a reader work out which of them the list
+    it came from was sorted on.  A row of a kind this build does not know, or
+    one whose axis column is empty, answers with whichever moment it does carry
+    rather than with no time at all.
+    """
+    kind = str(row.get("kind") or "")
+    spec = SPECS.get(kind)
+    ordered = str(row.get(spec.time) or "") if spec else ""
+    found: dict[str, Any] = {
+        "kind": kind,
+        "key": str(row.get("key") or ""),
+        "title": str(row.get("title") or ""),
+        "time": ordered or str(row.get("updated_at") or row.get("created_at") or ""),
+        "tags": str(row.get("tags") or ""),
+        "summary": str(row.get("summary") or ""),
+        "mirror": str(row.get("mirror") or ""),
+    }
+    for column in _EXTRA_COLUMNS.get(kind, ()):
+        found[column] = (
+            int(row.get(column) or 0)
+            if column == "size"
+            else str(row.get(column) or "")
+        )
+    return found
+
+
+def choice_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One document as something to **choose**: `facts`, and the line a chooser shows.
+
+    **A listing and a search answer with this and not with the row.**  A body is
+    the document, and a model picking one out of fifty has asked for a way to
+    tell them apart — the reason the tool catalogue reports a tool's schema as a
+    *size* rather than as text (`slife2.libs.store.catalogue`).  `excerpt` is `line_excerpt`, the
+    one spelling of what such a line shows, so a row marked `matched_in:
+    "line"` has the caller's words in the text printed beside it.
+    """
+    return {**facts(row), "excerpt": line_excerpt(row)}
 
 
 def _found(
@@ -1814,16 +1884,14 @@ def _found(
     *,
     matched_in: str | None = None,
 ) -> dict[str, Any]:
-    """One search result: what a chooser needs, and no more."""
-    found: dict[str, Any] = {
-        "kind": str(row.get("kind") or ""),
-        "key": str(row.get("key") or ""),
-        "title": str(row.get("title") or ""),
-        "body": str(row.get("body") or ""),
-        "tags": str(row.get("tags") or ""),
-        "time": str(row.get("updated_at") or row.get("created_at") or ""),
-        "summary": str(row.get("summary") or ""),
-    }
+    """One search result: what a chooser needs, and no more.
+
+    `choice_row` and the two marks a search adds — `similarity`, how close the
+    row is **by meaning** (`search` says why a row nothing measured carries none
+    rather than a zero), and `matched_in`, which is not a score but the fact
+    that the caller's words are in the text the answer prints.
+    """
+    found = choice_row(row)
     if similarity is not None:
         found["similarity"] = similarity
     if matched_in is not None:

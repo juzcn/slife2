@@ -175,6 +175,37 @@ DESCRIPTION_CHARS = 120
 #: for ten thousand rows is a model asking for something no answer can carry.
 RUNS_MAX = 200
 
+#: The page `schedule_list` answers with, and the most it will answer with.
+#: **The same two numbers the ledger's listing uses**, one order of magnitude
+#: apart, because the two tables are: a task row is a name, an expression and a
+#: shortened description, and there is one per task somebody wrote down, where a
+#: run row is one per fire and the ledger never stops growing.  A task listing
+#: is therefore a page rather than a wall for the same reason the run listing
+#: is — a model that has scheduled for a year is a model whose `schedule_list`
+#: would otherwise be shortened by the harness and read back through `dump_read`
+#: (`tool_result.tokens`).
+TASKS_LIMIT = 50
+TASKS_MAX = 200
+
+
+def page_of(limit: int, offset: int, default: int, cap: int) -> tuple[int, int]:
+    """One listing's page size and where it starts, from what a model asked.
+
+    **A limit that is not a positive number means "nobody said"**, and it is
+    "unset" rather than "no bound": a *negative* must not reach SQLite, where
+    `LIMIT -1` means **no limit at all** — so a model passing `-1` would walk
+    past the ceiling these tools exist to keep, and the ceiling is the answer to
+    a model asking for ten thousand rows.  A negative `offset` is folded to the
+    first page for the same reason: it is nothing but a way to be out of range.
+
+    One function because the two listings of this section are one shape — the
+    numbers they answer with are the numbers the page was cut to, and a caller
+    paging by `offset` cannot compute its next page from a number the tool
+    interpreted differently than it reported.
+    """
+    return (min(limit, cap) if limit > 0 else default), max(0, int(offset))
+
+
 #: The template.  Machinery rather than something an operator writes — it is how
 #: this system tells a loop that nobody is listening, in the same sense
 #: `agent_task.j2` is — so it is asked for by bare name and is the shipped one.
@@ -604,7 +635,11 @@ async def poll_once(
         # `slife2-wechat` makes around each of its sessions.
         try:
             with in_home(store.home):
-                for task in store.tasks(enabled_only=True):
+                # Unbounded on purpose: the poll is the one reader that wants
+                # every enabled task, and it is why the page is optional there
+                # (`ScheduleStore.tasks`).
+                enabled, _ = store.tasks(enabled_only=True)
+                for task in enabled:
                     verdict = due(task, reference)
                     if verdict is None:
                         continue
@@ -888,31 +923,53 @@ def build_server(
         return {"name": name.strip(), "removed": True}
 
     @mcp.tool(name=SCHEDULE_LIST, meta=FOR_THE_MODEL)
-    async def schedule_list(ctx: Context) -> dict[str, Any]:
-        """Every scheduled task this agent has, with when each next comes due.
+    async def schedule_list(
+        ctx: Context, limit: int = 0, offset: int = 0
+    ) -> dict[str, Any]:
+        """This agent's scheduled tasks, by name, with when each next comes due.
 
         Each row carries the whole description, shortened, and `next_run` — which
         is what the expression means right now rather than something stored, so
         it is right the moment you read it. A task that is switched off is here
         too, and says so.
+
+        `limit` bounds this page (at most 200); left out it is 50. `offset` skips
+        that many, which is how you page back.
+
+        Returns:
+            `tasks` — the rows of this page — and `total`, so
+            `offset + len(tasks) < total` says whether more remain.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        return {"tasks": [row(task) for task in store.tasks()]}
+        bounded, skipped = page_of(limit, offset, TASKS_LIMIT, TASKS_MAX)
+        found, total = store.tasks(limit=bounded, offset=skipped)
+        return {
+            "tasks": [row(task) for task in found],
+            "total": total,
+            "limit": bounded,
+            "offset": skipped,
+        }
 
     @mcp.tool(name=SCHEDULE_RUNS, meta=FOR_THE_MODEL)
     async def schedule_runs(
-        ctx: Context, name: str = "", status: str = "", limit: int = 0
+        ctx: Context, name: str = "", status: str = "", limit: int = 0, offset: int = 0
     ) -> dict[str, Any]:
         """What a scheduled task has actually done, newest first.
 
         `name` narrows it to one task, `status` to one state — `pending`, `ran`,
-        `failed`, `missed` or `skipped` — and `limit` bounds the rows (at most
-        200). Each row is one fire, named by the moment it was *due* rather than
-        by when it ran, with the note whoever closed it left.
+        `failed`, `missed` or `skipped` — and `limit` bounds this page (at most
+        200); left out it is 20. `offset` skips that many, which is how you page
+        back through a ledger that only ever grows. Each row is one fire, named
+        by the moment it was *due* rather than by when it ran, with the note
+        whoever closed it left.
 
         This is the answer to "did it run", and it is the only place that answer
         exists: a run nobody closed stays here until somebody does.
+
+        Returns:
+            `runs` — the rows of this page — and `total`, so
+            `offset + len(runs) < total` says whether more remain.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
@@ -921,14 +978,14 @@ def build_server(
             raise ToolError(
                 f"{wanted!r} is not a run state; they are {', '.join(STATUSES)}."
             )
-        # A limit that is not a positive number is "unset", the way zero already
-        # is: `or` folds zero into the default, and a *negative* must not reach
-        # SQLite, where `LIMIT -1` means **no limit at all** — so a model passing
-        # `-1` would walk past the ceiling this tool exists to keep.  The default
-        # is itself under the ceiling, so either branch is bounded.
-        bounded = min(limit, RUNS_MAX) if limit > 0 else RUNS_LIMIT
-        rows = [run.row() for run in store.runs(name.strip(), wanted, bounded)]
-        return {"runs": rows}
+        bounded, skipped = page_of(limit, offset, RUNS_LIMIT, RUNS_MAX)
+        found, total = store.runs(name.strip(), wanted, bounded, skipped)
+        return {
+            "runs": [run.row() for run in found],
+            "total": total,
+            "limit": bounded,
+            "offset": skipped,
+        }
 
     @mcp.tool(name=SCHEDULE_RUN_NOW, meta=FOR_THE_MODEL)
     async def schedule_run_now(

@@ -173,10 +173,9 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
     sentence lives where the mechanism lives and the vocabulary lives with the
     plugin, so a wording change is one edit rather than five.
 
-    A server that answers with a refusal *sentence* rather than an error — the
-    cabinet, the login — calls `slife2.libs.plugin.audience.unaddressed` directly.  The
-    sentence is one place either way, which is the half that matters, and
-    :func:`agent_or_blank` is the question those two ask.
+    The sentence is `slife2.libs.plugin.audience.unaddressed` either way, which is the
+    half that matters, and :func:`agent_or_blank` is the question a server asks
+    when the *blank* is the answer rather than the raise.
 
     **The condition is `None` *or* an empty agent**, and both halves matter: a
     call with no `_meta` at all and a call whose `_meta` names nobody are the
@@ -197,18 +196,20 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
 def agent_or_blank(ctx: Any) -> str:
     """The agent a call is on behalf of, or `""` when the call did not say.
 
-    **The second of the two idioms, and they are two on purpose.**  A server
-    whose tools *raise* refuses by raising — `agent_reader`, which is how the
-    mesh, the task server and the clock do it — and a server whose tools answer
-    in sentences refuses in a sentence, which is the cabinet's and the login's
-    shape: they return `unaddressed(...)` as the answer, and the model reads a
-    refusal rather than an error.
+    **The second of the two idioms, and each has one caller.**  Every
+    model-facing tool *raises* now — a refusal is a `ToolError`, so that the
+    call's status and its text agree (`DESIGN.md` §8.9) — which is what
+    `agent_reader` builds and what the mesh, the task server, the clock and the
+    cabinet use.  This is the other shape: a plugin that asks the question in a
+    *class* whose tool bodies decide what to do with the blank, which is the
+    login's (`slife2.plugins.wechat.server.Wechat.who`), and whose `unaddressed`
+    method exists so the wording stays with the class that owns it.
 
     What both ask is this one question, and it was written out line for line in
-    both of the sentence-answering servers — three lines each, in the two
-    modules whose refusal wording the shared sentence already covers.  Nothing
-    was wrong with either copy; the count was two, which is one more than the
-    number of places a rule can be stated in.
+    both of the servers that ask it — three lines each, in the two modules whose
+    refusal wording the shared sentence already covers.  Nothing was wrong with
+    either copy; the count was two, which is one more than the number of places
+    a rule can be stated in.
 
     **`""` and not `None`**, because both callers ask `if not agent:` and an
     empty name is what a server that keys nothing on it can act on.  `None`

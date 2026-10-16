@@ -2,14 +2,21 @@
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
-it says, and the four rules the port had to keep — a day accumulates while a note
-is replaced, a file's bytes are never indexed, a path from a model cannot leave
-the cabinet, and a save that cannot embed stores nothing.
+it answers, and the four rules the port had to keep — a day accumulates while a
+note is replaced, a file's bytes are never indexed, a path from a model cannot
+leave the cabinet, and a save that cannot embed stores nothing.
+
+**Every tool here answers JSON**, which is what a model reads: a `payload` is one
+call's parsed answer, an `ask` is the same call's raw text — the two the budget
+test needs, since what a model is handed is the text and what it reads is the
+fields in it.  A miss and a refusal both raise `ToolError`, so a test that used
+to read a sentence reads it off the raised error instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import sqlite3
@@ -61,11 +68,23 @@ def cabinet() -> FastMCP:
 
 
 async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) -> str:
-    """One tool call, on behalf of a conversation, as the model reads it."""
+    """One tool call's answer as **text** — what a model is handed, byte for byte."""
     result = await client.call_tool(
         tool, arguments, meta=client_meta(agent) if agent else None
     )
     return "".join(getattr(block, "text", "") for block in result.content or [])
+
+
+async def payload(
+    client: Client, tool: str, agent: str = "jack", **arguments: Any
+) -> Any:
+    """One tool call's answer as the JSON a model reads."""
+    return json.loads(await ask(client, tool, agent=agent, **arguments))
+
+
+def keys(rows: list[dict[str, Any]]) -> list[str]:
+    """The `key` of each row of a page or a result set, in the order it came back."""
+    return [str(row["key"]) for row in rows]
 
 
 def bag(agent: str = "jack") -> Path:
@@ -127,13 +146,13 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
     """A shared process cannot guess the cabinet, so it refuses to.
 
     One cabinet per agent, and which agent is a fact only the caller has — so a
-    call with no client id is answered with why rather than with somebody else's
-    diary (the rule `slife2-wechat` states, for the same reason).
+    call with no client id is **refused**, rather than answered with somebody
+    else's diary or with a sentence a model reads as a result (the rule
+    every other plugin of this kind states, for the same reason).
     """
     async with Client(cabinet()) as client:
-        answer = await ask(client, "note_list", agent="")
-
-    assert "did not say which conversation" in answer
+        with pytest.raises(ToolError, match="did not say which conversation"):
+            await ask(client, "note_list", agent="")
 
 
 # --- notes and the diary: replace, and accumulate -----------------------------
@@ -143,17 +162,28 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
     """A note is a document: the second write *is* the note, and the file too."""
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="Python", content="first", tags="py")
+        wrote = await payload(
+            client, "note_edit", subject="Python", content="first", tags="py"
+        )
         await ask(client, "note_edit", subject="Python", content="second")
-        read = await ask(client, "note_read", subject="Python")
+        read = await payload(client, "note_read", subject="Python")
 
-    assert "second" in read
-    assert "first" not in read
+    assert [wrote[key] for key in ("kind", "key", "title", "tags", "summary")] == [
+        NOTE,
+        "Python",
+        "Python",
+        "py",
+        "",
+    ]
+    assert wrote["time"], "the write answers the row it stored, stamp and all"
+    assert wrote["mirror"] == f"notes/{cabinet_store.mirror_stem('Python')}.md"
     # The path is the stem's to decide (`mirror_stem`), and that rule has a test
     # of its own: what this one is about is that the file was rewritten, not
     # what it is called.
     written = bag() / "notes" / f"{cabinet_store.mirror_stem('Python')}.md"
     assert written.read_text(encoding="utf-8") == "# Python\n\nsecond\n"
+    assert read["text"] == "second"
+    assert "first" not in json.dumps(read), "the older body is gone"
 
 
 @pytest.mark.asyncio
@@ -167,12 +197,15 @@ async def test_a_days_diary_accumulates_because_two_entries_are_two_facts() -> N
     async with Client(cabinet()) as client:
         await ask(client, "diary_write", content="morning", date="2026-10-11")
         await ask(client, "diary_write", content="evening", date="2026-10-11")
-        read = await ask(client, "diary_read", date="2026-10-11")
-        refused = await ask(client, "note_remove", subject="2026-10-11")
+        read = await payload(client, "diary_read", date="2026-10-11")
+        with pytest.raises(ToolError, match="no note about"):
+            await ask(client, "note_remove", subject="2026-10-11")
 
-    assert "morning" in read and "evening" in read
-    assert read.index("morning") < read.index("evening"), "the day reads forwards"
-    assert "[refused]" in refused or "no note" in refused
+    assert "morning" in read["text"] and "evening" in read["text"]
+    assert read["text"].index("morning") < read["text"].index("evening"), (
+        "the day reads forwards"
+    )
+    assert read["key"] == read["time"] == "2026-10-11", "a day is its own axis"
     assert (bag() / "diary" / "2026-10-11.md").read_text(encoding="utf-8").count(
         "## "
     ) == 2
@@ -191,21 +224,22 @@ async def test_a_report_is_a_log_under_one_title() -> None:
             period_end="2026-10-11",
         )
         await ask(client, "report_save", title="weekly", content="week two")
-        read = await ask(client, "report_read", title="weekly")
-        listed = await ask(client, "report_list")
+        read = await payload(client, "report_read", title="weekly")
+        listed = await payload(client, "report_list")
 
-    assert "week one" in read and "week two" in read
-    assert "weekly" in listed
-    assert "2026-10-05" in read
+    assert "week one" in read["text"] and "week two" in read["text"]
+    assert keys(listed["entries"]) == ["weekly"]
+    assert read["period_start"] == "2026-10-05"
+    assert read["period_end"] == "2026-10-11", "the period is the row's own"
 
 
 @pytest.mark.asyncio
 async def test_a_bad_date_is_refused_rather_than_stored() -> None:
     """`2026-13-45` is a typo, and a diary keyed by it is a day that cannot sort."""
     async with Client(cabinet()) as client:
-        answer = await ask(client, "diary_write", content="x", date="2026-13-45")
+        with pytest.raises(ToolError, match="is not a date"):
+            await ask(client, "diary_write", content="x", date="2026-13-45")
 
-    assert "[refused]" in answer
     assert store().get(DIARY, "2026-13-45") is None
 
 
@@ -215,10 +249,11 @@ async def test_removing_a_note_takes_its_file_row_and_vectors() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="gone", content=f"{WORD} here")
         assert (bag() / "notes" / "gone.md").exists()
-        answer = await ask(client, "note_remove", subject="gone")
-        await ask(client, "note_read", subject="gone")
+        answer = await payload(client, "note_remove", subject="gone")
+        with pytest.raises(ToolError, match="no note about"):
+            await ask(client, "note_read", subject="gone")
 
-    assert "deleted" in answer
+    assert answer == {"kind": NOTE, "key": "gone", "removed": True}
     assert not (bag() / "notes" / "gone.md").exists()
     assert store().get(NOTE, "gone") is None
     with store()._connect() as connection:
@@ -227,6 +262,40 @@ async def test_removing_a_note_takes_its_file_row_and_vectors() -> None:
             " WHERE rowid NOT IN (SELECT id FROM cabinet_chunk)"
         ).fetchone()["n"]
     assert int(orphans) == 0, "a deleted row's vectors go with it"
+
+
+@pytest.mark.asyncio
+async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
+    """**The envelope is `turn_list`'s, so `offset` is the one arithmetic a model
+    needs**: `total` is counted before the page is cut, which is what makes
+    "there are three and here are two" answerable rather than guessed from a
+    full page.  Each entry is a row to *choose* from and not the document
+    itself, which is what keeps a page of fifty inside the budget the harness
+    spends on a tool result.
+    """
+    async with Client(cabinet()) as client:
+        for index in range(3):
+            await ask(client, "note_edit", subject=f"n{index}", content=f"body {index}")
+        first = await payload(client, "note_list", limit=2)
+        second = await payload(client, "note_list", limit=2, offset=2)
+
+    assert (first["total"], first["limit"], first["offset"]) == (3, 2, 0)
+    assert len(first["entries"]) == 2
+    assert first["offset"] + len(first["entries"]) < first["total"], "there is more"
+    assert (second["offset"], second["total"]) == (2, 3)
+    assert second["offset"] + len(second["entries"]) == second["total"], "the end"
+    assert keys(second["entries"]) == ["n0"], "and it is where the first page stopped"
+    assert set(first["entries"][0]) == {
+        "kind",
+        "key",
+        "title",
+        "time",
+        "tags",
+        "summary",
+        "mirror",
+        "excerpt",
+    }, "the row itself, and not its body"
+    assert first["entries"][0]["excerpt"] == "body 2"
 
 
 # --- files: bytes on disk, never in the index ---------------------------------
@@ -239,17 +308,21 @@ async def test_a_saved_file_is_copied_never_moved() -> None:
     source.write_bytes(b"the contents\n")
 
     async with Client(cabinet()) as client:
-        saved = await ask(
+        saved = await payload(
             client, "file_save", paths=[str(source)], summary=f"a {WORD} file"
         )
-        read = await ask(client, "file_read", path="documents/report.txt")
-        await ask(client, "file_remove", path="documents/report.txt")
-        listed = await ask(client, "file_list")
+        read = await payload(client, "file_read", path="documents/report.txt")
+        removed = await payload(client, "file_remove", path="documents/report.txt")
+        listed = await payload(client, "file_list")
 
-    assert "documents/report.txt" in saved
-    assert read == "the contents\n"
+    assert keys(saved["saved"]) == ["documents/report.txt"]
+    assert saved["saved"][0]["size"] == len(b"the contents\n")
+    assert read["text"] == "the contents\n"
+    assert read["kind"] == FILE and read["mime"] == "text/plain"
+    assert "encoding" not in read, "utf-8 is the cabinet's own, and needs no label"
     assert source.read_bytes() == b"the contents\n", "the original stays"
-    assert "No files" in listed
+    assert removed == {"kind": FILE, "key": "documents/report.txt", "removed": True}
+    assert listed["total"] == 0 and listed["entries"] == []
 
 
 @pytest.mark.asyncio
@@ -264,10 +337,13 @@ async def test_two_files_of_one_name_are_two_files() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(first)])
         await ask(client, "file_save", paths=[str(second)])
-        listed = await ask(client, "file_list")
+        listed = await payload(client, "file_list")
 
-    assert "documents/notes.txt" in listed
-    assert "documents/notes-2.txt" in listed
+    assert set(keys(listed["entries"])) == {
+        "documents/notes.txt",
+        "documents/notes-2.txt",
+    }
+    assert listed["total"] == 2
     assert (bag() / "documents" / "notes.txt").read_text(encoding="utf-8") == "one"
     assert (bag() / "documents" / "notes-2.txt").read_text(encoding="utf-8") == "two"
 
@@ -284,11 +360,13 @@ async def test_a_file_with_no_text_is_refused_not_decoded() -> None:
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(binary)])
-        answer = await ask(client, "file_read", path="documents/scan.pdf")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "file_read", path="documents/scan.pdf")
 
-    assert "is not text" in answer
-    assert "application/pdf" in answer
-    assert str(bag() / "documents" / "scan.pdf") in answer
+    said = str(refused.value)
+    assert "is not text" in said
+    assert "application/pdf" in said
+    assert str(bag() / "documents" / "scan.pdf") in said
 
 
 @pytest.mark.asyncio
@@ -296,8 +374,8 @@ async def test_text_in_another_encoding_is_read_and_the_encoding_named() -> None
     """A `.txt` from cmd is GBK, and refusing it would refuse text that exists.
 
     The one outcome still worth refusing is a *silent* wrong decode, so the
-    encoding is announced on the first line and UTF-8 — the cabinet's own — is
-    returned with no header at all.
+    encoding is named beside the text and UTF-8 — the cabinet's own — is returned
+    with no such key at all.
     """
     gbk = data_dir() / "gbk.txt"
     gbk.write_bytes("中文记录\n".encode("gb18030"))
@@ -306,12 +384,12 @@ async def test_text_in_another_encoding_is_read_and_the_encoding_named() -> None
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(gbk), str(utf8)])
-        decoded = await ask(client, "file_read", path="documents/gbk.txt")
-        plain = await ask(client, "file_read", path="documents/utf8.txt")
+        decoded = await payload(client, "file_read", path="documents/gbk.txt")
+        plain = await payload(client, "file_read", path="documents/utf8.txt")
 
-    assert decoded.startswith("[decoded as gb18030; the file is not utf-8]\n")
-    assert "中文记录" in decoded
-    assert plain == "plain\n"
+    assert decoded["encoding"] == "gb18030"
+    assert "中文记录" in decoded["text"]
+    assert plain["text"] == "plain\n"
 
 
 @pytest.mark.asyncio
@@ -322,10 +400,10 @@ async def test_a_binary_sniff_beats_a_wrong_guess() -> None:
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(utf16)])
-        answer = await ask(client, "file_read", path="documents/utf16.txt")
+        answer = await payload(client, "file_read", path="documents/utf16.txt")
 
-    assert "记录" in answer
-    assert "is not text" not in answer
+    assert "记录" in answer["text"]
+    assert answer["encoding"] == "utf-16"
 
 
 @pytest.mark.asyncio
@@ -424,33 +502,38 @@ async def test_the_two_legs_answer_different_questions() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="alpha", content=f"{WORD} in the body")
         await ask(client, "note_edit", subject="beta", content="nothing to match")
-        by_words = await ask(client, "cabinet_search", keywords=[WORD])
-        by_meaning = await ask(
+        by_words = await payload(client, "cabinet_search", keywords=[WORD])
+        by_meaning = await payload(
             client, "cabinet_search", sentences=[f"{WORD} in the body"]
         )
 
-    assert "alpha" in by_words
-    assert "beta" not in by_words, "an AND over the words is the words not being there"
-    assert "matched your words" in by_words
-    assert "alpha" in by_meaning
-    assert "meaning 1.00" in by_meaning
+    assert keys(by_words["results"]) == ["alpha"]
+    assert by_words["results"][0]["matched_in"] == "line"
+    assert "similarity" not in by_words["results"][0], "no leg measured it by meaning"
+    best = by_meaning["results"][0]
+    assert best["key"] == "alpha" and best["similarity"] == 1.0
 
 
 @pytest.mark.asyncio
-async def test_a_mark_is_about_what_the_line_shows() -> None:
+async def test_a_mark_is_about_what_the_row_shows() -> None:
     """**A mark the reader cannot check is not evidence.**
 
     `matched_in` is the one piece of a cabinet search that is certain rather
     than graded — the cosine is a measurement and the rank is an order, and this
-    says "your words are *there*".  So "there" has to be the line it is printed
-    on, and the scope it was decided against was not: the store tested
-    `title + key + body[:400] + summary` while the line prints `key` and
+    says "your words are *there*".  So "there" has to be the row the model is
+    handed, and the scope it was decided against was not: the store tested
+    `title + key + body[:400] + summary` while the answer printed `key` and
     `summary` *or* `body[:120]`.  A saved file whose words are only in its title
-    was therefore marked "matched your words" on a line that never prints a
+    was therefore marked "matched your words" beside a line that never showed a
     title, and a note whose words sit at character 300 was marked beside an
     excerpt that stops at 120.  Both are the same failure — a claim the reader
     cannot check — and both are answered `elsewhere in the document`, which is
     where those words really are.
+
+    The answer is the row itself now, so the rule is the one it always was with
+    a different thing under it: the title is *on* the row and the mark says so,
+    and a word at character 300 of the body is still not, because the row shows
+    the body's head and no more.
     """
     source = data_dir() / "attached.txt"
     source.write_text("nothing to do with the words\n", encoding="utf-8")
@@ -458,11 +541,13 @@ async def test_a_mark_is_about_what_the_line_shows() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(source)], title="quarterly figures")
         await ask(client, "note_edit", subject="deep", content=f"{'x' * 300} {WORD}")
-        by_title = await ask(client, "cabinet_search", keywords=["quarterly"])
-        by_tail = await ask(client, "cabinet_search", keywords=[WORD])
+        by_title = await payload(client, "cabinet_search", keywords=["quarterly"])
+        by_tail = await payload(client, "cabinet_search", keywords=[WORD])
 
-    assert "elsewhere in the document" in by_title, "the title is not on the line"
-    assert "elsewhere in the document" in by_tail, "nor is character 300"
+    assert by_title["results"][0]["title"] == "quarterly figures", "the title is shown"
+    assert by_title["results"][0]["matched_in"] == "line"
+    assert by_tail["results"][0]["matched_in"] == "rest", "character 300 is not shown"
+    assert WORD not in by_tail["results"][0]["excerpt"]
 
 
 @pytest.mark.asyncio
@@ -480,10 +565,11 @@ async def test_a_mark_is_decided_by_the_index_s_own_tokenizer() -> None:
     """
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="spelling", content="A Café on the wall")
-        answer = await ask(client, "cabinet_search", keywords=["cafe"])
+        answer = await payload(client, "cabinet_search", keywords=["cafe"])
 
-    assert "matched your words" in answer, "the index found it, so the line has it"
-    assert "elsewhere" not in answer
+    assert answer["results"][0]["matched_in"] == "line", (
+        "the index found it, so the row shows it"
+    )
 
 
 @pytest.mark.asyncio
@@ -526,10 +612,11 @@ async def test_a_window_narrows_without_deciding() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "diary_write", content="old", date="2020-01-01")
         await ask(client, "diary_write", content="new", date="2030-01-01")
-        windowed = await ask(client, "cabinet_search", kind=DIARY, since="2025-01-01")
+        windowed = await payload(
+            client, "cabinet_search", kind=DIARY, since="2025-01-01"
+        )
 
-    assert "2030-01-01" in windowed
-    assert "2020-01-01" not in windowed
+    assert keys(windowed["results"]) == ["2030-01-01"]
 
 
 @pytest.mark.asyncio
@@ -548,9 +635,9 @@ async def test_a_day_axis_reads_a_datetime_bound_as_the_day_it_names() -> None:
     async with Client(cabinet()) as client:
         for day in ("2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"):
             await ask(client, "diary_write", content=f"on {day}", date=day)
-        by_day = await ask(client, "diary_list", until="2026-10-07")
-        by_moment = await ask(client, "diary_list", until="2026-10-07T12:00:00")
-        equal = await ask(
+        by_day = await payload(client, "diary_list", until="2026-10-07")
+        by_moment = await payload(client, "diary_list", until="2026-10-07T12:00:00")
+        equal = await payload(
             client,
             "diary_list",
             since="2026-10-07T12:00:00",
@@ -558,22 +645,27 @@ async def test_a_day_axis_reads_a_datetime_bound_as_the_day_it_names() -> None:
         )
 
     assert by_moment == by_day, "the same day named two ways is two answers"
-    assert "- 2026-10-07" in by_moment, "the day the bound names is in its window"
-    assert "2026-10-08" not in by_moment
-    assert "- 2026-10-07" in equal, "a window whose bounds are one day is that day"
+    assert "2026-10-07" in keys(by_moment["entries"]), "the day the bound names is in"
+    assert "2026-10-08" not in keys(by_moment["entries"])
+    assert "2026-10-07" in keys(equal["entries"]), "a window of one day is that day"
 
 
 @pytest.mark.asyncio
 async def test_a_search_with_neither_input_browses() -> None:
-    """Both empty is a browse rather than an empty answer, and it says so."""
+    """Both empty is a browse rather than an empty answer, and it says so.
+
+    A keyword that holds no *term* is the other half of the same question, and
+    it is refused: the index would read an empty match as "every row", which is
+    the browse a caller did not ask for.
+    """
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="one", content="x")
-        browsed = await ask(client, "cabinet_search")
-        refused = await ask(client, "cabinet_search", keywords=["  "])
+        browsed = await payload(client, "cabinet_search")
+        with pytest.raises(ToolError, match="no search term"):
+            await ask(client, "cabinet_search", keywords=["  "])
 
-    assert "one" in browsed
-    assert "newest first" in browsed
-    assert "refused" in refused
+    assert keys(browsed["results"]) == ["one"]
+    assert browsed["browsed"] is True
 
 
 @pytest.mark.asyncio
@@ -582,12 +674,12 @@ async def test_a_search_can_name_one_kind() -> None:
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="same-word", content=WORD)
         await ask(client, "diary_write", content=WORD, date="2026-10-11")
-        only_files = await ask(client, "cabinet_search", keywords=[WORD], kind=FILE)
-        only_notes = await ask(client, "cabinet_search", keywords=[WORD], kind=NOTE)
+        only_files = await payload(client, "cabinet_search", keywords=[WORD], kind=FILE)
+        only_notes = await payload(client, "cabinet_search", keywords=[WORD], kind=NOTE)
 
-    assert "same-word" in only_notes
-    assert "same-word" not in only_files
-    assert "Nothing matched" in only_files
+    assert keys(only_notes["results"]) == ["same-word"]
+    assert only_files["results"] == [], "a filter that matched nothing is an empty page"
+    assert only_files["browsed"] is False, "and it was a search, not a browse"
 
 
 @pytest.mark.asyncio
@@ -622,19 +714,26 @@ async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(source)], title="spec sheet")
-        before = await ask(client, "cabinet_search", sentences=[OTHER])
-        written = await ask(
+        before = await payload(client, "cabinet_search", sentences=[OTHER])
+        written = await payload(
             client,
             "cabinet_summarize",
             kind=FILE,
             key="documents/spec.txt",
             summary=f"about {OTHER}",
         )
-        after = await ask(client, "cabinet_search", sentences=[OTHER])
+        after = await payload(client, "cabinet_search", sentences=[OTHER])
 
-    assert "spec sheet" not in before, "nothing describes it yet but its name"
-    assert "re-embedded" in written
-    assert "documents/spec.txt" in after
+    assert before["results"][0]["key"] == "documents/spec.txt", (
+        "the meaning leg found it, and found nothing in it"
+    )
+    assert before["results"][0]["similarity"] == 0.0, (
+        "nothing describes it yet but its name"
+    )
+    assert written["reembedded"] is True, "a file's vector is of its summary too"
+    assert written["summary"] == f"about {OTHER}"
+    assert after["results"][0]["key"] == "documents/spec.txt"
+    assert after["results"][0]["similarity"] == 1.0, "and now it is what it is about"
 
 
 @pytest.mark.asyncio
@@ -651,9 +750,8 @@ async def test_a_path_from_a_model_cannot_leave_the_cabinet() -> None:
         resolve(bag(), "../slife2.yaml")
 
     async with Client(cabinet()) as client:
-        answer = await ask(client, "file_read", path="../../slife2.yaml")
-
-    assert "no saved file" in answer
+        with pytest.raises(ToolError, match="no saved file"):
+            await ask(client, "file_read", path="../../slife2.yaml")
 
 
 # --- the store, on its own ----------------------------------------------------
@@ -735,10 +833,12 @@ def test_a_category_says_what_a_file_is_only_when_it_knows() -> None:
 
 
 def test_decoding_refuses_a_file_that_is_not_text() -> None:
-    assert decode(b"plain ascii\n") == ("plain ascii\n", "")
+    """The encoding comes back by name, which is what the JSON answer labels it with."""
+    assert decode(b"plain ascii\n") == ("plain ascii\n", ""), "utf-8 is unannounced"
     assert decode(b"\x00\x01\x02")[0] == ""
     assert decode(b"\x00\x01\x02")[1] == "binary"
     assert decode("记录\n".encode("utf-16"))[0].strip() == "记录"
+    assert decode("记录\n".encode("utf-16"))[1] == "utf-16"
 
 
 @pytest.mark.asyncio
@@ -820,17 +920,12 @@ async def test_a_category_is_one_folder_name() -> None:
     source = data_dir() / "report.txt"
     source.write_bytes(b"x")
     async with Client(cabinet()) as client:
-        traversing = await ask(
-            client, "file_save", paths=[str(source)], category="./documents"
-        )
-        trailing = await ask(
-            client, "file_save", paths=[str(source)], category="documents/"
-        )
-        reserved = await ask(client, "file_save", paths=[str(source)], category="NOTES")
-        nested = await ask(client, "file_save", paths=[str(source)], category="a/b")
-
-    for answer in (traversing, trailing, reserved, nested):
-        assert "not one folder name" in answer or "cannot be filed under it" in answer
+        for category in ("./documents", "documents/", "NOTES", "a/b"):
+            with pytest.raises(ToolError) as refused:
+                await ask(client, "file_save", paths=[str(source)], category=category)
+            assert "not one folder name" in str(refused.value) or (
+                "cannot be filed under it" in str(refused.value)
+            ), category
     assert not (bag() / "notes").exists() or not list((bag() / "notes").glob("*.txt"))
 
 
@@ -1200,8 +1295,12 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
         answer = await ask(client, "dump_read", call="call_big")
 
     assert estimate_text_tokens(answer) <= 120
-    assert "line 1 of a tool output" in answer
-    assert "the next window starts at offset" in answer
+    window = json.loads(answer)
+    shown = window["text"].splitlines()
+    assert shown[0].endswith("line 1 of a tool output"), (
+        "it starts where it was asked to"
+    )
+    assert window["next"] == len(shown) + 1, "the next window starts where this stopped"
 
 
 @pytest.mark.asyncio
@@ -1210,19 +1309,16 @@ async def test_a_window_says_where_the_next_one_starts_and_it_is_there() -> None
     await save_dump("call_page", dump_body())
 
     async with Client(cabinet()) as client:
-        first = await ask(client, "dump_read", call="call_page")
-        next_window = re.search(r"offset (\d+)", first)
-        assert next_window is not None, first
-        following = int(next_window.group(1))
-        second = await ask(client, "dump_read", call="call_page", offset=following)
+        first = await payload(client, "dump_read", call="call_page")
+        assert first["next"] > 1, first
+        second = await payload(
+            client, "dump_read", call="call_page", offset=first["next"]
+        )
 
-    stopped = re.search(r"lines \d+-(\d+) of", first)
-    assert stopped is not None, first
-    assert int(stopped.group(1)) + 1 == following, (
-        "the next window starts where this one stopped"
-    )
-    assert f"line {following} of a tool output" in second
-    assert "line 1 of a tool output" not in second
+    last = [int(n) for n in re.findall(r"^\s*(\d+)", first["text"], flags=re.M)][-1]
+    assert last + 1 == first["next"], "the next window starts where this one stopped"
+    assert f"line {first['next']} of a tool output" in second["text"]
+    assert "line 1 of a tool output" not in second["text"]
 
 
 @pytest.mark.asyncio
@@ -1236,24 +1332,29 @@ async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -
     await save_dump("call_grep", dump_body(3000, every=100))
 
     async with Client(cabinet()) as client:
-        all_of_them = await ask(client, "dump_read", call="call_grep", pattern="marker")
-        some = await ask(client, "dump_read", call="call_grep", pattern="line")
-        none = await ask(client, "dump_read", call="call_grep", pattern="nothing here")
+        all_of_them = await payload(
+            client, "dump_read", call="call_grep", pattern="marker"
+        )
+        some = await payload(client, "dump_read", call="call_grep", pattern="line")
+        none = await payload(
+            client, "dump_read", call="call_grep", pattern="nothing here"
+        )
 
-    assert "all 30 lines containing 'marker', from line 1" in all_of_them
-    assert "line 100 of a tool output MARKER" in all_of_them
-    assert re.search(
-        r"\(\d+ of 3000 lines containing 'line'; the next start is offset \d+\)", some
-    ), "a page of matches says how many there are"
-    assert "no line from 1 contains 'nothing here'" in none
+    assert all_of_them["matched"] == 30, "the count is of the output, not the window"
+    assert "line 100 of a tool output MARKER" in all_of_them["text"]
+    assert "next" not in all_of_them, (
+        "every match fitted, so there is nowhere to read on"
+    )
+    assert some["matched"] == 3000, "a page of matches says how many there are"
+    assert some["next"] > 1
+    assert none["matched"] == 0 and none["text"] == "", "a pattern that found nothing"
 
 
 @pytest.mark.asyncio
 async def test_a_dump_that_is_not_there_is_said_rather_than_guessed() -> None:
     async with Client(cabinet()) as client:
-        answer = await ask(client, "dump_read", call="call_never")
-
-    assert "no saved output" in answer
+        with pytest.raises(ToolError, match="no saved output"):
+            await ask(client, "dump_read", call="call_never")
 
 
 @pytest.mark.asyncio
@@ -1266,10 +1367,11 @@ async def test_a_line_too_large_for_the_window_names_the_file_instead() -> None:
     await save_dump("call_one", "x" * 60000)
 
     async with Client(cabinet()) as client:
-        answer = await ask(client, "dump_read", call="call_one")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "dump_read", call="call_one")
 
-    assert "does not fit" in answer
-    assert "dumps" in answer, "the header names where the bytes are"
+    assert "does not fit" in str(refused.value)
+    assert "dumps" in str(refused.value), "and the refusal names where the bytes are"
 
 
 @pytest.mark.asyncio
@@ -1285,11 +1387,11 @@ async def test_a_search_that_names_no_kind_does_not_reach_the_dumps() -> None:
     await save_dump("call_word", f"{WORD} is in this output\nand a second line")
 
     async with Client(cabinet()) as client:
-        anywhere = await ask(client, "cabinet_search", keywords=[WORD])
-        named = await ask(client, "cabinet_search", keywords=[WORD], kind=DUMP)
+        anywhere = await payload(client, "cabinet_search", keywords=[WORD])
+        named = await payload(client, "cabinet_search", keywords=[WORD], kind=DUMP)
 
-    assert "call_word" not in anywhere
-    assert "call_word" in named
+    assert "call_word" not in keys(anywhere["results"])
+    assert "call_word" in keys(named["results"])
 
 
 def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None:

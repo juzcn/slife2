@@ -114,7 +114,7 @@ def _decoded(encoded: Any, field: str) -> bytes:
     are the far end answering with something malformed rather than this
     process's fault, which is the same class of answer `_json_object` exists to
     turn into a sentence one function up: a truncated `b64_json` left the model
-    with a raw traceback and the plugin's own `[failed] …` wording nowhere.
+    with a raw traceback and the plugin's own wording nowhere.
 
     `field` is the vendor's own name for what it sent — `b64_json`, `data` — so
     the sentence says which part of the answer was unusable, and a model reading
@@ -136,7 +136,7 @@ def _json_object(response: Any, what: str) -> dict[str, Any]:
     does not convert: a body that is not JSON (`ValueError`), a body that is JSON
     but not an object (`AttributeError` on `.get`), and a key that is missing or
     the wrong shape (`IndexError`, `TypeError`).  `_run` turns only
-    `MediaAdapterError` into the `[failed] …` sentence DESIGN §1.5 promises, so
+    `MediaAdapterError` into the sentence DESIGN §1.5 promises, so
     anything else reached the model as a raw traceback instead — and the fix
     belongs here, once, because both adapters have the same body to read and two
     copies of this is how they come to differ.

@@ -64,9 +64,11 @@ def files(main: str, **extra: str) -> list[dict[str, str]]:
     ]
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
+async def ask(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    """These tools answer with a dict, which is what the model reads."""
     result = await client.call_tool(tool, arguments)
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    assert isinstance(result.data, dict), result
+    return result.data
 
 
 # --- installing ---------------------------------------------------------------
@@ -97,14 +99,14 @@ async def test_installing_a_skill_writes_the_folder_and_reads_at_once(
         read = await ask(client, USE_TOOL, name="note-taking")
 
     folder = isolated_runtime / "skills" / "note-taking"
-    assert "installed (2 file(s))" in answer
+    assert answer == {"name": "note-taking", "state": "on", "files": 2}
     assert (folder / "SKILL.md").is_file()
     assert (folder / "scripts" / "save.py").read_text(encoding="utf-8") == (
         "print('saved')\n"
     )
     rows = {row["name"]: row for row in declared.data["sources"][0]["rows"]}
     assert rows["skill:note-taking"]["description"] == "Keep notes."
-    assert "Keep notes." in read
+    assert "Keep notes." in read["content"]
 
 
 @pytest.mark.asyncio
@@ -260,7 +262,7 @@ async def test_a_name_that_is_not_one_directory_is_refused(
     skills = isolated_runtime / "skills"
     folders = {path.name for path in skills.iterdir()} if skills.is_dir() else set()
     assert folders == set(), f"nothing installed, nothing left behind: {folders}"
-    assert "No skills are installed" in listed
+    assert listed == {"skills": [], "total": 0, "limit": 50, "offset": 0}
 
 
 @pytest.mark.asyncio
@@ -308,7 +310,9 @@ async def test_replacing_a_skill_leaves_no_half_written_one(
 
     folders = {path.name for path in (isolated_runtime / "skills").iterdir()}
     assert folders == {"one"}, "no staging or replaced directory left behind"
-    assert "The old body." not in read, "the manifest is the one just written"
+    assert "The old body." not in read["content"], (
+        "the manifest is the one just written"
+    )
     assert (isolated_runtime / "skills" / "one" / "scripts" / "new.py").is_file()
 
 
@@ -321,7 +325,12 @@ async def test_removing_a_skill_takes_the_folder_and_leaves_the_entry(
 ) -> None:
     """The `skills:` entry is what the playbook is *given*, and it is the
     operator's — so uninstalling the files does not throw away the wiring that
-    re-installing them needs, and a name with no folder is not a mistake."""
+    re-installing them needs, and a name with no folder is not a mistake.
+
+    A name the folder does not have is **refused**, though: nothing was deleted,
+    so a `skill_remove` that answered as ordinary text would arrive with `ok`
+    true and read as an uninstall that happened.
+    """
     config_on_disk(
         isolated_runtime,
         CONFIG + "skills:\n  one:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
@@ -330,12 +339,13 @@ async def test_removing_a_skill_takes_the_folder_and_leaves_the_entry(
 
     async with Client(build_server(load())) as client:
         answer = await ask(client, "skill_remove", name="one")
-        missing = await ask(client, "skill_remove", name="one")
+        with pytest.raises(ToolError) as missing:
+            await client.call_tool("skill_remove", {"name": "one"})
 
-    assert "uninstalled" in answer and "`skills:` entry stays" in answer
+    assert answer == {"name": "one", "removed": True}
     assert not (isolated_runtime / "skills" / "one").exists()
     assert "SOME_KEY" in (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
-    assert "is not installed" in missing
+    assert "is not installed" in str(missing.value)
 
 
 @pytest.mark.asyncio
@@ -362,14 +372,14 @@ async def test_switching_a_skill_off_keeps_it_installed_and_unreadable(
         on = await ask(client, "skill_set_enabled", name="one", enabled=True)
 
     rows = {row["name"]: row for row in declared.data["sources"][0]["rows"]}
-    assert "off" in off
+    assert off == {"name": "one", "enabled": False, "state": "off"}
     assert rows["skill:one"]["status"] == "disabled"
     assert "switched off" in str(raised.value)
-    assert "one [off]" in listed
+    assert [row["state"] for row in listed["skills"]] == ["off"]
     assert (isolated_runtime / "skills" / "one" / "SKILL.md").is_file(), (
         "files untouched"
     )
-    assert "on again" in on
+    assert on["state"] == "on" and on["enabled"] is True
     assert "enabled" not in (isolated_runtime / "slife2.yaml").read_text(
         encoding="utf-8"
     )
@@ -425,6 +435,8 @@ async def test_the_listing_says_what_each_skill_is_for_and_what_it_needs(
     async with Client(build_server(load())) as client:
         listed = await ask(client, "skill_list")
 
-    assert "needy [on]" in listed
-    assert "Needs a key." in listed
-    assert "SOME_KEY" in listed, "and whether it has been supplied"
+    (row,) = listed["skills"]
+    assert row["name"] == "needy"
+    assert row["state"] == "on"
+    assert row["description"] == "Needs a key."
+    assert "SOME_KEY" in row["requirements"], "and whether it has been supplied"

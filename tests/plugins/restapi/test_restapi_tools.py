@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.host.configfile import read_section
@@ -74,9 +75,11 @@ def family(isolated_runtime: Path, text: str = CONFIG) -> FastMCP:
     return build_server(load(), client_factory=answering(upstream()))
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
+async def ask(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    """These tools answer with a dict, which is what the model reads."""
     result = await client.call_tool(tool, arguments)
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    assert isinstance(result.data, dict), result
+    return result.data
 
 
 def section(isolated_runtime: Path) -> dict[str, Any]:
@@ -110,8 +113,9 @@ async def test_an_api_is_written_as_the_spec_it_is(isolated_runtime) -> None:
     assert entry["spec"] == "https://api.example.test/openapi.yaml"
     assert entry["base_url"] == "https://api.example.test"
     assert "command" not in entry, "the expansion is the config layer's, not the file's"
-    assert "serving" in answer and "2 operation(s)" in answer
-    assert "tool(s)" not in answer, "the other family's word for it"
+    assert answer["state"] == "ready", "the one word every answer uses for a live link"
+    assert answer["operations"] == 2, answer
+    assert "tools" not in answer, "the other family's word for it"
 
 
 @pytest.mark.asyncio
@@ -144,7 +148,7 @@ async def test_the_credential_is_stored_as_a_name_and_never_as_a_value(
 
     assert section(isolated_runtime)["github"]["api_key"] == "${GITHUB_TOKEN}"
     assert section(isolated_runtime)["other"]["api_key"] == "${SOME_OTHER_TOKEN}"
-    assert "serving" in written_as_given
+    assert written_as_given["state"] == "ready"
     assert "connected" not in written_as_given, (
         "the MCP family's word, in an answer about an API"
     )
@@ -184,11 +188,13 @@ async def test_setting_an_api_again_replaces_the_whole_entry(isolated_runtime) -
 async def test_a_key_nothing_resolves_says_so_at_the_moment_it_is_written(
     isolated_runtime,
 ) -> None:
-    """**One line now, or a 401 from somebody else's server one turn later.**
+    """**One field now, or a 401 from somebody else's server one turn later.**
 
     An unresolved `${VAR}` is not an error — the config keeps the reference and
     the failure surfaces where the value is used — but for an API key the place
-    it surfaces names nothing, so the answer says it here instead.
+    it surfaces names nothing, so the answer carries the reference here instead.
+    It is the *name* that a caller acts on (`credstore set` takes it), and the
+    old sentence wrapped that name in advice the tool's schema says once.
     """
     async with Client(family(isolated_runtime)) as client:
         answer = await ask(
@@ -200,9 +206,32 @@ async def test_a_key_nothing_resolves_says_so_at_the_moment_it_is_written(
             api_key="NOBODY_HAS_THIS_ONE",
         )
 
-    assert "does not resolve" in answer
-    assert "credstore set NOBODY_HAS_THIS_ONE" in answer
+    assert answer["unresolved"] == "${NOBODY_HAS_THIS_ONE}"
     assert section(isolated_runtime)["github"]["api_key"] == "${NOBODY_HAS_THIS_ONE}"
+
+
+@pytest.mark.asyncio
+async def test_a_credential_that_resolves_is_not_reported(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The field is absent when there is nothing to say about it.
+
+    A `${VAR}` the config can resolve is an ordinary credential, and an
+    `unresolved: ""` on every answer would be a field a model learns to skip —
+    the same reason `readiness` is silent for a skill that declares nothing.
+    """
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "a-real-value")
+    async with Client(family(isolated_runtime)) as client:
+        answer = await ask(
+            client,
+            "rest_api_set",
+            name="github",
+            spec="https://api.example.test/openapi.yaml",
+            base_url="https://api.example.test",
+            api_key="SLIFE2_TEST_KEY",
+        )
+
+    assert "unresolved" not in answer
 
 
 @pytest.mark.asyncio
@@ -237,10 +266,10 @@ async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
             api_key="keyring:slife2/github",
         )
 
-    assert "does not resolve" in answer
-    # The name to store it under is the URI's own tail, not `${…}`'s arithmetic:
-    # `reference[2:-1]` would have said `eyring:slife2/gith`.
-    assert "credstore set slife2/github" in answer
+    # The whole reference, verbatim — and not the `${…}` wrapper's arithmetic,
+    # which would have said `eyring:slife2/gith`.  A keyring URI carries its own
+    # name in its tail, and that name is what a caller stores under.
+    assert answer["unresolved"] == "keyring:slife2/github"
     assert section(isolated_runtime)["github"]["api_key"] == "keyring:slife2/github"
 
 
@@ -259,23 +288,26 @@ async def test_a_url_that_is_not_http_is_refused_before_anything_is_fetched(
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
 
     async with Client(family(isolated_runtime)) as client:
-        local = await ask(
-            client,
-            "rest_api_set",
-            name="sneaky",
-            spec="file:///etc/passwd",
-            base_url="https://api.example.test",
-        )
-        nowhere = await ask(
-            client,
-            "rest_api_set",
-            name="sneaky",
-            spec="api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-        )
+        with pytest.raises(ToolError) as local:
+            await client.call_tool(
+                "rest_api_set",
+                {
+                    "name": "sneaky",
+                    "spec": "file:///etc/passwd",
+                    "base_url": "https://api.example.test",
+                },
+            )
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "rest_api_set",
+                {
+                    "name": "sneaky",
+                    "spec": "api.example.test/openapi.yaml",
+                    "base_url": "https://api.example.test",
+                },
+            )
 
-    assert local.startswith("[refused]") and "must be an http(s) URL" in local
-    assert nowhere.startswith("[refused]")
+    assert "must be an http(s) URL" in str(local.value)
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
     assert "sneaky" not in section(isolated_runtime)
 
@@ -298,7 +330,7 @@ async def test_a_private_address_is_not_refused(isolated_runtime) -> None:
             base_url="http://127.0.0.1:8080",
         )
 
-    assert not answer.startswith("[refused]")
+    assert answer["name"] == "localapi"
     assert section(isolated_runtime)["localapi"]["spec"] == (
         "http://127.0.0.1:8080/openapi.json"
     )
@@ -325,17 +357,17 @@ mcp:
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
 
     async with Client(family(isolated_runtime, text)) as client:
-        answer = await ask(
-            client,
-            "rest_api_set",
-            name="clash",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-        )
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "rest_api_set",
+                {
+                    "name": "clash",
+                    "spec": "https://api.example.test/openapi.yaml",
+                    "base_url": "https://api.example.test",
+                },
+            )
 
-    assert (
-        answer.startswith("[refused]") and "already configured under `mcp:`" in answer
-    )
+    assert "already configured under `mcp:`" in str(raised.value)
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
 
 
@@ -346,29 +378,35 @@ mcp:
 async def test_the_listing_shows_the_spec_and_not_the_proxy(isolated_runtime) -> None:
     """What a person configured, not what the config layer made of it.
 
-    A listing built from the held settings would print `uvx
-    mcp-openapi-proxy` and lose the only thing a reader came for — which API
-    this is and where it lives.
+    A row built from the held settings would say `uvx mcp-openapi-proxy` and lose
+    the only thing a reader came for — which API this is and where it lives.
     """
     async with Client(family(isolated_runtime)) as client:
         listed = await ask(client, "rest_api_list")
 
-    assert "registry [ready]" in listed
-    assert "spec     https://registry.example.test/openapi.json" in listed
-    assert "base_url https://registry.example.test" in listed
-    assert "A registry." in listed
-    assert "mcp-openapi-proxy" not in listed
+    (row,) = listed["apis"]
+    assert row["name"] == "registry"
+    assert row["state"] == "ready"
+    assert row["spec"] == "https://registry.example.test/openapi.json"
+    assert row["base_url"] == "https://registry.example.test"
+    assert row["description"] == "A registry."
+    assert "mcp-openapi-proxy" not in str(listed)
 
 
 @pytest.mark.asyncio
 async def test_the_operations_are_listed_and_capped(isolated_runtime) -> None:
+    """One page shape, this family's word for what a row is."""
     async with Client(family(isolated_runtime)) as client:
         all_of_them = await ask(client, "rest_api_list_tools", name="registry")
         capped = await ask(client, "rest_api_list_tools", name="registry", limit=1)
 
-    assert "registry — 2 operation(s), showing 2:" in all_of_them
-    assert "list_things" in all_of_them and "get_thing" in all_of_them
-    assert "2 operation(s), showing 1" in capped and "1 more" in capped
+    assert {one["name"] for one in all_of_them["operations"]} == {
+        "registry__list_things",
+        "registry__get_thing",
+    }
+    assert all_of_them["total"] == 2 and all_of_them["state"] == "ready"
+    assert capped["total"] == 2, "the whole count, not the page's"
+    assert (capped["limit"], capped["offset"], len(capped["operations"])) == (1, 0, 1)
 
 
 @pytest.mark.asyncio
@@ -384,12 +422,12 @@ async def test_removing_and_switching_behave_as_they_do_next_door(
         removed = await ask(client, "rest_api_remove", name="registry")
         gone = await ask(client, "rest_api_list")
 
-    assert "switched off" in off and off_entry["enabled"] is False
-    assert "registry [off]" in listed
-    assert "serving" in on
-    assert "gone from `rest-api:`" in removed
-    assert "registry" not in gone, gone
-    assert "No REST APIs are configured" in gone, gone
+    assert off["state"] == "off" and off["enabled"] is False
+    assert off_entry["enabled"] is False
+    assert [row["state"] for row in listed["apis"]] == ["off"]
+    assert on["state"] == "ready" and on["operations"] == 2
+    assert removed == {"name": "registry", "removed": True, "stopped": True}
+    assert gone == {"apis": [], "total": 0, "limit": 50, "offset": 0}, gone
 
 
 @pytest.mark.asyncio
@@ -410,7 +448,9 @@ async def test_both_entry_tools_describe_a_live_api_the_same_way(
     test that touched only *it* passed.
 
     Both are asked here in one test, because the defect was their disagreement:
-    an assertion about either one alone cannot see it.
+    an assertion about either one alone cannot see it.  The two answers are now
+    built once (`entry_report`), so what this pins is that they are the *same*
+    dict where it matters and carry this family's word for a row.
     """
     async with Client(family(isolated_runtime)) as client:
         written = await ask(
@@ -423,7 +463,7 @@ async def test_both_entry_tools_describe_a_live_api_the_same_way(
         switched = await ask(client, "rest_api_set_enabled", name="other", enabled=True)
 
     for answer in (written, switched):
-        assert "serving" in answer, answer
-        assert "operation(s)" in answer, answer
+        assert answer["state"] == "ready", answer
+        assert answer["operations"] == 2, answer
+        assert "tools" not in answer, answer
         assert "connected" not in answer, answer
-        assert "tool(s)" not in answer, answer

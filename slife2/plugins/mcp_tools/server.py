@@ -76,21 +76,26 @@ INSTRUCTIONS = (
     "themselves reach the model through the hub."
 )
 
-#: What this family calls things, for the sentences `slife2.libs.plugin.family` writes
+#: What this family calls things, for the payloads `slife2.libs.plugin.family` builds
 #: once for both connection families.  Every word here is one a model reads
-#: back: `a server` here is `an API` next door, over one road underneath.
+#: back: a `server` here is an `API` next door, and a `tool` here is an
+#: `operation`, over one road underneath.
+#:
+#: **Nothing here is an adjective.**  `connected` and `connecting` used to be
+#: fields, because a link's state was read off a sentence; as a payload field it
+#: is `state_word`'s own vocabulary (`ready`, `connecting`, `failed`, `idle`,
+#: `off`, `not held`), which is the same one the hub answers `servers` with — so
+#: the words that remain name *things* a family may legitimately call by another
+#: name, and the state is one vocabulary everywhere.
 WORDS = FamilyWords(
     section=SECTION,
-    plural="MCP servers",
+    collection="servers",
     entry="a server",
     unit="tool",
     list_tool="mcp_list",
     set_tool="mcp_set",
     enable_tool="mcp_set_enabled",
     remove_log="mcp_removed",
-    present="connected",
-    past="connected",
-    starting="connecting",
 )
 
 
@@ -103,15 +108,11 @@ WORDS = FamilyWords(
 # so a change is written once and held once.
 
 
-def _prepare(
-    config: Config, name: str, entry: dict[str, Any]
-) -> tuple[ToolServerSettings | None, str]:
-    """Write one `mcp:` entry, or answer with why it cannot be.
+def _prepare(config: Config, name: str, entry: dict[str, Any]) -> ToolServerSettings:
+    """Write one `mcp:` entry, or raise `ToolError` saying why it cannot be.
 
-    `(settings, "")` means it was written; `(None, refusal)` is a sentence for
-    the caller to return.  Two refusals, and both happen *before* anything is
-    written — a name the hub is already using, and an entry the config layer
-    will not parse.
+    Two refusals, and both happen *before* anything is written — a name the hub
+    is already using, and an entry the config layer will not parse.
 
     **Validated by the parser the loader uses.**  `slife2.libs.host.config._tool_server`
     is what turns an entry into settings at every start, so an entry that goes
@@ -125,49 +126,66 @@ def _prepare(
     )
 
 
-def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
-    """One line of `mcp_list` — the file's words and the link's state.
+def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+    """One row of `mcp_list` — the file's words and the link's state.
 
     Both halves are needed and neither is the other's summary: the file says what
     was configured (**with `${VAR}` intact** — the settings this process holds
-    have been through `resolve_secret`, so printing those would put the
-    operator's live keys in the conversation), and the link says whether it is
-    answering — one word in brackets, `state_word`'s to choose and explain.
+    have been through `resolve_secret`, so handing those over would put the
+    operator's live keys in the conversation and in the turn log), and the link
+    says whether it is answering — `state_word`'s word, which is the same one a
+    `set` answer and the hub's `servers` use.
+
+    A key the file does not have is **left out** rather than sent empty: an
+    entry with no `args` and one with `args: []` are the same absence, and a row
+    that spelled both as `[]` would be inventing a field the operator never wrote.
     """
+    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
     if raw.get("url"):
-        reach = "http  " + str(raw["url"])
+        row["transport"] = "http"
+        row["url"] = str(raw["url"])
     else:
-        reach = "stdio " + str(raw.get("command") or "")
+        row["transport"] = "stdio"
+        row["command"] = str(raw.get("command") or "")
     args = raw.get("args")
     if isinstance(args, list) and args:
-        reach += " " + " ".join(str(part) for part in args)
-    state = state_word(raw, one)
-    line = f"- {name} [{state}]\n    {reach}"
+        row["args"] = [str(part) for part in args]
     # The credentials are named and never shown — `KEY=${VAR}`, exactly as the
-    # file has it.  Worth printing for the usual reason a listing exists (which
+    # file has it.  Worth listing for the usual reason a listing exists (which
     # key does this server need?) and safe for the same one: the reference is
     # what the file holds, and the resolved value never gets here.
-    for field, label in (("env", "env"), ("headers", "headers")):
+    for field in ("env", "headers"):
         values = raw.get(field)
         if isinstance(values, dict) and values:
-            for key, value in values.items():
-                line += f"\n    {label} {key}={value}"
+            row[field] = {str(key): str(value) for key, value in values.items()}
     if description := str(raw.get("description") or ""):
-        line += f"\n    {description}"
-    return line
+        row["description"] = description
+    return row
 
 
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     """Serve the `mcp_*` tools on this family's server."""
 
     @mcp.tool(name="mcp_list", meta=FOR_THE_MODEL)
-    async def mcp_list() -> str:
+    async def mcp_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the MCP servers configured under `mcp:`, with their state.
 
-        Each entry as the file writes it, and whether its link is answering.
-        `mcp_list_tools` shows what one offers.
+        Each entry as the file writes it — how it is reached, what it is for,
+        and whether its link is answering.
+
+        Args:
+            limit: How many entries this page may hold. Omit for the cap.
+            offset: How many entries to skip — that is how you page.
+
+        Returns:
+            `servers` — one row per entry, each with `name`, `state`
+            (`ready`, `connecting`, `failed`, `idle` or `off`) and whatever the
+            file has of it — and `total`, `limit` and `offset`, so
+            `offset + len(servers) < total` says whether more remain.
         """
-        return await list_entries(homes.current(), words=WORDS, describe=_describe)
+        return await list_entries(
+            homes.current(), limit, offset, words=WORDS, describe=_describe
+        )
 
     @mcp.tool(name="mcp_set", meta=FOR_THE_MODEL)
     async def mcp_set(
@@ -181,7 +199,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         description: str = "",
         enabled: bool = True,
         autoload: bool = False,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Add or update an MCP server under `mcp:` (upsert).
 
         One entry is one transport: `command` for a process slife2 starts, `url`
@@ -191,8 +209,8 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         says whether it answered.
 
         Args:
-            name: The server's name. Every tool it offers reaches you as
-                `{name}__{tool}`, so it is also how you call them.
+            name: The server's name — the key it is written under, and the
+                prefix every tool of it reaches you as (`{name}__{tool}`).
             command: stdio — the program to start (npx, uvx, python).
             args: stdio — its arguments.
             env: stdio — environment overrides; `${VAR}` resolves when needed.
@@ -204,8 +222,15 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled: Connect it now. False writes the entry switched off.
             autoload: Every tool it offers starts in your list and is never
                 evicted.
+
+        Returns:
+            `name` and `enabled`; `state`, one of `ready`, `connecting`,
+            `failed`, `idle` or `off`; `tools`, how many it offers, when it
+            answered; `large`, true when that count is past a page's worth and
+            the next search has a row per tool to write and embed; and `error`,
+            what it said, when it has not answered.
         """
-        settings, why = _prepare(
+        settings = _prepare(
             load(),
             name,
             {
@@ -220,47 +245,61 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
                 "autoload": autoload or None,
             },
         )
-        if settings is None:
-            return why
         return await apply_and_report(homes.current(), settings, words=WORDS)
 
     @mcp.tool(name="mcp_remove", meta=FOR_THE_MODEL)
-    async def mcp_remove(name: str) -> str:
+    async def mcp_remove(name: str) -> dict[str, Any]:
         """Stop an MCP server and delete its entry from `mcp:`.
 
         Its tools leave the catalogue at the next search. A package the command
-        names stays on the machine.
+        names stays on the machine. A name that is not in `mcp:` is refused, so
+        a success means the entry is gone.
 
         Args:
-            name: The server to remove, from `mcp_list`.
+            name: The server to remove — the key it is written under.
+
+        Returns:
+            `removed`, whether the entry was in the file, and `stopped`, whether
+            this process was holding a link to it.
         """
         return await remove_entry(homes.current(), name, words=WORDS, logger=logger)
 
     @mcp.tool(name="mcp_set_enabled", meta=FOR_THE_MODEL)
-    async def mcp_set_enabled(name: str, enabled: bool) -> str:
+    async def mcp_set_enabled(name: str, enabled: bool) -> dict[str, Any]:
         """Switch an MCP server on or off, keeping its entry in `mcp:`.
 
         Off keeps the entry and stops the server being connected or started.
 
         Args:
-            name: The server, from `mcp_list`.
+            name: The server — the key it is written under.
             enabled: True connects it; False stops it and keeps the entry.
+
+        Returns:
+            The same payload `mcp_set` answers with: `name`, `enabled`, `state`,
+            and `tools` or `error` when the link has one of them.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
 
     @mcp.tool(name="mcp_list_tools", meta=FOR_THE_MODEL)
-    async def mcp_list_tools(name: str, limit: int = 0) -> str:
+    async def mcp_list_tools(
+        name: str, limit: int = 0, offset: int = 0
+    ) -> dict[str, Any]:
         """List the tools one MCP server offers.
 
-        These are the names behind `{name}__…` in your tool list. The answer is
-        capped, because a published server can offer more than are worth
-        reading; `tool_search` finds anything specific by what it does.
+        These are the names to call them by, each `{name}__{tool}`.
 
         Args:
-            name: The server, from `mcp_list`.
-            limit: How many to show. Omit for the cap.
+            name: The server — the key it is written under.
+            limit: How many tools this page may hold. Omit for the cap.
+            offset: How many tools to skip — that is how you page.
+
+        Returns:
+            `name`, `state` (`ready`, `connecting`, `failed`, `idle` or `off`),
+            `tools` — `name` and `description` per tool — `total`, `limit` and
+            `offset`, and `error` when the link has one. An empty `tools` with a
+            `state` other than `ready` is why it is empty.
         """
-        return await list_entry_tools(homes.current(), name, limit, words=WORDS)
+        return await list_entry_tools(homes.current(), name, limit, offset, words=WORDS)
 
 
 def build_server(

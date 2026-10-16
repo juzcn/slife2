@@ -54,6 +54,7 @@ from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.plugins.agent.server import (
+    ATTACH_IMAGE,
     SUBAGENT_REMOVE,
     SUBAGENT_SET,
     Pending,
@@ -185,6 +186,22 @@ async def reset(server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = 
     """Forget a conversation."""
     async with Client(server) as client:
         return await client.call_tool("reset", {"agent": agent, "subagent": subagent})
+
+
+async def attach(
+    server: FastMCP, sources: list[str], *, agent: str = DEFAULT_AGENT
+) -> dict[str, Any]:
+    """Call `attach_image` the way the turn does, and answer its JSON.
+
+    The caller's identity rides in `_meta`, exactly as it does when the loop
+    makes the call on the model's behalf — and `.data`, because the shape is the
+    subject here rather than the rendered text.
+    """
+    async with Client(server) as client:
+        result = await client.call_tool(
+            ATTACH_IMAGE, {"sources": sources}, meta=client_meta(agent)
+        )
+    return result.data
 
 
 async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
@@ -1592,8 +1609,12 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     assert call["function"]["arguments"] == "{}", "no names: the budget, not a choice"
     assert call["id"] == result["tool_call_id"], "answered, as the wire requires"
     assert result["role"] == "tool"
-    assert result["content"].startswith("2 tool(s) unloaded")
-    assert "fake__echo" in result["content"] and "fake__boom" in result["content"]
+    answer = json.loads(result["content"])
+    # Sorted, because the order is the budget's (least recently used first) and
+    # what this pins is *what went*, said to the model in the pair.
+    assert sorted(answer["unloaded"]) == ["fake__boom", "fake__echo"], (
+        "the pair says what went"
+    )
 
 
 @pytest.mark.asyncio
@@ -1820,6 +1841,73 @@ async def test_a_refused_image_does_not_end_the_conversation(context, hub) -> No
     assert sent.content[1]["type"] == "text"
     assert "image not stored" in sent.content[1]["text"]
     assert "data:image" not in sent.content[1]["text"], "the bytes are gone"
+
+
+@pytest.mark.asyncio
+async def test_the_attachment_report_names_what_went_in_and_what_did_not(
+    context, hub, tmp_path: Path
+) -> None:
+    """The model's own call answers which sources it can now see.
+
+    **The batch rule reaches the model as two lists**, and that is what makes it
+    useful: one unreadable path among two must not read as a call that failed,
+    because the fault is the file's and the other picture is attached.  A refusal
+    carried in the *same* answer is also the only place the model can learn it —
+    a request that quietly carried fewer pictures than it named is the one thing
+    it cannot detect for itself.
+    """
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"pretend png bytes")
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("ok")),
+    )
+    # A loop exists only for a conversation that has run, and this is the model
+    # calling the tool inside a turn of one.
+    await send(server, "look")
+
+    answer = await attach(server, [str(shot), str(tmp_path / "gone.png")])
+
+    assert answer["attached"] == [str(shot)]
+    assert len(answer["refused"]) == 1
+    assert str(tmp_path / "gone.png") in answer["refused"][0]
+    assert "no such file" in answer["refused"][0], "and why, not just which"
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_cannot_read_images_is_refused_by_name(context, hub) -> None:
+    """The refusal is the tool's, and it is the tool the model called.
+
+    The config listing only `text` under `input` is the config saying so, and the
+    alternative is a model that quietly ignores what it was handed.  Nothing was
+    attached, so this is a refusal of the call rather than a fact about the
+    batch — v1 refused to encode for the same reason.
+    """
+    from slife2.libs.host.config import ProviderSettings
+
+    text_only = replace(
+        default_config(),
+        providers={
+            "deepseek": ProviderSettings(
+                api="openai-completions",
+                base_url="https://example.test",
+                api_key_ref="${K:-x}",
+                models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
+            )
+        },
+    )
+    server = build_server(
+        text_only,
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("ok")),
+    )
+    await send(server, "look")
+
+    with pytest.raises(ToolError, match="cannot read images"):
+        await attach(server, ["data:image/png;base64,AAAA"])
 
 
 @pytest.mark.asyncio

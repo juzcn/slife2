@@ -12,12 +12,14 @@ model added to a provider does not lose the ones beside it.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import DEFAULT_AGENT, load, load_cached
 from slife2.libs.host.configfile import read_scalar, read_section
@@ -69,9 +71,19 @@ def server_for(isolated_runtime: Path, text: str = CONFIG):
     return build_server(load(), source=load_cached)
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
+async def ask(client: Client, tool: str, **arguments: Any) -> Any:
+    """One model tool's answer, which is the JSON every model-facing tool gives.
+
+    `result.data` rather than the content blocks: the shape is what these tools
+    are, and a test that read the rendered text would pass on a sentence.
+    """
     result = await client.call_tool(tool, arguments)
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    return result.data
+
+
+def dumped(answer: Any) -> str:
+    """An answer as the model reads it, for the "and never this" assertions."""
+    return json.dumps(answer, default=str)
 
 
 def written(isolated_runtime: Path) -> str:
@@ -101,11 +113,16 @@ async def test_the_listing_shows_the_file_and_never_the_key(
     async with Client(server_for(isolated_runtime)) as client:
         listed = await ask(client, "model_list")
 
-    assert "local/big — Big" in listed and "[default]" in listed
-    assert "local/small — Small" in listed
-    assert "openai-completions" in listed and "https://local.test/v1" in listed
-    assert "sk-live-do-not-print-me" not in listed
-    assert "${LOCAL_KEY}" not in listed
+    assert listed["total"] == 2
+    assert listed["default"] == "local/big"
+    rows = {(row["provider"], row["model"]): row for row in listed["models"]}
+    assert rows[("local", "big")]["name"] == "Big"
+    assert rows[("local", "big")]["marks"] == ["default"]
+    assert rows[("local", "big")]["context_window"] == 100000
+    assert rows[("local", "small")]["name"] == "Small"
+    assert rows[("local", "small")]["marks"] == []
+    assert "sk-live-do-not-print-me" not in dumped(listed)
+    assert "${LOCAL_KEY}" not in dumped(listed)
 
 
 # --- adding one ---------------------------------------------------------------
@@ -124,8 +141,7 @@ async def test_adding_a_model_keeps_the_ones_beside_it(isolated_runtime) -> None
         answer = await ask(
             client,
             "model_set",
-            provider="local",
-            model="third",
+            ref="local/third",
             name="Third",
             context_window=8000,
         )
@@ -136,8 +152,15 @@ async def test_adding_a_model_keeps_the_ones_beside_it(isolated_runtime) -> None
     assert entry["api"] == "openai-completions", "the provider's own fields stay"
     assert entry["base_url"] == "https://local.test/v1"
     assert entry["api_key"] == "${LOCAL_KEY}", "and the reference, not the key"
-    assert "added to `local`" in answer
-    assert "local/third — Third" in listed
+    assert answer == {
+        "ref": "local/third",
+        "created": True,
+        "provider_created": False,
+        "backend": None,
+    }, "added, on a provider that was already there and needs no backend started"
+    assert any(
+        row["model"] == "third" and row["name"] == "Third" for row in listed["models"]
+    )
 
 
 @pytest.mark.asyncio
@@ -147,11 +170,10 @@ async def test_setting_an_existing_model_replaces_its_own_entry(
     """A `set` is that model's whole entry — the rule the four sections'
     `*_set` tools already have, over a list instead of a mapping."""
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(
-            client, "model_set", provider="local", model="small", name="Tiny"
-        )
+        answer = await ask(client, "model_set", ref="local/small", name="Tiny")
 
-    assert "updated on `local`" in answer
+    assert answer["created"] is False, "one the file already had"
+    assert answer["provider_created"] is False
     entry = section(isolated_runtime)["local"]
     assert [one["model"] for one in entry["models"]] == ["small", "big"]
     assert "context_window" not in entry["models"][0], (
@@ -165,9 +187,11 @@ async def test_a_new_provider_needs_an_endpoint_and_a_key(isolated_runtime) -> N
     before = written(isolated_runtime)
 
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(client, "model_set", provider="fresh", model="m", name="M")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_set", ref="fresh/m", name="M")
 
-    assert answer.startswith("[refused]") and "new provider" in answer
+    assert "new provider" in str(refused.value)
+    assert "base_url" in str(refused.value), "and what it needs instead"
     assert written(isolated_runtime) == before
 
 
@@ -177,16 +201,16 @@ async def test_an_unknown_wire_protocol_is_refused(isolated_runtime) -> None:
     before = written(isolated_runtime)
 
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(
-            client,
-            "model_set",
-            provider="local",
-            model="m",
-            name="M",
-            api="carrier-pigeon",
-        )
+        with pytest.raises(ToolError) as refused:
+            await ask(
+                client,
+                "model_set",
+                ref="local/m",
+                name="M",
+                api="carrier-pigeon",
+            )
 
-    assert answer.startswith("[refused]") and "wire protocol" in answer
+    assert "wire protocol" in str(refused.value)
     assert written(isolated_runtime) == before
 
 
@@ -212,15 +236,15 @@ async def test_a_provider_on_a_new_protocol_starts_its_backend(
         answer = await ask(
             client,
             "model_set",
-            provider="claude",
-            model="sonnet",
+            ref="claude/sonnet",
             name="Sonnet",
             api="anthropic-messages",
             base_url="https://anthropic.test",
             api_key="ANTHROPIC_KEY",
         )
 
-    assert "new provider `claude`" in answer and "backend is up" in answer
+    assert answer["provider_created"] is True and answer["created"] is True
+    assert answer["backend"] == {"api": "anthropic-messages", "up": True, "detail": ""}
     assert [spec.name for spec in started] == ["llm:anthropic-messages"]
     assert section(isolated_runtime)["claude"]["api"] == "anthropic-messages"
 
@@ -235,9 +259,10 @@ async def test_the_default_model_cannot_be_removed(isolated_runtime) -> None:
     before = written(isolated_runtime)
 
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(client, "model_remove", ref="local/big")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_remove", ref="local/big")
 
-    assert answer.startswith("[refused]") and "default model" in answer
+    assert "default model" in str(refused.value)
     assert written(isolated_runtime) == before
 
 
@@ -247,7 +272,7 @@ async def test_removing_a_model_leaves_the_ones_beside_it(isolated_runtime) -> N
         await ask(client, "model_switch", ref="local/small")
         answer = await ask(client, "model_remove", ref="local/big")
 
-    assert "removed" in answer and "no other models" not in answer
+    assert answer == {"ref": "local/big", "provider_removed": False}
     assert [one["model"] for one in section(isolated_runtime)["local"]["models"]] == [
         "small"
     ]
@@ -286,7 +311,7 @@ default: local/big
     async with Client(server_for(isolated_runtime, two)) as client:
         answer = await ask(client, "model_remove", ref="aside/only")
 
-    assert "removed" in answer and "no other models" in answer
+    assert answer == {"ref": "aside/only", "provider_removed": True}
     assert "aside" not in section(isolated_runtime)
     assert "local" in section(isolated_runtime), "its neighbour is untouched"
 
@@ -311,9 +336,10 @@ providers:
     before = written(isolated_runtime)
 
     async with Client(server_for(isolated_runtime, one)) as client:
-        answer = await ask(client, "model_remove", ref="local/only")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_remove", ref="local/only")
 
-    assert answer.startswith("[refused]") and "last model" in answer
+    assert "last model" in str(refused.value)
     assert written(isolated_runtime) == before
 
 
@@ -429,7 +455,8 @@ async def test_switching_moves_the_conversations_already_running(
         )
 
     assert first.data["model"] == "local/big", "it starts on the default"
-    assert "moved with it" in switched, "and the answer says what happened"
+    assert switched["moved"] == 1, "and the answer says what it moved"
+    assert switched["previous"] == "local/big"
     assert second.data["model"] == "local/small", "the same conversation moved"
 
 
@@ -443,12 +470,14 @@ async def test_switching_writes_the_scalar_and_refuses_a_stranger(
         assert read_scalar("default", path=isolated_runtime / "slife2.yaml") == (
             "local/small"
         )
-        assert "was `local/big`" in answer
+        assert answer["previous"] == "local/big"
+        assert answer["moved"] == 0, "nothing was running on this server"
 
         before = written(isolated_runtime)
-        refused = await ask(client, "model_switch", ref="nobody/knows")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_switch", ref="nobody/knows")
 
-    assert refused.startswith("[refused]")
+    assert "not a model" in str(refused.value)
     assert written(isolated_runtime) == before, "rolled back"
     assert "providers" in written(isolated_runtime), "the file survived the refusal"
 
@@ -524,7 +553,7 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
             switched = await ask(client, "model_switch", ref="local/small")
         one, two = await asyncio.gather(first, second)
 
-    assert "moved with it" in switched, "the switch did land, mid-turn"
+    assert switched["moved"] == 1, "the switch did land, mid-turn"
     assert one.data["model"] == "local/big", "the model that answered the turn"
     assert two.data["injected"] is True, "and the message really was folded in"
     assert two.data["text"] == one.data["text"]
@@ -575,7 +604,7 @@ async def test_a_switch_moves_only_the_conversations_of_the_callers_home(
             switched = await ask(client, "model_switch", ref="local/small")
         second = await send(server, "two", home=theirs)
 
-    assert switched.endswith("Nothing was running, so nothing had to move.")
+    assert switched["moved"] == 0, "nothing of this home's was running"
     assert first.data["model"] == "local/big"
     assert second.data["model"] == "local/big", (
         "another home's switch did not reach that home's conversation"
@@ -607,8 +636,7 @@ async def test_one_home_cannot_block_a_removal_with_another_homes_conversation(
         async with Client(server) as client:
             answer = await ask(client, "model_remove", ref="local/small")
 
-    assert not answer.startswith("[refused]"), answer
-    assert answer.startswith("`local/small` is removed")
+    assert answer["ref"] == "local/small", "removed, and not refused"
     assert [one["model"] for one in section(mine)["local"]["models"]] == ["big"]
     assert [one["model"] for one in section(theirs)["local"]["models"]] == [
         "big",

@@ -37,6 +37,7 @@ from slife2.libs.turn.loop import BACKGROUND_UNAVAILABLE, DENIED, AgentLoop
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolCall, ToolSpec
 from slife2.libs.turn.tools import (
     Tool,
+    ToolFailed,
     ToolRegistry,
     bind_timeout,
     parse_timeout,
@@ -314,8 +315,10 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
     # And the status query says so, without repeating the result: it was already
     # delivered, and a result read twice is a result the model keeps paying for.
     answer = await check_async({"task_id": task_id})
-    assert marker_fields(answer)["status"] == FINISHED
-    assert "the answer" not in answer
+    assert answer["status"] == FINISHED
+    assert answer["delivered"] is True
+    assert answer["call_id"] == "call-1" and answer["tool"] == "slow"
+    assert "result" not in answer, "the answer was already handed over"
 
 
 @pytest.mark.asyncio
@@ -347,8 +350,9 @@ async def test_an_undelivered_result_stays_readable() -> None:
         await asyncio.sleep(0)
 
     answer = await check_async({"task_id": task_id})
-    assert "lost unless kept" in answer
-    assert marker_fields(answer)["status"] == FINISHED
+    assert answer["result"] == "lost unless kept"
+    assert answer["status"] == FINISHED
+    assert answer["delivered"] is False, "nobody took it, so it is still here"
 
 
 @pytest.mark.asyncio
@@ -539,7 +543,8 @@ async def test_cancelling_a_background_call_hands_back_that_it_was_cancelled() -
     await asyncio.sleep(0)
     answer = await cancel_async({"task_id": task_id})
 
-    assert marker_fields(answer)["status"] == CANCELLED
+    assert answer["status"] == CANCELLED
+    assert answer["call_id"] == "call-9"
     await asyncio.wait_for(  # the hand-back is detached, so it is waited for here
         _until(lambda: bool(handed)),
         timeout=1.0,  # timeouts: the value this test is built around, not a budget
@@ -667,12 +672,61 @@ def test_the_marker_is_one_shape_for_every_status() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_and_cancel_name_a_task_they_do_not_have() -> None:
-    """An unknown id is an `Error` the model can read, not an exception."""
+async def test_check_and_cancel_refuse_a_task_they_do_not_have() -> None:
+    """**A miss is a refusal and not an answer.**  The sentence used to be
+    *returned*, so a call naming a task nobody had ever made was recorded as a
+    call that succeeded — an `ok` with "Error:" in its text — and the distinction
+    is the registry's to make (`ToolRegistry.execute` renders this one bare)."""
     for tool in (check_async, cancel_async):
-        answer = await tool({"task_id": "nosuch"})
-        assert answer.startswith("Error")
-        assert "nosuch" in answer
+        with pytest.raises(ToolFailed, match="nosuch"):
+            await tool({"task_id": "nosuch"})
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_handed_the_answer_as_json() -> None:
+    """**The tool answers an object and the registry says it as JSON.**  These
+    two are built straight into the model's registry rather than served over
+    MCP — the agent server adds them to every one it hands the model — so the
+    rendering is `as_tool_text`'s and there is no FastMCP hop to do it.
+    """
+
+    async def done(_arguments: dict[str, Any]) -> tuple[str, bool]:
+        return "the answer", True
+
+    task_id = async_tasks.schedule(done({}), call_id="call-json", tool="slow")
+    tools = async_tasks.async_tools()
+    check = next(one for one in tools if one.spec.name == CHECK_ASYNC)
+
+    text, ok = await ToolRegistry([check]).execute(
+        ToolCall(id="c1", name=CHECK_ASYNC, arguments={"task_id": task_id})
+    )
+
+    assert ok is True
+    assert json.loads(text)["call_id"] == "call-json"
+    assert json.loads(text)["task_id"] == task_id
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_reaches_the_transcript_as_a_failure() -> None:
+    """**`Error:` in a *successful* call's text is the shape this closes.**  A
+    miss used to be returned, so the registry marked it `ok` and a window drew a
+    call that worked — one word aloud, and the model has to un-believe it.
+    Raised, the sentence arrives under the one prefix the registry adds itself.
+    """
+    cancel = next(
+        one
+        for one in async_tasks.async_tools()
+        if one.spec.name == async_tasks.CANCEL_ASYNC
+    )
+
+    text, ok = await ToolRegistry([cancel]).execute(
+        ToolCall(
+            id="c2", name=async_tasks.CANCEL_ASYNC, arguments={"task_id": "nosuch"}
+        )
+    )
+
+    assert ok is False
+    assert text.startswith("Error: no async task 'nosuch'")
 
 
 def test_the_two_tools_are_offered_under_the_names_the_prompt_uses() -> None:
@@ -717,6 +771,10 @@ async def test_a_finished_call_whose_delivery_is_in_flight_is_not_settled() -> N
     copy of the answer was gone if that delivery then failed.  `cancel_async` was
     worse: it cancelled the handle, which aborted a completed call's delivery
     mid-flight and reported "cancelled, so it has no result".
+
+    The JSON says the same thing one field at a time: the call is `finished` and
+    nothing has been delivered *yet* — and the result is not offered, because a
+    delivery about to land must not be read twice.
     """
     parked = asyncio.Event()
 
@@ -742,12 +800,13 @@ async def test_a_finished_call_whose_delivery_is_in_flight_is_not_settled() -> N
     async_tasks._tasks["inflight"] = task
     try:
         answer = await check_async({"task_id": "inflight"})
-        assert "on its way" in answer
-        assert "could not be handed back" not in answer
+        assert answer["status"] == async_tasks.FINISHED
+        assert answer["delivered"] is False, "on its way, and not yet a verdict"
+        assert "result" not in answer, "the delivery it is about to make, twice"
         assert async_tasks._get_task("inflight") is task, "and it was not popped"
 
         refused = await cancel_async({"task_id": "inflight"})
-        assert "has no result" not in refused
+        assert refused["status"] == async_tasks.FINISHED, "nothing to cancel"
         assert not task.handle.cancelled(), "a delivery in flight is not cancelled"
     finally:
         async_tasks._pop_task("inflight")

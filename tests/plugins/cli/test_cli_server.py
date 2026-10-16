@@ -16,6 +16,7 @@ making is whether the program is actually on this machine.
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,11 @@ def config_for(data_dir: Path):
     return load()
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
+async def ask(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    """These tools answer with a dict, which is what the model reads."""
     result = await client.call_tool(tool, arguments)
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    assert isinstance(result.data, dict), result
+    return result.data
 
 
 def section(data_dir: Path) -> dict[str, Any]:
@@ -186,7 +189,7 @@ async def test_recording_a_command_writes_it_and_declares_it_at_once(
         )
         declared = await client.call_tool(LIST_SOURCES, {})
 
-    assert "recorded as `gh`" in answer
+    assert (answer["name"], answer["enabled"], answer["state"]) == ("gh", True, "on")
     assert section(isolated_runtime)["gh"]["command"] == "gh"
     names = {row["name"] for row in declared.data["sources"][0]["rows"]}
     assert "cli:gh" in names, "declared without waiting for a restart"
@@ -199,8 +202,8 @@ async def test_a_command_that_is_not_installed_says_so(isolated_runtime: Path) -
     A model writing a command down from a documentation page has no way to know
     whether it is on this machine, and v1 only answers after the fact — `install`
     is shown when the command turns out to be missing.  The entry is still
-    written: it is a fact about what the operator wants recorded, and the note is
-    about the machine.
+    written: it is a fact about what the operator wants recorded, and the
+    `missing_program` field is a fact about the machine.
     """
     async with Client(build_server(config_for(isolated_runtime))) as client:
         nowhere = await ask(
@@ -211,11 +214,29 @@ async def test_a_command_that_is_not_installed_says_so(isolated_runtime: Path) -
             description="d",
         )
 
-    assert "not on PATH" in nowhere
-    assert "definitely-not-installed-anywhere-9f3a" in nowhere
+    assert nowhere["missing_program"] == "definitely-not-installed-anywhere-9f3a"
+    assert nowhere["state"] == "on", "recorded all the same"
     assert section(isolated_runtime)["not-a-real-program"]["command"] == (
         "definitely-not-installed-anywhere-9f3a"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_is_on_path_has_nothing_to_report(
+    isolated_runtime: Path,
+) -> None:
+    """The field is absent, not empty: a `missing_program: ""` is a field a
+    model learns to skip — `readiness`'s rule for a skill that declares nothing."""
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        answer = await ask(
+            client,
+            "cli_set",
+            name="interpreter",
+            command=sys.executable,
+            description="d",
+        )
+
+    assert "missing_program" not in answer
 
 
 @pytest.mark.asyncio
@@ -246,7 +267,7 @@ async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
         )
 
     assert asked == [r"C:\Program Files\tool\tool.exe"], "the whole program, quotes off"
-    assert r"C:\Program Files\tool\tool.exe" in answer
+    assert answer["missing_program"] == r"C:\Program Files\tool\tool.exe"
 
 
 def test_the_dead_config_parameter_has_not_come_back() -> None:
@@ -307,10 +328,10 @@ async def test_the_switch_takes_the_row_out_without_taking_the_entry(
         on = await ask(client, "cli_set_enabled", name="yt-dlp", enabled=True)
 
     rows_by_name = {row["name"]: row for row in declared.data["sources"][0]["rows"]}
-    assert "off" in off
+    assert off == {"name": "yt-dlp", "enabled": False, "state": "off"}
     assert written_off["enabled"] is False
     assert rows_by_name["cli:yt-dlp"]["status"] == "disabled"
-    assert "on" in on
+    assert on["state"] == "on" and on["enabled"] is True
     assert "enabled" not in section(isolated_runtime)["yt-dlp"], "on is the default"
 
 
@@ -331,7 +352,7 @@ async def test_forgetting_a_command_takes_the_row_and_leaves_the_program(
             await client.call_tool("cli_remove", {"name": "yt-dlp"})
 
     names = {row["name"] for row in declared.data["sources"][0]["rows"]}
-    assert "forgotten" in answer
+    assert answer == {"name": "yt-dlp", "removed": True}
     assert "yt-dlp" not in section(isolated_runtime)
     assert "cli:yt-dlp" not in names
     assert "is not recorded" in str(missing.value)
@@ -394,11 +415,35 @@ async def test_the_listing_shows_the_entry_and_its_switch(
     isolated_runtime: Path,
 ) -> None:
     """`on` / `off` and not `ready` / `failed`: those are words about a link, and
-    a command has none — there is nothing that could be unreachable."""
+    a command has none — there is nothing that could be unreachable.  The word
+    is a *field* now, and the one children's documents answer with too."""
     async with Client(build_server(config_for(isolated_runtime))) as client:
         listed = await ask(client, "cli_list")
 
-    assert "yt-dlp [on]" in listed
-    assert "iflow [off]" in listed
-    assert "install  uv pip install yt-dlp" in listed
-    assert "Download a video." in listed
+    rows = {row["name"]: row for row in listed["commands"]}
+    assert rows["yt-dlp"]["state"] == "on"
+    assert rows["yt-dlp"]["command"] == "yt-dlp"
+    assert rows["yt-dlp"]["install"] == "uv pip install yt-dlp"
+    assert rows["yt-dlp"]["description"] == "Download a video."
+    assert rows["iflow"]["state"] == "off"
+    assert (listed["total"], listed["limit"], listed["offset"]) == (2, 50, 0)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_section_is_an_empty_page(isolated_runtime: Path) -> None:
+    """**`total` says it, not a sentence about it.**
+
+    The listing used to answer "No commands are recorded under `cli:` yet.
+    `cli_set` records one." — a cross-reference to another tool carried in
+    prose.  An empty page and a `total` of zero say the same thing in the shape
+    every listing here answers with.
+    """
+    isolated_runtime.mkdir(parents=True, exist_ok=True)
+    (isolated_runtime / "slife2.yaml").write_text(
+        "providers: {}\ndefault: ''\n", encoding="utf-8"
+    )
+
+    async with Client(build_server(default_config())) as client:
+        listed = await ask(client, "cli_list")
+
+    assert listed == {"commands": [], "total": 0, "limit": 50, "offset": 0}

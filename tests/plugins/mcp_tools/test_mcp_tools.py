@@ -10,11 +10,13 @@ flipped on an object that says one thing and does another.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import Config, load, load_cached
 from slife2.libs.host.configfile import read_section
@@ -80,15 +82,16 @@ def family(isolated_runtime: Path, factory: Any = None) -> FastMCP:
     return build_server(load(), client_factory=factory or answering(upstream()))
 
 
-async def ask(client: Client, tool: str, **arguments: Any) -> str:
-    """What one of these tools said, as the model reads it.
+async def ask(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    """What one of these tools answered, as the model reads it.
 
-    The text blocks and not `result.data`: every one of these tools answers with
-    a sentence, and that is the surface under test — what a model is told, not
-    what a caller could parse out of it.
+    The structured payload and not the text blocks: every one of these tools
+    answers with a dict — JSON is what a model reads, and it is the surface
+    under test — so parsing the text block back would be testing the renderer.
     """
     result = await client.call_tool(tool, arguments)
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    assert isinstance(result.data, dict), result
+    return result.data
 
 
 def written(isolated_runtime: Path) -> str:
@@ -109,30 +112,60 @@ async def test_the_listing_shows_the_file_and_not_the_credential(
 ) -> None:
     """**`${VAR}` comes back as `${VAR}`, and this is why the listing reads the file.**
 
-    What this process *holds* is the resolved settings, so a listing built from
-    them would print the operator's live API key into the conversation and into
-    the turn log.  The file is also simply the better answer: it is what a person
-    reads and edits, and it is the thing these tools change.
+    What this process *holds* is the resolved settings, so a row built from them
+    would put the operator's live API key into the conversation and into the turn
+    log.  The file is also simply the better answer: it is what a person reads
+    and edits, and it is the thing these tools change.
     """
     monkeypatch.setenv("MCP_TEST_KEY", "sk-live-do-not-print-me")
 
     async with Client(family(isolated_runtime)) as client:
         listed = await ask(client, "mcp_list")
 
-    assert "existing" in listed
-    assert "${MCP_TEST_KEY}" in listed, "the reference, as written"
-    assert "sk-live-do-not-print-me" not in listed
+    (row,) = listed["servers"]
+    assert row["name"] == "existing"
+    assert row["env"] == {"SERPER_API_KEY": "${MCP_TEST_KEY}"}, (
+        "the reference, as written"
+    )
+    assert "sk-live-do-not-print-me" not in json.dumps(listed)
 
 
 @pytest.mark.asyncio
 async def test_the_listing_says_which_servers_are_working(isolated_runtime) -> None:
-    """The answer to "what do I have", and each entry's link in one word."""
+    """The answer to "what do I have": one row per entry, its link in one word.
+
+    **One page shape for four listings**, `mcp_list` among them: the rows under
+    the plural noun, and `total`/`limit`/`offset` beside them — `total` is the
+    whole count and not the page's, so a cap says what it left behind.
+    """
     async with Client(family(isolated_runtime)) as client:
         listed = await ask(client, "mcp_list")
 
-    assert "existing [ready]" in listed
-    assert "stdio in-memory" in listed
-    assert "Already configured." in listed
+    (row,) = listed["servers"]
+    assert row["state"] == "ready"
+    assert row["transport"] == "stdio"
+    assert row["command"] == "in-memory"
+    assert row["description"] == "Already configured."
+    assert (listed["total"], listed["limit"], listed["offset"]) == (1, 50, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_listing_pages_and_says_where_it_stopped(isolated_runtime) -> None:
+    """**`offset + len(rows) < total` is the whole of how a model pages.**
+
+    A cap that is applied without being announced reads as the whole section, so
+    the numbers answering it back are as much of the answer as the rows are.
+    """
+    write_config(isolated_runtime)
+    async with Client(family(isolated_runtime)) as client:
+        await ask(client, "mcp_set", name="second", command="in-memory")
+        first = await ask(client, "mcp_list", limit=1)
+        rest = await ask(client, "mcp_list", limit=1, offset=1)
+
+    assert first["total"] == 2 and len(first["servers"]) == 1
+    assert (first["limit"], first["offset"]) == (1, 0)
+    assert rest["offset"] == 1
+    assert first["servers"][0]["name"] != rest["servers"][0]["name"], "the page moved"
 
 
 # --- setting one --------------------------------------------------------------
@@ -153,11 +186,16 @@ async def test_setting_a_server_writes_it_and_connects_it(isolated_runtime) -> N
         listed = await ask(client, "mcp_list")
         tools = await ask(client, "mcp_list_tools", name="added")
 
-    assert "connected" in answer
-    assert "2 tool(s)" in answer, answer
+    assert answer["state"] == "ready", "the word the hub answers `servers` with"
+    assert answer["tools"] == 2, answer
     assert section(isolated_runtime)["added"]["command"] == "in-memory"
-    assert "added [ready]" in listed
-    assert "echo" in tools and "second" in tools
+    assert "added" in {row["name"] for row in listed["servers"]}
+    assert {row["name"] for row in listed["servers"] if row["state"] == "ready"} == {
+        "added",
+        "existing",
+    }
+    assert {one["name"] for one in tools["tools"]} == {"added__echo", "added__second"}
+    assert tools["total"] == 2
 
 
 @pytest.mark.asyncio
@@ -175,7 +213,7 @@ async def test_setting_it_again_does_not_rebuild_the_link(isolated_runtime) -> N
         await ask(client, "mcp_set", name="added", command="in-memory")
         again = await ask(client, "mcp_list_tools", name="added")
 
-    assert "2 tool(s)" in first and "2 tool(s)" in again
+    assert first["total"] == 2 and again["total"] == 2
     assert written(isolated_runtime).count("  added:") == 1, "one entry, not two"
 
 
@@ -205,8 +243,8 @@ async def test_setting_it_again_replaces_the_entry_rather_than_patching_it(
     assert entry["command"] == "in-memory"
     assert "url" not in entry, "the transport it used to be is gone"
     assert "description" not in entry, "and a field this call did not name"
-    assert "connected" in answer
-    assert "added [ready]" in listed
+    assert answer["state"] == "ready"
+    assert "added" in {row["name"] for row in listed["servers"]}
 
 
 @pytest.mark.asyncio
@@ -218,18 +256,26 @@ async def test_an_entry_the_config_refuses_is_refused_before_anything_is_written
     An entry naming no transport is one `slife2.libs.host.config` refuses at every start,
     so writing it would be an edit that reports success and takes the next start
     down; one naming *both* is the same shape, from the other side.
+
+    **Raised, and not returned as a sentence.**  A refusal answered as ordinary
+    text arrives with `ok` true and reads as an edit that happened — and nothing
+    was written, which is the one fact the caller has to be able to see.
     """
     write_config(isolated_runtime)
     before = written(isolated_runtime)
 
     async with Client(family(isolated_runtime)) as client:
-        neither = await ask(client, "mcp_set", name="nowhere", description="d")
-        both = await ask(
-            client, "mcp_set", name="nowhere", command="npx", url="https://x.test/mcp"
-        )
+        with pytest.raises(ToolError) as neither:
+            await client.call_tool("mcp_set", {"name": "nowhere", "description": "d"})
+        with pytest.raises(ToolError) as both:
+            await client.call_tool(
+                "mcp_set",
+                {"name": "nowhere", "command": "npx", "url": "https://x.test/mcp"},
+            )
 
-    assert neither.startswith("[refused]") and "needs `command`" in neither
-    assert both.startswith("[refused]") and "both `command` and `url`" in both
+    assert "needs `command`" in str(neither.value)
+    assert "both `command` and `url`" in str(both.value)
+    assert not str(neither.value).startswith("[refused]"), "the status is the call's"
     assert written(isolated_runtime) == before, "nothing was written"
 
 
@@ -243,9 +289,10 @@ async def test_a_name_the_hub_is_already_using_is_refused(isolated_runtime) -> N
     and the model would have no way to find that out.
     """
     async with Client(family(isolated_runtime)) as client:
-        answer = await ask(client, "mcp_set", name="agent", command="in-memory")
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool("mcp_set", {"name": "agent", "command": "in-memory"})
 
-    assert answer.startswith("[refused]") and "slife2 itself runs" in answer
+    assert "slife2 itself runs" in str(raised.value)
     assert "agent" not in section(isolated_runtime)
 
 
@@ -254,28 +301,36 @@ async def test_a_name_the_hub_is_already_using_is_refused(isolated_runtime) -> N
 
 @pytest.mark.asyncio
 async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) -> None:
+    """**`removed` and `stopped` are the two facts the removal carries.**
+
+    The entry leaves the file and the link stops, and a caller can tell which of
+    the two happened — the one thing a single sentence could not say when only
+    one of them had (see the entry-not-in-the-file case below).
+    """
     async with Client(family(isolated_runtime)) as client:
         await ask(client, "mcp_set", name="added", command="in-memory")
         answer = await ask(client, "mcp_remove", name="added")
         listed = await ask(client, "mcp_list")
-        gone = await ask(client, "mcp_list_tools", name="added")
+        with pytest.raises(ToolError) as gone:
+            await client.call_tool("mcp_list_tools", {"name": "added"})
 
-    assert "gone from `mcp:`" in answer
+    assert answer == {"name": "added", "removed": True, "stopped": True}
     assert "added" not in section(isolated_runtime)
-    assert "added" not in listed
-    assert "not a server this process holds" in gone
+    assert "added" not in {row["name"] for row in listed["servers"]}
+    assert "not a server this process holds" in str(gone.value)
 
 
 @pytest.mark.asyncio
 async def test_removing_something_that_is_not_there_says_so(isolated_runtime) -> None:
-    """Nothing is uninstalled and nothing is written; the answer is the truth."""
+    """Nothing is uninstalled and nothing is written, so the call is a failure."""
     write_config(isolated_runtime)
     before = written(isolated_runtime)
 
     async with Client(family(isolated_runtime)) as client:
-        answer = await ask(client, "mcp_remove", name="never-existed")
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool("mcp_remove", {"name": "never-existed"})
 
-    assert "not a server under `mcp:`" in answer
+    assert "not a server under `mcp:`" in str(raised.value)
     assert written(isolated_runtime) == before
 
 
@@ -285,7 +340,7 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
 ) -> None:
     """Off is a decision, not a deletion — the file's own vocabulary.
 
-    The entry stays, the link goes, and the listing says `off` rather than
+    The entry stays, the link goes, and every answer says `off` rather than
     `failed`: a server nobody asked to connect has not failed at anything.
 
     **And `mcp_list_tools` says the same thing**, which is what the assertions
@@ -293,7 +348,8 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
     either, and the tool's fallback read those two as "it is not answering yet"
     — one entry with three accounts: `[off]` in the listing, `off` in its own
     state, and a sentence telling the model to wait for a connection
-    `enabled: false` promises will never be opened.
+    `enabled: false` promises will never be opened.  There is one word for it
+    now, and it is the listing's own: `state`.
     """
     async with Client(family(isolated_runtime)) as client:
         off = await ask(client, "mcp_set_enabled", name="existing", enabled=False)
@@ -305,14 +361,14 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
         on = await ask(client, "mcp_set_enabled", name="existing", enabled=True)
         back = await ask(client, "mcp_list")
 
-    assert "switched off" in off
+    assert off["state"] == "off" and off["enabled"] is False
     assert written_off["enabled"] is False
-    assert "existing [off]" in listed
-    assert "no tool list to show" in tools
-    assert "switched off" in tools, "the word the listing and its state both use"
-    assert "not answering yet" not in tools, "there is no link to be waiting for"
-    assert "connected" in on
-    assert "existing [ready]" in back
+    assert [row["state"] for row in listed["servers"]] == ["off"]
+    assert tools["state"] == "off", "the word the listing's own row carries"
+    assert tools["tools"] == [] and tools["total"] == 0
+    assert "error" not in tools, "there is no link to be waiting for"
+    assert on["state"] == "ready" and on["tools"] == 2
+    assert [row["state"] for row in back["servers"]] == ["ready"]
     assert "enabled" not in section(isolated_runtime)["existing"], "on is the default"
 
 
@@ -323,8 +379,9 @@ async def test_the_cap_says_how_much_is_behind_it(isolated_runtime) -> None:
     async with Client(family(isolated_runtime)) as client:
         tools = await ask(client, "mcp_list_tools", name="existing", limit=1)
 
-    assert "2 tool(s), showing 1" in tools
-    assert "1 more" in tools
+    assert tools["total"] == 2, "the whole count, not the page's"
+    assert tools["limit"] == 1 and tools["offset"] == 0
+    assert len(tools["tools"]) == 1
 
 
 # --- and it reaches the model -------------------------------------------------

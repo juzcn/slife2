@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness import handover, markers
@@ -248,12 +249,18 @@ async def until(
     raise AssertionError("the background loop did not get there in time")
 
 
-async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) -> str:
-    """One tool call, on behalf of a conversation, as the model reads it."""
+async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) -> Any:
+    """One tool call, on behalf of a conversation, as the model reads it.
+
+    `result.data` is the object FastMCP parsed out of the tool's JSON — the
+    answer itself, so an assertion built on it is about a fact rather than about
+    the sentence that used to carry that fact.  A refusal raises `ToolError`,
+    which is what the tests about refusals assert.
+    """
     result = await client.call_tool(
         tool, arguments, meta=client_meta(agent) if agent else None
     )
-    return "".join(getattr(block, "text", "") for block in result.content or [])
+    return result.data
 
 
 # --- the surface the model is given -------------------------------------------
@@ -292,15 +299,17 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 
     v1 knew without being told: its plugin was one agent's, so the agent *was*
     the process.  Here the login is the agent's and the caller is the only party
-    that says which — so a call with no client id is answered with why rather
-    than with somebody else's WeChat.
+    that says which — so a call with no client id is *refused* rather than
+    answered about somebody else's WeChat, and the refusal is a `ToolError`
+    rather than a sentence a transcript would read as a success.
     """
     async with Client(served()) as client:
-        anonymous = await ask(client, "wechat_check_status", agent="")
+        with pytest.raises(ToolError, match="did not say which conversation"):
+            await ask(client, "wechat_check_status", agent="")
         named = await ask(client, "wechat_check_status", agent="jack")
 
-    assert "did not say which conversation" in anonymous
-    assert "not connected" in named
+    assert named["connected"] is False, "and no login was ever scanned"
+    assert named["peer_wechat_id"] == ""
 
 
 # --- logging in ---------------------------------------------------------------
@@ -331,14 +340,18 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
         after = await ask(client, "wechat_check_status")
 
     saved = load_session("jack")
-    assert "Show this in your reply" in shown
+    # The code to show, and the URL it encodes: the two things a reply needs.
+    assert shown["state"] == "waiting"
+    assert shown["qr"] and "█" in shown["qr"], "a drawn code, not a link"
+    assert shown["qr_url"] == "https://example.test/scan"
+    assert shown["seconds_left"] == int(_T.timeouts.ready.qr_deadline)
     assert saved["bot_token"] == "bot-token-9"
     assert saved["ilink_user_id"] == "bot-user-9"
-    assert "connected" in after
+    assert after["connected"] is True
     # The account that scanned is a peer a message can reach, and it is said as
     # that rather than as somebody who has written — nobody has yet.
-    assert "Nobody has written yet" in after
-    assert "bot-user-9" in after
+    assert after["heard_from"] is False
+    assert after["peer_wechat_id"] == "bot-user-9"
     # **And the window is told, because this is a link coming up while somebody
     # is watching** — the one arrival that is news, as against a saved login
     # picked up at start-up (`test_a_login_resumed_at_start_up_says_nothing`).
@@ -367,16 +380,16 @@ async def test_a_watch_that_cannot_poll_ends_the_login_rather_than_waiting(
         # The watch fails on its first poll, and the wait is this loop rather
         # than `until` because what is being waited for is the *tool's* answer
         # and `until` takes a predicate that cannot await one.
-        after = ""
+        after: dict[str, Any] = {}
         for _ in range(400):
             after = await ask(client, "wechat_check_status")
-            if "did not work" in after:
+            if after["qr_state"] == "error":
                 break
             await asyncio.sleep(0.005)
 
-    assert "The login did not work" in after
-    assert "could not be followed" in after
-    assert "waiting to be scanned" not in after
+    assert after["qr_state"] == "error", "a dead watch is a state, not a wait"
+    assert after["connected"] is False
+    assert "could not be followed" in after["error"], "and the reason is in it"
 
 
 @pytest.mark.asyncio
@@ -397,7 +410,8 @@ async def test_a_login_that_exists_is_not_asked_to_scan_again(
     ) as client:
         answer = await ask(client, "wechat_login")
 
-    assert "already connected" in answer
+    assert answer["state"] == "connected"
+    assert answer["qr"] == "", "and no code: there is nothing to scan"
     assert made.bridge.paths.count("ilink/bot/get_bot_qrcode") == 0
 
 
@@ -438,9 +452,11 @@ async def test_a_login_without_the_qr_renderer_tells_the_truth(
     ) as client:
         answer = await ask(client, "wechat_login")
 
-    assert "so it can be scanned" not in answer, "a link is not scannable"
-    assert "`qrcode` package is missing" in answer
-    assert "https://example.test/scan" in answer, "the link is still handed over"
+    # **An empty `qr` is the fact**: nothing scannable was drawn, and the URL
+    # rides beside it as what to send instead rather than as a code.
+    assert answer["state"] == "waiting"
+    assert answer["qr"] == "", "a link is not a code"
+    assert answer["qr_url"] == "https://example.test/scan", "the link is handed over"
 
 
 # --- messages become turns ----------------------------------------------------
@@ -722,8 +738,8 @@ async def test_an_aged_login_is_never_offered_to_the_server(
         await made.close()
 
     assert made.bridge.polls() == 0, "an aged token is not offered"
-    assert "older than one lasts" in answer
-    assert "wechat_login" in answer
+    assert answer["connected"] is False
+    assert "older than one lasts" in answer["error"], "and why is the note's"
 
 
 @pytest.mark.asyncio
@@ -750,7 +766,8 @@ async def test_a_rejected_login_is_forgotten_rather_than_retried(
     finally:
         await made.close()
 
-    assert "rejected" in answer
+    assert answer["connected"] is False
+    assert "rejected" in answer["error"]
     assert not session_path("jack").exists(), "a dead token is not kept"
 
 
@@ -775,7 +792,9 @@ async def test_a_reply_carries_the_peer_and_the_conversation(
             context_token="ctx-1",
         )
 
-    assert answer == "Sent to peer-1."
+    assert answer["sent"] is True
+    assert answer["peer_wechat_id"] == "peer-1"
+    assert answer["context_token"] == "ctx-1"
     sent = made.bridge.sent[0]["msg"]
     assert (sent["to_user_id"], sent["context_token"]) == ("peer-1", "ctx-1")
     assert sent["item_list"][0]["text_item"]["text"] == "在的"
@@ -803,8 +822,8 @@ async def test_a_rejected_send_is_not_reported_as_sent(
     did not — and the model has no way to find out.  Both spellings of that
     envelope are here because the retired one is the harder half: the message a
     *retired* login sends is not refused loudly by the bridge, it is dropped, and
-    "Sent to peer-1." over a dropped message is the most expensive lie this
-    plugin can tell.
+    a `sent` field over a dropped message is the most expensive lie this plugin
+    can tell — so the refusal is raised, and there is no answer to read as one.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -813,14 +832,12 @@ async def test_a_rejected_send_is_not_reported_as_sent(
     async with Client(
         served(http=made.bridge, deliver=made.delivery, note=made.notes)
     ) as client:
-        answer = await ask(
-            client, "wechat_send_message", peer_wechat_id="peer-1", text="hi"
-        )
+        with pytest.raises(ToolError, match="rejected the send"):
+            await ask(client, "wechat_send_message", peer_wechat_id="peer-1", text="hi")
         after = await ask(client, "wechat_check_status")
 
-    assert "rejected" in answer
-    assert "Sent to" not in answer
-    assert "rejected" in after
+    assert after["connected"] is False
+    assert "rejected" in after["error"]
     assert not session_path("jack").exists()
 
 
@@ -832,9 +849,9 @@ async def test_nothing_is_sent_to_nobody(monkeypatch: pytest.MonkeyPatch) -> Non
     async with Client(
         served(http=made.bridge, deliver=made.delivery, note=made.notes)
     ) as client:
-        answer = await ask(client, "wechat_send_message", peer_wechat_id="", text="")
+        with pytest.raises(ToolError, match="neither may be empty"):
+            await ask(client, "wechat_send_message", peer_wechat_id="", text="")
 
-    assert "neither may be empty" in answer
     assert made.bridge.sent == []
 
 
@@ -951,7 +968,9 @@ async def test_logging_out_forgets_the_login_and_the_scan(
     finally:
         await made.close()
 
-    assert "Logged out" in answer
+    assert answer["logged_out"] is True
+    assert answer["login_removed"] is True
+    assert answer["login_file"] == str(session_path("jack"))
     assert session.qr_state == ""
     assert forgotten == {}, "the file goes with the login"
     assert not session_path("jack").exists()
@@ -987,9 +1006,9 @@ async def test_a_login_that_could_not_be_removed_is_not_reported_as_gone(
         await made.close()
 
     assert session_path("jack").exists(), "the file this test is about"
-    assert "could not be removed" in answer
-    assert "saved login is gone" not in answer, "a file still there is not gone"
-    assert str(session_path("jack")) in answer, "the answer names what to remove"
+    assert answer["logged_out"] is True, "the link did go down"
+    assert answer["login_removed"] is False, "a file still there is not gone"
+    assert answer["login_file"] == str(session_path("jack")), "and it is named"
 
 
 # --- the link, as a line in the window ----------------------------------------
@@ -1076,7 +1095,8 @@ async def test_a_login_that_did_not_come_back_says_nothing(
         await made.close()
 
     assert made.notes.lines == []
-    assert "could not be confirmed" in answer
+    assert answer["connected"] is False
+    assert "could not be confirmed" in answer["error"]
 
 
 @pytest.mark.asyncio
@@ -1158,7 +1178,8 @@ async def test_a_second_login_of_the_same_account_retires_the_first(
     assert made.notes.lines == [("jack", "✗ Wechat offline")]
     # And the reason is the bridge's own words, so the model can say which of
     # the two things happened rather than sending somebody to scan blindly.
-    assert "session timeout" in answer
+    assert answer["connected"] is False
+    assert "session timeout" in answer["error"]
     assert not session_path("jack").exists(), "a retired token is not kept"
 
 
@@ -1278,9 +1299,11 @@ async def test_a_damaged_login_file_is_named_rather_than_read_as_no_login(
     ) as client:
         answer = await ask(client, "wechat_check_status")
 
-    assert "no login is saved" not in answer, "the file is there, and it is damaged"
-    assert "could not be read" in answer
-    assert "wechat.yaml" in answer, "the file at fault is not named"
+    assert answer["connected"] is False
+    # `error` is the note, and an empty one is "nothing was ever saved" — so a
+    # damaged file has to fill it or the two read alike.
+    assert "could not be read" in answer["error"]
+    assert "wechat.yaml" in answer["error"], "the file at fault is named"
 
 
 @pytest.mark.asyncio
@@ -1315,7 +1338,8 @@ async def test_a_bridge_that_is_unreachable_at_boot_is_retried(
     finally:
         await made.close()
 
-    assert "connected" in answer
+    assert answer["connected"] is True
+    assert answer["polling"] is True, "and the loop it started is watching"
 
 
 @pytest.mark.asyncio

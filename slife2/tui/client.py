@@ -30,7 +30,6 @@ from slife2.libs.host.config import (
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
-from slife2.libs.plugin.audience import REFUSAL, refused
 from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.plugins.a2a.server import JOIN
@@ -38,25 +37,14 @@ from slife2.plugins.tui.server import ATTACH, Handover
 from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
-__all__ = ["REFUSAL", "refused"]
-
-
-#: Both names come from `slife2.libs.plugin.audience` and are re-exported, not
-#: defined here.  **The word is the plugins'**, and this module is one of its two
-#: readers: it used to be spelled here — in a *client* of the agent server, in the
-#: package that draws the terminal — so a protocol word was defined by the layer
-#: that parses it.  `slife2.tui.app` and `slife2.libs.harness.handover` import it
-#: from this module as they always have, which is why the re-export is explicit
-#: rather than left to an import nobody can see the reason for.
-
 
 def _unreadable(what: str, answer: Any) -> ConnectionError:
     """The loud failure a tool's answer that is not its shape raises, worded once.
 
     Three answers here are contracts rather than data — a turn's `text`, the
-    transcript's `turns`, and the sentence `model_switch` replies with — and each
-    has an obvious empty that reads as a legitimate one: an answer with no words,
-    a conversation that never ran, a switch that worked.  So each quotes the
+    transcript's `turns`, and the switch `model_switch` reports — and each has an
+    obvious empty that reads as a legitimate one: an answer with no words, a
+    conversation that never ran, a switch that worked.  So each quotes the
     payload rather than summarising it, because a shape this build cannot read is
     the only evidence there is that the far end is a different build (DESIGN.md
     §10.1: a value that cannot be read is not a value that is absent).
@@ -71,10 +59,9 @@ def answer_of(result: Any) -> str:
     `data` — so that is the first shape read, and the content-block half is the
     fallback for a server that answered the older way.
 
-    **A reply that is neither is refused, not answered as empty.**  The refusal
-    this client acts on (`refused`) is a *prefix*, so an unreadable answer read
-    as `""` is read as a successful switch: the client adopts the ref and the bar
-    describes a model that is not the one answering.  An unknown shape raises
+    **A reply that is neither is refused, not answered as empty.**  Text read as
+    `""` is a turn with nothing in it, and a caller that treated that as an answer
+    would draw nothing where the server said something.  An unknown shape raises
     naming what came back (DESIGN.md §10.1: a failure is not a verdict).
     """
     data = getattr(result, "data", None)
@@ -110,15 +97,16 @@ class AgentClient(Protocol):
 
     async def close(self) -> None: ...
 
-    async def switch_model(self, ref: str) -> str:
-        """Make `provider/model` what this machine runs on, and say what happened.
+    async def switch_model(self, ref: str) -> dict[str, Any]:
+        """Make `provider/model` what this machine runs on, and say what changed.
 
-        **The answer is the agent server's own sentence**, because it is the
-        only place that says what a switch does to a conversation already
-        running — and a client that paraphrased it would be a second story about
-        the same fact.  A refusal arrives as an answer too (`refused`), not as
-        an exception: the server answered, the connection is fine, and the
-        sentence is written for a person to read.
+        **The facts are the agent server's**, because it is the only place that
+        says what a switch does to a conversation already running: `default`,
+        `previous`, and how many conversations moved.  What the *window* draws
+        with them is the window's (`slife2.tui.i18n`), like every other line it
+        shows.  A refusal arrives as a `ToolError` — the server answered, the
+        connection is fine, and its sentence is written for a person to read —
+        which is what this used to infer from a `[refused]` prefix in the text.
 
         **It needs the agent server and not the model**, which is the whole
         reason the key exists: switching away from a model that is down is the
@@ -317,14 +305,18 @@ class MCPAgentClient:
             await self.close()
             raise
 
-    async def switch_model(self, ref: str) -> str:
+    async def switch_model(self, ref: str) -> dict[str, Any]:
         result = await self._call_tool("model_switch", {"ref": ref})
-        answer = answer_of(result)
-        # Adopted only when the server said it happened.  A refused switch wrote
-        # nothing, so carrying the reference here would pin the next conversation
-        # to a model this client was just told does not exist.
-        if not refused(answer):
-            self._model = ref
+        answer = getattr(result, "data", None)
+        # **The answer *is* the adoption.**  A refused switch raises out of
+        # `_call_tool` (`ToolError`, re-raised untouched), so reaching this line
+        # means the server switched and the reference is the one to carry —
+        # which is what the `[refused]` prefix test used to be, read off a
+        # sentence.  A shape this build cannot read raises rather than adopting:
+        # `_unreadable` has the argument (DESIGN.md §10.1).
+        if not isinstance(answer, dict) or "default" not in answer:
+            raise _unreadable("answer with the switch it made", result)
+        self._model = ref
         return answer
 
     async def transcript(self) -> list[dict[str, Any]]:

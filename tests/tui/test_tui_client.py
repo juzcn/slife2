@@ -59,10 +59,12 @@ class FakeTransport:
         # recorded call.
         self.sent.append((name, copy.deepcopy(arguments)))
         if name == "model_switch":
-            # A string rather than a mapping, which is what the tool returns
-            # and what FastMCP hands back wrapped in `data` — the shape the
-            # client reads first.
-            return SimpleNamespace(data=f"`default:` is now `{arguments['ref']}`.")
+            # The facts the tool returns, which FastMCP hands back wrapped in
+            # `data` — the shape the client reads, and the shape it refuses when
+            # it cannot (`switch_model`).
+            return SimpleNamespace(
+                data={"default": arguments["ref"], "previous": "local/big", "moved": 0}
+            )
         return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
 
 
@@ -171,19 +173,21 @@ async def test_switching_names_the_model_and_adopts_it(monkeypatch) -> None:
     answer = await client.switch_model("local/small")
 
     assert sent(transport, "model_switch") == [{"ref": "local/small"}]
-    assert "local/small" in answer, "the server's own sentence, not a paraphrase"
+    assert answer["default"] == "local/small", "the server's own facts"
     await client.run_turn("hi", lambda event: None)
     assert sent(transport, "send_message")[-1]["model"] == "local/small"
 
 
 @pytest.mark.asyncio
 async def test_a_refused_switch_is_not_adopted(monkeypatch) -> None:
-    """A refusal is an answer rather than an error — and it is not a switch.
+    """**The absence of a failure is the adoption**, where a prefix used to be.
 
-    `model_switch` says no in a sentence the model reads like any other answer,
-    so nothing raises and the caller has to read it.  Carrying the reference
-    anyway would pin the *next* conversation to a model this client has just
-    been told does not exist.
+    `model_switch` refuses by raising (`ToolError`), which `_call_tool`
+    re-raises untouched because the server answered and the connection is fine.
+    So the reference is carried when the call returns at all — reading it off a
+    `[refused]` prefix in the text is what this replaced — and carrying it
+    anyway on a refusal would pin the *next* conversation to a model this client
+    has just been told does not exist.
     """
     transport = FakeTransport()
     install(monkeypatch, transport)
@@ -192,14 +196,14 @@ async def test_a_refused_switch_is_not_adopted(monkeypatch) -> None:
 
     async def refuse(name, arguments, **kwargs):
         if name == "model_switch":
-            return SimpleNamespace(data="[refused] `local/nope` is not a model.")
+            raise ToolError("`local/nope` is not a model this config defines.")
         return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
 
     monkeypatch.setattr(transport, "call_tool", refuse)
 
-    answer = await client.switch_model("local/nope")
+    with pytest.raises(ToolError):
+        await client.switch_model("local/nope")
 
-    assert answer.startswith("[refused]")
     await client.run_turn("hi", lambda event: None)
     assert sent(transport, "send_message")[-1]["model"] == "local/big"
 

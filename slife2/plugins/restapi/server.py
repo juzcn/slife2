@@ -75,22 +75,21 @@ INSTRUCTIONS = (
     "connections, and the tools themselves reach the model through the hub."
 )
 
-#: What this family calls things, for the sentences `slife2.libs.plugin.family` writes
-#: once for both connection families.  An API is *served* where a server is
-#: *connected*, and it exposes *operations* where one of ours exposes tools —
-#: the same mechanism under the two names a person already uses for them.
+#: What this family calls things, for the payloads `slife2.libs.plugin.family` builds
+#: once for both connection families.  An API exposes *operations* where a
+#: server exposes tools, and its listing's rows sit under `apis` — the same
+#: mechanism under the two names a person already uses for them.  **The state is
+#: not one of these**: `ready` and `failed` are `state_word`'s, because the hub
+#: answers that question in the same words for every kind of source.
 WORDS = FamilyWords(
     section=SECTION,
-    plural="REST APIs",
+    collection="apis",
     entry="an API",
     unit="operation",
     list_tool="rest_api_list",
     set_tool="rest_api_set",
     enable_tool="rest_api_set_enabled",
     remove_log="rest_api_removed",
-    present="serving",
-    past="served",
-    starting="starting",
 )
 
 
@@ -134,8 +133,8 @@ def _validate_http_url(url: str, what: str) -> str:
 
 def _prepare(
     config: Config, name: str, spec: str, base_url: str, api_key: str, **rest: Any
-) -> tuple[ToolServerSettings | None, str]:
-    """Validate a `rest-api:` entry and write it, or say why not."""
+) -> ToolServerSettings:
+    """Validate a `rest-api:` entry and write it, or raise why it cannot be."""
 
     def build() -> tuple[ToolServerSettings, dict[str, Any]]:
         # The two URL checks run here, inside the shared helper's `try`: a
@@ -152,14 +151,21 @@ def _prepare(
 
 
 def _unresolved(api_key: str) -> str:
-    """A sentence about a credential that is not there yet, or `""`.
+    """The credential that is not there yet, or `""`.
 
     **Said at the moment it is written, and not saved for the call that fails**:
     a `${VAR}` nothing resolves to is not an error — the config keeps the
     reference and the failure surfaces where the value is used (`slife2.libs.host.config`
     says so) — but for an *API key* the place it surfaces is a 401 from somebody
-    else's server, one turn later, naming nothing.  One line here is the
-    difference between that and knowing now.
+    else's server, one turn later, naming nothing.  A field here is the
+    difference between that and knowing now, and the model that reads it knows
+    what to do: the value is a reference, so it needs storing.
+
+    **A *name*, and never the sentence that used to carry it.**  What a caller
+    acts on is which reference did not resolve, and the answer's `unresolved`
+    field is exactly that string.  The old sentence spelled the fix out —
+    `credstore set <name>` — which put the remedy in prose in a payload that is
+    otherwise fields.
 
     **And "is this still a reference" is not answered here.**
     `slife2.libs.host.config.unresolved_reference` is where that question is answered, and
@@ -169,62 +175,64 @@ def _unresolved(api_key: str) -> str:
     no `credstore` (the degrade `resolve_secret` names) a
     `keyring:slife2/github` did not resolve, was left verbatim, was written into
     the proxy child's `API_KEY` as the credential, and the person was told
-    nothing while the sibling `${VAR}` case printed the note — two halves of one
-    rule disagreeing.
+    nothing while the sibling `${VAR}` case returned the name — two halves of
+    one rule disagreeing.
     """
     if not api_key:
         return ""
     reference = _reference(api_key)
     if not unresolved_reference(resolve_secret(reference)):
         return ""
-    if reference.startswith("keyring:"):
-        # **Not `reference[2:-1]`**, which is the `${…}` wrapper's arithmetic:
-        # it would tell a person to store `eyring:slife2/gith`.  A keyring URI's
-        # own tail is the name, and `credstore set` takes it verbatim.
-        how = f"`credstore set {reference[len('keyring:') :]}`"
-    else:
-        how = f"`credstore set {reference[2:-1]}` (or export it)"
-    return (
-        f"\nNote: {reference} does not resolve to anything yet — set it with "
-        f"{how} before this API is called."
-    )
+    return reference
 
 
-def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> str:
-    """One line of `rest_api_list` — the spec, and whether it is serving.
+def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+    """One row of `rest_api_list` — the spec, and whether it is answering.
 
     The spec and the base URL are what this family *is*, and they are not what
     the entry becomes: the config layer has already turned them into a proxy
-    command by the time a `ToolServerSettings` exists, so a listing built from
-    the held settings would print `uvx mcp-openapi-proxy` and lose the only
-    thing a reader wanted.
+    command by the time a `ToolServerSettings` exists, so a row built from the
+    held settings would say `uvx mcp-openapi-proxy` and lose the only thing a
+    reader wanted.  The command is carried only when the file has no spec, which
+    is the one case a reader has nothing else to go on.
     """
-    state = state_word(raw, one)
-    lines = [f"- {name} [{state}]"]
+    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
     if spec := raw.get("spec"):
-        lines.append(f"    spec     {spec}")
+        row["spec"] = str(spec)
     else:
-        lines.append(f"    command  {raw.get('command', '(none)')}")
+        row["command"] = str(raw.get("command") or "")
     if base_url := raw.get("base_url"):
-        lines.append(f"    base_url {base_url}")
+        row["base_url"] = str(base_url)
     if api_key := raw.get("api_key"):
-        lines.append(f"    auth     {api_key}")
+        row["api_key"] = str(api_key)
     if description := str(raw.get("description") or ""):
-        lines.append(f"    {description}")
-    return "\n".join(lines)
+        row["description"] = description
+    return row
 
 
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     """Serve the `rest_api_*` tools on this family's server."""
 
     @mcp.tool(name="rest_api_list", meta=FOR_THE_MODEL)
-    async def rest_api_list() -> str:
+    async def rest_api_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the REST APIs configured under `rest-api:`, with their state.
 
         Each entry as the file writes it — the spec, the base URL, the
-        credential — and whether it is serving.
+        credential — and whether it is answering.
+
+        Args:
+            limit: How many entries this page may hold. Omit for the cap.
+            offset: How many entries to skip — that is how you page.
+
+        Returns:
+            `apis` — one row per entry, each with `name`, `state` (`ready`,
+            `connecting`, `failed`, `idle` or `off`) and whatever the file has
+            of it — and `total`, `limit` and `offset`, so
+            `offset + len(apis) < total` says whether more remain.
         """
-        return await list_entries(homes.current(), words=WORDS, describe=_describe)
+        return await list_entries(
+            homes.current(), limit, offset, words=WORDS, describe=_describe
+        )
 
     @mcp.tool(name="rest_api_set", meta=FOR_THE_MODEL)
     async def rest_api_set(
@@ -235,15 +243,16 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         description: str = "",
         enabled: bool = True,
         autoload: bool = False,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Add or update a REST API under `rest-api:` (upsert).
 
-        Every endpoint in the OpenAPI document becomes a tool named
-        `{name}__{operation}`, so one spec can be hundreds of tools. This is the
+        Every endpoint in the OpenAPI document becomes an operation named
+        `{name}__{operation}`, so one spec can be hundreds of them. This is the
         whole entry: a field left out is dropped, so restate everything.
 
         Args:
-            name: The API's name; its tools reach you as `{name}__{operation}`.
+            name: The API's name — the key it is written under, and the prefix
+                every operation of it reaches you as (`{name}__{operation}`).
             spec: The OpenAPI document's URL (JSON or YAML). It is fetched here,
                 so it has to be http(s) and reachable.
             base_url: Where the API actually is, overriding whatever server the
@@ -254,8 +263,15 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled: Serve it now. False writes the entry switched off.
             autoload: Every operation starts in your tool list and is never
                 evicted. Check how many there are first.
+
+        Returns:
+            The payload `mcp_set` answers with over this family's words:
+            `name`, `enabled`, `state` (`ready`, `connecting`, `failed`, `idle`
+            or `off`), `operations` when it answered, `large` when that count is
+            past a page's worth, `error` when it has not — and `unresolved`, the
+            credential reference that resolves to nothing yet, when there is one.
         """
-        settings, why = _prepare(
+        settings = _prepare(
             load(),
             name,
             spec,
@@ -265,49 +281,66 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled=enabled,
             autoload=autoload or None,
         )
-        if settings is None:
-            return why
-        return await apply_and_report(
-            homes.current(), settings, words=WORDS
-        ) + _unresolved(api_key)
+        answer = await apply_and_report(homes.current(), settings, words=WORDS)
+        if unresolved := _unresolved(api_key):
+            answer["unresolved"] = unresolved
+        return answer
 
     @mcp.tool(name="rest_api_remove", meta=FOR_THE_MODEL)
-    async def rest_api_remove(name: str) -> str:
+    async def rest_api_remove(name: str) -> dict[str, Any]:
         """Stop a REST API and delete its entry from `rest-api:`.
 
-        Its operations leave the catalogue at the next search.
+        Its operations leave the catalogue at the next search. A name that is
+        not in `rest-api:` is refused, so a success means the entry is gone.
 
         Args:
-            name: The API to remove, from `rest_api_list`.
+            name: The API to remove — the key it is written under.
+
+        Returns:
+            `removed`, whether the entry was in the file, and `stopped`, whether
+            this process was holding a link to it.
         """
         return await remove_entry(homes.current(), name, words=WORDS, logger=logger)
 
     @mcp.tool(name="rest_api_set_enabled", meta=FOR_THE_MODEL)
-    async def rest_api_set_enabled(name: str, enabled: bool) -> str:
+    async def rest_api_set_enabled(name: str, enabled: bool) -> dict[str, Any]:
         """Switch a REST API on or off, keeping its entry in `rest-api:`.
 
-        A spec generates a tool per endpoint, so one served API can outweigh
-        every other tool in the catalogue; off keeps it written down.
+        A spec generates an operation per endpoint, so one served API can
+        outweigh every other tool in the catalogue; off keeps it written down.
 
         Args:
-            name: The API, from `rest_api_list`.
+            name: The API — the key it is written under.
             enabled: True serves it; False stops it and keeps the entry.
+
+        Returns:
+            The same payload `rest_api_set` answers with, and no `unresolved`:
+            writing the entry is what put the credential there, and this call
+            changed only the switch.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
 
     @mcp.tool(name="rest_api_list_tools", meta=FOR_THE_MODEL)
-    async def rest_api_list_tools(name: str, limit: int = 0) -> str:
+    async def rest_api_list_tools(
+        name: str, limit: int = 0, offset: int = 0
+    ) -> dict[str, Any]:
         """List the operations one REST API exposes.
 
-        These are the names behind `{name}__…` in your tool list, one per
-        endpoint in the spec. The answer is capped; `tool_search` finds the one
-        you want by what it does.
+        These are the names to call them by, each `{name}__{operation}`, one per
+        endpoint in the spec.
 
         Args:
-            name: The API, from `rest_api_list`.
-            limit: How many to show. Omit for the cap.
+            name: The API — the key it is written under.
+            limit: How many operations this page may hold. Omit for the cap.
+            offset: How many operations to skip — that is how you page.
+
+        Returns:
+            `name`, `state` (`ready`, `connecting`, `failed`, `idle` or `off`),
+            `operations` — `name` and `description` per operation — `total`,
+            `limit` and `offset`, and `error` when the link has one. An empty
+            `operations` with a `state` other than `ready` is why it is empty.
         """
-        return await list_entry_tools(homes.current(), name, limit, words=WORDS)
+        return await list_entry_tools(homes.current(), name, limit, offset, words=WORDS)
 
 
 def build_server(

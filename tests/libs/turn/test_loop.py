@@ -575,11 +575,12 @@ async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
     A background call the loop started keeps its result whenever the hand-back
     did not provably land (`Task.delivered`/`result`), and `cancel_async` reaches
     that very state whenever it is called *after* the work is over.  Answering
-    only "nothing to cancel" and popping the task would throw that result away —
-    the one copy of an answer nobody can ask for a second time — which is
-    `DESIGN.md` §8.8's "the alternative to returning it is losing it", and losing
-    it in silence is the worse of the two.  So the reply carries it, exactly as
-    `check_async` would have.
+    the state alone and popping the task would throw that result away — the one
+    copy of an answer nobody can ask for a second time — which is `DESIGN.md`
+    §8.8's "the alternative to returning it is losing it", and losing it in
+    silence is the worse of the two.  So the answer carries it, exactly as
+    `check_async` would have: `status` says the call was already over (and so
+    that *this* call cancelled nothing), and `result` is the answer itself.
     """
     finished = asyncio.Event()
 
@@ -608,5 +609,7 @@ async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
 
     reply = await cancel_async({"task_id": task_id})
 
-    assert "nothing to cancel" in reply
-    assert "three tries" in reply, "the undelivered result was dropped"
+    assert reply["status"] == async_tasks.FINISHED, "already over: cancelled nothing"
+    assert reply["result"] == "the retry policy is three tries", (
+        "the undelivered result was dropped"
+    )

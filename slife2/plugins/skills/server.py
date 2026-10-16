@@ -34,17 +34,31 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host import configfile
-from slife2.plugins.skills import playbooks as skills
+from slife2.libs.host.config import (
+    SKILLS_SERVER_NAME,
+    Config,
+    SkillSettings,
+    load_cached,
+)
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.host.config import Config, SKILLS_SERVER_NAME, SkillSettings, load_cached
+from slife2.libs.plugin.family import (
+    LIST_PAGE,
+    Documents,
+    Homes,
+    build_document_server,
+    listed,
+    page_of,
+)
 from slife2.libs.plugin.protocol import SKILLS_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
-from slife2.libs.plugin.family import Documents, Homes, build_document_server
+from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.plugins.skills import playbooks as skills
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +170,55 @@ DESCRIPTION = (
     "data directory's `skills/`."
 )
 
+#: What a playbook's page leaves room for inside the token budget: the answer's
+#: own keys and numbers, and the escaping a document pays for once it is a JSON
+#: string — every newline in it becomes two characters on the wire.
+#:
+#: **A reserve and not a measurement**, and that is the honest description: the
+#: budget is `tool_result.tokens`' and the page is filled against
+#: `estimate_text_tokens`, which weighs the document's lines and not the answer
+#: around them.  A page that came out a few dozen tokens over would be a result
+#: the harness shortens, which is our own reader feeding our own shortening.
+_ENVELOPE_TOKENS = 128
+
+
+def _fit(lines: list[str], offset: int, room: int) -> int:
+    """How many of *lines*, from *offset*, come in under *room* tokens.
+
+    Greedy and announced: the caller echoes both the count and the offset, so a
+    model that got a page can ask for the next one.  At least one line is always
+    taken when there is one — a page that could never advance would leave a long
+    single-line playbook unreadable rather than merely over budget.
+    """
+    used = 0
+    fits = 0
+    for line in lines[offset:]:
+        used += estimate_text_tokens(line) + 1
+        if used > room:
+            break
+        fits += 1
+    return max(fits, 1 if lines[offset:] else 0)
+
+
+def _playbook_page(
+    lines: list[str], limit: int, offset: int, *, budget: int
+) -> tuple[list[str], int, int]:
+    """One page of a playbook — the lines, and the numbers that describe it.
+
+    The page is filled against the budget and then capped by the caller's own
+    `limit`, so neither a stated size nor a default one can hand over more than
+    `tool_result.tokens` holds.  `page_of` is what answers the size back, for the
+    reason it states: a caller pages by `offset`, and a `limit` that is not the
+    one applied makes its own arithmetic skip lines.
+    """
+    start = max(0, int(offset))
+    return page_of(
+        lines,
+        limit,
+        offset,
+        cap=_fit(lines, start, max(budget - _ENVELOPE_TOKENS, 1)),
+    )
+
 
 def build_server(
     config: Config, *, source: Callable[[], Config] | None = None
@@ -174,6 +237,20 @@ def build_server(
     section comes from — `load_cached` in production, nothing when a test hands a
     config in.
     """
+
+    def management(mcp: FastMCP, homes: Homes[Documents]) -> None:
+        """Register this family's tools, with the budget they must answer within.
+
+        **The budget is the config's and not a constant here.**
+        `tool_result.tokens` is how much of one result a model is handed, and
+        `skill_use` is the one tool in these four families whose answer is a
+        *document* — so it is the one that has to be measured, and against the
+        number this build was configured with rather than a second copy of the
+        default.  It travels as a closure because a tool's body is defined below
+        and the builder passes only the server and the families.
+        """
+        register_tools(mcp, homes, budget=config.tool_result.tokens)
+
     return build_document_server(
         config,
         name=SERVER_NAME,
@@ -185,11 +262,11 @@ def build_server(
         entries=lambda theirs: theirs.skills,
         source=source,
         rows=catalogue,
-        management=register_tools,
+        management=management,
     )
 
 
-def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
+def register_tools(mcp: FastMCP, homes: Homes[Documents], *, budget: int) -> None:
     """The `skill_*` tools — and `skill_use`, which no other family has.
 
     **Every body resolves the home the call is for** (`home_entries`), because
@@ -197,6 +274,10 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     once when this process started would be that home's, served to every other —
     which for a skill is the operator's `env`, the credentials a playbook is run
     with.
+
+    `budget` is `tool_result.tokens`, and only `skill_use` spends it: a playbook
+    is arbitrarily long, and every other tool here answers with rows a page
+    bounds by count.
     """
 
     def home_entries() -> dict[str, SkillSettings]:
@@ -205,27 +286,33 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
     def supplied_for(name: str) -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""
-        return {
-            one: dict(settings.env) for one, settings in home_entries().items()
-        }
+        return {one: dict(settings.env) for one, settings in home_entries().items()}
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
-    async def skill_use(name: str) -> str:
+    async def skill_use(name: str, limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """Read a skill: a playbook to follow rather than a tool to call.
 
-        Read the one for a job before starting it.
+        Read the one for a job before starting it. A playbook can be longer than
+        one answer holds, so `content` is a page of it and the lines it left
+        behind are the next call's `offset`.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
+            limit: The most lines this page may hold. `0` holds as many as the
+                budget has room for.
+            offset: The first line of the playbook to read; `0` is the first.
 
         Returns:
-            The playbook, preceded by a line saying what its paths are relative
-            to and whether what it requires is at hand. For a name that is not
-            installed, the answer lists the ones that are.
+            `name`, the skill's own name for it; `content`, this page of the
+            playbook — its first lines name the root the paths in it are
+            relative to, and say whether what it requires is at hand; `total`,
+            how many lines the whole playbook has; and `limit` and `offset`.
+            A page that stopped short of `total` is one there is more of.
         """
-        # Found here only to read the switch off it: the skill may be filed under
-        # either its own name or its directory's, and only the folder knows
-        # which, so this is the same both-names lookup `catalogue` makes.
+        # Found here to read the switch off it, and to answer with the skill's own
+        # name: a skill may be filed under either its own name or its directory's,
+        # and only the folder knows which, so this is the same both-names lookup
+        # `catalogue` makes.
         skill = skills.find(name.strip())
         if skill is not None:
             found = skills.entry_for(skill, home_entries())
@@ -248,7 +335,15 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             # value and not a crash: `slife2.plugins.toolhub.server` reads a peer's refusal as
             # the model's answer rather than as a broken server.
             raise ToolError(text)
-        return text
+        lines = text.splitlines()
+        page, size, start = _playbook_page(lines, limit, offset, budget=budget)
+        return {
+            "name": skill.name if skill is not None else name.strip(),
+            "content": "\n".join(page),
+            "total": len(lines),
+            "limit": size,
+            "offset": start,
+        }
 
     # ── The management tools ─────────────────────────────────────────────
     # v1's `skill_*` set, and the half DESIGN.md §9 named as next: a skill is a
@@ -285,26 +380,34 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         return skill.name if skill else name
 
     @mcp.tool(name="skill_list", meta=FOR_THE_MODEL)
-    async def skill_list() -> str:
+    async def skill_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the playbooks installed on this machine, with their state.
 
-        This is where the name `skill_use` takes comes from: each line says what
+        This is where the name `skill_use` takes comes from: each row says what
         the playbook is for and whether what it requires is at hand — a key, a
         program.
+
+        Args:
+            limit: How many skills this page may hold. Omit for the cap.
+            offset: How many skills to skip — that is how you page.
+
+        Returns:
+            `skills` — one row per skill, each with `name`, `state` (`on` or
+            `off`) and, when it has them, `description` and `requirements` —
+            and `total`, `limit` and `offset`, so
+            `offset + len(skills) < total` says whether more remain.
         """
-        found = skills.scan()
-        if not found:
-            return (
-                "No skills are installed. A skill is a directory with a "
-                "`SKILL.md` in it; `skill_set` installs one."
-            )
-        lines: list[str] = []
-        for skill in found:
+        rows: list[dict[str, Any]] = []
+        for skill in skills.scan():
             settings = _settings(skill.name, skill)
-            state = "off" if settings is not None and not settings.enabled else "on"
-            lines.append(f"- {skill.name} [{state}]")
+            row: dict[str, Any] = {
+                "name": skill.name,
+                "state": "off"
+                if settings is not None and not settings.enabled
+                else "on",
+            }
             if skill.description:
-                lines.append(f"    {skill.description}")
+                row["description"] = skill.description
             # **No `except OSError` here.**  `readiness` opens nothing: it reads
             # `os.environ`, the skill's `skills:` entry and `shutil.which`, so an
             # `OSError` arm could only fire for a failure nobody anticipated —
@@ -314,11 +417,12 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 skill, dict(settings.env) if settings is not None else None
             )
             if note:
-                lines.append(f"    {note}")
-        return "\n".join(lines)
+                row["requirements"] = note
+            rows.append(row)
+        return listed(rows, "skills", limit, offset, cap=LIST_PAGE)
 
     @mcp.tool(name="skill_set", meta=FOR_THE_MODEL)
-    async def skill_set(name: str, files: list[dict[str, str]]) -> str:
+    async def skill_set(name: str, files: list[dict[str, str]]) -> dict[str, Any]:
         """Install or replace a skill: write a playbook onto this machine.
 
         `SKILL.md` is the playbook and has to be one of the paths; anything else
@@ -332,12 +436,17 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             files: The files to write, each `{"path": "SKILL.md", "content":
                 "..."}`. Paths are relative to the skill's own directory, and
                 one that leaves it is refused.
+
+        Returns:
+            `name`, `state` (`on`), and `files`, how many were written. A
+            refused install raises instead, so a success means the folder is
+            there.
         """
         # **Refused by raising, like `skill_use`** — see that tool for why `ok`
         # false and not a `[refused]` sentence: a refusal is a failure the caller
-        # can see.  The connection families still return the sentence
-        # (`toolfamily.prepare_entry`, which serves `mcp_set` and `rest_api_set`),
-        # and that is a second contract this one deliberately does not join.
+        # can see.  The connection families raise too (`toolfamily.prepare_entry`
+        # serves `mcp_set` and `rest_api_set`), so this is one contract and not
+        # two.
         if not name.strip():
             raise ToolError("a skill needs a name")
         try:
@@ -347,48 +456,49 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         except OSError as exc:
             raise ToolError(f"could not write {name!r}: {exc}") from exc
         logger.info("skill_set name=%s dir=%s", name, installed)
-        return (
-            f"`{name}` is installed ({len(files)} file(s)). A search finds it "
-            f"from your next one, and `skill_use` reads it."
-        )
+        return {"name": name, "state": "on", "files": len(files)}
 
     @mcp.tool(name="skill_remove", meta=FOR_THE_MODEL)
-    async def skill_remove(name: str) -> str:
+    async def skill_remove(name: str) -> dict[str, Any]:
         """Uninstall a skill: delete its directory and everything in it.
 
         The `skills:` entry naming what it was given stays, and `skill_set`
         installs it again.
 
         Args:
-            name: The skill to remove, from `skill_list`.
+            name: The skill to remove.
+
+        Returns:
+            `name` and `removed`, which a success makes true. A name with no
+            folder is refused: nothing was deleted, so the call failed.
         """
         try:
             removed = skills.remove(name.strip())
         except ValueError as exc:
             raise ToolError(f"{name!r} was not removed: {exc}") from exc
         if not removed:
-            return f"'{name}' is not installed — see `skill_list`."
+            raise ToolError(f"'{name}' is not installed — see `skill_list`.")
         logger.info("skill_removed name=%s", name)
-        return (
-            f"`{name}` is uninstalled — the directory and everything in it. Its "
-            f"`skills:` entry stays: it is what the playbook is given, and it is "
-            f"what re-installing it needs."
-        )
+        return {"name": name, "removed": True}
 
     @mcp.tool(name="skill_set_enabled", meta=FOR_THE_MODEL)
-    async def skill_set_enabled(name: str, enabled: bool) -> str:
+    async def skill_set_enabled(name: str, enabled: bool) -> dict[str, Any]:
         """Switch a skill on or off, keeping it installed.
 
         Off keeps the files, stops it being findable, and `skill_use` refuses
         it. The switch lives in the config.
 
         Args:
-            name: The skill, from `skill_list`.
+            name: The skill.
             enabled: True offers it again; False keeps it out of the way.
+
+        Returns:
+            `name`, `enabled`, and `state` — `on` or `off` — the same word a
+            row of `skill_list` carries.
         """
         skill = skills.find(name.strip())
         if skill is None and name.strip() not in home_entries():
-            return f"'{name}' is not installed — see `skill_list`."
+            raise ToolError(f"'{name}' is not installed — see `skill_list`.")
         key = _key_for(name.strip(), skill, home_entries())
         if key in configfile.read_section(SECTION):
             configfile.set_enabled(SECTION, key, enabled)
@@ -409,9 +519,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             key, enabled, make=lambda: SkillSettings(enabled=enabled)
         )
         logger.info("skill_set_enabled name=%s key=%s enabled=%s", name, key, enabled)
-        if enabled:
-            return f"`{name}` is on again; a search finds it from your next one."
-        return f"`{name}` is off and still installed; its files are untouched."
+        return {"name": name, "enabled": enabled, "state": "on" if enabled else "off"}
 
 
 def main(argv: list[str] | None = None) -> int:

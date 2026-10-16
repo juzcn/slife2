@@ -75,7 +75,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from slife2.libs.turn.messages import ToolSpec
-from slife2.libs.turn.tools import Tool
+from slife2.libs.turn.tools import Tool, ToolFailed
 
 logger = logging.getLogger(__name__)
 
@@ -403,71 +403,52 @@ def _pop_task(task_id: str) -> Task | None:
 
 
 def _not_found(task_id: str) -> str:
-    return (
-        f"Error: Task {task_id!r} not found. "
-        f"It may have already completed and been cleaned up, "
-        f"or the task_id is incorrect."
-    )
+    """The one sentence both tools refuse an id they do not hold with.
 
-
-def _status_of(task: Task, task_id: str) -> str:
-    """The marker for a task, wherever it is in its life."""
-    return marker(task.status, call_id=task.call_id, tool=task.tool, task_id=task_id)
-
-
-def _in_flight_reply(task: Task, task_id: str) -> str:
-    """What a task whose *call* is over and whose *delivery* is not answers.
-
-    Between `_runner` recording the ending and `hand_back` finishing, neither
-    thing `check_async` can otherwise say is true: the work is not still running,
-    and `delivered` is not yet a verdict — it is False until the hand-back
-    returns.  Answering with the finished reply in that window read a delivery
-    that was about to land as one that had failed, so the model met the same
-    result twice, and answering `cancel_async` by cancelling the handle threw a
-    completed call's answer away.
+    **A miss is a refusal and not an answer**, which is the half of these two
+    tools that was wrong: the sentence was *returned*, so a call naming a task
+    nobody ever made came back as a call that succeeded — an `ok` with "Error:"
+    in its text — and a transcript that reads a failure as a success is the one
+    thing this system's tool contract exists to prevent.
     """
-    head = _status_of(task, task_id)
     return (
-        f"{head}\n"
-        f"✓ Task {'failed' if task.status == FAILED else 'completed'} "
-        f"(task_id: {task_id}). Its result is on its way to the conversation."
+        f"no async task {task_id!r} here: either it was never started, or it "
+        f"finished and has been read already — the task_id comes from the call "
+        f"that started it."
     )
 
 
-def _finished_reply(task: Task, task_id: str) -> str:
-    """What a *finished* task's answer says, wherever it is asked from.
+def _answer(task: Task, task_id: str) -> dict[str, Any]:
+    """One task, as the object both tools answer with.
 
-    **One function, because two tools now answer about the same finished task.**
-    `check_async` is the documented way to ask; `cancel_async` reaches the same
-    state whenever it is called *after* the work is over, and it must not drop
-    the answer the task is still holding.  Two copies of this were two chances
-    for one of them to stop reporting `task.result` — which is exactly the bug
-    this closes.
+    Five facts, and the answer itself only when the conversation has not been
+    given it: the id, the status, the tool and call the task is about, whether
+    the hand-back landed, and — **only then** — the result.
 
-    The marker names the task's final status for both readers (a screen and the
-    model); `delivered` decides whether there is an answer to hand over or only
-    the news that there is none.
+    **A result in flight is not a result to hand over.**  `_runner` records the
+    ending before it awaits `hand_back`, so there is a window in which the call
+    is over and its delivery has no verdict yet — the work is not still running,
+    and `delivered` is false because the hand-back has not returned, which is
+    not the same as false because it failed.  Offering the text in that window
+    would hand the model the same answer twice (once here, once as the message
+    it is about to become), and popping the task there would throw the only copy
+    away if that delivery then failed.  So `result` appears only once `handle` is
+    done, and its *absence* is what "there is nothing to hand over" looks like —
+    whichever of the several ways that happens to be true.
     """
-    head = _status_of(task, task_id)
-    if task.delivered:
-        return (
-            f"{head}\n"
-            f"✓ Task {'failed' if task.status == FAILED else 'completed'} "
-            f"(task_id: {task_id}). Its result was handed back to the "
-            f"conversation."
-        )
-    if task.status == FAILED:
-        return (
-            f"{head}\nError: Async task failed (task_id: {task_id}) — its result "
-            f"could not be handed back:\n\n{task.result}"
-        )
-    return (
-        f"{head}\n✓ Task completed (task_id: {task_id}) — its result could not "
-        f"be handed back:\n\n{task.result}"
-    )
+    answer: dict[str, Any] = {
+        "task_id": task_id,
+        "status": task.status,
+        "tool": task.tool,
+        "call_id": task.call_id,
+        "delivered": task.delivered,
+    }
+    if task.result and not task.delivered and task.handle.done():
+        answer["result"] = task.result
+    return answer
 
 
-async def check_async(arguments: dict[str, Any]) -> str:
+async def check_async(arguments: dict[str, Any]) -> dict[str, Any]:
     """Answer where one background call stands.
 
     **Status, not a result**, because the result is handed back on its own — and
@@ -482,15 +463,7 @@ async def check_async(arguments: dict[str, Any]) -> str:
     task_id = str(arguments.get("task_id") or "")
     task = _get_task(task_id)
     if task is None:
-        return _not_found(task_id)
-    if task.status == RUNNING:
-        head = _status_of(task, task_id)
-        return (
-            f"{head}\n"
-            f"⏳ Task is still running…\n"
-            f"  task_id: {task_id}\n"
-            f"  Try {CHECK_ASYNC} again later."
-        )
+        raise ToolFailed(_not_found(task_id))
     # **Final status is not the same moment as a finished delivery.**  `_runner`
     # records the ending before it awaits `hand_back`, so between the two the
     # call is over and its answer is still on its way — and this asked
@@ -501,13 +474,13 @@ async def check_async(arguments: dict[str, Any]) -> str:
     # answered "not found".  What decides here is the status; the handle decides
     # whether the *delivery* has an outcome yet, and popping before it has one
     # would drop the only copy of the result if it fails.
-    if not task.handle.done():
-        return _in_flight_reply(task, task_id)
+    if task.status == RUNNING or not task.handle.done():
+        return _answer(task, task_id)
     _pop_task(task_id)
-    return _finished_reply(task, task_id)
+    return _answer(task, task_id)
 
 
-async def cancel_async(arguments: dict[str, Any]) -> str:
+async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     """Abandon one running background call, and tell the conversation it is gone.
 
     **The cancellation is handed back too.**  A person watching saw the call
@@ -521,8 +494,11 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
     result (`Task.delivered`/`result`), and popping it while answering only
     "nothing to cancel" would lose that copy for good.  §8.8 says the
     alternative to returning a result is losing it, and losing it in silence is
-    the worse of the two, so this case is answered with what `check_async` would
-    have said, under the sentence that says why nothing was cancelled.
+    the worse of the two, so this case is answered with exactly what
+    `check_async` would have said.  What tells the two apart is `status`, and
+    nothing extra has to: `cancelled` is the word that means *this* call stopped
+    it, and the call's own ending means it was already over when the call
+    arrived.
 
     The hand-back is detached rather than awaited: this runs *inside* the turn
     that called it, and `slife2.libs.harness.handover` reaching the agent server for that same
@@ -532,7 +508,7 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
     task_id = str(arguments.get("task_id") or "")
     task = _get_task(task_id)
     if task is None:
-        return _not_found(task_id)
+        raise ToolFailed(_not_found(task_id))
     if task.status != RUNNING:
         # **Nothing to cancel, and nothing to throw away.**  The work is over —
         # and when its handle is still running, what is running is the hand-back
@@ -542,26 +518,23 @@ async def cancel_async(arguments: dict[str, Any]) -> str:
         # function's own docstring says cannot happen.  The task is kept while
         # that delivery is in flight, for `check_async`'s reason.
         if not task.handle.done():
-            return (
-                f"Task {task_id!r} already completed — nothing to cancel.\n\n"
-                + _in_flight_reply(task, task_id)
-            )
+            return _answer(task, task_id)
         _pop_task(task_id)
-        return (
-            f"Task {task_id!r} already completed — nothing to cancel.\n\n"
-            + _finished_reply(task, task_id)
-        )
+        return _answer(task, task_id)
     task.handle.cancel()
     _pop_task(task_id)
+    # **Recorded as well as reported.**  The field is the one thing that says
+    # which of the two tools ended this call, and it is left behind *before* the
+    # detached hand-back reads the task — `handed_back` writes the marker with a
+    # status of its own, and a task whose field still said `running` would be a
+    # task two readers describe differently.
+    task.status = CANCELLED
     logger.info("async_task_cancelled id=%s", task_id)
     if task.deliver is not None:
         handback = asyncio.create_task(hand_back(task, task_id, CANCELLED, ""))
         _handbacks.add(handback)
         handback.add_done_callback(_handbacks.discard)
-    return (
-        f"{marker(CANCELLED, call_id=task.call_id, tool=task.tool, task_id=task_id)}\n"
-        f"✓ Task {task_id!r} cancelled."
-    )
+    return _answer(task, task_id)
 
 
 def _task_id_schema() -> dict[str, Any]:
@@ -576,7 +549,7 @@ def _task_id_schema() -> dict[str, Any]:
         "properties": {
             "task_id": {
                 "type": "string",
-                "description": "The task_id returned by the async task.",
+                "description": "The id the backgrounded call answered with.",
             },
         },
         "required": ["task_id"],
@@ -590,14 +563,22 @@ def async_tools() -> list[Tool]:
     tools: they are not rows in the toolhub's catalogue, so the model's budget
     cannot take them away and `_func_tool_unload` has never heard of them — which
     is what a mechanism whose tools could be unloaded would deserve.
+
+    **They answer objects, and nothing here renders them.**  The registry does
+    (`slife2.libs.turn.tools.as_tool_text`) — the same rendering a plugin's tool
+    gets from FastMCP — which is what lets a body return its fields and lets the
+    tool's own tests assert them.
     """
     return [
         Tool(
             spec=ToolSpec(
                 name=CHECK_ASYNC,
                 description=(
-                    "Query an async task result. Returns status while running, "
-                    "the result when done."
+                    "Where one background call stands: `status` — running, "
+                    "finished, failed or cancelled — the `tool` and `call_id` it "
+                    "is about, and `result`, which is the answer only when the "
+                    "conversation has not been handed it. The result arrives on "
+                    "its own when the call ends."
                 ),
                 parameters=_task_id_schema(),
             ),
@@ -607,7 +588,10 @@ def async_tools() -> list[Tool]:
             spec=ToolSpec(
                 name=CANCEL_ASYNC,
                 description=(
-                    "Cancel a running async task. Completed tasks cannot be cancelled."
+                    "Abandon a running background call, and answer where it "
+                    "stands: `status` is `cancelled` when this is what stopped "
+                    "it, and the call's own ending when it was already over — in "
+                    "which case its `result` is still handed over, not dropped."
                 ),
                 parameters=_task_id_schema(),
             ),

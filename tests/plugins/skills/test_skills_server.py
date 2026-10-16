@@ -115,11 +115,50 @@ async def test_the_schema_is_read_off_the_signature(isolated_runtime: Path) -> N
 
 @pytest.mark.asyncio
 async def test_skill_use_reads_the_document(isolated_runtime: Path) -> None:
+    """A page of the playbook, and the numbers that say it is a page.
+
+    Every model-facing tool answers with JSON (`turn_list`'s rule), and a
+    playbook can be longer than one answer holds — so what comes back is the
+    page, how many lines there are in all, and where this one started.
+    """
     skill(isolated_runtime, "one", body="Do it.")
     async with Client(build_server(default_config())) as client:
         result = await client.call_tool(USE_TOOL, {"name": "one"})
 
-    assert result.data.rstrip().endswith("Do it.")
+    answer = result.data
+    assert answer["name"] == "one", "the skill's own name, not the one asked with"
+    assert answer["content"].rstrip().endswith("Do it.")
+    assert answer["offset"] == 0
+    assert answer["total"] == len(answer["content"].splitlines()), "all of it fits"
+    assert answer["limit"] >= answer["total"]
+
+
+@pytest.mark.asyncio
+async def test_skill_use_pages_a_playbook_that_will_not_fit(
+    isolated_runtime: Path,
+) -> None:
+    """**A playbook longer than one answer holds is read in pages, not clipped.**
+
+    `tool_result.tokens` is how much of one result a model is handed, and a
+    shortened playbook is a procedure that stops in the middle of a step — worse
+    than one the model knows to ask for the rest of.  So the page is filled
+    against that budget, `total` says how much there is, and `offset` reaches it.
+    """
+    skill(isolated_runtime, "long", body="\n".join(f"step {n}" for n in range(20000)))
+    async with Client(build_server(default_config())) as client:
+        first = (await client.call_tool(USE_TOOL, {"name": "long"})).data
+        rest = (
+            await client.call_tool(
+                USE_TOOL, {"name": "long", "offset": first["offset"] + first["limit"]}
+            )
+        ).data
+
+    assert first["total"] > first["limit"], "the whole playbook does not fit a page"
+    assert first["offset"] == 0
+    assert first["limit"] < 20000, "the budget decided the page, not the document"
+    assert 0 < len(first["content"].splitlines()) <= first["limit"]
+    assert rest["offset"] == first["offset"] + first["limit"], "the next page"
+    assert rest["content"] != first["content"]
 
 
 @pytest.mark.asyncio
@@ -136,7 +175,7 @@ async def test_a_skill_dropped_in_later_is_readable_at_once(
         skill(isolated_runtime, "two", body="Second body.")
         result = await client.call_tool(USE_TOOL, {"name": "two"})
 
-    assert result.data.rstrip().endswith("Second body.")
+    assert result.data["content"].rstrip().endswith("Second body.")
 
 
 @pytest.mark.asyncio
@@ -197,8 +236,9 @@ async def test_the_two_names_read_one_entry_and_agree(
         read = await client.call_tool(USE_TOOL, {"name": "the-name"})
         listed = await client.call_tool("skill_list", {})
 
-    assert "are met" in read.data, "the declared name's entry wins"
-    assert "are met" in listed.data, "and the listing reads the same entry"
+    assert "are met" in read.data["content"], "the declared name's entry wins"
+    (row,) = listed.data["skills"]
+    assert "are met" in row["requirements"], "and the listing reads the same entry"
 
 
 @pytest.mark.asyncio
@@ -236,8 +276,8 @@ async def test_a_declared_key_is_read_here_and_reported_before_the_model_acts(
     async with Client(build_server(default_config())) as client:
         without = await client.call_tool(USE_TOOL, {"name": "one"})
 
-    assert "are met" in with_key.data
-    assert "not configured" in without.data
+    assert "are met" in with_key.data["content"]
+    assert "not configured" in without.data["content"]
 
 
 # --- declaring rows -----------------------------------------------------------

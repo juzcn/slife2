@@ -41,6 +41,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.gateway import ClientFactory, Connection, mcp_config, proxied_name
@@ -63,11 +64,56 @@ from slife2.libs.plugin.protocol import (
 
 logger = logging.getLogger(__name__)
 
-#: How many of one server's tools a `*_list_tools` prints.  v1's number and v1's
-#: reason: a published server can carry four figures of tools (github: 1239),
-#: and printing them all spends the model's context on names it never asked for.
-#: The read is uncapped — the catalogue needs every tool.
+#: How many of one server's tools a `*_list_tools` hands over in one page.  v1's
+#: number and v1's reason: a published server can carry four figures of tools
+#: (github: 1239), and handing them all over spends the model's context on names
+#: it never asked for.  The read is uncapped — the catalogue needs every tool.
 TOOL_LIST_LIMIT = 20
+
+#: How many entries one `*_list` hands over in one page.
+#:
+#: **A cap rather than a preference**, and the same one `TOOL_LIST_LIMIT` is: a
+#: `limit` comes from a model, and a section an operator has let grow to a
+#: hundred entries is a listing that would spend a context on names.  Both
+#: listings answer `total`, which is the *whole* count and not the page's, so a
+#: page says what it left behind and `offset` reaches it — hiding rows with
+#: nothing saying they were hidden is the one thing a browse must not do.
+LIST_PAGE = 50
+
+
+def page_of[T](
+    rows: list[T], limit: int, offset: int, *, cap: int
+) -> tuple[list[T], int, int]:
+    """One page of a listing: the rows, and the `limit`/`offset` that describe it.
+
+    **The answer's `limit` is the page's own and never the one that was asked
+    for**, which is `slife2.libs.store.index.page_limit`'s rule and its reason:
+    a caller pages by `offset`, so an answer echoing a size it did not apply —
+    1000, say, for a 50-row cap — makes the caller's own arithmetic skip every
+    row in between.  A `limit` of zero or less means "the cap", so a caller that
+    names no size gets a page without naming `LIST_PAGE` itself.
+
+    `offset` is floored at zero for the same reason it is echoed back: it is the
+    number the caller will add its page to, and a negative one would make the
+    next page overlap this one.
+    """
+    size = cap if limit <= 0 else min(int(limit), cap)
+    start = max(0, int(offset))
+    return rows[start : start + size], size, start
+
+
+def listed[T](
+    rows: list[T], key: str, limit: int, offset: int, *, cap: int
+) -> dict[str, Any]:
+    """A listing's answer: `key`'s page, what there is in all, and where this is.
+
+    One builder for the four listings that answer rows (`mcp_list`,
+    `rest_api_list`, `cli_list`, `skill_list`) and the two that answer tools,
+    because they are one shape with one fact under it:
+    `offset + len(key) < total` is how a model knows it has not seen everything.
+    """
+    page, size, start = page_of(rows, limit, offset, cap=cap)
+    return {key: page, "total": len(rows), "limit": size, "offset": start}
 
 
 class Link:
@@ -658,9 +704,15 @@ class Family:
         this class does not hold a vocabulary, and the sentence used to write
         `set_enabled` out — a tool this system serves under no name at all, in
         an answer to a model that would go and call it.  Taking it here rather
-        than in the constructor is the same arrangement the four sentence
-        functions use (`apply_and_report`, `switch_entry`): the sentence is
-        shared and the words come from the caller that knows them.
+        than in the constructor is the same arrangement the payload builders use
+        (`apply_and_report`, `switch_entry`): the answer is built once and the
+        words come from the caller that knows them.
+
+        **A sentence, and not JSON like the tools' own answers**, because this
+        is not one of ours: it is the *result* of somebody else's tool, and the
+        hub hands it to the model as the `text` of a call it made.  The
+        contract that carries it is `call_source`'s (`{"text", "ok"}`), which the
+        model never sees and which every call in this system keeps.
         """
         one = self._held.get(source)
         if one is None:
@@ -733,129 +785,112 @@ async def settled(one: Held) -> Held:
     return one
 
 
-async def apply_and_report(
-    family: Family, settings: ToolServerSettings, *, words: FamilyWords
-) -> str:
-    """Hold *settings* and describe what happened, in one sentence.
+def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
+    """One entry's state, and what it offers when it answered.
 
     **The three outcomes are the three things that can be true**, and the point
-    is that they are distinguishable: a server that connected has a tool count,
-    a disabled one has nothing to connect, and one that did not answer says so
-    rather than reporting a count of zero — which is what a server with no tools
-    would also report.  Whether it answers *later* is not a claim this can make;
-    what it can say is that the catalogue learns at the next search, because the
-    hub re-reads every declaration before each one.
+    is that they are distinguishable: a server that connected has a count, a
+    disabled one has `off` and nothing to connect, and one that did not answer
+    says so with the reason it gave rather than reporting a count of zero —
+    which is what a server with no tools would also report.  Whether it answers
+    *later* is not a claim this can make; what it can say is that the hub
+    re-reads every declaration before each search.
 
-    **The sentence itself is the family's**, not this function's: `words` carries
-    every word that varies (`slife2.libs.plugin.family.FamilyWords`), and the two answers
-    this shares with `switch_entry` are methods on it rather than text written
-    out here.  They were written out here, and the copy had `connected`,
-    `tool(s)`, `connecting` and `` `set_enabled` `` hardcoded into it — so the
-    REST API family answered in the MCP family's vocabulary, naming a tool it
-    does not have.
+    **The state is the one word `state_word` answers with**, and not a word of
+    this family's own.  `connected` and `serving` were two vocabularies for one
+    question the hub already answers the same way (`ready`, `connecting`,
+    `failed`, `idle`, `off`), so a listing and a `set` could describe one link
+    differently and a model held two things to learn for one fact.  `Held.state`
+    is that word and reads the switch first, which is why a switched-off entry
+    says `off` rather than the `idle` of a connection nobody started.
+
+    **The count is the cost, and only the tool can say it before it is paid.**
+    Nothing here writes the catalogue: the hub merges this source's whole list
+    before the next search, and that merge embeds every row — one request, every
+    text of every tool.  So a server with four figures of tools makes the
+    model's *next* search the expensive call, which is one turn too late to be
+    discovering it; `large` says so at the moment it is connected, and a count
+    at or under the listing cap is ordinary and goes unsaid.
     """
-    one = await family.put(settings)
-    if not settings.enabled:
-        return (
-            f"'{settings.name}' is written into `{words.section}:` and switched "
-            f"off, so this process does not connect it. Its `{words.enable_tool}` "
-            f"tool turns it on."
-        )
-    await settled(one)
+    if not one.settings.enabled:
+        return {"name": name, "enabled": False, "state": "off"}
+    report: dict[str, Any] = {
+        "name": name,
+        "enabled": True,
+        "state": one.state,
+    }
     if one.usable:
         count = len(one.rows or [])
-        # **The count is the cost, and only the tool can say it before it is
-        # paid.**  Nothing here writes the catalogue: the hub merges this
-        # source's whole list before the next search, and that merge embeds every
-        # row — one request, every text of every tool.  So a server with four
-        # figures of tools makes the model's *next* search the expensive call,
-        # which is one turn too late to be discovering it.  A count at or under
-        # the listing cap is ordinary and is left unsaid.
-        expensive = (
-            " That is a large server: the next search writes and embeds a row for "
-            "each of them, and may take a while."
-            if count > TOOL_LIST_LIMIT
-            else ""
-        )
-        return words.offers(settings.name, count, note=expensive)
-    reason = one.error or "it has not answered yet"
-    return words.coming_up(
-        settings.name, reason, because=f"written into `{words.section}:`"
-    )
+        # The count key is the unit's plural, so the number here and the rows a
+        # `*_list_tools` hands over are named the same thing.
+        report[f"{words.unit}s"] = count
+        if count > TOOL_LIST_LIMIT:
+            report["large"] = True
+    else:
+        # What it said the last time it failed, or `""` for one that has not
+        # answered yet — a different fact from a server that answered with
+        # nothing, which is `usable` with a count of zero.
+        report["error"] = one.error
+    return report
 
 
-def tools_as_text(one: Held, name: str, limit: int, *, words: FamilyWords) -> str:
-    """One server's tools, capped, with the count it was capped from.
+async def apply_and_report(
+    family: Family, settings: ToolServerSettings, *, words: FamilyWords
+) -> dict[str, Any]:
+    """Hold *settings* and answer with what happened to it.
 
-    **Three ways to have no list, and they are three answers**: switched off,
-    not answering, and answering with nothing.  Each is the state the family's
-    own listing tool prints for the same entry, and folding any two of them
-    together makes this plugin tell a model two things about one entry — the
-    model is the party that cannot check, so it is the party the disagreement
-    costs.
+    The upsert's own half of `switch_entry`'s answer: an entry that was just
+    written and connected is the same entry as one that was switched on, so the
+    payload is built once (`entry_report`) and both tools answer with it.
 
-    The cap is announced rather than applied quietly: a trimmed list that reads
-    as the whole list is a model concluding a server cannot do something it can.
+    A disabled entry is deliberately **not waited for**: there is no link to wait
+    on, and `settled` is the one thing that must never start one.
+    """
+    one = await family.put(settings)
+    if settings.enabled:
+        await settled(one)
+    return entry_report(one, settings.name, words=words)
 
-    **`words` and not a `noun` beside it**, because every one of the three
-    answers ends by naming the *listing tool* the model should reach for next —
-    and that tool has a different name in each family (`mcp_list`,
-    `rest_api_list`).  The tail was written out here as `` `_list` ``, a tool
-    that exists under no family at all, so a model whose entry was switched off
-    or unanswered was told to call something nothing serves; and the noun beside
-    it was a second parameter of the same sentence, which is the same vocabulary
-    assembled from two halves that have to be kept in step.  It is one object
-    here, the way it is everywhere else in this module.
+
+def tools_payload(
+    one: Held, name: str, limit: int, offset: int, *, words: FamilyWords
+) -> dict[str, Any]:
+    """One server's tools, as one page, with the state it was read in.
+
+    **Three ways to have no tools, and the state says which.**  A switched-off
+    entry, one that is not answering and one that answered with nothing all have
+    an empty page, and folding them together would make this plugin tell a model
+    two things about one entry — the model is the party that cannot check, so it
+    is the party the disagreement costs.  The old answer kept them apart in
+    three sentences, each ending by naming the `*_list` tool the model should
+    reach for next; the state *is* that answer now, in the same words the listing
+    and the hub use, so there is nothing to go and ask.
+
+    The cap is announced rather than applied quietly (`total`), because a
+    trimmed list that reads as the whole list is a model concluding a server
+    cannot do something it can.
+
+    `name` is the name in the model's own tool list — what a call to one of
+    these is made with — and the far end's name for it is deliberately not
+    repeated: it is what the plugin routes by, and a model that used it would be
+    naming a tool that has no such spelling in its list.
     """
     rows = list(one.rows or [])
-    if not one.settings.enabled:
-        # **The switch is read first, as it is everywhere else** (`state_word`,
-        # `apply_and_report`).  A switched-off entry has no link, so `usable` is
-        # False and `error` is empty — and the fallback below read those two as
-        # "it is not answering yet", which is a link the entry's own
-        # `enabled: false` promises will never be asked.  One entry then had
-        # three accounts: `mcp_list` printed `[off]`, `Held.state` answered
-        # `off`, and this told the model to wait for a connection nobody is
-        # opening.  The word is the same one both of the others use.
-        return (
-            f"'{name}' is {one.state} — it is switched off, so this process "
-            f"does not connect it and there is no {words.unit} list to show. The "
-            f"`{words.list_tool}` tool reports its state."
-        )
-    if not one.usable:
-        reason = one.error or "it is not answering yet"
-        return (
-            f"'{name}' has no tool list to show — {reason}. The "
-            f"`{words.list_tool}` tool reports its state."
-        )
-    if not rows:
-        # **A server that answered with nothing is not a server that is
-        # silent.**  Folding the two together made this say "it is not
-        # answering yet" about a link the `_list` tool was showing as `ready` —
-        # two answers about one source, from one plugin — and told the model to
-        # consult a tool that would contradict it.  `apply_and_report` already
-        # keeps them apart for the same reason ("a server that did not answer
-        # says so rather than reporting a count of zero"): an empty listing is
-        # `rows == []`, which is what `_listed` records when a server exposes
-        # nothing.
-        return (
-            f"'{name}' is {one.state} and offers no {words.unit}s. The "
-            f"`{words.list_tool}` tool reports its state."
-        )
-    shown = rows[:limit]
-    lines = [f"{name} — {len(rows)} {words.unit}(s), showing {len(shown)}:"]
-    for row in shown:
-        text = str(row.get("description") or "").strip().splitlines()
-        summary = text[0] if text else ""
-        lines.append(
-            f"- {row.get('remote_name', '?')}" + (f" — {summary}" if summary else "")
-        )
-    if len(shown) < len(rows):
-        lines.append(
-            f"\n{len(rows) - len(shown)} more — use tool_search to find the one "
-            f"you need."
-        )
-    return "\n".join(lines)
+    page = [
+        {
+            "name": str(row.get("name") or ""),
+            "description": str(row.get("description") or ""),
+        }
+        for row in rows
+    ]
+    answer: dict[str, Any] = {
+        "name": name,
+        "state": one.state,
+        **listed(page, f"{words.unit}s", limit, offset, cap=TOOL_LIST_LIMIT),
+    }
+    if one.error:
+        answer["error"] = one.error
+    return answer
 
 
 def refusal(config: Config, name: str) -> str | None:
@@ -875,16 +910,21 @@ def refusal(config: Config, name: str) -> str | None:
     called — the plugin's own name, a category the hub owns — the hub refuses
     loudly at declaration time (`Upstream._record`), and duplicating that list
     here would be a second copy to keep in step.
+
+    **One sentence, with no marker in front of it.**  Both answers used to begin
+    `[refused] `, which said in the text what the *call* should have said:
+    `prepare_entry` raises them now, so the failure is the call's status and the
+    sentence is only the reason.
     """
     if name in config.plugins():
         return (
-            f"[refused] '{name}' is a server slife2 itself runs, so its tools "
+            f"'{name}' is a server slife2 itself runs, so its tools "
             f"would be dropped as a name the hub is already connected under. "
             f"Choose another name."
         )
     if name in (SKILLS_SOURCE, CLI_SOURCE):
         return (
-            f"[refused] '{name}' is the name the `{name}:` section's rows are "
+            f"'{name}' is the name the `{name}:` section's rows are "
             f"filed under. Choose another name."
         )
     return None
@@ -892,40 +932,49 @@ def refusal(config: Config, name: str) -> str | None:
 
 # ── The management tools' shared half ───────────────────────────────────
 # `mcp_tools` and `restapi_tools` serve the same four tools over one mechanism
-# and answer in the same sentences; the words they differ by live in a
-# `FamilyWords`, and the sentences that consume it live here.  What stays in
-# each family is the part that is genuinely its own: `*_set`'s argument list
-# (the schema the model reads — `mcp_set` takes a command, `rest_api_set` a
-# spec), and `*_list`'s `describe`, because an MCP entry is a command or a URL
-# and a REST entry is a spec and a base URL.
+# and answer with the same payloads; the words they differ by live in a
+# `FamilyWords`, and the builders that consume it live here.  What stays in each
+# family is the part that is genuinely its own: `*_set`'s argument list (the
+# schema the model reads — `mcp_set` takes a command, `rest_api_set` a spec),
+# and `*_list`'s `describe`, because an MCP entry is a command or a URL and a
+# REST entry is a spec and a base URL.
 
 
 @dataclass(frozen=True)
 class FamilyWords:
-    """One family's vocabulary — the tokens its four sentences vary by.
+    """One family's vocabulary — the words its tools' payloads vary by.
 
-    The two connection families manage the same shape of entry through the
-    same `Family` and answer in the same sentences: "is not in `…:` — `…_set`
-    adds it"; "is switched on and …ing".  Every word that changes between them
-    is a field here, so the sentences can be written once.  Two copies of a
-    sentence is two chances for a model to learn two vocabularies for one
-    mechanism.
+    The two connection families manage the same shape of entry through the same
+    `Family` and answer with the same keys: a listing under a plural noun, an
+    upsert reporting one entry's state, a removal reporting what it stopped.
+    Every word that changes between them is a field here, so the answers can be
+    built once.  Two builders is two chances for a model to learn two
+    vocabularies for one mechanism.
+
+    **What is *not* here is as deliberate as what is.**  A link's state used to
+    be a pair of family words (`present`/`past`, `connected`/`connected` against
+    `serving`/`served`, and `connecting` against `starting`) because it was read
+    off a *sentence*.  As a field it is `state_word`'s one vocabulary instead —
+    the hub answers the same question the same way — so the adjectives are gone
+    and the words that remain are the ones that name *things*: what a row is
+    called, what a tool is called, which tool to reach for next.
     """
 
     section: str
     """The config section this family owns: `mcp` or `rest-api`."""
 
-    plural: str
-    """Its entries, plural, as the empty listing names them."""
+    collection: str
+    """Its entries, plural, as the key a listing's rows sit under: `servers`."""
 
     entry: str
     """One entry, singular with its article: `a server` or `an API`."""
 
     unit: str
-    """What one exposed item is: `tool` or `operation` (pluralised `{unit}(s)`)."""
+    """What one exposed item is: `tool` or `operation`.  It names the key a
+    `*_list_tools` page sits under, and the count an entry report carries."""
 
     list_tool: str
-    """The listing tool's name, so another sentence can point at it."""
+    """The listing tool's name, so a refusal can point at it."""
 
     set_tool: str
     """The upsert tool's name, for the same reason."""
@@ -940,54 +989,9 @@ class FamilyWords:
     remove_log: str
     """The `logger.info` event a removal writes."""
 
-    present: str
-    """A live link, present tense: `connected` or `serving`."""
-
-    past: str
-    """A live link said of the next start: `connected` or `served`."""
-
-    starting: str
-    """A link still coming up: `connecting` or `starting`."""
-
-    def offers(self, name: str, count: int, *, note: str = "") -> str:
-        """A live link, and what it offers — the answer **both** entry tools give.
-
-        **One sentence, because there is one state.**  `mcp_set` reaches a
-        connected server by writing its entry and `mcp_set_enabled` by flipping a
-        switch on one already written, and a model that got two different accounts
-        of the same connection would be reading two vocabularies for one
-        mechanism — which is what happened: this sentence was written out twice,
-        once here and once hardcoded, and the hardcoded copy said "connected" and
-        "tool(s)" for *every* family, so `rest_api_set` described an API as
-        connected with three tools.  The words that legitimately differ are fields
-        of this class (`present`, `unit`), which is the whole of what it is for.
-
-        `note` is the one thing a caller may add: a server whose tool count
-        crosses the listing cap is worth warning about at the moment it is
-        connected, and only the caller that has just merged it knows the count.
-        """
-        return (
-            f"'{name}' is {self.present} and offers {count} {self.unit}(s); "
-            f"they are in your tool list from the next search.{note}"
-        )
-
-    def coming_up(self, name: str, reason: str, *, because: str) -> str:
-        """A link that has not answered yet — the other answer both tools give.
-
-        `because` is the hole, and it is the operation's own account of itself:
-        one caller *wrote* the entry into the file, the other *switched on* one
-        that was already there, and those are genuinely two facts.  Everything
-        after the reason is not, which is why it is here rather than in each.
-        """
-        return (
-            f"'{name}' is {because} and {self.starting} — {reason}. Its "
-            f"{self.unit}s appear once it answers, and the hub retries before "
-            f"every search."
-        )
-
 
 def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
-    """The one word a listing puts in `[brackets]` for one entry.
+    """The one word a listing row's `state` carries for one entry.
 
     **Read off the file before the link**, which is the whole of the rule: a
     switched-off entry was never asked, so its link has nothing to say and its
@@ -1015,13 +1019,20 @@ def prepare_entry(
     build: Callable[[], tuple[ToolServerSettings, Mapping[str, Any]]],
     *,
     section: str,
-) -> tuple[ToolServerSettings | None, str]:
-    """Refuse, validate and write one entry, or answer with why it cannot be.
+) -> ToolServerSettings:
+    """Write one entry, or raise `ToolError` saying why it cannot be.
 
-    `(settings, "")` means it was written; `(None, refusal)` is a sentence for
-    the caller to return.  Both refusals happen **before** anything is written:
-    a name the hub is already using (`refusal`), and an entry the config layer
-    will not parse.
+    Both refusals happen **before** anything is written: a name the hub is
+    already using (`refusal`), and an entry the config layer will not parse.
+
+    **Raised, and not returned.**  A refusal is this system's word for a call
+    that failed — `slife2.clients.gateway` splits a peer's refusal from a
+    transport fault on exactly that, and `slife2.plugins.toolhub.server` reads a
+    raised `ToolError` as a value with `ok` false — while a sentence *returned*
+    arrives with `ok` true and reads as a success.  Both refusals here used to
+    come back as a sentence, one of them prefixed `[refused]`, which is a marker
+    in the answer rather than a status on the call: the model that read it could
+    not tell that nothing had been written.
 
     `build` is the family's own half — it constructs the entry and runs it
     through the parser a start uses (`_tool_server`, `_rest_api`), returning
@@ -1034,40 +1045,42 @@ def prepare_entry(
     what a start accepts one question.
     """
     if why := refusal(config, name):
-        return None, why
+        raise ToolError(why)
     try:
         settings, entry = build()
         configfile.upsert(section, name, entry)
     except ConfigError as exc:
-        return None, f"[refused] {exc}"
-    return settings, ""
+        raise ToolError(str(exc)) from exc
+    return settings
 
 
 async def list_entries(
     family: Family,
+    limit: int,
+    offset: int,
     *,
     words: FamilyWords,
-    describe: Callable[[Held | None, str, Mapping[str, Any]], str],
-) -> str:
+    describe: Callable[[Held | None, str, Mapping[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
     """The `*_list` answer: every entry as the file has it, with its state.
 
     Settles first, for the reason the hub's `servers()` does: this is the
     answer to "why is my tool missing", and a server that started a moment ago
     reads as one still starting — two different problems this tool exists to
-    tell apart.  The description is the family's, because an MCP entry is a
-    command or a URL and a REST entry is a spec and a base URL.
+    tell apart.  The row is the family's own, because an MCP entry is a command
+    or a URL and a REST entry is a spec and a base URL.
+
+    **An empty section is an empty page and not a sentence.**  It used to answer
+    "No … are configured under `…:` yet. `…_set` adds one.", which is a
+    cross-reference to another tool carried in prose — a dependency to keep in
+    step.  `total` says the section is empty, and the tool that writes an entry
+    is one the model can read in its own list.
     """
     family.connecting()
     await family.settle()
     entries = configfile.read_section(words.section)
-    if not entries:
-        return (
-            f"No {words.plural} are configured under `{words.section}:` yet. "
-            f"`{words.set_tool}` adds one."
-        )
-    return "\n".join(
-        describe(family.held(name), name, raw) for name, raw in entries.items()
-    )
+    rows = [describe(family.held(name), name, raw) for name, raw in entries.items()]
+    return listed(rows, words.collection, limit, offset, cap=LIST_PAGE)
 
 
 async def remove_entry(
@@ -1076,88 +1089,83 @@ async def remove_entry(
     *,
     words: FamilyWords,
     logger: logging.Logger,
-) -> str:
+) -> dict[str, Any]:
     """The `*_remove` answer: stop holding *name*, drop its entry.
 
     The file is consulted as well as the process, because a name this process
     never held but the operator wrote is still one to delete — and one in
-    neither is answered as what it is rather than silently succeeding.
+    neither is refused rather than silently succeeding: nothing was written, so
+    the call is a failure the model can see (`prepare_entry`'s rule).
+
+    **`removed` and `stopped` are two facts and the old sentence carried one.**
+    The entry can be held and no longer in the file — another instance removed
+    it, or a person edited it out — and then no entry was deleted but a link
+    *was* stopped, so a single "nothing was removed" is the opposite of what
+    happened.  Both are answered as they are.
     """
     if family.held(name) is None and name not in configfile.read_section(words.section):
-        return (
+        raise ToolError(
             f"'{name}' is not {words.entry} under `{words.section}:` — "
             f"see `{words.list_tool}`."
         )
     removed = configfile.remove(words.section, name)
     stopped = await family.remove(name)
-    if not removed:
-        # **Two ways to be here, and the old sentence was true of one.**  The
-        # entry can be held and no longer in the file — another instance removed
-        # it, or a person edited it out — and then a link *was* stopped, so
-        # "nothing was removed" is the opposite of what happened.
-        if stopped is not None:
-            return (
-                f"'{name}' was not written in `{words.section}:` any more, so "
-                f"there was no entry to delete — but this process was still "
-                f"holding it, and that link is stopped."
-            )
-        return (
-            f"'{name}' was not written in `{words.section}:`, so nothing was removed."
-        )
-    logger.info("%s name=%s", words.remove_log, name)
-    return f"'{name}' is stopped and its entry is gone from `{words.section}:`."
+    if removed:
+        logger.info("%s name=%s", words.remove_log, name)
+    return {"name": name, "removed": removed, "stopped": stopped is not None}
 
 
 async def switch_entry(
     family: Family, name: str, enabled: bool, *, words: FamilyWords
-) -> str:
-    """The `*_set_enabled` answer: flip the switch and say what followed.
+) -> dict[str, Any]:
+    """The `*_set_enabled` answer: flip the switch and report what followed.
 
     The switch is the file's, and the link follows it — a rebuild rather than a
     flag, so there is no state where the two disagree (`Family.set_enabled`).
+
+    A name the file does not have is refused rather than answered as a switch
+    that was set: nothing was written, so the call failed.
+
+    **Written but not held is a state of its own** (`not held`), and it is not a
+    failure: this process did not have the entry — another instance added it
+    since this one read the config — and the file is right, so the next start
+    holds it.
     """
     if name not in configfile.read_section(words.section):
-        return (
+        raise ToolError(
             f"'{name}' is not in `{words.section}:` — `{words.set_tool}` adds it, "
             f"`{words.list_tool}` shows what is there."
         )
     configfile.set_enabled(words.section, name, enabled)
     one = await family.set_enabled(name, enabled)
     if one is None:
-        # Written but not held: this process did not have it — an entry another
-        # instance added since this one read the config.  The file is right;
-        # the next start holds it.
-        return (
-            f"'{name}' is now {'enabled' if enabled else 'disabled'} in "
-            f"`{words.section}:`. It was not one of the servers this process is "
-            f"holding, so it is {words.past} from the next start."
-        )
-    if not enabled:
-        return f"'{name}' is switched off; its entry stays in `{words.section}:`."
-    await settled(one)
-    if one.usable:
-        return words.offers(name, len(one.rows or []))
-    reason = one.error or "it has not answered yet"
-    return words.coming_up(name, reason, because="switched on")
+        return {"name": name, "enabled": enabled, "state": "not held"}
+    if enabled:
+        await settled(one)
+    return entry_report(one, name, words=words)
 
 
 async def list_entry_tools(
-    family: Family, name: str, limit: int, *, words: FamilyWords
-) -> str:
-    """The `*_list_tools` answer: one entry's exposed items, capped."""
+    family: Family, name: str, limit: int, offset: int, *, words: FamilyWords
+) -> dict[str, Any]:
+    """The `*_list_tools` answer: one entry's exposed items, as one page.
+
+    A name this process does not hold is refused rather than answered with an
+    empty page: the entry exists nowhere this can look, and `total: 0` would read
+    as a server that offers nothing.
+    """
     one = family.held(name)
     if one is None:
-        return (
+        raise ToolError(
             f"'{name}' is not {words.entry} this process holds — "
             f"see `{words.list_tool}`."
         )
     # Waits for the link, for the reason `list_entries` does: what this reports
-    # is the items the entry *offers*, and "no list" is the answer for both a
-    # broken entry and one still starting.
+    # is the items the entry *offers*, and a page that is empty because the link
+    # is still coming up is a different answer from one that answered with
+    # nothing — and `state` is which of them it is.
     await settled(one)
-    return tools_as_text(
-        one, name, limit if limit > 0 else TOOL_LIST_LIMIT, words=words
-    )
+    return tools_payload(one, name, limit, offset, words=words)
 
 
 @dataclass

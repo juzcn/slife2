@@ -48,6 +48,7 @@ from slife2.libs.turn.messages import (
     ToolSpec,
     Usage,
 )
+from slife2.libs.turn.tools import as_tool_text
 
 logger = logging.getLogger(__name__)
 
@@ -324,12 +325,15 @@ def render_tool_result(content: Any) -> str:
     a list of image blocks should stay blocks: no wire here carries a picture in
     a tool result, and a JSON rendering is a fact the model can read where the
     empty string was a fact hidden.
+
+    **The rendering itself is `slife2.libs.turn.tools.as_tool_text`**, which is
+    where the same question is answered for a tool the loop runs and for one the
+    hub serves.  This function is the third caller and keeps only its own half —
+    the *result* of a tool call, whatever shape the caller sent, on its way into
+    a request field.  One rule, one place: two spellings of it were two chances
+    for one of them to answer `""` for a result it did not recognise.
     """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    return json.dumps(content, ensure_ascii=True, default=str)
+    return as_tool_text(content)
 
 
 class ProviderClients:

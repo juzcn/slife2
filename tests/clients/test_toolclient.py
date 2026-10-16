@@ -322,7 +322,7 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         text, ok = await registry.execute(
             ToolCall(id="c2", name="skill_list", arguments={})
         )
-        assert ok is True and "No skills are installed" in text
+        assert ok is True and json.loads(text)["skills"] == []
 
 
 @pytest.mark.asyncio
@@ -418,10 +418,10 @@ async def test_the_trim_is_one_tool_with_two_callers() -> None:
         )
 
     assert ok is True, "the budget is within its limit, so nothing was refused"
-    assert "within its budget" in text
+    assert json.loads(text)["unloaded"] == [], "said, not silent"
 
     assert trimmed["unloaded"] == [], "a hundred is room for everything here"
-    assert "within its budget" in trimmed["text"]
+    assert json.loads(trimmed["text"])["unloaded"] == []
 
 
 @pytest.mark.asyncio

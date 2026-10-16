@@ -164,10 +164,18 @@ class FakeAgentClient:
         #: picker's choice reached the server rather than only that the picker
         #: closed.
         self.switches: list[str] = []
-        #: What `switch_model` answers with.  A refusal is an *answer* on the
-        #: wire, so a test sets this to a `[refused] …` sentence to exercise the
-        #: one path that must not move anything.
-        self.switch_answer = "`default:` is now `local/small`; it was `local/big`."
+        #: What `switch_model` answers with — the agent server's facts, which is
+        #: what the real tool returns (`default`, `previous`, `moved`).
+        self.switch_answer: dict[str, Any] = {
+            "default": "local/small",
+            "previous": "local/big",
+            "moved": 0,
+        }
+        #: What `switch_model` raises instead, when a test wants the other half.
+        #: **A refusal is a raised `ToolError`**, which is the contract every
+        #: tool in this system keeps, and the one path that must not move the
+        #: bar.
+        self.switch_error: Exception | None = None
         #: What `transcript` answers with — the previous conversation, as the
         #: window opened after a restart sees it.  Empty is the real answer for
         #: a name that has never run, and so is the default.
@@ -193,8 +201,8 @@ class FakeAgentClient:
     async def close(self) -> None:
         self.connected = False
 
-    async def switch_model(self, ref: str) -> str:
-        """Answer the way the server does: the answer carries a refusal too.
+    async def switch_model(self, ref: str) -> dict[str, Any]:
+        """Answer the way the server does: the facts, or a raised refusal.
 
         It needs a connection for the same reason `run_turn` does — the real one
         reaches for a client it may no longer have, and that is the failure the
@@ -203,7 +211,9 @@ class FakeAgentClient:
         if not self.connected:
             raise ConnectionError("not connected")
         self.switches.append(ref)
-        return self.switch_answer
+        if self.switch_error is not None:
+            raise self.switch_error
+        return dict(self.switch_answer)
 
     async def answer_approval(self, call_id: str, approved: bool) -> str:
         """Answer the way the server does: the sentence is empty when taken.

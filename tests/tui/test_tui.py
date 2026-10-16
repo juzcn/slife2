@@ -19,6 +19,7 @@ from fakes import (
     FakeWindowClient,
     RefusingMeshClient,
 )
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD
@@ -2310,10 +2311,11 @@ async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
         await pilot.pause()
 
         assert client.switches == ["local/small"]
-        assert "Switched to local/small" in shown(app)
-        # The server's own sentence, kept as it was written: it is the only
-        # thing that says what a switch does to a conversation already running.
-        assert client.switch_answer in shown(app)
+        assert "Switched to local/small" in shown(app), "the picker's own line"
+        # And the window's note, drawn from the server's *facts* — which model it
+        # is now, which it was, and how many conversations moved, which is the
+        # half only the server knows.
+        assert "`default:` is now `local/small`; it was `local/big`." in shown(app)
         bar = status(app)
         assert "local/small" in bar and GLYPHS["vision"] in bar
         assert "local/big" not in bar and GLYPHS["thinking"] not in bar
@@ -2412,14 +2414,16 @@ async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
 
 
 async def test_a_refused_switch_moves_nothing_and_says_why() -> None:
-    """A refusal is an answer, and the one thing it must not do is move the bar.
+    """A refusal is a failure, and the one thing it must not do is move the bar.
 
     The server writes nothing when it refuses, so a window that showed the new
     model anyway would be the one place in the system claiming a switch that
-    did not happen.
+    did not happen.  **That a refusal arrives as a raised `ToolError`** is what
+    makes this the app's ordinary failure path rather than a sentence it has to
+    read a prefix out of.
     """
     client = FakeAgentClient(answering("ok"))
-    client.switch_answer = "[refused] `local/nope` is not a model"
+    client.switch_error = ToolError("`local/nope` is not a model this config defines.")
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,

@@ -48,6 +48,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.turn.tokens import clip_to_tokens
 from slife2.plugins.media.adapters import (
     MediaAdapter,
     MediaAdapterError,
@@ -65,9 +66,9 @@ CONFIG_KEY = "media"
 
 INSTRUCTIONS = (
     "Generation: images, video, speech and transcripts, from the `media:` "
-    "providers. Each tool names the file it wrote, or says what refused it. "
-    "`generate_video` can take minutes; a long render times out on the wait "
-    "while the job keeps running at the provider."
+    "providers. Each tool answers the file it wrote — `transcribe_audio`, the "
+    "text itself. `generate_video` can take minutes; a long render times out on "
+    "the wait while the job keeps running at the provider."
 )
 
 # ── The one bound a caller can be wrong about ────────────────────────────────
@@ -94,14 +95,14 @@ def check_size(size: str) -> str:
     matched = _SIZE.match(size.strip())
     if matched is None:
         raise ToolError(
-            f"[refused] {size!r} is not a size. Write it as `WIDTH*HEIGHT`, "
+            f"{size!r} is not a size. Write it as `WIDTH*HEIGHT`, "
             f"two whole numbers — `1024*1024`."
         )
     pixels = int(matched.group(1)) * int(matched.group(2))
     if not MIN_PIXELS <= pixels <= MAX_PIXELS:
         direction = "small" if pixels < MIN_PIXELS else "large"
         raise ToolError(
-            f"[refused] {size!r} is too {direction}: {pixels} pixels, and this "
+            f"{size!r} is too {direction}: {pixels} pixels, and this "
             f"provider takes {MIN_PIXELS}..{MAX_PIXELS} (about 768x768 to "
             f"4096x4096)."
         )
@@ -142,7 +143,7 @@ class Media:
         try:
             return self._settings.resolve(kind, model)
         except ConfigError as exc:
-            raise ToolError(f"[refused] {exc}") from exc
+            raise ToolError(str(exc)) from exc
 
     def output(self, ctx: Context, folder: str) -> Path:
         """Where this call's artifact goes: `agents/<agent>/media[/folder]/`.
@@ -160,7 +161,7 @@ class Media:
         try:
             return media_dir(found[0], folder)
         except MediaAdapterError as exc:
-            raise ToolError(f"[refused] {exc}") from exc
+            raise ToolError(str(exc)) from exc
 
     async def close(self) -> None:
         for adapter in self._adapters.values():
@@ -202,8 +203,8 @@ def build_server(
         size: str = "",
         image: str = "",
         folder: str = "",
-    ) -> str:
-        """Draw an image from a description, and say where it was written.
+    ) -> dict[str, Any]:
+        """Draw an image from a description, and answer where it was written.
 
         The picture is a file on this machine: copy it, or save it into the
         cabinet, to keep it.
@@ -218,6 +219,9 @@ def build_server(
                 `data:` URI. For models that take a reference image.
             folder: A folder inside the media directory to write into. Empty
                 writes at the top.
+
+        Returns:
+            `path` — the file the picture was written to.
         """
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
@@ -233,7 +237,7 @@ def build_server(
                 extra_params=params,
             ),
         )
-        return f"Image written to {output}"
+        return {"path": output}
 
     @mcp.tool(name="generate_video", meta=FOR_THE_MODEL)
     async def generate_video(
@@ -249,8 +253,8 @@ def build_server(
         # schema's default, the tool reads it, and there is nothing here to
         # route through the registry.
         timeout: float = 0,  # timeouts: the model's number, not ours
-    ) -> str:
-        """Render a video from a description, and say where it was written.
+    ) -> dict[str, Any]:
+        """Render a video from a description, and answer where it was written.
 
         A render takes minutes: one that outruns `timeout` fails, with the
         provider's job id in the message so the same render can be asked after
@@ -269,6 +273,9 @@ def build_server(
             folder: A folder inside the media directory to write into.
             timeout: How long to wait, in seconds. Zero or less uses the
                 default.
+
+        Returns:
+            `path` — the file the video was written to.
         """
         provider, entry = media.resolve("video", model)
         given: dict[str, Any] = {}
@@ -290,13 +297,13 @@ def build_server(
                 deadline_s=timeout if timeout > 0 else None,
             ),
         )
-        return f"Video written to {output}"
+        return {"path": output}
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
         ctx: Context, text: str, model: str = "", voice: str = "", folder: str = ""
-    ) -> str:
-        """Say something out loud, into an audio file, and say where it is.
+    ) -> dict[str, Any]:
+        """Say something out loud, into an audio file, and answer where it is.
 
         Args:
             text: What to say.
@@ -305,6 +312,9 @@ def build_server(
             voice: Which voice, by the provider's own name. Empty uses the
                 model's default.
             folder: A folder inside the media directory to write into.
+
+        Returns:
+            `path` — the file the audio was written to.
         """
         provider, entry = media.resolve("tts", model)
         output = await _run(
@@ -317,19 +327,37 @@ def build_server(
                 extra_params=dict(entry.params),
             ),
         )
-        return f"Audio written to {output}"
+        return {"path": output}
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
-    async def transcribe_audio(ctx: Context, path: str, model: str = "") -> str:
-        """Write down what an audio file says, and answer with the text.
+    async def transcribe_audio(
+        ctx: Context, path: str, model: str = "", offset: int = 0, limit: int = 0
+    ) -> dict[str, Any]:
+        """Write down what an audio file says, and answer the text.
+
+        A recording can be longer than one answer may carry, so this is read in
+        pages: `offset` says where to start and `limit` how much to ask for.
+        Read the rest from `offset + len(text)` — an hour of speech is several
+        turns of reading, and every page says where the next one begins.
 
         Args:
             path: The audio file, as a local path.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
+            offset: The character to start at; `0` is the beginning.
+            limit: The most characters to answer with. `0` answers as much as
+                fits the tool-result budget, which is also the ceiling on any
+                `limit` — a page is never longer than the budget whatever is
+                asked for.
+
+        Returns:
+            `text` — the transcript from `offset` — `total`, how many characters
+            the whole transcript is, and `offset`/`limit` as asked. So
+            `offset + len(text) < total` says whether more remains.
         """
         if not path.strip():
-            raise ToolError("[refused] no audio file was named.")
+            raise ToolError("no audio file was named — pass the path of the recording.")
+        start = max(0, offset)
         provider, entry = media.resolve("asr", model)
         text = await _run(
             "transcript",
@@ -341,7 +369,20 @@ def build_server(
                 extra_params=dict(entry.params),
             ),
         )
-        return text
+        page = text[start : start + limit] if limit > 0 else text[start:]
+        # **The budget is the last word, whatever `limit` said.**  A page size
+        # in characters is not a size in tokens — `limit=20000` of Chinese is
+        # several times what an English 20000 is, and a transcript is the one
+        # answer here whose length is the recording's rather than the caller's.
+        # An answer over `tool_result.tokens` is one the harness would have to
+        # shorten again, which is our own reader feeding our own shortening
+        # (`slife2.plugins.cabinet.server.dump_read` bounds itself the same way).
+        return {
+            "text": clip_to_tokens(page, config.tool_result.tokens),
+            "total": len(text),
+            "offset": start,
+            "limit": limit,
+        }
 
     return mcp
 
@@ -370,13 +411,13 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
         return await call()
     except NotImplementedError as exc:
         raise ToolError(
-            f"[refused] this provider cannot make a {noun}: {exc}. Another "
+            f"this provider cannot make a {noun}: {exc}. Another "
             f"`api:` (or another model of the right kind) would."
         ) from exc
     except MediaAdapterError as exc:
-        raise ToolError(f"[failed] {noun}: {exc}") from exc
+        raise ToolError(f"the {noun} call failed: {exc}") from exc
     except FileNotFoundError as exc:
-        raise ToolError(f"[refused] {exc}") from exc
+        raise ToolError(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> int:

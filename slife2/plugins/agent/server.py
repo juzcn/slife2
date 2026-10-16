@@ -2107,7 +2107,7 @@ def build_server(
     )
 
     @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
-    async def attach_image(ctx: Context, sources: list[str]) -> str:
+    async def attach_image(ctx: Context, sources: list[str]) -> dict[str, Any]:
         """Add the image parts a vision model reads to the request.
 
         Call this when a message names a picture — a path on this machine, a
@@ -2116,51 +2116,59 @@ def build_server(
         Args:
             sources: Absolute paths on this machine, `http(s)` URLs that serve
                 image bytes, or `data:` URIs — as many as you need in one call.
+
+        Returns:
+            `attached` — the sources the model can now see, named exactly as
+            this call named them — and `refused`, one entry per source that
+            could not be read, each naming the source and the reason.
         """
         client_id = request_client(ctx)
         loop = loops.get(client_key(*client_id)) if client_id else None
         if loop is None:
-            return "No conversation is running here, so there is nothing to attach to."
+            raise ToolError(
+                "this call is not inside a running turn, so there is no request "
+                "to attach an image to."
+            )
         wanted = [str(source) for source in sources if str(source).strip()]
         if not wanted:
-            return "Nothing to attach: no source was named."
+            raise ToolError(
+                "this call named no source; pass the paths, URLs or `data:` "
+                "URIs of the images to attach."
+            )
 
         if not loop.accepts_images:
             # v1 refused to encode rather than letting a provider drop them, and
-            # this is the better half of its version: the refusal is a tool result
-            # the model reads, so it can tell the person — where v1 had the
-            # harness write an assistant message on the model's behalf.
-            return (
-                f"Nothing attached: {loop.model} cannot read images. Tell whoever "
-                f"asked, or switch to a model whose config lists `image` under "
-                f"`input`. The file(s) named were: {', '.join(wanted)}"
+            # this is the better half of its version: the refusal is the tool
+            # result the model reads, so it can tell the person — where v1 had
+            # the harness write an assistant message on the model's behalf.
+            raise ToolError(
+                f"{loop.model} cannot read images, so nothing was attached — "
+                f"move to a model whose config lists `image` under `input`."
             )
 
         pairs, refusals = attachments.resolve(wanted)
-        if not pairs:
-            # **Every source failed, and the refusals are the whole answer.**
-            # Asked the other way round this reported "there is no message to
-            # attach it to" — a claim about the conversation, made when the
-            # fault is the file's, and one that threw away the sentence naming
-            # the fault: a model that named a path that is not there was told
-            # nothing about the path.
-            return "Nothing attached:\n" + "\n".join(
-                f"Not attached — {refusal}" for refusal in refusals
-            )
-        if not attachments.inject(loop.messages, [url for _source, url in pairs]):
-            return "Nothing attached: there is no message to attach it to."
+        if pairs and not attachments.inject(
+            loop.messages, [url for _source, url in pairs]
+        ):
+            raise ToolError("there is no message here to attach an image to.")
         logger.info(
             "attach_image %s: %d attached, %d refused",
             client_id,
             len(pairs),
             len(refusals),
         )
-        lines = [
-            f"Attached {len(pairs)} image(s): "
-            + ", ".join(source for source, _url in pairs)
-        ]
-        lines += [f"Not attached — {refusal}" for refusal in refusals]
-        return "\n".join(lines)
+        # **A refusal is about one source, and it is answered as a value.**  The
+        # batch rule is the module's; this is the half that hands it to the
+        # model.  One unreadable source among five still attaches the other
+        # four, and a call where every source failed answers the shape a call
+        # where none did answers — because the fault is the file's, and a
+        # refusal about the *call* would throw away the sentence naming which
+        # file it was (the mistake this used to make: "there is no message to
+        # attach it to", said of a path that is not there).
+        return {
+            "attached": [source for source, _url in pairs],
+            "refused": refusals,
+        }
 
     @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
     async def check_new_input(ctx: Context) -> str:
@@ -2274,8 +2282,8 @@ def build_server(
                 return f"{name}/{models[0].get('model', '')}"
         return ""
 
-    async def _ensure_backend(api: str) -> str:
-        """Start the model server for an api nothing was serving.  `""` when up.
+    async def _ensure_backend(api: str) -> dict[str, Any]:
+        """Start the model server for an api nothing was serving.
 
         **The one case a re-read cannot cover.**  The agent and the backends
         follow the file, but a protocol with no provider at boot has no process
@@ -2288,6 +2296,12 @@ def build_server(
         (`slife2.libs.host.launcher`); and on the common path `ensure` probes first, so a
         model added beside a provider whose backend is already up costs one
         round trip and starts nothing.
+
+        Answers `{"api", "up", "detail"}` — the protocol, whether it has a
+        backend now, and the reason when it has not.  **A start that failed is a
+        value and not an exception**, so the model is told its model was written
+        and its backend was not: the edit stands either way, and a restart is
+        what retries.
         """
         from slife2.libs.host import launcher
 
@@ -2298,49 +2312,57 @@ def build_server(
                 config_path=configfile.config_path(),
             )
         except Exception as exc:  # noqa: BLE001 - a start that raised is not a crash
-            return (
-                f" Its `{api}` server could not be started ({exc}); a restart "
-                f"will retry."
-            )
+            return {
+                "api": api,
+                "up": False,
+                "detail": f"its server could not be started ({exc}); a restart "
+                f"will retry",
+            }
         if outcome.ok:
-            return f" Its `{api}` backend is up."
-        return (
-            f" Its `{api}` backend did not come up — "
-            f"{outcome.detail or 'it did not answer'}; a restart will retry."
-        )
+            return {"api": api, "up": True, "detail": ""}
+        return {
+            "api": api,
+            "up": False,
+            "detail": f"it did not come up — "
+            f"{outcome.detail or 'it did not answer'}; a restart will retry",
+        }
 
     @mcp.tool(name="model_list", meta=FOR_THE_MODEL)
-    async def model_list() -> str:
-        """List the models this config defines, grouped by provider.
+    async def model_list() -> dict[str, Any]:
+        """List the models this config defines.
 
-        Each model shows the reference you name it by (`provider/model`), its
-        context window and output limit, and whether it reasons or reads images;
-        the one `default:` names is marked. This reads the config file, so it is
-        what the next conversation would use.
+        Reads the config file, so it is what the next conversation would use.
+
+        Returns:
+            `models`, one row per model: `provider` and `model`, which name it —
+            `provider/model` is the reference the rest of these tools take —
+            `name`, whether it is the `default`, and whether it reasons or reads
+            images, under `marks`; and `context_window` and `max_tokens`, both
+            `0` when the config does not say.  Plus `total`, how many models
+            there are, and `default`, the reference the system runs on — `null`
+            when the config names none.
         """
         try:
             providers = _providers()
             active = _active_default(providers)
         except ConfigError as exc:
-            return f"[refused] {exc}"
-        if not providers:
-            return "No models are configured. `model_set` adds one."
+            raise ToolError(str(exc)) from exc
 
-        lines: list[str] = []
-        total = 0
+        # **No `limit`/`offset`, and the bound is what decides it.**  Every other
+        # listing here answers a log — turns, runs — which grows for as long as
+        # the system is used, so it pages.  This one answers the config file: a
+        # handful of models an operator wrote down, read whole in a fraction of
+        # the token budget, where a page would be two arguments the model has to
+        # reason about for a list it can hold in one look.
+        models: list[dict[str, Any]] = []
         for provider, entry in providers.items():
             if not isinstance(entry, dict):
                 continue
-            lines.append(
-                f"\n- {provider}  "
-                f"(api {entry.get('api') or '?'}, base {entry.get('base_url') or '?'})"
-            )
-            models = entry.get("models")
-            for spec in models if isinstance(models, list) else []:
+            specs = entry.get("models")
+            for spec in specs if isinstance(specs, list) else []:
                 if not isinstance(spec, dict):
                     continue
-                total += 1
-                model = str(spec.get("model") or "?")
+                model = str(spec.get("model") or "")
                 marks = []
                 if f"{provider}/{model}" == active:
                     marks.append("default")
@@ -2348,24 +2370,21 @@ def build_server(
                     marks.append("reasoning")
                 if "image" in (spec.get("input") or []):
                     marks.append("image")
-                facts = []
-                if spec.get("context_window"):
-                    facts.append(f"ctx {spec['context_window']}")
-                if spec.get("max_tokens"):
-                    facts.append(f"out {spec['max_tokens']}")
-                line = f"    {provider}/{model} — {spec.get('name') or model}"
-                if marks:
-                    line += f"  [{', '.join(marks)}]"
-                if facts:
-                    line += f"  {', '.join(facts)}"
-                lines.append(line)
-        header = f"{total} model(s); `default:` is `{active or '(none)'}`."
-        return "\n".join([header, *lines])
+                models.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "name": str(spec.get("name") or model),
+                        "marks": marks,
+                        "context_window": spec.get("context_window") or 0,
+                        "max_tokens": spec.get("max_tokens") or 0,
+                    }
+                )
+        return {"models": models, "total": len(models), "default": active or None}
 
     @mcp.tool(name="model_set", meta=FOR_THE_MODEL)
     async def model_set(
-        provider: str,
-        model: str,
+        ref: str,
         name: str,
         api: str = "",
         base_url: str = "",
@@ -2377,15 +2396,15 @@ def build_server(
         temperature: float | None = None,
         top_p: float | None = None,
         compat: dict[str, Any] | None = None,
-    ) -> str:
-        """Add or update one model on a provider, creating the provider.
+    ) -> dict[str, Any]:
+        """Add or update one model, creating its provider.
 
         This is the model's whole entry: a field left out is dropped, so restate
         everything it should have. The next conversation can name it.
 
         Args:
-            provider: The provider's name in the config; created if it is new.
-            model: The API model id, which is also what `provider/model` names.
+            ref: The model, as `provider/model` — the same reference its
+                siblings take. The provider is created when it is new.
             name: The display name.
             api: The wire protocol — `openai-completions`,
                 `anthropic-messages` or `openai-responses`. Empty uses the
@@ -2401,30 +2420,40 @@ def build_server(
             temperature: Sampling temperature.
             top_p: Nucleus sampling.
             compat: Wire quirks the endpoint needs, e.g. `{"thinking": "omit"}`.
+
+        Returns:
+            `ref`, and what the write did: `created` when this call added a model
+            the file did not have rather than replacing one it did, and
+            `provider_created` when it made the provider too. `backend` is the
+            protocol's backend when this call had to start one — `{"api", "up",
+            "detail"}`, where `up: false` carries the reason — and `null` when a
+            provider for that protocol was already configured.
         """
+        provider, _slash, model = ref.strip().partition("/")
         provider, model, name = provider.strip(), model.strip(), name.strip()
-        if not provider or not model or not name:
-            return (
-                "[refused] a model needs a `provider`, a `model` id and a "
-                "display `name`."
+        if not provider or not model:
+            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
+        if not name:
+            raise ToolError(
+                "a model needs a display `name` — it is what the model is called "
+                "in a conversation."
             )
         if api and api not in API_BACKENDS:
-            return (
-                f"[refused] {api!r} is not a wire protocol; known: "
-                f"{', '.join(API_BACKENDS)}."
+            raise ToolError(
+                f"{api!r} is not a wire protocol; known: {', '.join(API_BACKENDS)}."
             )
         try:
             providers = _providers()
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
 
         existing = providers.get(provider)
         creating = not isinstance(existing, dict)
         if creating and not (base_url and api_key):
-            return (
-                f"[refused] `{provider}` is a new provider, so it needs "
-                f"`base_url` and `api_key` — the key as a `${{VAR}}` reference, "
-                f"so it stays out of the file."
+            raise ToolError(
+                f"`{provider}` is a new provider, so it needs `base_url` and "
+                f"`api_key` — the key as a `${{VAR}}` reference, so it stays out "
+                f"of the file."
             )
         known = set()
         for entry in providers.values():
@@ -2470,49 +2499,53 @@ def build_server(
         try:
             configfile.update_entry("providers", provider, change)
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
 
-        where = (
-            f"the new provider `{provider}` on `{entry_api}`"
-            if creating
-            else f"`{provider}`"
-        )
-        action = "updated on" if had_model else "added to"
-        answer = f"`{provider}/{model}` ({name}) is {action} {where}."
-        if entry_api not in known:
-            answer += await _ensure_backend(entry_api)
-        return answer
+        return {
+            "ref": f"{provider}/{model}",
+            "created": not had_model,
+            "provider_created": creating,
+            # Only when this call is what made the protocol reachable: a provider
+            # for an api that was already configured is served by a backend that
+            # has been up since boot, and reporting on it here would be this tool
+            # answering about a process it never touched.
+            "backend": await _ensure_backend(entry_api)
+            if entry_api not in known
+            else None,
+        }
 
     @mcp.tool(name="model_remove", meta=FOR_THE_MODEL)
-    async def model_remove(ref: str) -> str:
+    async def model_remove(ref: str) -> dict[str, Any]:
         """Remove one model, named `provider/model`.
 
-        The provider goes too when that was its last model. Refused for the
-        default model — `model_switch` first — and for one a running
-        conversation is on, whose model is fixed when it starts. The model stays
-        at the provider.
+        The model stays at its provider, and the provider goes too when that was
+        its last model. Refused for the default model — switch to another first
+        — and for one a running conversation is on, whose model is fixed when it
+        starts.
 
         Args:
             ref: The model, as `provider/model`.
+
+        Returns:
+            `ref`, and `provider_removed`: whether the provider's whole entry
+            went with it, which happens when this was its last model.
         """
         ref = ref.strip()
         if "/" not in ref:
-            return f"[refused] `{ref}` is not a model reference; use `provider/model`."
+            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
         provider, model = ref.split("/", 1)
         try:
             providers = _providers()
             active = _active_default(providers)
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
         entry = providers.get(provider)
         specs = (entry or {}).get("models")
         specs = specs if isinstance(specs, list) else []
         if not any(
             isinstance(one, dict) and one.get("model") == model for one in specs
         ):
-            return (
-                f"[refused] `{ref}` is not a model — `model_list` shows what there is."
-            )
+            raise ToolError(f"`{ref}` is not a model this config defines.")
         # **The config-wide guard comes first, deliberately.**  With one model
         # the fallback makes it the default too, so both refusals are true — and
         # "it is the last model" is the deeper reason, the one that says what
@@ -2523,22 +2556,21 @@ def build_server(
             if isinstance(entry, dict)
         )
         if total == 1:
-            return (
-                f"[refused] `{ref}` is the last model in the config; without it "
-                f"slife2 would fall back to its built-in default. `model_set` "
-                f"another first."
+            raise ToolError(
+                f"`{ref}` is the last model in the config; without it slife2 "
+                f"would fall back to its built-in default. `model_set` another "
+                f"first."
             )
         if ref == active:
-            return (
-                f"[refused] `{ref}` is the default model; `model_switch` to "
-                f"another first."
+            raise ToolError(
+                f"`{ref}` is the default model; `model_switch` to another first."
             )
         # **This home's conversations, and this home's only.**  The loop table is
         # keyed by `(home, agent, subagent)` because one process serves several
         # homes, and `current()` above read the *caller's* file — so a loop filed
         # under another home is a conversation this call knows nothing about, and
         # refusing on its behalf would be a false refusal that also printed
-        # somebody else's conversation names into a sentence the model reads.
+        # somebody else's conversation names into an error the model reads.
         here = this_home()
         holders = [
             describe((one.agent, one.subagent))
@@ -2546,9 +2578,9 @@ def build_server(
             if key[0] == here and one.model == ref
         ]
         if holders:
-            return (
-                f"[refused] `{ref}` is the model a conversation is running on "
-                f"({', '.join(holders)}). `model_switch` to another one first — "
+            raise ToolError(
+                f"`{ref}` is the model a conversation is running on "
+                f"({', '.join(holders)}); `model_switch` to another one first — "
                 f"it moves the conversations running on this one with it."
             )
 
@@ -2567,50 +2599,43 @@ def build_server(
         try:
             configfile.update_entry("providers", provider, change)
         except ConfigError as exc:
-            return f"[refused] {exc}"
-        gone = (
-            ""
-            if len(specs) > 1
-            else f" `{provider}` had no other models, so its entry went too."
-        )
-        return f"`{ref}` is removed.{gone}"
+            raise ToolError(str(exc)) from exc
+        return {"ref": ref, "provider_removed": len(specs) == 1}
 
     @mcp.tool(name="model_switch", meta=FOR_THE_MODEL)
-    async def model_switch(ref: str) -> str:
+    async def model_switch(ref: str) -> dict[str, Any]:
         """Make `provider/model` the model this system runs on, at once.
 
         Writes the top-level `default:` in the config file, and moves every
         conversation this server is holding onto it: each keeps its history and
         runs on the new model from its next turn. That is what makes it the way
-        out of a model that has stopped answering. The model must be one
-        `model_list` shows.
+        out of a model that has stopped answering. The model must be one the
+        config defines.
 
         Args:
             ref: The model, as `provider/model`.
+
+        Returns:
+            `default` — the reference the system now runs on — `previous`, what
+            `default:` said before, and `moved`, how many conversations that were
+            already running this server moved onto it from their next turn.
         """
         ref = ref.strip()
         if "/" not in ref:
-            return f"[refused] `{ref}` is not a model reference; use `provider/model`."
+            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
         try:
             providers = _providers()
-            old = _active_default(providers) or "(none)"
+            old = _active_default(providers)
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
         provider, model = ref.split("/", 1)
         entry = providers.get(provider)
         specs = (entry or {}).get("models")
         specs = specs if isinstance(specs, list) else []
-        display = model
-        found = False
-        for one in specs:
-            if isinstance(one, dict) and one.get("model") == model:
-                found = True
-                display = str(one.get("name") or model)
-                break
-        if not found:
-            return (
-                f"[refused] `{ref}` is not a model — `model_list` shows what there is."
-            )
+        if not any(
+            isinstance(one, dict) and one.get("model") == model for one in specs
+        ):
+            raise ToolError(f"`{ref}` is not a model this config defines.")
 
         # What the conversations below are moved *onto*, and it is not the same
         # question as the judge inside the writer.  `default:` is a scalar the
@@ -2623,7 +2648,7 @@ def build_server(
         try:
             name, endpoint, settings = current().resolve(ref)
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
 
         def resolves(config: Config) -> None:
             """The writer's judge: `load` accepts any string, `resolve` does not."""
@@ -2632,7 +2657,7 @@ def build_server(
         try:
             configfile.set_scalar("default", ref, check=resolves)
         except ConfigError as exc:
-            return f"[refused] {exc}"
+            raise ToolError(str(exc)) from exc
 
         # **The conversations move with it, and this is the half that makes the
         # tool worth having.**  Writing `default:` alone changes what the *next*
@@ -2669,15 +2694,7 @@ def build_server(
             loop.model_id = settings.model
             loop.accepts_images = settings.accepts_images
 
-        running = len(mine)
-        if running:
-            moved = (
-                f" {running} conversation{'' if running == 1 else 's'} already "
-                f"running moved with it, from the next turn."
-            )
-        else:
-            moved = " Nothing was running, so nothing had to move."
-        return f"`default:` is now `{reference}` ({display}); it was `{old}`.{moved}"
+        return {"default": reference, "previous": old or None, "moved": len(mine)}
 
     @mcp.tool
     async def send_message(
@@ -3246,8 +3263,7 @@ def build_server(
         subagent's is the record inside it, and a name that has no such record is
         not one: asking for the agent's own cabinet is refused rather than
         emptied.  A name that is not there at all is not an error — the caller
-        wanted it gone and it is gone, which is `reset`'s answer for the same
-        question.
+        wanted it gone and it is gone.
 
         Args:
             name: Which of your subagents.  The same name you made it with.

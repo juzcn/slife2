@@ -79,7 +79,6 @@ from slife2.tui.client import (
     MCPWindowClient,
     MeshClient,
     WindowClient,
-    refused,
 )
 from slife2.tui.i18n import t
 from slife2.tui.restore import restore
@@ -965,13 +964,24 @@ class SlifeApp(App[None]):
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
             self._transcript.add_error(t("model_switch_failed", err=exc))
             return
-        # A refusal rather than a note (`client.refused`), and the difference is
-        # the bar: a note would leave it describing a switch that never
-        # happened.
-        if refused(answer):
-            self._transcript.add_error(answer)
-            return
-        self._transcript.add_note(answer)
+        # **A note, and it is this window's sentence.**  What the server said is
+        # the *facts* — which model it is now, which it was, how many
+        # conversations moved — and the line a person reads is the window's, like
+        # every other one it draws (`slife2.tui.i18n`); what it draws from them
+        # is the half only the server knows, which is why `moved` is in the
+        # sentence at all.
+        self._transcript.add_note(
+            t(
+                "model_switched",
+                default=str(answer["default"]),
+                previous=str(answer.get("previous") or "(none)"),
+                moved=(
+                    t("model_switched_moved", n=answer.get("moved"))
+                    if answer.get("moved")
+                    else ""
+                ),
+            )
+        )
         self._apply_model(choice)
 
     def _ask_approval(self, call_id: str, name: str, arguments: dict[str, Any]) -> None:

@@ -41,6 +41,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastmcp import Context, FastMCP
@@ -428,7 +429,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     # ── For the model ────────────────────────────────────────────────────
 
     @mcp.tool(name="expose_local_image", meta=FOR_THE_MODEL)
-    async def expose_local_image(ctx: Context, path: str) -> str:
+    async def expose_local_image(ctx: Context, path: str) -> dict[str, Any]:
         """Give a local file a public HTTPS URL, so something that cannot read
         this machine's disk can fetch it — a vision model asked about a
         picture, a chat API that only accepts links.
@@ -442,14 +443,19 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         Args:
             path: The file on this machine, as an absolute path or one
                 relative to where slife2 was started.
+
+        Returns:
+            `url` — the public link to hand to whoever needs the file — its
+            `token`, which is what `unexpose_local_image` takes — and `file`,
+            the name being served.
         """
         if not path.strip():
-            raise ToolError("[refused] no file was named.")
+            raise ToolError("no file was named — pass the path of the file to publish.")
         target = Path(path)
         if not target.exists():
-            raise ToolError(f"[refused] there is no file at {path}.")
+            raise ToolError(f"there is no file at {path}.")
         if not target.is_file():
-            raise ToolError(f"[refused] {path} is a directory, not a file.")
+            raise ToolError(f"{path} is a directory, not a file.")
         # **Judge the file that will actually be served, not the name it was
         # asked for.**  The registry stores `str(target.resolve())` and the
         # route serves *that* path, so a symlink named `photo.png` pointing at
@@ -461,7 +467,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         served = target.resolve()
         if is_credential_path(served):
             raise ToolError(
-                f"[refused] {served.name} looks like a private credential "
+                f"{served.name} looks like a private credential "
                 f"(a key, a `.env`, a saved password). A share URL is public "
                 f"while the tunnel is up, so this would publish it."
             )
@@ -469,7 +475,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         await _ensure(tunnel, port)
         if not tunnel.is_active:
             raise ToolError(
-                "[failed] the tunnel is not up, so there is no public URL to "
+                "the tunnel is not up, so there is no public URL to "
                 "hand out. `tunnel_status` says what the tunnel is doing."
             )
         # A published URL is not a working one: a transport that lost the edge
@@ -479,7 +485,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         # answer, and the tunnel keeps retrying in the background.
         if not tunnel.is_reachable():
             raise ToolError(
-                "[failed] the tunnel has published a URL but nothing is "
+                "the tunnel has published a URL but nothing is "
                 "reaching it from outside right now — every fetch would answer "
                 "HTTP 530. `tunnel_status` has the detail; try again shortly."
             )
@@ -487,35 +493,36 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         found = exposed.register(str(served), request_client(ctx))
         url = tunnel.share_url_for(found.token)
         if url is None:
-            raise ToolError("[failed] the tunnel went away as the file was published.")
-        return f"{found.name} is now at:\n{url}\n\nThat URL works for as long as this is running. Fetch it, or hand it to whatever needs the file."
+            raise ToolError("the tunnel went away as the file was published.")
+        return {"url": url, "token": found.token, "file": found.name}
 
     @mcp.tool(name="unexpose_local_image", meta=FOR_THE_MODEL)
-    async def unexpose_local_image(ctx: Context, token: str) -> str:
+    async def unexpose_local_image(ctx: Context, token: str) -> dict[str, Any]:
         """Stop serving a file that `expose_local_image` published. Its URL
         answers 403 from then on, and the file itself is untouched.
 
         Args:
             token: The last part of the share URL — the `xxxx` in
                 `https://…/share/xxxx`.
+
+        Returns:
+            `token` — the link that was withdrawn, whether it arrived as a bare
+            token or as a whole share URL. From here that URL answers 403.
         """
         wanted = token.strip().rstrip("/").rsplit("/", 1)[-1]
         if not wanted:
             raise ToolError(
-                "[refused] no token was given — it is the last part of the share URL."
+                "no token was given — it is the last part of the share URL."
             )
         outcome = exposed.revoke(wanted, request_client(ctx))
         if outcome is Revoked.UNKNOWN:
-            raise ToolError(
-                f"[refused] no link with the token {wanted!r} is being served."
-            )
+            raise ToolError(f"no link with the token {wanted!r} is being served.")
         if outcome is Revoked.FOREIGN:
             raise ToolError(
-                f"[refused] the token {wanted!r} belongs to another "
-                f"conversation's link."
+                f"the token {wanted!r} belongs to another conversation's link."
             )
         logger.info("unexposed token=%s", wanted)
-        return f"Stopped serving {wanted}. That URL no longer works."
+        return {"token": wanted}
 
     # ── Not for the model ────────────────────────────────────────────────
     # No `meta`, so the hub withholds it (slife2/libs/plugin/audience.py).  It is here

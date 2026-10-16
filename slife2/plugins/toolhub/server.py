@@ -182,6 +182,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
@@ -221,6 +222,7 @@ from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.index import Embedder
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
+from slife2.libs.turn.tools import as_tool_text
 
 logger = logging.getLogger(__name__)
 
@@ -1569,8 +1571,14 @@ class LocalTool:
     of that answer plus a list of exceptions kept here.
     """
 
+    #: Arguments in, and the answer out — an object `call_tool` says as JSON for
+    #: the model (`slife2.libs.turn.tools.as_tool_text`), or text for an answer
+    #: that is already words.  **A refusal is raised** (`ToolError`), which is the
+    #: contract every tool in this system keeps, and which is why there is no
+    #: second half to this answer: a call that did nothing is not an answer at
+    #: all, and the one that does something *partly* says so in its own fields.
     tool: UpstreamTool
-    run: Callable[[dict[str, Any]], Awaitable[tuple[str, bool]]]
+    run: Callable[[dict[str, Any]], Awaitable[Any]]
 
 
 #: How many rows one search answers with.
@@ -1752,7 +1760,7 @@ def local_tools(
     unfindable at the same time.  See `Upstream.declare`.
     """
 
-    async def search(arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def search(arguments: dict[str, Any]) -> dict[str, Any]:
         # Every family that owns rows is asked for its list on the way in,
         # because a search is exactly where something that arrived since the hub
         # started has to be findable — see `Upstream.declare`.  Nothing is
@@ -1781,12 +1789,11 @@ def local_tools(
             # tool's own answer promising that somebody else can do the job is a
             # promise it cannot keep; when there is a tool that enumerates, the
             # sentence can name it and be true.
-            return (
+            raise ToolError(
                 "tool_search needs something to look for: `sentences` is what you "
                 "want to do ('take a screenshot of a page') and `keywords` are "
                 "words a tool's own text would carry ('screenshot'). Give one of "
-                "them — both empty is not a search.",
-                False,
+                "them — both empty is not a search."
             )
         # **A keywords-only call reaches both legs, and the rule is the store's.**
         # `ToolStore.search` turns words with no sentence into a sentence of them
@@ -1796,12 +1803,12 @@ def local_tools(
         found = await catalogue.search(
             keywords=keywords, sentences=sentences, limit=SEARCH_LIMIT
         )
-        return _results_as_text(found), True
+        return _results(found)
 
-    async def load(arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def load(arguments: dict[str, Any]) -> dict[str, Any]:
         names = _names_of(arguments)
         if not names:
-            return "func_tool_load needs at least one tool name", False
+            raise ToolError("func_tool_load needs at least one tool name")
         if len(names) > MAX_LOAD_NAMES:
             # A bound, because each name is its own catalogue write and its own
             # embedding call — this is a `for` over a hop, not a batch — and
@@ -1809,21 +1816,31 @@ def local_tools(
             # trim takes back anyway.  Refused as a whole rather than truncated:
             # a model told *which* half was loaded has to diff two lists, and
             # one told to ask for fewer knows exactly what to do.
-            return (
+            raise ToolError(
                 f"func_tool_load takes at most {MAX_LOAD_NAMES} names at a time "
                 f"({len(names)} given): the list is trimmed to the budget at "
                 f"every turn boundary, so load the ones you want now."
-            ), False
-        lines: list[str] = []
-        ok = True
+            )
+        loaded: list[str] = []
+        failed: list[dict[str, str]] = []
         for name in names:
             answer = await catalogue.set_load(name, "loaded")
-            text, loaded = _load_as_text(name, answer)
-            lines.append(text)
-            ok = ok and loaded
-        return "\n".join(lines), ok
+            reason = _load_refusal(name, answer)
+            if reason:
+                failed.append({"name": name, "reason": reason})
+            else:
+                loaded.append(name)
+        # **A name that cannot be loaded is a verdict, not a failure.**  The
+        # call did what a load does: it asked the catalogue about every name and
+        # got an answer for each.  Marking the call failed would make *that*
+        # answer an error, and the four `failed` reasons are exactly what the
+        # model has to read to correct itself — a server that is switched off, a
+        # server that is not answering, a playbook that is read with `skill_use`,
+        # a name nothing holds.  What *is* a failure is a call that cannot be
+        # made at all: no names, or too many to be one call.
+        return {"loaded": loaded, "failed": failed}
 
-    async def unload(arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def unload(arguments: dict[str, Any]) -> dict[str, Any]:
         """Take tools out of the model's list, by name or by budget.
 
         Both callers of `_func_tool_unload` arrive here — the model with the
@@ -1836,13 +1853,14 @@ def local_tools(
         found = await unload_tools(
             catalogue, live_sources(), _names_of(arguments), autoload_sources()
         )
-        # Nothing it could not do is a success.  A refused name (one the system
-        # works by) and an unknown one are both the model asking for something
-        # that did not happen, which is what `ok` is for — the trim the harness
-        # asks for has neither, and comes back true.
-        return _unload_as_text(found), not (
-            found.get("refused") or found.get("unknown")
-        )
+        # **Every one of the five lists is a verdict about a name, and all five
+        # are the answer.**  Nothing here is a failure: the model asked about its
+        # own list and this is what is true of it — `tool_search` cannot go
+        # because the system works by it, `nowhere` because no row has that name,
+        # and a name already out of the list is the state the model asked for.
+        # The one caller that must not read it as a judgement is the harness,
+        # which asks with no names and reads `unloaded` (`trim_answer`).
+        return _unload_answer(found)
 
     return [
         LocalTool(
@@ -1980,36 +1998,28 @@ def _unload_names(found: Mapping[str, Any], key: str) -> list[str]:
     return [str(name) for name in names]
 
 
-def _unload_as_text(found: Mapping[str, Any]) -> str:
-    """What a trim did, said in a sentence — for a log line and for a person.
+def _unload_answer(found: Mapping[str, Any]) -> dict[str, Any]:
+    """What a trim did, as the object both of its readers read.
+
+    **Five lists, one word each, and every name in exactly one of them.**  The
+    sentence this replaced said the same thing in prose — "3 tool(s) unloaded: a,
+    b, c; refused (the system needs them): tool_search" — and a sentence is what
+    the *model* then had to take apart to find out which of its tools it still
+    had.  The names are the whole point of the answer (`unload_tools`), and the
+    list a name is in is the verdict about it.
 
     Every list is read through `_unload_names`, so an answer this process cannot
-    read fails rather than reading as "nothing to unload: the list is within its
-    budget" — a model that lost tools and reads that stops looking (DESIGN.md
-    §10.1, "a failure is not a verdict").
+    read fails rather than reading as "nothing to unload" — a model that lost
+    tools and reads that stops looking (DESIGN.md §10.1, "a failure is not a
+    verdict").
     """
-    unloaded = _unload_names(found, "unloaded")
-    parts = [
-        f"{len(unloaded)} tool(s) unloaded: " + ", ".join(unloaded)
-        if unloaded
-        else "nothing to unload: the list is within its budget"
-    ]
-    refused = _unload_names(found, "refused")
-    if refused:
-        parts.append("refused (the system needs them): " + ", ".join(refused))
-    documents = _unload_names(found, "no_load_state")
-    if documents:
-        parts.append(
-            "not a tool to unload (a playbook or an installed command): "
-            + ", ".join(documents)
-        )
-    unknown = _unload_names(found, "unknown")
-    if unknown:
-        parts.append("no such tool: " + ", ".join(unknown))
-    not_loaded = _unload_names(found, "not_loaded")
-    if not_loaded:
-        parts.append("already out of the list: " + ", ".join(not_loaded))
-    return "; ".join(parts)
+    return {
+        "unloaded": _unload_names(found, "unloaded"),
+        "refused": _unload_names(found, "refused"),
+        "no_load_state": _unload_names(found, "no_load_state"),
+        "unknown": _unload_names(found, "unknown"),
+        "not_loaded": _unload_names(found, "not_loaded"),
+    }
 
 
 def _listed(given: Any) -> list[str]:
@@ -2065,106 +2075,93 @@ MATCH_FLOOR = 0.55
 WEAK_FLOOR = 0.48
 
 
-def _quoted(description: Any) -> list[str]:
-    """A tool's description, as the lines under its record.
+def _record(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One search row, with the same fields every time.
 
-    **Indented, and never cut.**  The indentation is what makes the line count
-    mean anything: every record begins at the left margin with its number, so a
-    description may be as long as it likes — `mcp-pandoc`'s is ninety lines
-    against a catalogue median of one — and the answer is still countable at a
-    glance.  Cutting it would have hidden the problem rather than fixed it, and
-    at the price of the one thing a model chooses by.
+    **The same fields, because the reader is a model**: a list whose entries
+    cannot be compared is a list it has to guess at, and the one job this answer
+    has is letting it choose between tools.  `meaning` is how close the row is by
+    meaning — the same measurement for every row, including the ones the words
+    found and the meaning leg never returned, which used to carry no number at all
+    (`ToolStore.search` fills it in) — and it is what orders the page: words
+    first, then meaning, each descending.  So the number a reader sees is the
+    number that ordered what it sees, which is the one property this answer has to
+    keep — a number that does not order the page is a number a model will sort by
+    and be wrong about.
 
-    Empty lines stay empty rather than becoming three spaces, and they cannot be
-    mistaken for a record because a record starts with a number.
+    `matched` is which leg found it, and it is the half of the answer that is
+    certain rather than graded: `words` is the caller's own words **in this
+    row's text**, and `body`/`parameters` is the same evidence one column over —
+    a playbook's whole text, or the parameters of a tool.  Naming which is what
+    makes the mark checkable instead of mysterious.
+
+    `status` is left as the catalogue's own word rather than filtered to unusable
+    rows: `enabled` is an answer, and "its server is switched off" is exactly what
+    v1 kept the rows of a failing server to be able to say.
+
+    `description` is **never cut**.  It is the one thing a model chooses by, and
+    `mcp-pandoc`'s is ninety lines against a catalogue median of one — a search
+    answer that outgrows `tool_result.tokens` because of it is the harness's
+    problem (`slife2.plugins.llm`'s dump), and a truncated description would hide
+    the problem rather than answer it.
     """
-    text = str(description or "").strip()
-    if not text:
-        return []
-    return [f"   {line.rstrip()}" if line.strip() else "" for line in text.split("\n")]
-
-
-def _verdict(rows: Sequence[Mapping[str, Any]], best: float) -> str:
-    """The first line: how sure, and how the rows below are ordered.
-
-    **No count of matches**, because there is no such number to give: the floors
-    label a page and do not cut it — a weak answer still shows its ten rows — so
-    what is known is "these rows", and a count would be the page size wearing the
-    word "found".
-
-    Sure / weak / nothing rather than a bare list, because a page of the ten
-    nearest rows says nothing about whether any of them is for the thing asked:
-    the same shape came back for a query this catalogue can answer and for one it
-    cannot, and the caller was left to guess which it had.
-
-    The second clause says what orders the page, in one clause, because the order
-    is two rules and only one of them is visible as a number: the rows the
-    caller's own words matched come first — that evidence is certain where a
-    cosine is graded — and the rest are by meaning.  A model that assumed one
-    rule would misread a page that has both.
-    """
-    worded = sum(1 for row in rows if row.get("matched_in"))
-    if best >= MATCH_FLOOR:
-        head = f"Best match {best:.2f} by meaning."
-    elif best >= WEAK_FLOOR or worded:
-        # "your words match" and not "match one": the clause below counts them,
-        # and when every row was a word match the two sentences read as a
-        # correction of each other rather than as one verdict.
-        why = (
-            "your words match, but the meaning leg is close to none"
-            if best < WEAK_FLOOR
-            else f"nothing is above {MATCH_FLOOR:.2f} by meaning"
-        )
-        head = f"Weak — {why}."
+    matched = row.get("matched_in")
+    if matched == "line":
+        found_by = "words"
+    elif matched == "rest":
+        found_by = "body" if str(row.get("category")) == SKILL else "parameters"
     else:
-        head = f"Nothing here matches: no row is above {WEAK_FLOOR:.2f} by meaning."
-    if not worded:
-        return f"{head} Closest first by meaning."
-    if worded == len(rows):
-        # No "rest" to describe.  Saying there was one made the header read as a
-        # claim about the whole column when the whole column was one group.
-        return f"{head} All of these matched your words."
-    # **"listed first" is the load-bearing half.**  Without it the clause says
-    # which rows are which and not that the order puts one group above the other,
-    # so a reader takes "the rest by meaning" as describing the whole column — and
-    # then `pdf_render_pages` at 0.38 sitting above `scan_workspace` at 0.56 reads
-    # as the numbers being out of order rather than as a tier boundary.
-    return (
-        f"{head} Your words matched {worded} of these, listed first; "
-        f"the rest by meaning."
-    )
+        found_by = ""
+    similarity = row.get("similarity")
+    return {
+        "name": row.get("name"),
+        "category": row.get("category"),
+        "source": row.get("source_id"),
+        "status": row.get("status"),
+        "loaded": row.get("load_status") == "loaded",
+        "matched": found_by,
+        "meaning": similarity if isinstance(similarity, float) else None,
+        "description": str(row.get("description") or ""),
+    }
 
 
-def _results_as_text(found: Mapping[str, Any]) -> str:
-    """A tool search's rows, as the text a model reads.
+def _confidence(rows: Sequence[Mapping[str, Any]], best: float) -> str:
+    """How sure this page is, as one of three words.
 
-    **One numbered record per result, the same fields every time**, because the
-    reader is a model and a list whose entries cannot be counted or compared is a
-    list it has to guess at:
+    **A judgement the model cannot make for itself**, which is why it is here and
+    not left to the numbers: the floors are this system's (`MATCH_FLOOR`,
+    `WEAK_FLOOR`), and a page of the ten nearest rows says nothing about whether
+    any of them is for the thing asked — the same shape came back for a query
+    this catalogue can answer and for one it cannot, and the caller was left to
+    guess which it had.
 
-        Best match 0.73 by meaning.
-        1. name  (category, source; meaning 0.73)
-           one line of description
+    `sure` is a row above the match floor, `weak` is one above the weak floor (or
+    a page the caller's own words reached at all — that evidence is certain where
+    a cosine is graded), and `none` is neither.  **And never a count of matches**,
+    because there is no such number to give: the floors label a page and do not
+    cut it — a weak answer still shows its ten rows — so a count would be the
+    page size wearing the word "found".
+    """
+    if best >= MATCH_FLOOR:
+        return "sure"
+    if best >= WEAK_FLOOR or any(row.get("matched_in") for row in rows):
+        return "weak"
+    return "none"
 
-    `meaning` is how close the row is by meaning — the same measurement for every
-    row, including the ones the words found and the meaning leg never returned,
-    which used to carry no number at all (`ToolStore.search` fills it in).  It
-    orders the page, within the rows the header's second clause separates: words
-    first, then meaning, each descending.  So the column a reader sees is the
-    column that ordered it, which is the one property this format has to keep — a
-    number that does not order the page is a number a model will sort by and be
-    wrong about.
 
-    `matched your words` marks the rows the keyword leg found, which is the one
-    piece of evidence here that is certain rather than graded.
+def _results(found: Mapping[str, Any]) -> dict[str, Any]:
+    """A tool search's rows, as the object a model reads.
 
-    A row that is not usable says so where its state would otherwise be silent:
-    "switched off" and "its server is not answering" are answers the model can
-    act on, and are exactly what v1 kept rows for a failing server to be able to
-    say.
+    `results` is in the order they are meant to be read — the caller's own words
+    first, then by meaning — and `best` and `confidence` are the verdict about
+    the page as a whole (`_confidence`).  No pointer at `func_tool_load` follows
+    them any more: it is in every model's list from the first turn, its own
+    description says what it does, and a tool's answer that instructs a model
+    about another tool is the cross-reference this surface is trying not to
+    carry.
 
     **A search answer that cannot be read is not a search that found nothing.**
-    "Nothing matched" is a verdict a model acts on rather than a failure it
+    An empty `results` is a verdict a model acts on rather than a failure it
     retries, so only a *readable* empty list may say it; an answer with no
     `results` list at all is damage, and it raises (§10.1, "a failure is not a
     verdict").  `call_tool` turns the raise into `ok` false, so the model reads
@@ -2176,51 +2173,17 @@ def _results_as_text(found: Mapping[str, Any]) -> str:
             f"tool_search could not read the catalogue's answer — `results` came "
             f"back as {rows!r}"
         )
-    if not rows:
-        # The advice this used to carry — "call tool_search with an empty query
-        # to see what is installed" — is gone with the browse it named, and a
-        # tool that suggested it would be sending the model to a refusal.  What
-        # is left is the one thing that can still work on a miss.
-        return "Nothing matched. Try fewer or different words."
-
     scored = [
         float(row["similarity"])
         for row in rows
         if isinstance(row.get("similarity"), float)
     ]
     best = max(scored) if scored else 0.0
-
-    lines = [_verdict(rows, best), ""]
-    for index, row in enumerate(rows, start=1):
-        state = [str(row.get("category") or ""), str(row.get("source_id") or "")]
-        status = str(row.get("status") or "")
-        if status and status != "enabled":
-            state.append(f"NOT USABLE: {status}")
-        elif row.get("load_status") == "loaded":
-            state.append("loaded")
-        matched = row.get("matched_in")
-        if matched == "line":
-            state.append("matched your words")
-        elif matched == "rest":
-            # The words are in the row, just not in the two columns printed here
-            # — a tool's parameters, or a skill's whole playbook.  Naming which
-            # is what makes the mark checkable instead of mysterious.
-            state.append(
-                f"matched your words in its "
-                f"{'body' if str(row.get('category')) == SKILL else 'parameters'}"
-            )
-        similarity = row.get("similarity")
-        if isinstance(similarity, float):
-            state.append(f"meaning {similarity:.2f}")
-        lines.append(f"{index}. {row.get('name')}  ({'; '.join(state)})")
-        lines.extend(_quoted(row.get("description")))
-    # Said for a browse as well as for a search, which is the opposite of what
-    # this did: an empty query is the "what is installed, and how do I get one
-    # of them" question, and answering it with a list and no next step leaves
-    # the model to guess the mechanism a moment after asking about it.
-    lines.append("")
-    lines.append("Call func_tool_load(name) to put one of these in your list.")
-    return "\n".join(lines)
+    return {
+        "results": [_record(row) for row in rows],
+        "best": best,
+        "confidence": _confidence(rows, best),
+    }
 
 
 def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
@@ -2245,29 +2208,30 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     )
 
 
-def _load_as_text(name: str, answer: Mapping[str, Any]) -> tuple[str, bool]:
-    """What the db said about one load, said to a model.
+def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
+    """Why one load did not end up in the model's list, or `""` when it did.
 
-    The outcome is a fact and this is the sentence: `ok` is false only when the
-    tool did not end up in the model's list, so a refusal reaches the transcript
-    as a failure and "it was already there" does not.
+    **One sentence per outcome, and the outcome is a fact the db gave us** —
+    `ok` used to be the second half of this function's answer, which is what made
+    a name that was *already* loaded a success and a name that could not be loaded
+    a failure.  Here the two are the same kind of thing: a name that landed says
+    nothing, and a name that did not says why.
+
+    The three refusals that are not a fault say so, because the model acts on
+    them differently: a switched-off entry is the operator's decision, a server
+    that is not answering is one to try later (`servers` says which), and the two
+    document families are findable and not loadable — `skill_use` reads a
+    playbook, and nothing runs an installed command yet (DESIGN.md §9).
     """
     outcome = str(answer.get("outcome") or "")
-    if outcome == "loaded":
-        return f"{name} is in your tool list from the next step.", True
-    if outcome == "already":
-        return f"{name} is already in your tool list.", True
+    if outcome in ("loaded", "already"):
+        return ""
     if outcome == "unknown":
         return (
             f"unknown tool {name!r} — find it with tool_search, which reports "
-            f"names exactly as they are called",
-            False,
+            f"names exactly as they are called"
         )
     if outcome == "no_load_state":
-        # The two document families, and the answer differs because what the
-        # model does next differs: a skill it reads with `skill_use`, and a
-        # command — installed, but not a tool — has nothing serving it yet
-        # (DESIGN.md §9).  Both are findable, which is the half that landed.
         if name.startswith(f"{SKILL}:"):
             what = (
                 f"it is a playbook, read with skill_use(name="
@@ -2280,21 +2244,19 @@ def _load_as_text(name: str, answer: Mapping[str, Any]) -> tuple[str, bool]:
             )
         else:
             what = "it has nothing behind it that could be loaded"
-        return f"{name!r} has no load state: {what}", False
+        return f"{name!r} has no load state: {what}"
     if outcome == "disabled":
         return (
             f"{name!r} is switched off in the config, so it cannot be loaded — "
             f"its server has `enabled: false`, which is the operator's decision "
-            f"and not a fault",
-            False,
+            f"and not a fault"
         )
     if outcome == "error":
         return (
             f"{name!r} cannot be loaded: the server that owns it is not "
-            f"answering. It is in the catalogue, and `servers` says why",
-            False,
+            f"answering. It is in the catalogue, and `servers` says why"
         )
-    return f"{name!r} could not be loaded ({outcome or 'no answer'})", False
+    return f"{name!r} could not be loaded ({outcome or 'no answer'})"
 
 
 def _advertise(settings: ToolServerSettings, tool: Any) -> UpstreamTool:
@@ -3027,11 +2989,16 @@ def build_server(
             # a body becomes an MCP error carrying our own traceback text,
             # which is neither actionable nor true.
             try:
-                text, ok = await one.run(arguments)
+                answer = await one.run(arguments)
+            except ToolError as exc:
+                # A refusal is the sentence and nothing else: `tool_search failed:
+                # give me something to look for` reads as a broken tool, and what
+                # happened is that the tool worked and said no.
+                return {"text": str(exc), "ok": False}
             except Exception as exc:  # noqa: BLE001 — a tool failure is a message
                 logger.exception("%s failed", name)
                 return {"text": f"{name} failed: {exc}", "ok": False}
-            return {"text": text, "ok": ok}
+            return {"text": as_tool_text(answer), "ok": True}
 
         forwarded = forwarded_client(request_meta(ctx))
         row = await catalogue.route(name)
@@ -3208,7 +3175,10 @@ def build_server(
             list(names or []),
             autoload_sources(),
         )
-        return {**found, "text": _unload_as_text(found)}
+        # `text` is the same answer said as the model reads it — the harness
+        # writes the trim into the conversation as a tool pair, and the pair's
+        # result is text on every wire (`slife2.clients.toolclient.trim_answer`).
+        return {**found, "text": as_tool_text(_unload_answer(found))}
 
     @mcp.tool
     async def servers() -> dict[str, Any]:

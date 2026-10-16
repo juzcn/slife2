@@ -465,7 +465,7 @@ async def test_switching_a_task_off_and_on_again_does_not_report_a_gap() -> None
     async with Client(build()) as client:
         await write(client)
         await write(client, enabled=False)
-        assert ledger().tasks()[0].last_due
+        assert ledger().tasks()[0][0].last_due
         before = ledger().task("daily")
         assert before is not None and not before.enabled
 
@@ -1454,6 +1454,69 @@ async def test_a_limit_that_is_not_positive_does_not_bypass_the_ceiling() -> Non
     assert len(listed["runs"]) == RUNS_LIMIT, "the default bound, not the whole table"
 
 
+async def test_the_ledger_read_is_a_page_of_the_whole_ledger() -> None:
+    """**`offset` is how the rest of a ledger nobody can see the end of is read.**
+
+    The ledger grows one row per fire for as long as a task lives, so a listing
+    that answers only its newest rows is a listing whose older rows no call can
+    reach.  What makes it a page rather than a window is `total`: the model
+    computes its next `offset` from the numbers the answer itself carries, and
+    `total` is what says there is one.
+    """
+    async with Client(build()) as client:
+        await write(client)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        for minute in range(5):
+            store.record(task, f"2026-10-12T09:{minute:02d}:00+08:00")
+        first = await ask(client, SCHEDULE_RUNS, {"name": "daily", "limit": 2})
+        second = await ask(
+            client, SCHEDULE_RUNS, {"name": "daily", "limit": 2, "offset": 2}
+        )
+        past_the_end = await ask(
+            client, SCHEDULE_RUNS, {"name": "daily", "limit": 2, "offset": 4}
+        )
+
+    assert first["total"] == 5
+    assert (first["limit"], first["offset"]) == (2, 0)
+    assert [run["due_at"][11:16] for run in first["runs"]] == ["09:04", "09:03"]
+    assert (second["limit"], second["offset"]) == (2, 2)
+    assert [run["due_at"][11:16] for run in second["runs"]] == ["09:02", "09:01"]
+    assert first["runs"][-1] != second["runs"][0], "no row is on two pages"
+    assert len(past_the_end["runs"]) == 1, "the last page is short, not refused"
+    assert past_the_end["total"] == 5, "and it still says how many there are"
+
+
+async def test_the_task_listing_is_a_page_too() -> None:
+    """The task listing takes the same two arguments as the run listing, because
+    the shape of the answer is what a model learns once: a name that is a page in
+    one listing and a wall in the other is a model that has to check."""
+    async with Client(build()) as client:
+        for name in ("a", "b", "c"):
+            await write(client, name)
+        listed = await ask(client, SCHEDULE_LIST, {"limit": 2})
+        second = await ask(client, SCHEDULE_LIST, {"limit": 2, "offset": 2})
+
+    assert [task["name"] for task in listed["tasks"]] == ["a", "b"]
+    assert (listed["total"], listed["limit"], listed["offset"]) == (3, 2, 0)
+    assert [task["name"] for task in second["tasks"]] == ["c"]
+    assert second["total"] == 3
+
+
+async def test_a_negative_offset_is_the_first_page() -> None:
+    """Nothing but a way to be out of range: SQLite would answer an empty page
+    for `OFFSET -1` while the answer echoed the number it never used, and a model
+    paging by that number would page backwards off the start of the table."""
+    async with Client(build()) as client:
+        await write(client, "a")
+        await write(client, "b")
+        listed = await ask(client, SCHEDULE_LIST, {"offset": -1})
+
+    assert [task["name"] for task in listed["tasks"]] == ["a", "b"]
+    assert listed["offset"] == 0
+
+
 # ── newest first is by the moment, not by the string ─────────────────────────
 
 
@@ -1485,7 +1548,7 @@ async def test_the_ledger_orders_runs_by_the_instant_and_not_by_the_string() -> 
     ):
         store.record(task, stamp)
 
-    assert [run.due_at for run in store.runs("daily")] == [
+    assert [run.due_at for run in store.runs("daily")[0]] == [
         "2026-10-25T01:15:00+00:00",
         "2026-10-25T01:00:00+00:00",
         "2026-10-25T01:45:00+01:00",

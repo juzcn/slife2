@@ -204,6 +204,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "the model was not switched: {err}",
         "zh": "模型未切换：{err}",
     },
+    # The switch that happened.  **Two keys and not one**, because the second
+    # clause is conditional and a template that always carried it would have to
+    # translate an empty string: `moved` is empty when nothing was running, and
+    # the app passes the clause in (`slife2.tui.app.action_switch_model`).  The
+    # wording is the window's, and the facts in it are the agent server's.
+    "model_switched": {
+        "en": "`default:` is now `{default}`; it was `{previous}`.{moved}",
+        "zh": "`default:` 现在是 `{default}`；之前是 `{previous}`。{moved}",
+    },
+    "model_switched_moved": {
+        "en": " {n} conversation(s) already running moved with it, from the next turn.",
+        "zh": " {n} 个已经在跑的对话也随之切换，从下一轮开始。",
+    },
     # The approval answer that arrived after the turn it belonged to had ended.
     "approval_undelivered": {
         "en": "the answer was not delivered: {err}",

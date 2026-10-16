@@ -287,15 +287,39 @@ class ScheduleStore:
 
     # ── tasks ────────────────────────────────────────────────────────────
 
-    def tasks(self, *, enabled_only: bool = False) -> list[Task]:
-        """Every task, oldest first.  `enabled_only` is what the poll asks."""
-        query = "SELECT * FROM scheduled_tasks"
-        if enabled_only:
-            query += " WHERE enabled = 1"
-        query += " ORDER BY name"
+    def tasks(
+        self, *, enabled_only: bool = False, limit: int = 0, offset: int = 0
+    ) -> tuple[list[Task], int]:
+        """Tasks by name, as `(the page, how many the filter matches)`.
+
+        **`total` counts what the filter matches**, which is what lets a caller
+        tell whether another page exists — `offset + len(rows) < total` — without
+        asking a second question (`slife2.libs.store.db.TurnStore.turns` is the
+        same shape for the same reason).
+
+        **One read transaction for both statements.**  A task written between
+        them would make `total` describe a different table than the page does, so
+        a model paging by `offset` would skip or repeat a row.  WAL gives a
+        reader one consistent snapshot for as long as its transaction lasts.
+
+        **`limit` of zero is no bound**, and that is the poll's question: it
+        wants every enabled task, where a page is what a *model's* listing wants
+        (`schedule_list`).  Nothing else in this system asks for an unbounded
+        page, and the table is one row per task somebody wrote down.
+        """
+        where = " WHERE enabled = 1" if enabled_only else ""
         with self._connect() as connection:
-            rows = connection.execute(query).fetchall()
-        return [_task(row) for row in rows]
+            connection.execute("BEGIN")
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM scheduled_tasks{where}"
+            ).fetchone()[0]
+            query = f"SELECT * FROM scheduled_tasks{where} ORDER BY name"
+            parameters: list[Any] = []
+            if limit > 0:
+                query += " LIMIT ? OFFSET ?"
+                parameters = [int(limit), max(0, int(offset))]
+            rows = connection.execute(query, parameters).fetchall()
+        return [_task(row) for row in rows], int(total)
 
     def task(self, name: str) -> Task | None:
         with self._connect() as connection:
@@ -432,9 +456,23 @@ class ScheduleStore:
         return _run(row, name) if row else None
 
     def runs(
-        self, name: str = "", status: str = "", limit: int = RUNS_LIMIT
-    ) -> list[Run]:
-        """The ledger, newest first, optionally narrowed.
+        self,
+        name: str = "",
+        status: str = "",
+        limit: int = RUNS_LIMIT,
+        offset: int = 0,
+    ) -> tuple[list[Run], int]:
+        """The ledger, newest first, optionally narrowed: `(the page, how many match)`.
+
+        The ledger is the one table here that grows for as long as a task lives —
+        one row per fire, forever — so a page without a `total` beside it is a
+        page nobody can tell the end of (`slife2.plugins.schedule.server`'s
+        `schedule_runs` is the caller that says so to a model).
+
+        **One read transaction for both statements**, for the reason
+        `TurnStore.turns` gives and `tasks` repeats: a fire recorded between them
+        would make `total` describe a different ledger than the page does, and a
+        caller paging by `offset` would skip or repeat a row.
 
         Newest by *when the run was due*, because that is the run's identity —
         and by the **instant** rather than by the stored string, because a stamp
@@ -442,22 +480,26 @@ class ScheduleStore:
         daylight-saving change are two offsets.  See `_by_instant` for the two
         spellings of one moment that made "newest first" order backwards.
         """
-        query = (
-            "SELECT r.*, t.name AS task_name FROM scheduled_runs r "
-            "JOIN scheduled_tasks t ON t.id = r.task_id WHERE 1 = 1"
-        )
+        where = " WHERE 1 = 1"
         parameters: list[Any] = []
         if name:
-            query += " AND t.name = ?"
+            where += " AND t.name = ?"
             parameters.append(name)
         if status:
-            query += " AND r.status = ?"
+            where += " AND r.status = ?"
             parameters.append(status)
-        query += f" {_by_instant('r.due_at')} LIMIT ?"
-        parameters.append(limit)
+        from_join = "FROM scheduled_runs r JOIN scheduled_tasks t ON t.id = r.task_id"
         with self._connect() as connection:
-            rows = connection.execute(query, parameters).fetchall()
-        return [_run(row, row["task_name"]) for row in rows]
+            connection.execute("BEGIN")
+            total = connection.execute(
+                f"SELECT COUNT(*) {from_join}{where}", parameters
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"SELECT r.*, t.name AS task_name {from_join}{where} "
+                f"{_by_instant('r.due_at')} LIMIT ? OFFSET ?",
+                (*parameters, limit, max(0, int(offset))),
+            ).fetchall()
+        return [_run(row, row["task_name"]) for row in rows], int(total)
 
     def newest(self, name: str, statuses: tuple[str, ...] = ()) -> Run | None:
         """A task's newest run, optionally restricted to some states.

@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
@@ -1143,13 +1144,18 @@ class Wechat:
 
     # ── The QR login ─────────────────────────────────────────────────────
 
-    async def login(self, session: Session) -> str:
-        """Start a QR login, and answer with what to show.
+    async def login(self, session: Session) -> dict[str, Any]:
+        """Start a QR login, and answer the code to show and where it stands.
 
         The QR is fetched and then watched *in the background*: a scan is a
         person finding their phone, and a tool call that waited for one would
-        hold a turn open for a minute.  What this hands back is the code and the
-        name of the tool that reports how it is going, which is v1's shape.
+        hold a turn open for a minute.
+
+        **A QR that could not be fetched is a failure and not a state**, which
+        is what a caller getting nothing scannable would otherwise be handed: a
+        login nothing is watching is not a login in progress, so the two are
+        raised rather than answered with a `state` that reads as an ordinary
+        wait.
         """
         # **Before the "already connected" question is asked**, because a login
         # that is saved but not yet resumed looks exactly like no login at all —
@@ -1158,10 +1164,7 @@ class Wechat:
         await self.ready(session)
         client = session.client
         if client.is_logged_in and not client.auth_failed:
-            return (
-                "WeChat is already connected. Call `wechat_logout` first to "
-                "switch to another account."
-            )
+            return {"state": "connected", "qr": "", "qr_url": "", "seconds_left": 0}
         if client.auth_failed:
             # A token the far end refused is not a session to build on; drop it
             # and let the scan replace it, rather than refusing the login.
@@ -1172,14 +1175,20 @@ class Wechat:
         session.qr_error = ""
         try:
             data = await client.fetch_qrcode(ilink.BASE_URL)
-        except Exception as exc:  # noqa: BLE001 — reported to the model as text
+        except Exception as exc:  # noqa: BLE001 — a failure the model reads
             session.qr_state = ""
             logger.warning("wechat %s: QR fetch failed: %s", session.agent, exc)
-            return f"The login QR could not be fetched: {exc}"
+            raise ToolError(
+                f"the login QR could not be fetched ({exc}); "
+                f"call `wechat_login` again in a moment."
+            ) from exc
         qrcode = str(data.get("qrcode") or "")
         if not qrcode:
             session.qr_state = ""
-            return "The server answered without a login QR; try again in a moment."
+            raise ToolError(
+                "the server answered without a login QR; "
+                "call `wechat_login` again in a moment."
+            )
         content = str(data.get("qrcode_img_content") or qrcode)
 
         self._cancel(session.qr_task)
@@ -1189,26 +1198,19 @@ class Wechat:
         try:
             rendered = render_qr(content)
         except ImportError:
-            # **A URL is not a code, so the sentence says which one this is**
+            # **A URL is not a code, so the answer says which one it is**
             # (DESIGN.md §10.1).  Without the rendering library there is nothing
-            # scannable to put in the reply, and telling the model to show a
-            # link "so it can be scanned" is a false instruction: the person
-            # opens the link instead.
-            return (
-                "The login code could not be drawn on this machine — the "
-                "`qrcode` package is missing — so there is nothing to scan.\n\n"
-                f"Send the person this link to open instead: {content}\n\n"
-                "`wechat_check_status` reports how the login is going. It "
-                "expires after about ten minutes."
-            )
-        return (
-            "Show this in your reply, so it can be scanned from the screen the "
-            "person is looking at:\n\n"
-            f"{rendered}\n\n"
-            f"If it cannot be scanned: {content}\n\n"
-            "`wechat_check_status` reports how the scan is going. It expires "
-            "after about ten minutes."
-        )
+            # scannable to put in a reply, and handing `qr` the URL would be a
+            # false instruction — the person would be told to scan a link.  So
+            # `qr` is empty and the URL rides in `qr_url`, where the tool's own
+            # `Returns:` says it is what to send instead.
+            rendered = ""
+        return {
+            "state": "waiting",
+            "qr": rendered,
+            "qr_url": content,
+            "seconds_left": int(_T.timeouts.ready.qr_deadline),
+        }
 
     async def _qr_watch(
         self, session: Session, qrcode: str, base_url: str, *, attempts: int
@@ -1349,17 +1351,25 @@ class Wechat:
     who = staticmethod(agent_or_blank)
 
     def unaddressed(self) -> str:
-        """What a tool says when a call arrived without a conversation on it."""
+        """The sentence a tool is *refused* with, for a call that arrived with
+        no conversation on it.
+
+        A sentence and not a raise, because what belongs to this class is which
+        words the refusal uses; raising it is the tool's, and it is the tool
+        that knows a refusal is a `ToolError` rather than an answer.
+        """
         return unaddressed("WeChat login to act on", "the login")
 
-    async def status(self, session: Session) -> str:
-        """`wechat_check_status`, as sentences.
+    async def status(self, session: Session) -> dict[str, Any]:
+        """`wechat_check_status`: the link, why it is not working when it is
+        not, and who a reply goes to.
 
         Restores first, so a saved login is live by the time the answer is
         written — see :meth:`ready`.  Then the states a session can be in, told
-        apart because the sentence a person needs is different for each: a QR
-        nobody has scanned, no login at all, a link that is up but not
-        answering, and a session that works.
+        apart by *values* rather than by shape: a QR nobody has scanned, no
+        login at all, a link that is up but not answering, and a session that
+        works all answer the same keys (`_facts`), so a model that has read one
+        answer has read the schema for the next.
         """
         await self.ready(session)
         client = session.client
@@ -1381,102 +1391,112 @@ class Wechat:
             )
 
         if session.qr_state and not client.is_logged_in:
-            return self._qr_status(session)
+            return self._facts(
+                session, qr_state=session.qr_state, error=session.qr_error
+            )
 
         if not client.is_logged_in:
-            if session.restore_note:
-                return (
-                    f"WeChat is not connected: {session.restore_note}. Call "
-                    f"`wechat_login` to scan a new code."
-                )
-            return (
-                "WeChat is not connected, and no login is saved. Call "
-                "`wechat_login` to put a QR code in front of whoever will scan it."
-            )
+            # **`error` is the reason and not the state.**  A `restore_note` that
+            # is empty is a login this machine has never had rather than one
+            # that failed, which is the difference between "scan a first code"
+            # and "scan again" — and it is the *note* that says which, because
+            # that is the field a damaged file and a refused token both fill in.
+            return self._facts(session, error=session.restore_note)
 
         left = max(
             0.0,
             _T.timeouts.pacing.wechat_session_max_age
             - (time.time() - session.saved_at),
         )
-        head = (
-            f"WeChat is connected — about {left / 3600:.1f} hours left on this "
-            f"login — and "
-            + ("watching for messages." if session.polling else "not polling.")
+        peer, token, heard = self._peer(session)
+        # `last_error` and not the state: up but not answering is not down — the
+        # token is still good, so what a reader is told is the bridge's own words
+        # and the advice is to wait rather than to re-scan.
+        return self._facts(
+            session,
+            connected=True,
+            hours_left=left / 3600,
+            peer=peer,
+            token=token,
+            heard_from=heard,
+            error=str(client.last_error or ""),
         )
-        if client.last_error:
-            # Up but not answering, which is not the same as down: the token is
-            # still good, so the advice is to wait rather than to re-scan.
-            return (
-                f"WeChat is connected but not answering: {client.last_error}.\n"
-                f"Messages will not arrive until that clears; nothing needs doing. "
-                f"{self._contact(session)}"
-            )
-        return f"{head}\n{self._contact(session)}"
 
-    def _qr_status(self, session: Session) -> str:
-        """What a status read says while a QR login is in progress."""
+    def _facts(
+        self,
+        session: Session,
+        *,
+        connected: bool = False,
+        hours_left: float = 0.0,
+        peer: str = "",
+        token: str = "",
+        heard_from: bool = False,
+        qr_state: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        """One status answer, whatever state it is answering about.
+
+        **Every key, always**, because the three states are three readings of
+        one session rather than three tools: a model that met a missing key
+        would have to guess whether it was absent or empty, and the same
+        question answered twice would be two shapes to keep in step.  What
+        differs between them is which values are filled in — and the docstring
+        the model reads is where each one is told what its empty value means.
+        """
         return {
-            "waiting": "A login QR is waiting to be scanned.",
-            "scanned": "The QR has been scanned — confirm it on the phone.",
-            "confirmed": (
-                "The scan was confirmed but no session came back; call "
-                "`wechat_login` again."
-            ),
-            "expired": f"The login QR expired ({session.qr_error}). `wechat_login` "
-            f"starts a new one.",
-            "error": f"The login did not work: {session.qr_error} `wechat_login` "
-            f"starts over.",
-        }.get(session.qr_state, "A login is in progress.")
+            "connected": connected,
+            # The loop, and not the token: a link that is up with nothing polling
+            # it is a link no message will arrive on, and that is the one thing
+            # about "connected" a model cannot see from anywhere else.
+            "polling": session.polling,
+            "hours_left": round(hours_left, 1),
+            "peer_wechat_id": peer,
+            "context_token": token,
+            # **Whether that peer wrote, or is this login's own account.**  Both
+            # are a peer a message can reach and only the first is a reply, so an
+            # answer that left it out would have a model believe it is answering
+            # somebody who has said nothing.
+            "heard_from": heard_from,
+            # The QR login, in the session's own words: waiting, scanned,
+            # confirmed, expired or error, and `""` when no login is in progress.
+            "qr_state": qr_state,
+            "error": error,
+        }
 
-    def _contact(self, session: Session) -> str:
-        """Who a reply goes to, and the call that sends it.
+    def _peer(self, session: Session) -> tuple[str, str, bool]:
+        """Who a reply goes to — the peer, the conversation's token, and whether
+        they wrote.
 
-        The one thing a model cannot work out for itself: the peer and the
-        conversation's token arrive with a message, and a model that has lost
-        them — a new turn, a trimmed context — has no way to ask a person.
+        The one thing a model cannot work out for itself: the peer and the token
+        arrive with a message, and a model that has lost them — a new turn, a
+        trimmed context — has no way to ask a person.  v1 seeded the login's own
+        account as a contact for this reason: until somebody writes there is
+        still one peer a message can reach, and it is whoever scanned the code.
         """
         contact = session.client.last_contact
-        peer = str(contact.get("from_id") or "")
-        token = str(contact.get("context_token") or "")
-        if not peer:
-            return (
-                "Nobody has written yet — messages start arriving once somebody does."
-            )
-        if not session.heard_from:
-            # v1 seeded the login's own account as a contact for this reason:
-            # until somebody writes there is still one peer a message can reach,
-            # and it is whoever scanned the code.  Said as what it is rather than
-            # as "the last person to write", which would have a model believe it
-            # is answering somebody who has said nothing.
-            return (
-                f"Nobody has written yet. This login belongs to {peer}, so that is "
-                f"who a message can reach: {self._reply_call(peer, token)}"
-            )
         return (
-            f"The last person to write is {peer}; reply with "
-            f"{self._reply_call(peer, token)}"
+            str(contact.get("from_id") or ""),
+            str(contact.get("context_token") or ""),
+            session.heard_from,
         )
 
-    @staticmethod
-    def _reply_call(peer: str, token: str) -> str:
-        """The call that answers *peer*, written out so a model can copy it."""
-        if token:
-            return (
-                f'`wechat_send_message(peer_wechat_id="{peer}", '
-                f'context_token="{token}")`'
-            )
-        return f'`wechat_send_message(peer_wechat_id="{peer}")`'
+    async def send(
+        self, session: Session, peer: str, token: str, text: str
+    ) -> dict[str, Any]:
+        """`wechat_send_message`: one text, to one conversation.
 
-    async def send(self, session: Session, peer: str, token: str, text: str) -> str:
-        """`wechat_send_message`: one text, to one conversation."""
+        **Every way this can fail raises**, which is the whole of what makes the
+        answer trustworthy: the envelope below is a `200` that says no, and a
+        caller that had to read "sent" out of a returned sentence would be
+        reading a reply the bridge had thrown away as one that landed.
+        """
         await self.ready(session)
         client = session.client
         if not client.is_logged_in:
-            return "WeChat is not connected. Call `wechat_login` first."
+            raise ToolError("WeChat is not connected — call `wechat_login` first.")
         if not peer.strip() or not text.strip():
-            return (
-                "Both `peer_wechat_id` and `text` are needed, and neither may be empty."
+            raise ToolError(
+                "both `peer_wechat_id` and `text` are needed, and neither may be empty."
             )
 
         # The reply is going out, so the indicator comes down now rather than
@@ -1485,9 +1505,9 @@ class Wechat:
         self._typing_off(session, peer)
         try:
             result = await client.send_message(peer, token, text)
-        except Exception as exc:  # noqa: BLE001 — reported to the model as text
+        except Exception as exc:  # noqa: BLE001 — a failure the model reads
             logger.warning("wechat %s: send to %s failed: %s", session.agent, peer, exc)
-            return f"The message could not be sent: {exc}"
+            raise ToolError(f"the message to {peer} could not be sent: {exc}") from exc
 
         # A rejected token comes back as a 200 carrying an error envelope, and
         # a send that reads that as success is a reply the model believes it
@@ -1495,19 +1515,19 @@ class Wechat:
         if ilink.error_envelope(result):
             client.auth_failed = True
             client.last_error = ilink.envelope_error(result) or "send rejected"
-            return (
-                f"The server rejected the send: {client.last_error}. The login "
-                f"has been marked as no longer working — `wechat_check_status` "
-                f"says what to do, and `wechat_login` is usually it."
+            raise ToolError(
+                f"the server rejected the send: {client.last_error} — the login "
+                f"is marked as no longer working, and `wechat_login` is usually "
+                f"the fix."
             )
         with contextlib.suppress(Exception):
             await client.send_typing(peer, token, status=2)
         logger.debug(
             "wechat %s: sent %d characters to %s", session.agent, len(text), peer
         )
-        return f"Sent to {peer}."
+        return {"sent": True, "peer_wechat_id": peer, "context_token": token}
 
-    async def logout(self, session: Session) -> str:
+    async def logout(self, session: Session) -> dict[str, Any]:
         """`wechat_logout`: stop watching, forget the login, forget its QR.
 
         **The login is only gone if the file is.**  `clear_session` used to
@@ -1516,8 +1536,9 @@ class Wechat:
         still there, and the next start adopted the same account the logout was
         asked to end.  The teardown still happens (the loop stops, the client is
         replaced, the link is announced down), and what changes is the answer:
-        a removal that failed is reported with the path, so the model can say
-        the one thing that is true and a person can remove the file.
+        `login_removed` is the file's own verdict and `login_file` names it, so
+        a model can say the one thing that is true and a person can remove the
+        file by hand.
         """
         self._cancel(session.poll)
         session.poll = None
@@ -1548,17 +1569,15 @@ class Wechat:
         # and a logout somebody asked for would be silent (`_announce`).
         await self._announce(session)
         logger.info("wechat %s: logged out", session.agent)
-        if not forgotten:
-            return (
-                f"Logged out of WeChat, but its saved login at "
-                f"{session_path(session.agent)} could not be removed, so the "
-                f"next start would adopt that account again — remove the file "
-                f"by hand to be forgotten for good."
-            )
-        return (
-            "Logged out of WeChat, and the saved login is gone. Call "
-            "`wechat_login` to connect again."
-        )
+        # **The path is answered either way.**  It is what a person removes by
+        # hand when the unlink failed, and it is also where a login would be
+        # written next time — a fact about the session rather than about this
+        # call's outcome, which is what `login_removed` is for.
+        return {
+            "logged_out": True,
+            "login_removed": forgotten,
+            "login_file": str(session_path(session.agent)),
+        }
 
 
 def build_server(
@@ -1591,30 +1610,48 @@ def build_server(
     )
 
     @mcp.tool(name="wechat_login", meta=FOR_THE_MODEL)
-    async def wechat_login(ctx: Context) -> str:
+    async def wechat_login(ctx: Context) -> dict[str, Any]:
         """Get a QR code that logs this agent into WeChat.
 
-        Put the code in your reply for somebody to scan with the WeChat app:
-        the account that scans is the account this conversation speaks as, and
-        other people reach this conversation by messaging it. The code expires
-        in about ten minutes, `wechat_check_status` reports the scan, and the
-        login lasts about a day.
+        Put `qr` in your reply for somebody to scan with the WeChat app: the
+        account that scans is the account this conversation speaks as, and other
+        people reach this conversation by messaging it. The code expires in
+        about ten minutes, and the login lasts about a day.
+
+        Returns:
+            `state` — `waiting` for a code to be scanned, or `connected` when
+            there was already a login, in which case call `wechat_logout` first
+            to switch accounts — `qr`, the code to put in your reply, `qr_url`,
+            what the code encodes (send it as a link instead when `qr` is empty,
+            which is a machine that cannot draw one), and `seconds_left`, how
+            long the code lasts.
         """
         agent = plugin.who(ctx)
         if not agent:
-            return plugin.unaddressed()
+            raise ToolError(plugin.unaddressed())
         return await plugin.login(plugin.session(agent))
 
     @mcp.tool(name="wechat_check_status", meta=FOR_THE_MODEL)
-    async def wechat_check_status(ctx: Context) -> str:
-        """How the WeChat link is: connected, waiting for a scan, or down.
+    async def wechat_check_status(ctx: Context) -> dict[str, Any]:
+        """How the WeChat link is, and who a reply goes to.
 
-        Also the one place that says who to reply to: the last person to write,
-        with the `context_token` their conversation needs.
+        The one place that says where a reply goes: the peer and the
+        `context_token` their conversation needs.
+
+        Returns:
+            `connected` — whether a message can go out — `polling`, whether
+            messages are being watched for, and `hours_left` of the login's day.
+            `qr_state` is a login in progress: `waiting` for the code to be
+            scanned, `scanned` for one to be confirmed on the phone, `confirmed`
+            or `expired` or `error`, and then call `wechat_login` again. `error`
+            says what is wrong whenever anything is — empty means nothing is —
+            and `peer_wechat_id` and `context_token` are who a reply goes to, and
+            `heard_from` is whether they wrote to you — false means nobody has,
+            and that peer is the account this login belongs to.
         """
         agent = plugin.who(ctx)
         if not agent:
-            return plugin.unaddressed()
+            raise ToolError(plugin.unaddressed())
         return await plugin.status(plugin.session(agent))
 
     @mcp.tool(name="wechat_send_message", meta=FOR_THE_MODEL)
@@ -1623,13 +1660,12 @@ def build_server(
         peer_wechat_id: str,
         text: str,
         context_token: str = "",
-    ) -> str:
+    ) -> dict[str, Any]:
         """Send a WeChat message to somebody who has written to you.
 
         An incoming message carries its peer and context token in a
         `[Wechat:{...}]` prefix: pass those back here and the reply lands in the
-        conversation it belongs to. `wechat_check_status` reports the same two
-        values. A turn that sends nothing reaches nobody.
+        conversation it belongs to. A turn that sends nothing reaches nobody.
 
         Args:
             peer_wechat_id: The id to send to, from the message's marker or
@@ -1637,25 +1673,34 @@ def build_server(
             text: The message body.
             context_token: The conversation's token, from the same place. Empty
                 starts a new thread, which a first message wants.
+
+        Returns:
+            `sent` — true, because a send that did not land raises — with the
+            `peer_wechat_id` and `context_token` it went to.
         """
         agent = plugin.who(ctx)
         if not agent:
-            return plugin.unaddressed()
+            raise ToolError(plugin.unaddressed())
         return await plugin.send(
             plugin.session(agent), peer_wechat_id, context_token, text
         )
 
     @mcp.tool(name="wechat_logout", meta=FOR_THE_MODEL)
-    async def wechat_logout(ctx: Context) -> str:
+    async def wechat_logout(ctx: Context) -> dict[str, Any]:
         """Disconnect WeChat and forget the saved login.
 
         The account stays logged in on the phone; what goes is this
         conversation's token and its place in the message stream. Messages
         arrive again after a new scan, which is how accounts are switched.
+
+        Returns:
+            `logged_out` — true — `login_removed`, whether the saved login file
+            is gone (the next start would adopt that account again if it is
+            not), and `login_file`, the path it was at.
         """
         agent = plugin.who(ctx)
         if not agent:
-            return plugin.unaddressed()
+            raise ToolError(plugin.unaddressed())
         return await plugin.logout(plugin.session(agent))
 
     return mcp

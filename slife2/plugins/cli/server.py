@@ -52,7 +52,13 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.plugin.family import Documents, Homes, build_document_server
+from slife2.libs.plugin.family import (
+    LIST_PAGE,
+    Documents,
+    Homes,
+    build_document_server,
+    listed,
+)
 from slife2.libs.plugin.protocol import CLI_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
 
@@ -139,13 +145,12 @@ def rows(entries: Mapping[str, CliToolSettings]) -> list[dict[str, Any]]:
 # actually on this machine.
 
 
-def _prepare(name: str, entry: dict[str, Any]) -> tuple[CliToolSettings | None, str]:
-    """Validate a `cli:` entry and write it, or say why not.
+def _prepare(name: str, entry: dict[str, Any]) -> CliToolSettings:
+    """Validate a `cli:` entry and write it, or raise why it cannot be.
 
-    `(settings, "")` means it was written; `(None, why)` is a sentence for the
-    caller to raise as the refusal — the contract `skill_set` and `skill_use`
-    keep, and the one whose text a `[refused]` prefix used to mark while it was
-    returned as a success.
+    **Raised, not returned**, which is the contract `skill_set` and `skill_use`
+    keep: a refusal returned as ordinary text arrives with `ok` true and reaches
+    the transcript as a success.
 
     **Both refusals come before the write.**  `_cli_tool` refuses an entry
     naming no program, and the split below refuses a command line `shlex` cannot
@@ -170,21 +175,21 @@ def _prepare(name: str, entry: dict[str, Any]) -> tuple[CliToolSettings | None, 
         # what the argv runner reads, and refusing an unsplittable line here is
         # the only way the refusal lands on the call rather than a note.
         shlex.split(command if isinstance(command, str) else "", posix=False)
-    except ValueError:
-        return None, (
+    except ValueError as exc:
+        raise ToolError(
             f"`{command}` cannot be split into a command line — check for an "
             f"unbalanced quote, or how the path is quoted"
-        )
+        ) from exc
     try:
         settings = _cli_tool(entry, name)
         configfile.upsert(SECTION, name, entry)
     except ConfigError as exc:
-        return None, str(exc)
-    return settings, ""
+        raise ToolError(str(exc)) from exc
+    return settings
 
 
-def _on_path(command: str) -> str:
-    """A sentence about a command that is not installed, or `""`.
+def _missing_program(command: str) -> str:
+    """The program this entry names and this machine has not got, or `""`.
 
     **The one failure this family is certain to meet**, in its own docstring's
     words: an entry is a program already on the machine, and a model writing one
@@ -192,6 +197,12 @@ def _on_path(command: str) -> str:
     v1 answers it after the fact — `install` is shown when the command turns out
     to be missing — and this says it at the moment the entry is written, which is
     the only moment anybody is looking.
+
+    **A name and not a sentence about it.**  It comes back as the answer's
+    `missing_program`, the program itself, because that is what a caller acts on:
+    the old note wrapped it in a paragraph of advice, and the two things worth
+    doing about it (add an `install` line, or fix the spelling) are the tool's to
+    say once rather than every answer's to repeat.
 
     **The command line is split the way the argv runner will take it apart**
     (`DESIGN.md` §9: an argv rather than a shell), so that quotes are honoured:
@@ -212,35 +223,37 @@ def _on_path(command: str) -> str:
     program = words[0].strip("\"'") if words else ""
     if not program or shutil.which(program):
         return ""
-    return (
-        f"\nNote: `{program}` is not on PATH, so this entry names a program that "
-        f"is not installed here. It is still written down — add an `install` line "
-        f"so a person is told how, or check the spelling."
-    )
+    return program
 
 
-def _describe(name: str, raw: Mapping[str, Any]) -> str:
-    """One line of `cli_list` — the entry as the file has it, and its switch.
+def _describe(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+    """One row of `cli_list` — the entry as the file has it, and its switch.
 
     **No state word beyond the switch**, and that is this family's whole
     difference: `ready` and `failed` are facts about a link, and a command has
     none — the program is either on the machine or the entry is wrong about it,
     and neither is something a running process can watch for.  So the two words
-    are `on` and `off`, and `off` is the hub's own word for a switch in the same
-    position.
+    are `on` and `off`, and `off` is the word the hub uses for a switch in the
+    same position.
     """
-    state = "off" if raw.get("enabled") is False else "on"
-    lines = [f"- {name} [{state}]", f"    command  {raw.get('command', '')}"]
+    row: dict[str, Any] = {
+        "name": name,
+        "state": "off" if raw.get("enabled") is False else "on",
+        "command": str(raw.get("command") or ""),
+    }
     if install := raw.get("install"):
-        lines.append(f"    install  {install}")
-    if source := raw.get("source"):
-        parts = [str(source.get(key, "")) for key in ("type", "url", "version")]
-        note = " ".join(part for part in parts if part)
-        if note:
-            lines.append(f"    source   {note}")
+        row["install"] = str(install)
+    if isinstance(source := raw.get("source"), dict):
+        given = {
+            str(key): str(source[key])
+            for key in ("type", "url", "version")
+            if source.get(key)
+        }
+        if given:
+            row["source"] = given
     if description := str(raw.get("description") or ""):
-        lines.append(f"    {description}")
-    return "\n".join(lines)
+        row["description"] = description
+    return row
 
 
 #: What `list_sources` says this source is, for the hub and for `servers()`.
@@ -290,16 +303,25 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     """
 
     @mcp.tool(name="cli_list", meta=FOR_THE_MODEL)
-    async def cli_list() -> str:
+    async def cli_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the commands recorded under `cli:`, with their switch.
 
         Each is a command recorded as installed on this machine, and a row in
-        the tool catalogue: `tool_search` finds one by what it does.
+        the tool catalogue, so a search finds one by what it does.
+
+        Args:
+            limit: How many entries this page may hold. Omit for the cap.
+            offset: How many entries to skip — that is how you page.
+
+        Returns:
+            `commands` — one row per entry, each with `name`, `state` (`on` or
+            `off`), `command`, and `install`, `source` and `description` when the
+            entry has them — and `total`, `limit` and `offset`, so
+            `offset + len(commands) < total` says whether more remain.
         """
         written = configfile.read_section(SECTION)
-        if not written:
-            return "No commands are recorded under `cli:` yet. `cli_set` records one."
-        return "\n".join(_describe(name, raw) for name, raw in written.items())
+        rows = [_describe(name, raw) for name, raw in written.items()]
+        return listed(rows, "commands", limit, offset, cap=LIST_PAGE)
 
     @mcp.tool(name="cli_set", meta=FOR_THE_MODEL)
     async def cli_set(
@@ -309,23 +331,29 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         install: str = "",
         source: dict[str, str] | None = None,
         enabled: bool = True,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Record a command that is already installed on this machine.
 
-        It writes the entry down for `tool_search`, installing and running
-        nothing; the answer says whether the command is on `PATH`. This is the
-        whole entry: a field left out is dropped, so restate everything.
+        It writes the entry down for a search to find, installing and running
+        nothing. This is the whole entry: a field left out is dropped, so
+        restate everything.
 
         Args:
-            name: The name it is recorded under, from `cli_list`.
+            name: The key it is recorded under.
             command: The invocation, resolved on `PATH` — one string, which may
                 be more than one word (`python -m mytool`).
             description: What it does, in the words a search should find it by.
             install: How to get it, for somebody who does not have it.
             source: Where the entry came from — `url`, `type`, `version`.
             enabled: False records it and keeps it out of the catalogue.
+
+        Returns:
+            `name`, `enabled` and `state` (`on`, or `off` for a switch written
+            off) — and `missing_program`, the program this entry names that is
+            not on `PATH`, when there is one. That is a note about the machine
+            and not about the entry: it is written down either way.
         """
-        settings, why = _prepare(
+        settings = _prepare(
             name,
             {
                 "command": command,
@@ -335,30 +363,29 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 "enabled": enabled,
             },
         )
-        if settings is None:
-            # **Refused by raising, so the call is a failure the caller can see.**
-            # `ok` false is this system's word for a refusal — `slife2.clients.gateway`
-            # splits a peer's refusal from a transport fault on exactly this flag,
-            # `slife2.plugins.toolhub.server` reads a raised `ToolError` as a value with `ok`
-            # false, and the tool panel renders `ok` false as a failed call.
-            # Returned as ordinary text the refusal would arrive with `ok` true
-            # and read as a success.
-            raise ToolError(why)
         homes.current().entries[name] = settings
         logger.info("cli_set name=%s", name)
-        return (
-            f"`{name}` is recorded as `{command}`; a search finds it from your "
-            f"next one."
-        ) + _on_path(command)
+        answer: dict[str, Any] = {
+            "name": name,
+            "enabled": enabled,
+            "state": "on" if enabled else "off",
+        }
+        if missing := _missing_program(command):
+            answer["missing_program"] = missing
+        return answer
 
     @mcp.tool(name="cli_remove", meta=FOR_THE_MODEL)
-    async def cli_remove(name: str) -> str:
+    async def cli_remove(name: str) -> dict[str, Any]:
         """Forget a command recorded under `cli:`.
 
-        The program itself stays on the machine.
+        The program itself stays on the machine. A name that is not recorded is
+        refused, so a success means the entry is gone.
 
         Args:
-            name: The entry to forget, from `cli_list`.
+            name: The key it is recorded under.
+
+        Returns:
+            `name` and `removed`, which a success makes true.
         """
         if name not in configfile.read_section(SECTION):
             # **Refused by raising, for `cli_set`'s reason**: returned as
@@ -369,18 +396,20 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         configfile.remove(SECTION, name)
         homes.current().forgotten(name)
         logger.info("cli_removed name=%s", name)
-        return (
-            f"`{name}` is forgotten; its row leaves the catalogue at your next search."
-        )
+        return {"name": name, "removed": True}
 
     @mcp.tool(name="cli_set_enabled", meta=FOR_THE_MODEL)
-    async def cli_set_enabled(name: str, enabled: bool) -> str:
+    async def cli_set_enabled(name: str, enabled: bool) -> dict[str, Any]:
         """Switch a recorded command on or off, keeping the entry.
 
         Args:
-            name: The entry, from `cli_list`.
+            name: The key it is recorded under.
             enabled: True records it as usable; False keeps it out of the
                 catalogue, the same switch as on a server.
+
+        Returns:
+            `name`, `enabled`, and `state` — `on` or `off` — which is the same
+            word the listing's rows carry.
         """
         if name not in configfile.read_section(SECTION):
             # The same refusal as `cli_remove`'s, and for the same reason: a
@@ -395,8 +424,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         # wrote, and it is the file's answer that counts until the next start.
         homes.current().switched(name, enabled)
         logger.info("cli_set_enabled name=%s enabled=%s", name, enabled)
-        state = "on" if enabled else "off"
-        return f"`{name}` is {state}; its entry stays in `cli:`."
+        return {"name": name, "enabled": enabled, "state": "on" if enabled else "off"}
 
 
 def main(argv: list[str] | None = None) -> int:

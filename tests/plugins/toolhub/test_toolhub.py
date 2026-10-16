@@ -10,6 +10,7 @@ them is ours.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import sqlite3
@@ -48,11 +49,13 @@ from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.catalogue import ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
+    MATCH_FLOOR,
     MAX_LOAD_NAMES,
     PLUGIN,
+    WEAK_FLOOR,
     Catalogue,
+    _confidence,
     _parameters,
-    _verdict,
     configured_sources,
     model_name,
 )
@@ -311,8 +314,15 @@ async def test_a_switched_off_command_is_a_row_that_says_so() -> None:
         )
 
     assert "cli:yt-dlp" in found["text"]
-    assert "cli:iflow" in found["text"] and "NOT USABLE: disabled" in found["text"]
-    assert "NOT USABLE: disabled" in again["text"], "still off after a re-merge"
+
+    def row_named(answer: dict[str, Any], name: str) -> dict[str, Any]:
+        rows = json.loads(answer["text"])["results"]
+        return next(row for row in rows if row["name"] == name)
+
+    assert row_named(found, "cli:iflow")["status"] == "disabled"
+    assert row_named(again, "cli:iflow")["status"] == "disabled", (
+        "still off after a re-merge"
+    )
 
 
 @pytest.mark.asyncio
@@ -339,14 +349,16 @@ async def test_a_document_answers_for_itself_when_it_is_called(
         command = await call(client, "cli:yt-dlp")
         cli_load = await call(client, "func_tool_load", {"names": ["cli:yt-dlp"]})
 
-    assert read["ok"] is False
+    assert read["ok"] is False, "a playbook is not a tool to call"
     assert "skill_use(name='browser-harness')" in read["text"]
-    assert loaded["ok"] is False and "no load state" in loaded["text"]
-    assert "a playbook, read with skill_use" in loaded["text"]
 
-    assert command["ok"] is False
+    # A load's verdict is in the answer rather than in the call's status: the
+    # name did not land, and the reason is what the model acts on.
+    assert "a playbook, read with skill_use" in _load_reason(loaded)
+    assert "a command already installed" in _load_reason(cli_load)
+
+    assert command["ok"] is False, "a command is not a tool to call either"
     assert "nothing here runs one yet" in command["text"]
-    assert "a command already installed" in cli_load["text"]
 
 
 # --- what the model may call --------------------------------------------------
@@ -481,7 +493,7 @@ async def test_a_skill_is_served_by_its_own_plugin(isolated_runtime: Path) -> No
     assert "name" in tool["parameters"]["properties"]
 
     assert answer["ok"] is True
-    assert answer["text"].rstrip().endswith("The body.")
+    assert json.loads(answer["text"])["content"].rstrip().endswith("The body.")
     assert later["ok"] is True
 
     # The plugin is a server and `servers()` reports it; the *catalogue source*
@@ -543,6 +555,17 @@ async def found(hub: Client, query: str) -> str:
     """
     answer = await call(hub, "tool_search", {"keywords": [query], "sentences": []})
     return str(answer["text"])
+
+
+def _load_reason(answer: dict[str, Any]) -> str:
+    """Why the one name a test asked to load did not land.
+
+    `func_tool_load` answers a verdict per name — `loaded`, and `failed` with a
+    reason each — and a test that is about one name wants that reason.
+    """
+    failed = json.loads(answer["text"])["failed"]
+    assert len(failed) == 1, failed
+    return str(failed[0]["reason"])
 
 
 def as_cli_server(answer: dict[str, Any]) -> dict[str, Any]:
@@ -925,7 +948,6 @@ async def test_a_servers_tools_are_on_demand_until_they_are_loaded() -> None:
         # the whole of what is installed, not only what is in front of the model.
         found = await call(hub, "tool_search", {"keywords": ["echo"], "sentences": []})
         assert "fake__echo" in found["text"]
-        assert "func_tool_load" in found["text"], "and the answer says how to use it"
 
         loaded = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
         assert loaded["ok"] is True
@@ -1030,14 +1052,17 @@ async def test_loading_says_why_it_cannot() -> None:
 
     The refusals that depend on a row's own state are the store's to make and
     are tested there (`tests/test_toolsdb.py`); what this checks is the hop —
-    that the model reads a sentence, and that the sentence says what to do next.
+    that the model reads which name did not land and why.
     """
     async with Client(hub_for()) as hub:
         unknown = await call(hub, "func_tool_load", {"names": ["nothing__at_all"]})
 
-    assert unknown["ok"] is False
-    assert "unknown tool" in unknown["text"]
-    assert "tool_search" in unknown["text"], "the way to find the right name"
+    answer = json.loads(unknown["text"])
+    assert answer["loaded"] == []
+    assert [entry["name"] for entry in answer["failed"]] == ["nothing__at_all"]
+    reason = answer["failed"][0]["reason"]
+    assert "unknown tool" in reason
+    assert "tool_search" in reason, "the way to find the right name"
 
 
 @pytest.mark.asyncio
@@ -1055,7 +1080,8 @@ async def test_a_name_that_does_not_exist_is_not_a_tool_the_system_needs() -> No
 
     assert answer.data["unknown"] == ["nothing__at_all"]
     assert answer.data["refused"] == []
-    assert "no such tool" in answer.data["text"]
+    assert "no tool has that name" not in answer.data["text"], "no prose at all"
+    assert json.loads(answer.data["text"])["unknown"] == ["nothing__at_all"]
 
 
 @pytest.mark.asyncio
@@ -1184,10 +1210,10 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     the number it found, and a page that has none says so instead of presenting
     ten rows as though they were matches.
 
-    The numbering is asserted with them because it is what makes the rest
-    readable at all: a description may be ninety lines long (`_quoted` argues
-    why it is not cut), and a row is recognisable only because it starts at the
-    left margin with its own number.
+    The rows are asserted field by field because that is what a model reads:
+    `meaning` is the number that ordered the page, `matched` says whether the
+    caller's own words were in that row's text, and `description` may be ninety
+    lines long (the whole of it is kept — `_record` argues why).
     """
     hub = hub_with_documents({"x": {"command": "x", "description": "工具"}})
     async with Client(hub) as client:
@@ -1198,28 +1224,32 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
             client, "tool_search", {"keywords": [], "sentences": ["trump"]}
         )
 
-    assert found["text"].startswith("Best match 1.00 by meaning."), found["text"]
-    assert "Nothing here matches" in nothing["text"], nothing["text"]
+    answer = json.loads(found["text"])
+    assert answer["confidence"] == "sure", answer
+    assert answer["best"] == 1.0
 
-    rows = [line for line in found["text"].split("\n") if line[:1].isdigit()]
-    # The precondition, not the claim: what the message used to state is
-    # asserted of each row below, and an empty list would make that loop vacuous.
+    assert json.loads(nothing["text"])["confidence"] == "none", nothing["text"]
+
+    rows = answer["results"]
+    # The precondition, not the claim: the fields below are asserted of every
+    # row, and an empty list would make that loop vacuous.
     assert rows, "there are result rows to read"
-    for line in rows:
-        assert "meaning " in line, f"and carries its number: {line!r}"
-    assert "cli:x" in found["text"]
+    for row in rows:
+        assert row["meaning"] is not None, f"and carries its number: {row!r}"
+    assert rows[0]["name"] == "cli:x", "the row asked for is the one on top"
 
 
 @pytest.mark.asyncio
-async def test_the_header_says_which_of_the_two_tiers_is_listed_first() -> None:
-    """A page in two tiers has to say so, or its numbers read as broken.
+async def test_the_rows_the_words_matched_are_listed_first() -> None:
+    """A page in two tiers has to *be* ordered that way, or its numbers read as broken.
 
     Measured on the report's own call: a row the words matched at `meaning 0.38`
     sat above one they did not at `0.56`.  That ordering is right — the words are
     certain and a cosine is graded — but the header named *which* rows were which
-    and not that one group is listed above the other, so "the rest are by meaning"
-    read as a claim about the whole column and the column looked out of order.
-    "listed first" is the half that was missing, and this is what pins it.
+    and not that one group is listed above the other, so a reader took "the rest
+    are by meaning" as a claim about the whole column and the column looked out
+    of order.  The order is the claim now, and it is asserted positionally; what
+    the header said about it is `matched`'s per-row field.
 
     The stub makes the two tiers maximally obvious: `alpha` is the only row the
     words match and scores nothing by meaning, `beta` is the reverse.
@@ -1235,54 +1265,54 @@ async def test_the_header_says_which_of_the_two_tiers_is_listed_first() -> None:
             client, "tool_search", {"keywords": ["工具"], "sentences": ["测试"]}
         )
 
-    header = answer["text"].split("\n")[0]
-    assert "listed first" in header, header
-
-    rows = [line for line in answer["text"].split("\n") if line[:1].isdigit()]
-    assert "matched your words" in rows[0], "the worded row is the one on top"
-    assert "matched your words" not in rows[-1], "and the other is beneath it"
+    rows = json.loads(answer["text"])["results"]
+    assert [row["name"] for row in rows][0] == "cli:alpha", "the worded row is on top"
+    assert rows[0]["matched"] == "words", rows[0]
+    assert rows[-1]["matched"] == "", "and the other matched nothing"
 
 
-def test_the_verdict_describes_the_two_tiers_and_never_a_rest_that_is_absent() -> None:
-    """Every branch of the first line, asserted where the wording lives.
+def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:
+    """Three words, pinned where the floors are.
 
-    `_verdict` is called with the page and its best number, so the wording can be
-    pinned without a catalogue — which matters because the case that was wrong is
-    the one where a whole page lands in one tier: `["pdf"]` matched all ten rows
-    and the header still said "the rest are by meaning", describing a rest that
-    was not there.
+    `_confidence` is called with the page and its best number, so the verdict can
+    be asserted without a catalogue — and it has to be *this* function's, because
+    the floors are this system's: `best` is a cosine, and what counts as a
+    match is not something a reading model can derive from the number.
+
+    The middle case is the one that is easy to get wrong.  The caller's own words
+    reaching a row is evidence — certain, where a cosine is graded — so a page
+    whose only evidence is that says `weak` rather than `none`, whatever the
+    numbers say.
     """
     worded = [{"matched_in": "line"}]
     plain = [{}]
 
-    assert "All of these matched your words" in str(_verdict(worded, 0.7))
-    assert "the rest" not in str(_verdict(worded, 0.7))
-
-    mixed = _verdict([*worded, *plain], 0.7)
-    assert "listed first" in mixed, "which group is on top is the half that was missing"
-    assert "1 of these" in mixed
-
-    assert "Closest first by meaning" in str(_verdict(plain, 0.7))
-    # And the tier does not hide a page that found nothing: the words matching is
-    # evidence, not a score, so it says weak rather than best.
-    assert str(_verdict(worded, 0.2)).startswith("Weak")
+    assert _confidence(plain, 0.7) == "sure"
+    assert _confidence(plain, MATCH_FLOOR) == "sure", "the floor is inclusive"
+    assert _confidence(plain, 0.2) == "none"
+    assert _confidence(worded, 0.2) == "weak", "the words are evidence"
+    assert _confidence(plain, WEAK_FLOOR) == "weak", "and so is a close-ish number"
 
 
 @pytest.mark.asyncio
-async def test_a_search_says_how_to_load_what_it_found() -> None:
-    """The hint belongs where a model asks about the mechanism: a result.
+async def test_a_search_answer_names_no_other_tool() -> None:
+    """**What a result carries is the row, not an instruction about the next tool.**
 
-    Withholding it there withheld it exactly where the question is — a model
-    reads a name in a result and wants it in its list.
+    The answer used to end "Call func_tool_load(name) to put one of these in your
+    list."  It is a true sentence, and it is exactly the cross-reference this
+    surface is trying not to carry: `func_tool_load` is in every model's list from
+    the first turn, its own description says what it does, and a tool's answer
+    that explains another tool is a second place the mechanism is written down —
+    one that goes stale the moment either name changes.
     """
-    async with Client(hub_for()) as hub:
+    hub = hub_with_documents({"yt-dlp": {"command": "yt-dlp", "description": "d"}})
+    async with Client(hub) as client:
         answer = await call(
-            hub, "tool_search", {"keywords": [], "sentences": ["run a command"]}
+            client, "tool_search", {"keywords": ["yt-dlp"], "sentences": []}
         )
 
-    # No bare truthiness here: naming `func_tool_load` in the answer is the
-    # claim, and it cannot hold of an empty one.
-    assert "func_tool_load" in answer["text"], answer["text"]
+    assert "cli:yt-dlp" in answer["text"], "the row is still the answer"
+    assert "func_tool_load" not in answer["text"], answer["text"]
 
 
 @pytest.mark.asyncio
@@ -1309,8 +1339,8 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
         )
 
     assert answer["ok"] is False, "an unreadable answer fails the call"
-    assert "Nothing matched" not in answer["text"], "it is not a verdict"
-    assert "results" in answer["text"], "and it names what was wrong"
+    assert "could not read" in answer["text"], "it is not a verdict, and it says so"
+    assert "results" in answer["text"], "naming what was wrong"
 
 
 def test_a_schema_that_will_not_parse_is_a_tool_with_no_arguments() -> None:
@@ -1361,10 +1391,11 @@ async def test_an_entry_removed_from_the_config_leaves_no_rows() -> None:
         refused = await call(second, "func_tool_load", {"names": ["fake__echo"]})
 
     assert "fake__echo" not in rows
-    assert refused["ok"] is False
-    assert "unknown tool" in refused["text"], (
-        "a tool whose entry is gone is not a tool whose server is down: "
-        f"{refused['text']}"
+    answer = json.loads(refused["text"])
+    reason = answer["failed"][0]["reason"]
+    assert answer["loaded"] == []
+    assert "unknown tool" in reason, (
+        f"a tool whose entry is gone is not a tool whose server is down: {reason}"
     )
 
 
@@ -1389,8 +1420,7 @@ async def test_an_entry_taken_out_of_a_section_takes_its_rows_with_it() -> None:
         refused = await call(hub, "func_tool_load", {"names": ["cli:thing"]})
 
     assert "cli:thing" not in rows
-    assert refused["ok"] is False
-    assert "unknown tool" in refused["text"]
+    assert "unknown tool" in json.loads(refused["text"])["failed"][0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -1508,10 +1538,21 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
         refused = await call(hub, "func_tool_load", {"names": ["fake__echo"]})
         found = await call(hub, "tool_search", {"keywords": ["echo"], "sentences": []})
 
-    assert refused["ok"] is False
-    assert "switched off" in refused["text"]
-    assert "fake__echo" in found["text"], "shown, and marked as not usable"
-    assert "NOT USABLE: disabled" in found["text"]
+    # The verdict, not a failed call: the name did not land, and the answer says
+    # which name and why — the reason is the one the model has to act on, and an
+    # `Error:` line would carry the same words under a worse label.
+    answer = json.loads(refused["text"])
+    assert answer["loaded"] == []
+    assert answer["failed"][0]["name"] == "fake__echo"
+    assert "switched off" in answer["failed"][0]["reason"]
+
+    rows = json.loads(found["text"])["results"]
+    # Found *and* marked, which is the whole of what a switched-off entry owes a
+    # model: the name is in the answer, and its row says why calling it will not
+    # work — where an absent row would say the tool does not exist.
+    kept = [row for row in rows if row["name"] == "fake__echo"]
+    assert kept, f"shown, not usable: {rows}"
+    assert kept[0]["status"] == "disabled", "and the row carries the verdict"
 
 
 @pytest.mark.asyncio
@@ -1697,11 +1738,14 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
 
     assert named.data["unloaded"] == ["fake__echo"]
     assert "fake__echo" in named.data["text"], "the caller reads the name off this"
+    assert json.loads(named.data["text"])["unloaded"] == ["fake__echo"], "as JSON"
     assert "fake__echo" not in names(after.data)
     assert "fake__boom" in names(after.data), "only what was named"
 
     assert idle.data["unloaded"] == []
-    assert "within its budget" in idle.data["text"]
+    assert set(idle.data["text"]) and "unloaded" in idle.data["text"], (
+        "said, not silent"
+    )
 
     assert refused.data["refused"] == ["tool_search"]
     assert refused.data["unloaded"] == []
@@ -1728,7 +1772,7 @@ async def test_unloading_a_document_row_is_not_a_refusal() -> None:
 
     assert answer.data["refused"] == [], "nothing was told a lie"
     assert answer.data["no_load_state"] == ["cli:yt-dlp"]
-    assert "not a tool to unload" in answer.data["text"]
+    assert "not a tool to unload" not in answer.data["text"], "no prose to parse"
 
 
 @pytest.mark.asyncio
@@ -1817,7 +1861,7 @@ async def test_a_plugins_own_tool_is_called_through_the_hub_like_any_other() -> 
         result = await call(hub, "skill_list", {})
 
     assert result["ok"] is True
-    assert "No skills are installed" in result["text"]
+    assert json.loads(result["text"])["skills"] == [], "the real plugin's answer"
 
 
 @pytest.mark.asyncio
