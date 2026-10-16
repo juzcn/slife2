@@ -120,6 +120,6 @@ A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。�
     - Schema over prompt
     - 大模型的工具schema要准确、简洁表达工具是干什么的、参数是什么，不要重复大模型知道的知识，尽量少的交叉引用，交叉引用容易造成不易维护的依赖。
     - 工具名称、描述和参数名称要统一规范，便于大模型推理。特别是相似的工具集，规范性更为重要。工具输出统一为json格式输出。例外：_check_new_input
-    - 工具输出小于4000 token, 否则会被我们自己的工具compact掉。
+    - 工具输出小于4000 token, 使用pagination if needed, 否则会被我们自己的工具compact掉。
 
 2、codereview, find duplicate and dead codes, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）.

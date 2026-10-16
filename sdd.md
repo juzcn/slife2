@@ -30,7 +30,7 @@
 3. [The machine](#3-the-machine) — the launcher, the shared servers, the config file, paths
 4. [A turn](#4-a-turn) — the loop, the harness, markers and channels, the context decision
 5. [Model backends](#5-model-backends) — one wire protocol per process, the stream, the failure contract
-6. [The tool system](#6-the-tool-system) — the hub, the catalogue, sources, the budget, the search
+6. [The tool system](#6-the-tool-system) — the hub, the catalogue, sources, the budget, the search, and what a tool says back
 7. [Memory](#7-memory) — the turns, the index machinery, the cabinet, embeddings
 8. [Work that arrives](#8-work-that-arrives) — WeChat, the A2A mesh, agent tasks, the clock
 9. [The terminal](#9-the-terminal) — the window, its inbox, restore, approval
@@ -232,18 +232,21 @@ turn "read my history" into "read anybody's".
 
 `libs/plugin/family.py` is the half a family plugin shares: hold each entry's
 connection, declare what each offers, route a call back to whoever holds it, and
-answer the four management tools in the section's own words (`FamilyWords`).
+build the four management tools' answers from the section's own words
+(`FamilyWords`), which are names of things rather than sentences — a listing rows,
+a set's state, a failure's reason.
 `mcp-tools` and `restapi-tools` are the two families that hold somebody else's
 processes; `cli`, `skills` and the cabinet's kinds are *document* families, whose
 rows are their own config section and which hold nothing.
 
-**One sentence per state, and the state is read off the file before the link.**
-`state_word` answers what a listing puts in `[brackets]`: a switched-off entry was
-never asked, so its state is the operator's `off` and not the `idle` of a
-connection nobody started. **An entry that answered with nothing is not an entry
-that is silent**: `tools_as_text` keeps "it offers no tools" apart from "it has
-not answered yet", because a listing that shows `ready` while the model is told
-"not answering yet" is two answers about one source.
+**One `state` field per entry, and the state is read off the file before the
+link**: a switched-off entry was never asked, so its state is the operator's
+`off` and not the `idle` of a connection nobody started — the same vocabulary the
+hub answers `servers()` with, because it is the same question. **An entry that
+answered with nothing is not an entry that is silent**: a listing says `ready`
+with no tools, where "it has not answered yet" is a state of the link, because a
+row that showed one while its state said the other is two answers about one
+source (§6.5: a row's fields are read together).
 
 **A credential that did not resolve is refused before it is used.**
 `libs/host/config.py`'s `unresolved_reference` is the one reader of "this value
@@ -303,21 +306,21 @@ one, because a refusal is the other half of "who is this call for".
   reason is genuinely its own. The context store's tail — "it is reached through
   the toolhub, which forwards the caller's identity" — is the same template's,
   because the situation is the shared one and only the road to fix it differs.
-* **`REFUSAL`** (`"[refused]"`) — how a tool says no *in an answer* rather than
-  by raising, which is a word rather than a sentence because a **caller** has to
-  recognise it: the window must not adopt a model that `model_switch` just
-  refused, and what tells a refusal from a note is the prefix. It used to be
-  defined in `tui/client.py` — in a client, in the package that draws the
-  terminal — while the producers are the agent server and the families. A word
-  the producers spell and a client parses belongs in the contract module, and it
-  is there.
+**And no `[refused]` marker any more.** There was one — a word in front of a
+sentence, so that a caller holding only a string could tell a refusal from a
+note, which the terminal needed before adopting the model `model_switch` had just
+been asked for. With a tool's answer an object and a refusal a raised `ToolError`
+(§6.5), the string a client parsed is gone: it reads the call's status, and the
+marker and its predicate were deleted rather than left as a second way of saying
+no.
 
-**Whose call it is has two idioms too.** A server whose tools raise refuses by
-raising (`protocol.agent_reader`); one whose tools answer in sentences refuses in
-a sentence (`audience.unaddressed`). `protocol.agent_or_blank` is the question
-both ask — *the agent this call is on behalf of, or `""`* — stated once, so the
-difference between the two is a decision rather than an accident of who wrote
-which plugin.
+**Whose call it is has two idioms, and they are two kinds of call.** A server
+whose tools raise refuses by raising (`protocol.agent_reader`); the question a
+*plugin's own API* answers with a sentence is `audience.unaddressed`, because its
+callers are our code rather than a model. `protocol.agent_or_blank` is the
+question both ask — *the agent this call is on behalf of, or `""`* — stated once,
+so the difference between the two is a decision rather than an accident of who
+wrote which plugin.
 
 ---
 
@@ -832,7 +835,7 @@ than about one conversation. It serves the model three tools of its own, which
 are the whole of how a tool arrives:
 
 - **`tool_search`** finds rows by words and by meaning (§6.4);
-- **`tool_func_load`** puts one in the model's list, which is what makes it
+- **`func_tool_load`** puts one in the model's list, which is what makes it
   callable: the model's list is the *loaded* set, and everything else is findable
   but not callable;
 - **`_func_tool_unload`** is the harness's trim, called by the harness at a turn
@@ -903,6 +906,46 @@ afterwards still returns the best rows inside the filter. The clauses name the
 corpus table's columns and are spliced into a query with one table in scope
 (`index.filter_clause`/`where_clause`, and the subquery the keyword leg uses so
 that a two-table join cannot make a column name ambiguous).
+
+### 6.5 What a tool says back
+
+**Everything the model reads is a surface, and a tool's answer is as much of one
+as its schema.** The schema is read before the call and the answer after it, and
+a system whose two halves disagree is one the model pays for twice: it derives
+what an answer means from the tool it happened to call, and re-derives it for the
+next one. So a tool the model may call says what it did the same way — §6.3
+bounds *how many* tools go out with a request; this is what each of them costs
+when it answers.
+
+- **The answer is a JSON object.** `llm.server_common.render_tool_result` renders
+  a `dict` as the JSON text the model reads, on every backend; a tool that
+  answers a sentence has invented a second format, and one the harness then has
+  to shorten as prose when it is long.
+- **A listing is a page**: `{"<noun>": [...], "total": N, "limit": L, "offset": O}`,
+  which is what `turn_list` and `CabinetStore.listing` already answered. `total`
+  is the whole of "is there more" — `offset + len(rows) < total` — and it counts
+  what the *filters* match rather than the table, so a narrowed listing is still
+  a page of what was asked for. A listing whose rows cannot outgrow the budget
+  answers its noun and says so; one that can takes `limit` and `offset`.
+- **A refusal — and a miss — raises `ToolError`**, one sentence saying what is
+  wrong and what to do instead. The failure is then the *call's* status, which is
+  what every reader already branches on: the hub answers `ok: false`, the loop
+  marks the call failed, the window draws it as one. A refusal returned as a
+  success is a call whose text and whose status disagree, and the party that
+  cannot check is the model.
+- **`_check_new_input` is the one exception, and it is the one that is not
+  data.** It hands over a person's message mid-turn (§4.4), so what it answers
+  *is* the thing itself — wrapped in an object it would be a message the model
+  had to unwrap before it could read what somebody wrote.
+- **No answer exceeds `tool_result.tokens`** (4000). A listing pages; an output
+  that cannot be bounded is the harness's (`dump`, §4.2), and the tool that reads
+  it back is a *searching* reader within the same budget, so reading an output
+  back can never cost the conversation more than shortening it did.
+
+**What the rule is not.** It is not "answers are machine-readable and nothing
+else" — a field may hold a sentence, and several do, because a person reads some
+of these answers too (`model_switch`'s note goes into the window). It is that the
+*envelope* is one shape, so that a reader that knows one tool knows them all.
 
 ---
 

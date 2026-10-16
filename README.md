@@ -462,6 +462,17 @@ quietly lost `turn_read` is a failure nobody can see — and somebody else's
 do when their entry says `autoload: true`, which is how a server whose tools are
 wanted every turn is written down as such. Everything else arrives on demand.
 
+**And what a tool answers is JSON, uniformly.** The schema and the answer are
+both things the model reads, so they are one surface: a listing answers
+`{"<noun>": [...], "total", "limit", "offset"}` — `total` is what says whether
+another page exists — a read answers the row's own fields, and **a refusal or a
+miss raises**, which the harness hands the model as a failed call with the
+reason. One exception: `_check_new_input` returns a person's message verbatim,
+because what it hands over is not data about something but the thing itself. No
+answer is meant to exceed `tool_result: tokens:`; a listing that could goes
+through `limit`/`offset`, and one that cannot be bounded is the dump a large
+output already goes to (`dump_read`, below).
+
 ### Three arguments every tool takes
 
 **Every tool accepts three meta-parameters the model may add to any call.** They

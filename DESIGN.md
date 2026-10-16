@@ -54,6 +54,7 @@ because a chapter is a subject and not a decision.
    - [8.6 Names, and the links the hub holds](#86-names-and-the-links-the-hub-holds)
    - [8.7 Editing the config](#87-editing-the-config)
    - [8.8 The three meta-parameters](#88-the-three-meta-parameters)
+   - [8.9 What a tool answers, and what two vocabularies cost](#89-what-a-tool-answers-and-what-two-vocabularies-cost)
 9. [Deferred](#9-deferred) — named so they are decisions rather than oversights: what is missing, where it would go, and what the current answer costs — and, first, the two of v1's features this build dropped rather than deferred
 10. [Fallbacks](#10-fallbacks) — the one kind of behaviour that is invisible when it is wrong
    - [10.1 The four deformations](#101-the-four-deformations)
@@ -295,10 +296,12 @@ eleven lines with three implementations (`serve_plugin`, and hand-rolled copies
 in `agent/server.py` and `llm/embeddings_server.py`, plus `serve_backend`'s
 second body for the model backends); it is one function with three hooks, and a
 gate refuses the next copy.  And the words a server says — the refusal sentence,
-the `[refused]` prefix a caller branches on, "the agent this call is on behalf
-of" — were spelled in the modules that produce them, including one defined in a
-*client* of the agent server.  They are `libs/plugin`'s now, which is where the
-rest of the contract is.
+"the agent this call is on behalf of" — were spelled in the modules that produce
+them, including one defined in a *client* of the agent server.  They are
+`libs/plugin`'s now, which is where the rest of the contract is.  **The
+`[refused]` prefix that paragraph used to name is gone** (§8.9): a refusal is a
+raised `ToolError` now, so the marker and the predicate a client parsed it with
+had no producer and no reader left.
 
 **The same question asked again, one layer down: the machinery, and the copies
 whose own docstrings had already admitted it.**  A later pass for the same
@@ -312,13 +315,15 @@ the one that did not.  The thread hop that keeps a blocking SQLite call off the
 loop every server answers from had four bodies in four modules, three of them
 untyped, so `helpers.threads.off_loop`'s `ParamSpec` is the first time those
 forty-seven call sites were checked at all.  And the cabinet served five kinds
-through ten tool bodies that differed only in the kind and in the sentence a miss
-answers with.
+through ten tool bodies that differed only in the kind and in the words a miss is
+refused with.
 
 **What decided each merge was whether the difference was the point.**  The
-cabinet's sentences are model-facing text — "There is no note about {subject!r}"
-against "There is no report called {title!r}" — so `page_of`, `row_of` and
-`remove_of` take them as arguments and each tool stays the kind it serves.  The
+cabinet's misses are model-facing text — "there is no note about {subject!r}"
+against "there is no report called {title!r}" — so `page_of`, `missing_row` and
+`remove_of` take them as arguments and each tool stays the kind it serves; the
+sentences are the *reason* a raised `ToolError` carries now (DESIGN.md §8.9),
+which is the same place they were.  The
 embedding count check is one rule with one consequence, so it is one function
 (`index.checked_vectors`) with the corpus noun passed in for the sentence, and
 the batch it wraps is one call because a first run has thousands of rows.  **That
@@ -3975,6 +3980,91 @@ runs, which is v1's rule for a turn with nobody behind it; a refusal mounts no
 tool panel at all, because a panel that appeared and then said "denied" would
 have told a reader the tool ran.
 
+### 8.9 What a tool answers, and what two vocabularies cost
+
+**A model-facing tool answers an object, and refuses by raising.**
+`_check_new_input` is the one exception, and it is the one that is not data: it
+hands over a person's message mid-turn, so what it answers *is* the thing, and
+wrapping it would make the model unwrap a message before reading what somebody
+wrote. The rule is the designer's (`designer_notes.md`, 大模型工具review); this
+section is what applying it to a build that had grown three vocabularies decided,
+and what it cost.
+
+**It had three, and none was wrong on its own.** `context`, `schedule`,
+`agent_task` and `a2a` answered objects from the start — a page of turns, a
+task's five fields, an agent card. `cabinet`, the two connection families, the
+two document families, `media`, `wechat`, the file tunnel, the agent server's
+own `model_*`/`subagent_*` tools and the harness's two async tools answered
+*sentences*: "Saved `x` to …", "`a` is connected and offers 3 tool(s)", "There is
+no note about …". And the hub's own three — the ones in every model's list from
+the first turn — answered a third: a compact numbered listing, argued for at
+length in `_results_as_text` ("a list whose entries cannot be counted or compared
+is a list it has to guess at").
+
+Each reads well on its own, and that is exactly the problem: the **model** cannot
+learn one shape and use it. It re-reads every answer to find where the facts are,
+and the terminal — the other reader — ended up parsing prose for a verdict.
+
+**A listing is a page, and `total` is the half that was missing.** `turn_list`
+and the cabinet's store already answered `{entries, total, limit, offset}`, which
+is where the shape came from. The schedule's task listing had no bound at all and
+its run listing had a `limit` that was a *cap* — a ledger that grows for as long
+as a task lives, with no way back through it. Both are pages now, and the numbers
+they answer with are the numbers the page was cut to: a page whose `limit` is what
+was asked for rather than what was applied is a page a caller pages wrongly from
+(`page_of`'s docstring, which is where the arithmetic lives for both listings).
+
+**A refusal raises, and a miss with it.** §8.3's failure contract already said a
+tool that fails is a value with `ok` false, read by the model as a failed call
+with a reason. What this replaced was a sentence returned as a *success*, and it
+had two costs: the transcript records the call as one that worked, which is a lie
+the model has to detect from the text, and every reader that needs the verdict
+has to parse it. One did.
+
+**`[refused]` was that reader, and it is gone.** `libs/plugin/audience.py` held
+the word and a predicate over it, because the terminal has to know whether
+`model_switch` *happened* before adopting the reference it just asked for — a
+prefix in the text, so that a client holding only a string could tell a refusal
+from a note. The tool answers `{default, previous, moved}` and refuses by raising
+now, so the client reads the call's status instead, and the marker and its
+predicate were deleted rather than left as a second way of saying no. What the
+window *draws* is its own sentence, composed from those facts (`tui/i18n.py`),
+which is where every other line it shows comes from.
+
+**What it cost, and what was deliberately not taken.**
+
+* **Sentences inside fields are fine, and several remain.** The rule is about the
+  *envelope*. `failed: [{name, reason}]` carries a reason a person could read,
+  `attach_image` names what it refused, and the agent server's refusals are still
+  the sentences they were — they are simply raised now rather than returned.
+* **The schemas got longer, and that is the price of the answers being
+  readable.**  Descriptions went from ~5,500 words to ~7,500 across the
+  model-facing set, and the growth is almost all `Returns:` — the keys of the
+  object, which a model that has only the *name* of a tool cannot guess and
+  which §8.8 already argues belongs on the schema rather than in the prompt (it
+  is what a model reading *that* tool's answer needs, and the prompt is the
+  operator's file).  The alternative was leaving the shape to be discovered at
+  call time, which is what the two vocabularies already cost.
+* **A tool's own arguments were left alone where renaming would break a wire
+  that mirrors them.** The WeChat marker's keys are named after `wechat_send_message`'s
+  arguments, so `text` stays `text` beside `a2a_send_message`'s `message`. The
+  designer's rule is about a model reading several schemas; a rename that changed
+  a channel's payload would be this rule buying uniformity with a broken contract.
+* **`text_to_speech` and `transcribe_audio` sit beside `generate_image` and
+  `generate_video`**, which is two naming schemes in one family — and they stay,
+  because the four are unambiguous, and because the method name *is* the media
+  adapter's contract (`adapters.py`). A rename here would be uniformity for its
+  own sake, paid for by every playbook that names them.
+* **A search answer can still be long.** A row's description is never cut — it is
+  what a model chooses by, and one catalogue row's is ninety lines — so
+  `tool_search` can outgrow `tool_result.tokens` and be dumped like any other
+  large output. Bounding it would mean truncating the one field the tool exists
+  to show, and the dump path already answers that case with the whole of it.
+* **`agent_task_list` answers `{tasks: […]}` with no page**, because the registry
+  keeps at most `RETIRED` finished tasks plus the running ones, so the answer
+  cannot outgrow the budget. A listing that cannot grow is not given paging
+  arguments it would never use.
+
 ## 9. Deferred
 
 Named so they are decisions rather than oversights. Each entry says what is
@@ -4543,14 +4633,25 @@ still alive, not that `taskkill` was unavailable. *Does not cover:* a process
 that survives the poll, which `terminate` reports as `False` and `down` reports
 as a server it could not stop. *Failure goes:* the pid the caller then polls.
 
-**A tool result JSON cannot serialise is rendered as its `repr`, not dropped.**
-`server_common.render_tool_result` hands a non-string, non-`None` result to
-`json.dumps(..., default=str)`, so an object the encoder does not know becomes
-text instead of failing the turn or emptying the field. *Gives up:* the object's
-exact shape — the model reads a representation of the value, not the value.
-*Does not cover:* a result JSON can encode, which passes through byte for byte,
-and `None`, which is the empty string. *Failure goes:* the rendered text is in
-the request and in the turn's own record, so what was rendered is findable.
+**A tool answer JSON cannot serialise is rendered as its `repr`, not dropped.**
+`libs/turn/tools.as_tool_text` — the one renderer, used by the loop, by the hub's
+own tools and by `server_common.render_tool_result` — hands a non-string,
+non-`None` answer to `json.dumps(..., ensure_ascii=False, default=str)`, so an
+object the encoder does not know becomes text instead of failing the turn or
+emptying the field. *Gives up:* the object's exact shape — the model reads a
+representation of the value, not the value. *Does not cover:* an answer JSON can
+encode, which passes through byte for byte, and `None`, which is the empty
+string. *Failure goes:* the rendered text is in the request and in the turn's own
+record, so what was rendered is findable.
+
+**A lone surrogate is escaped rather than failing the request.**
+`as_tool_text` encodes what it rendered as UTF-8 with `backslashreplace`, because
+`ensure_ascii=False` will put a surrogate a provider's JSON handed us straight
+back into the string, and a surrogate cannot be encoded at all. *Gives up:*
+nothing the model needs — the character becomes the escape `ensure_ascii=True`
+would have produced. *Does not cover:* text that is not a surrogate, which is
+untouched. *Failure goes:* nowhere, which is the point: the alternative was a
+turn that dies on the transport.
 
 **A post-turn trim is skipped when the hub cannot be reached.** The agent
 server's trim and a task's trim both swallow a hub that is unreachable or
