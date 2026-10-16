@@ -321,7 +321,16 @@ against "There is no report called {title!r}" — so `page_of`, `row_of` and
 `remove_of` take them as arguments and each tool stays the kind it serves.  The
 embedding count check is one rule with one consequence, so it is one function
 (`index.checked_vectors`) with the corpus noun passed in for the sentence, and
-the batch it wraps is one call because a first run has thousands of rows.  A
+the batch it wraps is one call because a first run has thousands of rows.  **That
+one is not only tidying: gathering the five seats found a fourth corpus that had
+none.**  `CabinetStore.vectors` handed its pieces to the model and wrote whatever
+came back, and the cabinet is the worst place for that — `place` marks a document
+tried whether or not it has vectors, so a partial answer left the rest of the
+document unreachable by meaning with `sync` reporting the cabinet ready, which is
+the exact hole the check exists to close.  Its search path was unchecked too, and
+there the symptom was a `zip()` of two lists of different lengths rather than a
+named fact.  Both call `checked_vectors` now, with a test for each that fails
+without it.  A
 numbered window is measured against the *harness's* budget from both ends — the
 shortening that fills it and `dump_read`, which fills one back — so the
 measurement is `tokens.estimate_lines_tokens` rather than two expressions that

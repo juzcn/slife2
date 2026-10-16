@@ -131,6 +131,7 @@ from slife2.libs.store.index import (
     _marks,
     _rowid,
     as_similarity,
+    checked_vectors,
     clear_vectors,
     connect_to,
     embed_chunks,
@@ -927,10 +928,28 @@ class CabinetStore:
 
         An empty text is no vectors rather than an empty embedding: a document
         with nothing to say about itself is one the keyword leg still finds.
+
+        **And an answer shorter than the request is refused** — the one thing
+        every other embedding path in the tree checked and this one did not.  It
+        is the worst place to miss it: `place` writes one `cabinet_chunk` row per
+        vector it is handed and marks the document tried either way, so a short
+        answer left the document holding vectors for *some* of its chunks,
+        `cabinet_embedded` saying the vector pass had finished with it, and
+        `embed_missing` therefore never selecting it again — the rest of the
+        document unreachable by meaning, with `sync` reporting the cabinet
+        ready.  `checked_vectors` is the check
+        and the sentence; the corpus noun and what is lost are this caller's.
         """
         text = vector_text(row)
         pieces = embed_chunks(text, limit=embedder.max_chars) if text.strip() else []
-        return await embedder.embed(pieces) if pieces else []
+        if not pieces:
+            return []
+        return await checked_vectors(
+            embedder,
+            pieces,
+            unit="chunks",
+            so="this document would be searchable only by keyword",
+        )
 
     def place(
         self,
@@ -1577,11 +1596,23 @@ class CabinetStore:
     async def _semantic_lists(
         self, sentences: Sequence[str], embedder: Embedder, k: int
     ) -> tuple[list[list[float]], list[list[tuple[int, float]]]]:
-        """`(the query vectors, one ranked list each)`, out of **one** `embed`."""
+        """`(the query vectors, one ranked list each)`, out of **one** `embed`.
+
+        The answer is checked here for the reason the catalogue's is, and the
+        symptom is why it is worth saying: the caller pairs each sentence with
+        its own ranked list, so a vector that never arrived is a question with no
+        answer — and an unchecked short answer reached it as a `zip` of two lists
+        of different lengths, which names the symptom rather than the fact.
+        """
         phrases = [sentence for sentence in sentences if sentence.strip()]
         if not phrases:
             return [], []
-        queries = await embedder.embed(phrases)
+        queries = await checked_vectors(
+            embedder,
+            phrases,
+            unit="sentences",
+            so="this search cannot say what a document is about",
+        )
         with self._connect() as connection:
             lists = [self._nearest(connection, vector, k) for vector in queries]
         return queries, lists

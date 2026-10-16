@@ -347,6 +347,68 @@ async def test_a_save_that_cannot_embed_stores_nothing() -> None:
     assert store().get(FILE, "documents/orphan.txt") is None
 
 
+class ShortEmbedder(StubEmbedder):
+    """An endpoint that answers with one vector fewer than it was asked for.
+
+    **Every answer but a single-text one**, and that is what lets it be used
+    twice: a one-chunk document embeds correctly, so a test can write a corpus
+    with it and then watch a *later* call be refused — a two-chunk document at
+    the write path, a two-sentence search at the other — instead of having the
+    first write fail and never reaching the thing under test.
+    """
+
+    identity: str = "stub:short"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return await super().embed(texts[:-1] if len(texts) > 1 else texts)
+
+
+#: Two paragraphs past the chunk size, so this document is more than one chunk —
+#: without that, a short answer *is* the whole answer and the row stays sound.
+TWO_CHUNKS = "x" * 1200 + "\n\n" + "y" * 1200
+
+
+@pytest.mark.asyncio
+async def test_a_short_embedding_answer_is_refused_at_the_write_path() -> None:
+    """**A partial answer is the hole `sync` cannot see, and this path took it.**
+
+    `place` writes one chunk row per vector it is handed and marks the document
+    tried either way, so a document embedded only in part is one `embed_missing`
+    never selects again: the rest of it unreachable by meaning while the keyword
+    leg still finds it, and `sync` reporting the cabinet ready.  Every other
+    embedding path in the tree refuses a short answer (`index.checked_vectors`);
+    the cabinet's save path was the one that did not, and it is the worst place
+    to miss it — the mark is what makes the hole permanent.
+    """
+    server = build_server(load(), embedder=ShortEmbedder())
+
+    async with Client(server) as client:
+        with pytest.raises(Exception, match="searchable only by keyword"):
+            await ask(client, "note_edit", subject="partial", content=TWO_CHUNKS)
+
+    assert store().get(NOTE, "partial") is None, "a write that raised stored nothing"
+    assert not list((bag() / "notes").glob("partial*")), "and wrote no mirror"
+
+
+@pytest.mark.asyncio
+async def test_a_short_embedding_answer_is_refused_at_the_search_path() -> None:
+    """A query vector that never arrived is a question with no answer.
+
+    The search pairs each sentence with its own ranked list, so an unchecked
+    short answer reached that pairing as a `zip` of two lists of different
+    lengths — a `ValueError` naming the symptom three steps from the fact, in a
+    tool a model calls.  The check is the one every other embedding path makes;
+    the sentence is this corpus's.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_edit", subject="alpha", content=f"a note about {WORD}")
+
+    server = build_server(load(), embedder=ShortEmbedder())
+    async with Client(server) as client:
+        with pytest.raises(Exception, match="cannot say what a document is about"):
+            await ask(client, "cabinet_search", sentences=[WORD, OTHER])
+
+
 # --- finding ---------------------------------------------------------------
 
 
