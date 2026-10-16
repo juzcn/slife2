@@ -2399,7 +2399,10 @@ def test_a_protocol_no_provider_uses_stops_with_an_answer(
     from slife2.plugins.llm import anthropic_server
 
     assert anthropic_server.main([]) == 2
-    assert "no anthropic-messages provider" in capsys.readouterr().out
+    # **On stderr, and that is the half worth asserting**: a start-up refusal is
+    # a sentence about a process that did not start, and stdout in this system is
+    # reserved (see `slife2.libs.plugin.protocol.configure_logging`).
+    assert "no anthropic-messages provider" in capsys.readouterr().err
 
 
 def test_the_matching_protocol_serves_every_provider_of_it(
@@ -2409,13 +2412,17 @@ def test_the_matching_protocol_serves_every_provider_of_it(
     goes on to serve, carrying only that protocol's providers.
 
     `serve` is replaced rather than run, because the real one blocks on a
-    socket — what is being asserted is what reaches it.
+    socket — what is being asserted is what reaches it.  **The seam is
+    `slife2.libs.plugin.protocol.serve`**, which is where every server in this
+    system is started from: `server_common` used to be its own copy of that
+    call, and a test that patched the copy proved something about the copy.
     """
-    from slife2.plugins.llm import openai_server, server_common
+    from slife2.libs.plugin import protocol
+    from slife2.plugins.llm import openai_server
 
     _point_at(tmp_path, monkeypatch)
     served: list[Any] = []
-    monkeypatch.setattr(server_common, "serve", lambda *a, **k: served.append(a))
+    monkeypatch.setattr(protocol, "serve", lambda *a, **k: served.append(a))
 
     assert openai_server.main([]) == 0
     (mcp, address, _args) = served[0]
@@ -2447,7 +2454,7 @@ def test_responses_stops_with_an_answer_when_its_config_has_none(
     from slife2.plugins.llm import openai_responses_server
 
     assert openai_responses_server.main([]) == 2
-    assert "no openai-responses provider" in capsys.readouterr().out
+    assert "no openai-responses provider" in capsys.readouterr().err
 
 
 def test_responses_is_served_on_its_own_port(tmp_path, monkeypatch) -> None:
@@ -2457,12 +2464,13 @@ def test_responses_is_served_on_its_own_port(tmp_path, monkeypatch) -> None:
     catches: both are "openai", and both would be reachable at :8001 if the
     registry keyed them by anything but the protocol.
     """
-    from slife2.plugins.llm import openai_responses_server, server_common
+    from slife2.libs.plugin import protocol
+    from slife2.plugins.llm import openai_responses_server
 
     (tmp_path / "slife2.yaml").write_text(ONLY_RESPONSES, encoding="utf-8")
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path))
     served: list[Any] = []
-    monkeypatch.setattr(server_common, "serve", lambda *a, **k: served.append(a))
+    monkeypatch.setattr(protocol, "serve", lambda *a, **k: served.append(a))
 
     assert openai_responses_server.main([]) == 0
     (mcp, address, _args) = served[0]

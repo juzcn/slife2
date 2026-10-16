@@ -63,6 +63,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
@@ -699,14 +700,19 @@ def serve_plugin(
     build: Callable[[Config], FastMCP],
     logger: logging.Logger,
     note: Callable[[Config], str] | None = None,
+    require: Callable[[Config], str] | None = None,
 ) -> int:
-    """The `main` every plugin that owns a config section shares.
+    """The `main` **every** server in this system shares.
 
-    Same shape as `slife2.plugins.llm.server_common.serve_backend`, and its sibling: one
-    process per plugin, so the only thing that differs between any two of them
-    is which config key their address is filed under and which server they
-    build.  Seven servers each spelled out the same eleven lines, which is the
-    kind of duplication that drifts one branch at a time.
+    One process per plugin, so the only thing that differs between any two of
+    them is which config key their address is filed under, which server they
+    build, and what they say about it — those are the three hooks.  Servers used
+    to spell these eleven lines out one at a time, and the count of copies was
+    itself the bug: eleven lines is enough to drift, and a copy that drifted was
+    a server that started differently from every other one for no reason anyone
+    had chosen.  Today the only two callers that are not this function are the
+    three model backends, through `slife2.plugins.llm.server_common.serve_backend`,
+    which is a wrapper over this and not a second implementation.
 
     `note` is the one thing a server wants to add to its start-up line — "turns
     in <dir>", "N plugin(s) to ask" — and it is a *callable* because the config
@@ -714,6 +720,23 @@ def serve_plugin(
     parentheses; the parentheses are this function's, so no caller can produce
     a half-formatted line.  `logger` is the caller's, so a line still lands
     under the name of the server that wrote it rather than this module's.
+
+    **`require` is what a server cannot serve without, and it is the one way
+    this function can refuse.**  It returns a sentence saying what is missing —
+    a model protocol no provider in this config speaks is the whole of it — and
+    this writes `"<server>: <sentence>"` to **stderr** and returns 2, which is
+    the same answer `slife2` gives a server that would not come up: two lines
+    and no stack, because nothing has been drawn yet and the fix is an edit to
+    the file the sentence names.  Said rather than raised, and the reason is
+    that this is a *configuration* answer rather than a fault: a config that
+    names no provider for a protocol is a config that does not need this
+    process, and the correct behaviour is to not start, loudly.
+
+    Note where the answer does **not** go: stdout.  `configure_logging` states
+    why nothing in this system prints model output, and the same argument covers
+    a start-up refusal — a console whose codepage is not UTF-8 is a
+    `UnicodeEncodeError` waiting for the first non-ASCII character in a server
+    name.  A refusal that cannot be printed is not a refusal.
     """
     args = parse_serve_args(argv, server_name)
     configure_logging()
@@ -721,6 +744,10 @@ def serve_plugin(
     config = load()
 
     address = config.server(config_key)
+    if require is not None and (missing := require(config)):
+        print(f"{server_name}: {missing}", file=sys.stderr)
+        return 2
+
     logger.info(
         "serving %s on http://%s:%d%s%s",
         server_name,

@@ -433,3 +433,50 @@ def test_a_server_that_never_served_takes_its_own_record_back() -> None:
         serve_once()
 
     assert read_record(URL) is None
+
+
+def test_no_server_starts_itself() -> None:
+    """**The gate: `serve_plugin` is the only way a server in this system starts.**
+
+    A plugin's `main` is eleven lines — parse the flags, set up logging, find the
+    config, load it, resolve the address, say what is being served, run it — and
+    they were written out once per server until the sharing was complete.  They
+    had been written out twice more than anybody noticed: `agent` and
+    `llm/embeddings_server` each carried their own copy while sixteen others
+    called the shared function, so the count of *implementations* was three and
+    the count of *shapes* was one, held together by nothing.
+
+    What this refuses is the next copy.  The three names below are the ones a
+    hand-rolled `main` needs and nothing else in the tree has any use for, so a
+    plugin module that reaches for one is a server that has started spelling the
+    eleven lines out again.  Scanning imports would not do: the copy that
+    existed imported exactly these and the test that would have caught it did not.
+
+    **The one exemption is `protocol.py` itself**, which is where the single
+    implementation lives — and the three model backends, which go through
+    `slife2.plugins.llm.server_common.serve_backend`: that is a wrapper over the
+    same function and not a second copy of it, which is why it names none of
+    these either.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    offenders: list[str] = []
+    for path in sorted((root / "slife2" / "plugins").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else getattr(node.func, "attr", "")
+            )
+            if name in ("parse_serve_args", "configure_logging", "serve"):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno} calls {name}")
+
+    assert not offenders, (
+        "a server is starting itself instead of calling "
+        "slife2.libs.plugin.protocol.serve_plugin: " + "; ".join(offenders)
+    )

@@ -110,9 +110,7 @@ from slife2.libs.host.config import (
     TOOLHUB_SERVER_NAME,
     Config,
     ConfigError,
-    find_config_path,
     for_the_call,
-    load,
     load_cached,
 )
 from slife2.libs.host.paths import agent_dir, subagent_dirs, subagent_file
@@ -128,12 +126,10 @@ from slife2.libs.plugin.audience import (
 from slife2.libs.plugin.protocol import (
     ClientId,
     close_server,
-    configure_logging,
     describe,
     house_server,
     open_server,
-    parse_serve_args,
-    serve,
+    serve_plugin,
     tool_payload,
 )
 from slife2.libs.store.db import safe_agent_name
@@ -155,6 +151,15 @@ from slife2.libs.turn.tools import Tool, ToolRegistry
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = AGENT_SERVER_NAME
+
+#: This server's key in the config's `servers:` table, and so the name the
+#: launcher starts it under.  **The same word as the `agent:` section and not a
+#: coincidence**: that section is this plugin's settings (`AgentSettings`) and
+#: the endpoint in `servers:` is where they are served from, so `PLUGINS` files
+#: one row under the one key both halves are named by.  Declared here like every
+#: other plugin's, because `serve_plugin` takes it and a literal at the call site
+#: is the only other way to say it.
+CONFIG_KEY = "agent"
 
 #: How many messages one loop may have waiting.  The client's per-call timeout
 #: starts when the call is made, not when its turn starts, so an unbounded queue
@@ -3523,30 +3528,31 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
-    settings = config.agent.server
+    """Serve the agent loop.  `slife2.libs.host.launcher` starts this.
 
-    logger.info(
-        "serving %s on http://%s:%d%s (default model: %s)",
-        SERVER_NAME,
-        args.host or settings.host,
-        args.port or settings.port,
-        settings.path,
-        config.default,
-    )
-    serve(
+    **The shared `main`, and this server is the reason there is one.**  The
+    eleven lines below used to be written out here, which is how they came to be
+    written out in `slife2.plugins.llm.embeddings_server` too and how the other
+    sixteen came to share a function that two of eighteen did not call.  What is
+    this server's own is the `note` — the model a *new* conversation starts on is
+    the one fact about this start that no other line carries, and it is the
+    thing a person checking "did my `--model` take" is looking for.
+
+    The address comes from `config.server("agent")`, which is `config.agent.server`
+    (`AgentSettings.server`): the agent's settings are the `agent:` section and
+    its endpoint is the `servers:` entry of the same name, and `PLUGINS` files
+    both under the second.
+    """
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
         # `load_cached` rather than the config: a new conversation reads the
         # file, so a model config edit — by a model or by hand — is live.
-        build_server(config, source=load_cached),
-        settings,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
+        build=lambda config: build_server(config, source=load_cached),
+        logger=logger,
+        note=lambda config: f"default model: {config.default}",
     )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

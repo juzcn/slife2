@@ -35,19 +35,12 @@ from fastmcp import Context, FastMCP
 from slife2.libs.host.config import (
     Config,
     ProviderSettings,
-    find_config_path,
-    load,
     load_cached,
     unresolved_reference,
 )
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.model.wire import encode_chunk
-from slife2.libs.plugin.protocol import (
-    configure_logging,
-    house_server,
-    parse_serve_args,
-    serve,
-)
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.libs.turn.messages import (
     Message,
     StreamChatResult,
@@ -709,50 +702,47 @@ def serve_backend(
     build: Callable[[], FastMCP],
     logger: logging.Logger,
 ) -> int:
-    """The `main` every model server shares.
+    """The two things a model server's `main` says that no other server does.
 
-    One process per wire protocol, so the only thing that genuinely differs
-    between any two of them is which protocol they serve and which SDK builds
-    the streamer.  Everything else here was byte-identical in the first two,
-    which is the kind of duplication that drifts one branch at a time — and a
-    third copy would have made it three.
+    **A wrapper over `serve_plugin` and not a second implementation of it.**  A
+    model backend is a server like every other one — the same flags, the same
+    HTTP transport, the same record, the same start-up line — and the only
+    difference is what it can be *asked*: its config key is a wire protocol
+    rather than a plugin's name, and a protocol no provider speaks is a process
+    with nothing to serve.  Both of those are hooks `serve_plugin` already has,
+    so this passes them and returns its answer; the eleven lines it used to
+    spell out are the eleven lines whose copies that function exists to end.
 
-    **`build` takes nothing**: the server it returns reads the providers itself,
-    through `LiveProviders`, so a model added while this process is running
-    arrives without a restart.  What is read *here* is only the boot question —
-    whether this config has a provider for this protocol at all — and the
-    address.
+    What is left is genuinely the LLM half's own business.  The address is filed
+    under the `api` because a process speaks one format, and the `note` says
+    which providers this process is serving with — the one fact a bare
+    `serving slife2-llm-openai on …` does not carry, since two backends can
+    serve providers whose names look alike.
 
-    A config with no provider for this protocol stops here, with a one-line
-    message and exit code 2, rather than starting a server that can answer
-    nothing.
+    **`build` takes no config**, unlike `serve_plugin`'s, and that is the second
+    real difference: the server it returns reads the providers itself through
+    `LiveProviders`, so a model added while this process is running arrives
+    without a restart.  What `require` reads is only the boot question — whether
+    this config has a provider for this protocol *at all* — and a config that
+    has none stops here with one line on stderr and exit code 2 rather than
+    starting a server that can answer nothing.
 
     `logger` is the caller's, so a line still lands under the name of the server
     that wrote it rather than under this module's.
     """
-    args = parse_serve_args(argv, server_name)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
 
-    providers = {
-        name: provider
-        for name, provider in config.providers.items()
-        if provider.api == api
-    }
-    if not providers:
-        print(f"{server_name}: this config has no {api} provider")
-        return 2
+    def providers(config: Config) -> list[str]:
+        """The providers in this config that speak *api*, sorted."""
+        return sorted(name for name, one in config.providers.items() if one.api == api)
 
-    address = config.server(api)
-    logger.info(
-        "serving %s for %s on http://%s:%d%s (providers: %s)",
-        server_name,
-        api,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
-        ", ".join(sorted(providers)),
+    return serve_plugin(
+        argv,
+        server_name=server_name,
+        config_key=api,
+        build=lambda _config: build(),
+        logger=logger,
+        note=lambda config: f"providers: {', '.join(providers(config))}",
+        require=lambda config: (
+            "" if providers(config) else f"this config has no {api} provider"
+        ),
     )
-    serve(build(), address, args, name=server_name, config_path=config_path)
-    return 0

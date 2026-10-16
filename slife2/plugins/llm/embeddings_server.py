@@ -42,15 +42,8 @@ from slife2.libs.host.config import (
     EMBEDDINGS_SERVER_NAME,
     Config,
     EmbeddingProviderSettings,
-    find_config_path,
-    load,
 )
-from slife2.libs.plugin.protocol import (
-    configure_logging,
-    house_server,
-    parse_serve_args,
-    serve,
-)
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.llm.server_common import unresolved_key
 
 logger = logging.getLogger(__name__)
@@ -329,30 +322,27 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_serve_args(argv, SERVER_NAME)
-    configure_logging()
-    config_path = find_config_path()
-    config = load()
+    """Serve the embeddings endpoint.  `slife2.libs.host.launcher` starts this.
 
-    address = config.server(CONFIG_KEY)
-    provider = config.embeddings.active_provider()
-    logger.info(
-        "serving %s on http://%s:%d%s (embeddings from %s at %s)",
-        SERVER_NAME,
-        args.host or address.host,
-        args.port or address.port,
-        address.path,
-        provider.label,
-        provider.base_url,
+    **The shared `main` and not this module's own**, which is what it used to be:
+    the eleven lines below were spelled out here and in
+    `slife2.plugins.agent.server`, and they were the same eleven lines every other
+    plugin calls `serve_plugin` for.  What is this server's own is the `note` —
+    which endpoint its vectors come from is the one fact a person cannot get
+    from anywhere else on this machine, since the provider is resolved from a
+    `embeddings:` section that no other process reads.
+    """
+    return serve_plugin(
+        argv,
+        server_name=SERVER_NAME,
+        config_key=CONFIG_KEY,
+        build=build_server,
+        logger=logger,
+        note=lambda config: (
+            f"embeddings from {config.embeddings.active_provider().label} "
+            f"at {config.embeddings.active_provider().base_url}"
+        ),
     )
-    serve(
-        build_server(config),
-        address,
-        args,
-        name=SERVER_NAME,
-        config_path=config_path,
-    )
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
