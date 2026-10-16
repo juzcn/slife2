@@ -1542,16 +1542,47 @@ conversation forever — which is why the shell is names and descriptions rather
 than code, and why its descriptions have to say *whose* roster they list
 (`a2a_list_agents` says "peer"; a subagent family must say "yours").
 
+**The road, worked out and not yet built.**  A subagent has no window, so
+something has to hold its place on the local network and run its turns — and the
+maker's window is the only window in the picture.  Four things, in this order,
+and the whole of it lands together because a network that pushes messages to
+nobody is worse than one that does not carry them:
+
+- **One join per maker, not per member.**  The window holds the same kind of call
+  it holds on the remote network (`MCPMeshClient.hold`), and what that one call
+  means on this network is "the maker and its subagents are here".  Membership is
+  *read*, not registered: `subagent_dirs(maker)` — the directories with a
+  `subagent.yaml` in them, `schedule_dbs`' principle one level down — so a member
+  needs no record anywhere and the swarm is whatever the filesystem says.
+- **The message arrives on that held call.**  `hand_over`/`submit` finds a window
+  by *agent name*, and a subagent has none, so the local network cannot use the
+  same road: it pushes on the stream the maker's window is holding, which is what
+  the tui plugin's `attach` already does for every other channel.  The shape is
+  there to copy — `report_progress` with an encoded payload, `None` for the
+  keepalive that `_hold_open` already sends — and `MCPMeshClient.hold` is the one
+  place that has to learn to decode it instead of dropping progress.
+- **The window runs it as that member's turn.**  `MCPAgentClient` already carries
+  `subagent` in its payload and the agent server already answers it, so this is a
+  `subagent=` argument on `run_turn` and a queue item that keeps the pair; what is
+  drawn is `subagent:<member>` → `Subagent(<member>)> `, which is in.
+- **And the one way to lose a message silently**: a send to a member whose
+  responder is not subscribed publishes to nobody and reports nothing.  On the
+  remote network that is impossible — the peer's own window is holding its
+  `join` — and here nothing is, so `a2a_send_message` has to ensure the *target's*
+  session before publishing.  It cannot be done once at join time: a model may
+  `subagent_set` while the window is already holding.
+
 **Build state.**  In order, each green before the next: **(1) the directory** —
 `agent_dir(agent, subagent)`, `database_path`, `turn_dbs`, and the docstring
-reasons the old flat `<name>.turns.db` convention carried — *done*; **(2)
+reasons the old flat `<name>.turns.db` convention carried — **done**; **(2)
 identity and lifetime** — `Loop.records`, `subagent_set`/`subagent_remove`, the
-bound, the prompt's own name for a subagent; **(3) the second network and the
-shell** — a second `a2a` instance (config key, `servers:` entry, `unit`), the
-module parameterised by prefix and unit, four tool names and descriptions per
-instance; **(4) the road and the display** — the maker's window holds the swarm's
-places and runs its turns, `subagent:<name>` → `Subagent(<name>)> `. What is
-still unstated is whose window runs a turn two levels down (sdd §12).
+bound, the prompt's own name for a subagent — **done**; **(3) the second network**
+— `Net`, a second instance of the module (`slife2.plugins.a2a.local_server`), its
+own section and port, the four tool names *and descriptions* per network — **done
+and seen running**: one `slife2` brings up both, `slife2-subagent` on 8041
+serving `subagent_*`; **(4) the road** — the four things above, and the display
+half of it is **done** (`subagent:<name>` → `Subagent(<name>)> `).  What is still
+unstated is whose window runs a turn two levels down (sdd §12).
 
 ## 2. Streaming: one pattern, used twice
 
