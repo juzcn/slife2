@@ -177,9 +177,7 @@ async def _ask_model(
         timeout=_T.timeouts.work.model_call,
     )
     if not isinstance(result.data, dict):
-        raise unreadable(
-            "the model server", "return a stream_chat result", result.data
-        )
+        raise unreadable("the model server", "return a stream_chat result", result.data)
     return StreamChatResult.from_wire(result.data).text
 
 

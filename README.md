@@ -1211,8 +1211,21 @@ registry came from is the agent server's business.
 `libs/plugin/protocol.py` is the leaf every server sits on: what being one of
 our servers means — the flags, the HTTP transport, the record that says a daemon
 is here, the conventions (`house_server`) that would otherwise be copied into
-each server, and the whole of a plugin's `main` (`serve_plugin`), which is
-eleven lines every one of them would otherwise spell out. It is not
+each server, and the whole of a server's `main` (`serve_plugin`), which is eleven
+lines every one of them would otherwise spell out. **Every** one of them: a
+server supplies three hooks — what to build, what to say about its own start, and
+what it cannot start without — and the model backends reach the same function
+through a wrapper rather than a second copy of it.
+
+**A plugin is also one row of one table.** `libs/host/config.py`'s `PLUGINS` says,
+for each of the twenty servers, its key in `servers:`, the module that serves it,
+the MCP name it answers to, the tool a probe identifies it by and the port it
+listens on. Everything else is derived from that — the start order, the addresses
+`default_config` begins from, every `*_SERVER_NAME` constant, and the specs the
+launcher starts things from — and each plugin reads its own name out of its own
+row. So adding a plugin is writing the module and adding a row; removing one is
+deleting both. It used to be five places per plugin and two tests whose only job
+was noticing when two of them disagreed. It is not
 LLM-specific, which is why it is not under `plugins/llm/`: the context store,
 the hub and the agent server are not LLM plugins, and the scaffold they serve on
 should not come out of the LLM package. The embeddings server is the one plugin

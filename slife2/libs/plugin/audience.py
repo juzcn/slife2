@@ -326,6 +326,7 @@ def refused(answer: str) -> bool:
     """
     return answer.startswith(REFUSAL)
 
+
 #: The tail four of the five use: the shared process cannot guess, and the thing
 #: asked for belongs to the agent the call did not name.
 AGENTS_OWN = "one process serves every agent, and {own} is the agent's"

@@ -62,7 +62,6 @@ from slife2.plugins.tui.server import NOTE
 logger = logging.getLogger(__name__)
 
 
-
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
     """One `submit`, classified: written, refused, or unknown.
 

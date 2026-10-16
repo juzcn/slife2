@@ -262,6 +262,44 @@ with the number of agents: the servers are shared by every
 instance (§4), so the multiplier for a library is the number of *processes* that
 import it, not the number of agents.
 
+**A plugin is described once, and that is what makes it replaceable.**  The rule
+above says which side of the line a capability falls on; this says what it costs
+to *be* one, and the cost was five statements of the same facts.  A plugin's MCP
+name was a constant in `config.py` and a `SERVER_NAME` literal in its own module,
+held in step by fifteen spelled-out assertions; its module, its name and the tool
+a probe identifies it by were a second table in `launcher.py`; the order it
+starts in was a third list; its port was a row of `default_config`'s `servers`
+table; and `pyproject.toml` had the console script.  Two test functions existed
+only to notice when two of those disagreed — which is `Invariant 8` being paid
+for rather than honoured, and the arrangement `libs/plugin/protocol.py` refuses
+in as many words about the two source names it replaced ("three copies of `"cli"`
+and a test to hold them together is what this replaces").
+
+**So there is one table and everything else is derived**: `config.PLUGINS`, one
+row per server, carrying the key, the module, the name, the probe tool and the
+default port, with `api` marking the four that speak a wire protocol.  The
+constants, the two dicts the launcher used to key by hand, the start order, the
+ports `default_config` begins from and the launcher's `ServerSpec`s are all
+*views* of it now, and a plugin binds its own `SERVER_NAME` to its own row.  What
+that buys is the sentence a reader wants: **to add a plugin, write the module and
+add a row; to remove one, delete both.**  What it costs is that the table cannot
+be checked against the modules by construction — the module path is a string,
+because reading one means importing it, and the agent loop must never reach
+`openai_server` — so one loop in `tests/libs/host/test_config.py` imports each
+row's module and checks it binds the name the row claims.  That is the half a
+table genuinely cannot check about itself, which is a smaller thing to keep in
+step than five lists were.
+
+**The same rule applied twice more, one layer down.**  A server's `main` was
+eleven lines with three implementations (`serve_plugin`, and hand-rolled copies
+in `agent/server.py` and `llm/embeddings_server.py`, plus `serve_backend`'s
+second body for the model backends); it is one function with three hooks, and a
+gate refuses the next copy.  And the words a server says — the refusal sentence,
+the `[refused]` prefix a caller branches on, "the agent this call is on behalf
+of" — were spelled in the modules that produce them, including one defined in a
+*client* of the agent server.  They are `libs/plugin`'s now, which is where the
+rest of the contract is.
+
 ### 1.2 The plugin that is not a family
 
 **`slife2-wechat` is the first plugin here that holds no section and declares no
@@ -4100,7 +4138,7 @@ survives in four places.
   written back — a corrupt live-context list read as `[]` is a list one turn
   long on the next save, and the loss is permanent. The rule the code already
   states where it gets this right (`config._mapping`, `server._adopt`,
-  `toolclient._unreadable`) is: refuse, naming the file, the section and the
+  `protocol.unreadable`) is: refuse, naming the file, the section and the
   row. Tolerance is for a value whose damage costs one message; it is never for
   a value that is structural.
 - **A write that failed is not a write that happened.** A bookkeeping write is
@@ -4182,7 +4220,7 @@ answer, remembered once per process so the fetch is attempted once.
 **A tool failure is a message, not an exception** (§7). `ToolRegistry.execute`
 answers `ok: false` with text the model reads. *Gives up:* a caller's ability to
 tell a tool error from a tool result by type alone. *Does not cover:* the
-harness's own failures — a missing hub, a missing store, an `_unreadable` answer
+harness's own failures — a missing hub, a missing store, an `unreadable` answer
 from a plugin — which fail the turn.
 
 **An image in a turn that has already died is replaced by a note naming it**

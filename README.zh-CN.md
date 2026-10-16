@@ -990,8 +990,18 @@ server 自己的事。
 
 `libs/plugin/protocol.py` 是每一个 server 坐在上面的叶子：成为我们的一个 server 意味着
 什么 —— 那些标志、HTTP 传输、说明这里有守护进程的记录、那些否则会被复制进每个 server
-的约定（`house_server`），以及一个 plugin `main` 的全部（`serve_plugin`），那是十一个
-行、否则每一个都要自己拼一遍。它不是 LLM 专属的，这就是它不在 `plugins/llm/` 下的原因：
+的约定（`house_server`），以及一个 server `main` 的全部（`serve_plugin`），那是十一个
+行、否则每一个都要自己拼一遍。**是每一个**：一个 server 只提供三个钩子 —— 构建什么、
+关于自己这次启动说什么、以及没有它就不能启动的是什么 —— 而模型后端经由一层包装走到
+同一个函数，而不是它的第二份副本。
+
+**一个 plugin 同时也是同一张表里的一行。** `libs/host/config.py` 的 `PLUGINS` 为二十个
+server 各写下：它在 `servers:` 里的键、服务它的模块、它应答的 MCP 名字、探针据以认出它
+的工具、以及配置没写时它监听的端口。其余一切都是从那张表推出来的 —— 启动顺序、
+`default_config` 起始的地址、每一个 `*_SERVER_NAME` 常量、launcher 据以启动的 spec ——
+而每个 plugin 从自己那一行里读出自己的名字。所以加一个 plugin 就是写模块加一行；去掉一个
+就是两处都删。从前这是每个 plugin 五处，外加两个只为发现其中两处不一致而存在的测试。
+它不是 LLM 专属的，这就是它不在 `plugins/llm/` 下的原因：
 上下文存储、hub 和 agent server 都不是 LLM plugin，而它们所坐的脚手架不该从 LLM 包里
 出来。embeddings server 是 `llm/` 下唯一一个不是聊天后端的 plugin —— 它只说
 `/embeddings`，别的什么都不说 —— 它在那里，是因为它是这套系统里另一个 import provider

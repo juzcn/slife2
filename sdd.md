@@ -26,7 +26,7 @@
 ## Contents
 
 1. [Orientation](#1-orientation) — what slife2 is, the vocabulary, the layers
-2. [The plugin contract](#2-the-plugin-contract) — the protocol, the audience, the family
+2. [The plugin contract](#2-the-plugin-contract) — the protocol, the audience, the family, the one row that describes a plugin, and the words it says no with
 3. [The machine](#3-the-machine) — the launcher, the shared servers, the config file, paths
 4. [A turn](#4-a-turn) — the loop, the harness, markers and channels, the context decision
 5. [Model backends](#5-model-backends) — one wire protocol per process, the stream, the failure contract
@@ -165,7 +165,19 @@ wire. What this project adds on top is the contract, and it is three rules.
 
 `libs/plugin/protocol.py` holds what it takes to be one of our servers: the
 flags every entry point accepts, the HTTP transport, the record that says a
-daemon is here, and the start-up every plugin's `main` is (`serve_plugin`).
+daemon is here, and the start-up every server's `main` is (`serve_plugin`).
+
+**And that is every server's `main`, not most of them.** A plugin's start-up is
+eleven lines — parse the flags, configure logging, find and load the config,
+resolve the address, say what is being served, run it — and a shape that long is
+one that drifts when it is copied, so it is not copied: a server supplies three
+hooks (`build`, `note`, `require`) and nothing else. The model backends go
+through `plugins/llm/server_common.serve_backend`, which is a *wrapper* over the
+same function and not a second one, because what they add is "this config has no
+provider for my protocol", which is `require`. A gate in
+`tests/libs/plugin/test_protocol.py` refuses the next hand-rolled `main` by name:
+no module under `plugins/` may call `parse_serve_args`, `configure_logging` or
+`serve`, because those three are what such a copy is made of.
 
 **A client proves which server it reached before it believes anything it says.**
 `identifies` compares the connected server's own `server_info` against the name
@@ -239,6 +251,73 @@ is still a `${VAR}` or a `keyring:` reference" — the model servers, the media
 adapter, the skills reader and the family's write tools all ask it — because a
 reference sent to somebody else's endpoint travels as the secret itself and comes
 back as a 401 that names nothing.
+
+### 2.5 A plugin is one row of `PLUGINS`
+
+**Everything about a plugin that is a fact about the plugin is one row of one
+table** — `libs/host/config.py`'s `PLUGINS`, twenty entries — and everything
+else about it is derived. A row is `key` (its word in `servers:` and in a
+`status` line), `module` (what `python -m` runs), `name` (the MCP name it puts on
+the wire), `probe` (the tool that identifies it when it advertises no name) and
+`port` (where it listens when the config names none), plus `api` for the four
+that speak a wire protocol rather than serving a capability.
+
+This is what makes a plugin replaceable, which is the property the arrangement
+is for. Adding or removing one is: write or delete the module, edit the row, add
+or drop the console script in `pyproject.toml`. **Not** five edits held together
+by tests — which is what it used to be. A plugin's `SERVER_NAME` was a literal in
+its own module *and* a constant in `config.py`, kept in step by fifteen
+spelled-out assertions; its module, name and probe were a second table in
+`launcher.py`; its start order was a third list; its port was a row of
+`default_config`. Two test functions existed only to notice when two of those
+disagreed, and `Invariant 8` is the rule they were standing in for.
+
+**The plugin module reads its own name out of the table** (`SERVER_NAME =
+AGENT_SERVER_NAME`, or `plugin(API).name` for a backend), which is the half that
+removes the drift rather than policing it: there is no second literal to disagree
+with the row. What is left worth asserting is the half a table cannot check about
+itself — that each `module` imports and binds the `name` its row claims — and
+that is one loop in `tests/libs/host/test_config.py`.
+
+**The table is data, not imports.** Every row's module is a *string*, because
+reading it off the module would mean importing it: the terminal and the agent
+loop must not pull a server in, and the agent loop in particular must never reach
+`openai_server`. The same reason keeps the ports here rather than in the module
+that listens — nothing needs the module to know where it will be.
+
+**Two rows are one module.** `a2a` and `subagent` are served by
+`plugins/a2a/server.py` and its three-line entry point, because the remote and
+local networks are one protocol and one mesh differing in a namespace and a
+broker (`Net`); they are two rows because the launcher starts two *processes*,
+and their names differ because a probe has to be able to tell them apart.
+
+### 2.6 Two words a server says no with, and both are the contract's
+
+**`libs/plugin/audience.py` holds the refusal vocabulary**, beside the identity
+one, because a refusal is the other half of "who is this call for".
+
+* **`UNADDRESSED`** — one sentence with two holes, for a call that did not say
+  which conversation it is for: *what* is missing and *why* the server cannot
+  guess. Six plugins use it (the mesh, a task, a schedule, the cabinet, the
+  login, the media directory), and the `why` hole exists for the fifth, whose
+  reason is genuinely its own. The context store's tail — "it is reached through
+  the toolhub, which forwards the caller's identity" — is the same template's,
+  because the situation is the shared one and only the road to fix it differs.
+* **`REFUSAL`** (`"[refused]"`) — how a tool says no *in an answer* rather than
+  by raising, which is a word rather than a sentence because a **caller** has to
+  recognise it: the window must not adopt a model that `model_switch` just
+  refused, and what tells a refusal from a note is the prefix. It used to be
+  defined in `tui/client.py` — in a client, in the package that draws the
+  terminal — while the producers are the agent server and the families. A word
+  the producers spell and a client parses belongs in the contract module, and it
+  is there.
+
+**Whose call it is has two idioms too.** A server whose tools raise refuses by
+raising (`protocol.agent_reader`); one whose tools answer in sentences refuses in
+a sentence (`audience.unaddressed`). `protocol.agent_or_blank` is the question
+both ask — *the agent this call is on behalf of, or `""`* — stated once, so the
+difference between the two is a decision rather than an accident of who wrote
+which plugin.
 
 ---
 
@@ -678,7 +757,8 @@ because it is the other thing here that speaks a provider's HTTP API.
 items, differently shaped tools, different streaming events. Merging them behind
 one `api` would put two adapters in one file and make the choice a branch inside
 the server rather than a fact about the config. `api` selects a module and the
-server name it must identify as (`config.API_BACKENDS`, `API_SERVER_NAMES`), and
+server name it must identify as (the `api` rows of `config.PLUGINS`, read as
+`API_BACKENDS` and `API_SERVER_NAMES`), and
 an unknown value is a typo worth reporting rather than a provider that quietly
 never starts.
 
@@ -1278,6 +1358,15 @@ opens `libs/turn/loop.py`, and a reader who wants the process that runs
 conversations opens `plugins/agent/server.py`. The cost is one more directory
 level, paid once.
 
+**And every process in that tree is described in one place outside it.** A plugin
+is a module here plus a row of `PLUGINS` (§2.5), which is where its name, its
+probe tool and its port live; nothing else in the tree names it, so a directory
+can be deleted and a row can be deleted and those two edits are the whole of
+removing a plugin. `pyproject.toml`'s console scripts are the third and last
+place, and they exist for a person rather than for the launcher — every daemon is
+started as `python -m <module>` (`libs/host/launcher._argv`), in the interpreter
+and virtual environment that spawned it, and not through a script on `PATH`.
+
 ### 11.2 The test tree mirrors it
 
 `tests/libs/`, `tests/clients/`, `tests/plugins/`, `tests/helpers/`, `tests/tui/`
@@ -1376,12 +1465,14 @@ obvious.
 
 1. **A plugin is an MCP server over Streamable HTTP**, started and shared by the
    launcher, honouring the contract: state keyed by client id, an audience on
-   every tool a model may be offered, an identity a client can check.
+   every tool a model may be offered, an identity a client can check, and one row
+   of `config.PLUGINS` saying what it is (§2.5).
 2. **No capability holds a credential where it is not used.** No provider SDK is
    imported by the agent loop, the terminal or a library; no key is read outside
    the process that needs it; a reference that did not resolve never travels.
 3. **Nothing under `plugins/` is a library or a helper**, and every directory
-   there has a `main` and a `SERVER_NAME`.
+   there has a `main` and a `SERVER_NAME` — the name read off its `PLUGINS` row,
+   and the `main` a call to `serve_plugin` (§2.1).
 4. **The loop is a pure function over a message list**: it owns no conversation,
    no socket and no clock of its own.
 5. **A history is one every provider accepts**: an assistant message's tool calls

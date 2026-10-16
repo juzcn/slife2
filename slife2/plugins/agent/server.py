@@ -1347,14 +1347,10 @@ def build_server(
         """
         messages = payload.get("messages")
         if not isinstance(messages, list):
-            raise unreadable(
-                "the context store", "return a message list", payload
-            )
+            raise unreadable("the context store", "return a message list", payload)
         turn_ids = payload.get("turn_ids")
         if not isinstance(turn_ids, list):
-            raise unreadable(
-                "the context store", "return a turn-id list", payload
-            )
+            raise unreadable("the context store", "return a turn-id list", payload)
         loop.messages = [Message.from_wire(raw) for raw in messages]
         loop.turn_ids = [int(turn_id) for turn_id in turn_ids]
         loop.covered = len(loop.messages) - carried
@@ -3080,9 +3076,7 @@ def build_server(
         )
         turns = payload.get("turns")
         if not isinstance(turns, list):
-            raise unreadable(
-                "the context store", "return a turn list", payload
-            )
+            raise unreadable("the context store", "return a turn list", payload)
         return {"turns": turns}
 
     @mcp.tool

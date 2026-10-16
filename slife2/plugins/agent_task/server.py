@@ -512,14 +512,10 @@ def build_server(
         """
         raw = payload.get("messages")
         if not isinstance(raw, list):
-            raise unreadable(
-                "the context store", "return a message list", payload
-            )
+            raise unreadable("the context store", "return a message list", payload)
         turn_ids = payload.get("turn_ids")
         if not isinstance(turn_ids, list):
-            raise unreadable(
-                "the context store", "return a turn-id list", payload
-            )
+            raise unreadable("the context store", "return a turn-id list", payload)
         return (
             [Message.from_wire(item) for item in raw],
             [int(turn_id) for turn_id in turn_ids],
