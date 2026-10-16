@@ -71,6 +71,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import API_SERVER_NAMES, CONTEXT_SERVER_NAME, Config
 from slife2.libs.host.paths import agents_dir, turn_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
@@ -203,16 +204,6 @@ def build_server(
     embedding = EmbedderConnection(config, embedder=embedder)
     injected = ask
 
-    async def _on_thread(function, *args, **kwargs):
-        """Run a blocking store call off the event loop.
-
-        SQLite is synchronous, and a call that blocks the loop blocks every other
-        call this server is handling.  A connection per call is what makes the
-        thread hop safe — a connection is not shareable across threads, so there
-        is none to share.
-        """
-        return await asyncio.to_thread(function, *args, **kwargs)
-
     #: Files whose indexes have been brought up to date, once per process.  A
     #: file created after the startup pass is not re-synced: its own save writes
     #: the vector for the turn it is saving, and the only thing a sync would add
@@ -233,7 +224,7 @@ def build_server(
 
     async def store_of(agent: str, subagent: str) -> TurnStore:
         """One conversation's store, with its indexes brought up to date."""
-        store = await _on_thread(store_for, agent, subagent)
+        store = await off_loop(store_for, agent, subagent)
         if store.path not in synced:
             await indexed(store, await embedding.get())
         return store
@@ -260,7 +251,7 @@ def build_server(
         # beside each `turns.db` and matched it — so this pass would open the
         # scheduler's ledger as a `TurnStore` and write the turn schema into it.
         for path in turn_dbs():
-            await indexed(await _on_thread(TurnStore, path), model)
+            await indexed(await off_loop(TurnStore, path), model)
         try:
             yield {}
         finally:
@@ -430,8 +421,8 @@ def build_server(
         # blocking call — it opens the file and runs the schema — so it goes off
         # the loop like every other one here.
         agent, subagent = _caller(ctx)
-        store = await _on_thread(store_for, agent, subagent)
-        records, total = await _on_thread(
+        store = await off_loop(store_for, agent, subagent)
+        records, total = await off_loop(
             store.turns, since=since, until=until, limit=limit, offset=offset
         )
         return {
@@ -455,8 +446,8 @@ def build_server(
         agent, subagent = _caller(ctx)
         # `store_for`, for the reason `turn_list` gives: a read of one turn does
         # not need the embedding model, only the table the turn is in.
-        store = await _on_thread(store_for, agent, subagent)
-        record = await _on_thread(store.turn, turn_id)
+        store = await off_loop(store_for, agent, subagent)
+        record = await off_loop(store.turn, turn_id)
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         return record.to_wire()
@@ -555,10 +546,10 @@ def build_server(
             readers from one read for the same reason.
         """
         store = await store_of(agent, subagent)
-        turn_ids = await _on_thread(store.context_turns)
+        turn_ids = await off_loop(store.context_turns)
         if not turn_ids:
             return {"messages": list(messages), "turn_ids": [], "turns": []}
-        rows = await _on_thread(_rows, store, turn_ids)
+        rows = await off_loop(_rows, store, turn_ids)
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
         )
@@ -655,7 +646,7 @@ def build_server(
             `turn_ids`: the list as it stands now, which is always `[]`.
         """
         store = await store_of(agent, subagent)
-        written = await _on_thread(store.set_context_turns, [])
+        written = await off_loop(store.set_context_turns, [])
         logger.info("forgot the context of %s", describe((agent, subagent)))
         return {"turn_ids": written}
 
@@ -768,7 +759,7 @@ def build_server(
             logger.info("recall_not_needed reason=context_unchanged")
             return _in_hand(messages, turn_ids)
 
-        rows = await _on_thread(_rows, store, target)
+        rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
             # A named turn with no row: the list and the log disagree, which
             # means a file was rebuilt or pruned underneath.  Keeping the context
@@ -805,7 +796,7 @@ def build_server(
         # of `rebuild` regardless); refusing it is the honest half, and the
         # caller that cannot have the write is told rather than handed a context
         # the log will not have on the next start.
-        await _on_thread(store.set_context_turns, target)
+        await off_loop(store.set_context_turns, target)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d",
             len(target),
@@ -868,7 +859,7 @@ def build_server(
         # the headroom *below*.  Summed here and not by the store: the store
         # ranks candidates, and how much room is left is a fact about a
         # selection the caller made.
-        base_cost = sum((await _on_thread(_cost_of, store, base)).values())
+        base_cost = sum((await off_loop(_cost_of, store, base)).values())
         if window:
             budget = min(
                 int(window * config.context.floor),
@@ -895,7 +886,7 @@ def build_server(
         order = [turn_id for turn_id, _ in gated][: config.context.recall_limit]
         if not order:
             return []
-        costs = await _on_thread(_cost_of, store, order)
+        costs = await off_loop(_cost_of, store, order)
         if not window:
             return sorted(order)
         fit = decisions.fit_budget if query else decisions.fit_window

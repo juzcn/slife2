@@ -51,7 +51,6 @@ What this cut does **not** do, each named rather than half-built:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import mimetypes
 import os
@@ -64,6 +63,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.clients.embedder import EmbedderConnection
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
 from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
 from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
@@ -268,15 +268,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     """
     embedding = EmbedderConnection(config, embedder=embedder)
 
-    async def on_thread(function: Any, *args: Any, **kwargs: Any) -> Any:
-        """Run a blocking store call off the event loop.
-
-        SQLite is synchronous and one connection per call is what makes the hop
-        safe, so a cabinet that is being written does not stop the process from
-        answering anything else.
-        """
-        return await asyncio.to_thread(function, *args, **kwargs)
-
     #: Cabinets whose indexes have been brought up to date, once per process.
     #: A cabinet opened after this pass is not re-synced on every call: its own
     #: writes embed, and the only thing a sync adds is a rebuild for a *changed*
@@ -285,7 +276,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     async def store(agent: str) -> CabinetStore:
         """One agent's cabinet, with its indexes brought up to date."""
-        opened = await on_thread(store_of, index_path(agent))
+        opened = await off_loop(store_of, index_path(agent))
         if opened.path not in synced:
             status = await opened.sync(await embedding.get())
             if not status["ready"]:
@@ -378,7 +369,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        row = await on_thread(opened.get, NOTE, subject)
+        row = await off_loop(opened.get, NOTE, subject)
         if row is None:
             return (
                 f"There is no note about {subject!r} — `note_list` shows what there is."
@@ -405,7 +396,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        page = await on_thread(
+        page = await off_loop(
             opened.listing,
             NOTE,
             since=since or None,
@@ -459,7 +450,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        row = await on_thread(opened.get, DIARY, date)
+        row = await off_loop(opened.get, DIARY, date)
         if row is None:
             return f"There is no diary entry for {date}."
         return _document(DIARY, row)
@@ -483,7 +474,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        page = await on_thread(
+        page = await off_loop(
             opened.listing,
             DIARY,
             since=since or None,
@@ -555,7 +546,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 # The copy is inside the `try` because `unique_path` has already
                 # created the destination: a copy that fails leaves an empty file
                 # where a failed copy used to leave nothing at all.
-                await on_thread(shutil.copy2, source, target)
+                await off_loop(shutil.copy2, source, target)
                 await opened.write(
                     FILE,
                     relative,
@@ -573,7 +564,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 # turn's save keeps.  The bytes are already on disk by now, so
                 # they are what has to be taken back; a row without its file, or
                 # a file the cabinet has forgotten, are both worse than a refusal.
-                await on_thread(discard_file, target)
+                await off_loop(discard_file, target)
                 raise
             saved.append(relative)
         logger.info("file_save count=%d", len(saved))
@@ -612,7 +603,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        row = await on_thread(opened.get, FILE, path)
+        row = await off_loop(opened.get, FILE, path)
         if row is None:
             return (
                 f"There is no saved file at {path!r} — `file_list` shows what there is."
@@ -629,7 +620,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 f"[refused] {path} is {size} bytes, past the {MAX_READ_BYTES}-byte "
                 f"cap — read it with a tool that takes a path."
             )
-        data = await on_thread(target.read_bytes)
+        data = await off_loop(target.read_bytes)
         text, header = decode(data)
         if header == "binary":
             return (
@@ -659,7 +650,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        page = await on_thread(
+        page = await off_loop(
             opened.listing,
             FILE,
             since=since or None,
@@ -724,7 +715,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        row = await on_thread(opened.get, REPORT, title)
+        row = await off_loop(opened.get, REPORT, title)
         if row is None:
             return f"There is no report called {title!r} — `report_list` shows what there is."
         return _document(REPORT, row)
@@ -748,7 +739,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         opened, refusal = await cabinet(ctx)
         if refusal:
             return refusal
-        page = await on_thread(
+        page = await off_loop(
             opened.listing,
             REPORT,
             since=since or None,
@@ -798,7 +789,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         if refusal:
             return refusal
         budget = config.tool_result.tokens
-        row = await on_thread(opened.get, DUMP, call)
+        row = await off_loop(opened.get, DUMP, call)
         if row is None:
             answer = (
                 f"There is no saved output for the call {call!r} — the marker "

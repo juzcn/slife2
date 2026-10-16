@@ -699,7 +699,7 @@ class CabinetStore:
         embed of every document with no vector.  On the loop that is a shared
         process not answering anything else until it finishes — the first call
         from one agent holding up every other agent's turn — and the plugin's
-        own `on_thread` cannot reach it, because the embedder is awaited in the
+        own `off_loop` cannot reach it, because the embedder is awaited in the
         middle and a thread cannot await.  So this is `TurnStore.sync_indexes`'
         shape, one step at a time: the store hops each blocking step itself and
         keeps the awaits — `to_thread` is `async`, so an inline `await` of a

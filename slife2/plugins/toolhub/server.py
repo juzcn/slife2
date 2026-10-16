@@ -193,6 +193,7 @@ from slife2.clients.gateway import (
     sanitise,
 )
 from slife2.clients.toolclient import UpstreamTool
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import (
     TOOLHUB_SERVER_NAME,
     Config,
@@ -555,17 +556,6 @@ class Catalogue:
                     self._stores[key] = found
         return found
 
-    @staticmethod
-    async def _off_loop(function, *args, **kwargs):
-        """Run one blocking store call on a worker thread.
-
-        The hub answers every conversation, so a synchronous read of the
-        catalogue on the event loop stalls turns that have nothing to do with it.
-        The stores open a connection per call, which is what makes the hop safe:
-        a connection is not shareable across threads, so there is none to share.
-        """
-        return await asyncio.to_thread(function, *args, **kwargs)
-
     async def merge(
         self,
         source: str,
@@ -791,13 +781,13 @@ class Catalogue:
         stopping the rest (`_write`'s rule, and `seed`'s).
         """
         here = str(home_dir())
-        await self._off_loop((await self.store()).set_source_state, source, state)
+        await off_loop((await self.store()).set_source_state, source, state)
         async with self._opening:
             for key, store in list(self._stores.items()):
                 if key == here:
                     continue
                 try:
-                    await self._off_loop(store.set_source_state, source, state)
+                    await off_loop(store.set_source_state, source, state)
                 except Exception as exc:  # noqa: BLE001 - kept, and the rest go on
                     self._failed.setdefault(key, {})[source] = (
                         f"{type(exc).__name__}: {exc}"
@@ -831,7 +821,7 @@ class Catalogue:
         self._failed.get(str(home_dir()), {}).pop(source, None)
         return [
             str(name)
-            for name in await self._off_loop((await self.store()).forget_source, source)
+            for name in await off_loop((await self.store()).forget_source, source)
         ]
 
     async def injectable(self, sources: Sequence[str]) -> dict[str, Any]:
@@ -841,7 +831,7 @@ class Catalogue:
         holding the connections, and a source is live when its tool list is in
         hand.  See `ToolStore.injectable`.
         """
-        return await self._off_loop((await self.store()).injectable, list(sources))
+        return await off_loop((await self.store()).injectable, list(sources))
 
     async def evict(
         self, sources: Sequence[str], *, autoload: Iterable[str] = ()
@@ -852,14 +842,14 @@ class Catalogue:
         from the declarations for the same reason the flag above does: the store
         cannot read the sections those sources were configured in.
         """
-        found = await self._off_loop(
+        found = await off_loop(
             (await self.store()).evict, list(sources), autoload=list(autoload)
         )
         return [str(name) for name in found]
 
     async def route(self, name: str) -> dict[str, Any] | None:
         """The row for one advertised name, or `None` if there is no such tool."""
-        return await self._off_loop((await self.store()).route, name)
+        return await off_loop((await self.store()).route, name)
 
     async def sources(self, live: Sequence[str]) -> dict[str, dict[str, int]]:
         """Per source: how many tools it has, and how many the model holds.
@@ -868,7 +858,7 @@ class Catalogue:
         source *offers* is a row on disk, and what the model *holds* is a row
         the gate would hand over — which is `slife2.libs.store.catalogue.ToolStore.source_counts`.
         """
-        return await self._off_loop((await self.store()).source_counts, list(live))
+        return await off_loop((await self.store()).source_counts, list(live))
 
     async def search(self, **arguments: Any) -> dict[str, Any]:
         """Both legs of a tool search, fused.  See `ToolStore.search`.
@@ -888,7 +878,7 @@ class Catalogue:
         model reads is built from it here, because a store that wrote prose
         would be the second place model-facing text lived.
         """
-        return await self._off_loop((await self.store()).set_load, name, load_status)
+        return await off_loop((await self.store()).set_load, name, load_status)
 
     async def touch(self, name: str) -> None:
         """Mark one tool *called*, for the eviction order.  Best-effort.
@@ -906,7 +896,7 @@ class Catalogue:
         tool, rather than suppressed.
         """
         try:
-            await self._off_loop((await self.store()).touch, name)
+            await off_loop((await self.store()).touch, name)
         except Exception as exc:  # noqa: BLE001 — a stamp that failed is not a call that failed
             logger.warning("the catalogue did not stamp %s as used: %s", name, exc)
 

@@ -73,7 +73,6 @@ degraded would store turns nothing could ever find.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -87,6 +86,7 @@ from typing import Any
 import sqlite_vec
 
 from slife2.helpers.clock import now
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.paths import TURNS_DB, agent_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
@@ -711,8 +711,8 @@ class TurnStore:
             else []
         )
         # The writes are the other way round — blocking, and off the loop.
-        await self._off_loop(self.ensure_indexes, embedder)
-        return await self._off_loop(self._write_turn, record, vectors)
+        await off_loop(self.ensure_indexes, embedder)
+        return await off_loop(self._write_turn, record, vectors)
 
     def _write_turn(self, record: _Stored, vectors: list[list[float]]) -> int:
         """The three inserts, in one transaction, on a thread of their own."""
@@ -747,19 +747,6 @@ class TurnStore:
             # leaves either both or neither.
             append_context(connection, turn_id)
             return turn_id
-
-    @staticmethod
-    async def _off_loop(function, *args, **kwargs):
-        """Run one blocking store call on a worker thread.
-
-        **Being `async` is not what keeps the loop free.**  SQLite here is
-        blocking: a statement issued on the loop holds it for as long as the
-        disk takes, and this server answers every agent instance from one loop,
-        so one slow read would stall an unrelated conversation.  The thread hop
-        is what actually yields — and it is safe precisely because a connection
-        is never shared: every call opens its own (see the class docstring).
-        """
-        return await asyncio.to_thread(function, *args, **kwargs)
 
     def turns(
         self,
@@ -980,7 +967,7 @@ class TurnStore:
         if not query.strip():
             if not since and not until and not anchor:
                 return []
-            return await self._off_loop(
+            return await off_loop(
                 self._time_ranked, since, until, limit, anchor != "oldest"
             )
 
@@ -995,9 +982,7 @@ class TurnStore:
         # The keyword leg is windowed in SQL (its `rank` orders every match, so
         # limiting after the window is still the best inside it); the semantic
         # leg is not, and the fusion is filtered below.
-        keyword = await self._off_loop(
-            self._keyword_hits, expression, over, clauses, params
-        )
+        keyword = await off_loop(self._keyword_hits, expression, over, clauses, params)
         semantic = await self._semantic_hits(query, embedder, over)
         fused = [
             turn_id
@@ -1005,7 +990,7 @@ class TurnStore:
                 {"keyword": keyword, "semantic": list(semantic)}
             )
         ][:MAX_SQL_VARS]
-        allowed = await self._off_loop(self._ids_in_window, fused, clauses, params)
+        allowed = await off_loop(self._ids_in_window, fused, clauses, params)
         return [
             (turn_id, semantic.get(turn_id)) for turn_id in fused if turn_id in allowed
         ][:limit]
@@ -1050,14 +1035,14 @@ class TurnStore:
         used to read an empty answer as "the index is as complete as it will
         get", which is the one thing an empty answer does not mean.)
         """
-        await self._off_loop(self._sync_text_index)
-        await self._off_loop(self.ensure_indexes, embedder)
+        await off_loop(self._sync_text_index)
+        await off_loop(self.ensure_indexes, embedder)
         while True:
-            missing = await self._off_loop(self._turns_without_vectors, SYNC_BATCH)
+            missing = await off_loop(self._turns_without_vectors, SYNC_BATCH)
             if not missing:
                 break
             vectors = await embed_rows(missing, embedder, noun="turn")
-            await self._off_loop(self._place_vectors, vectors)
+            await off_loop(self._place_vectors, vectors)
 
     def _place_vectors(self, vectors: Mapping[int, list[list[float]]]) -> None:
         """Write a batch of vectors, in one transaction."""
@@ -1280,7 +1265,7 @@ class TurnStore:
         over = min(limit * _OVERFETCH, MAX_SQL_VARS)
 
         ranked = {
-            "keyword": await self._off_loop(
+            "keyword": await off_loop(
                 self._keyword_hits, expression, over, clauses, params
             ),
             # `list(...)` of the mapping, which is in nearest-first order: the
@@ -1292,9 +1277,7 @@ class TurnStore:
         # that are each already `over` long, and the next query binds one value
         # per id.  A cap applied to each leg would leave the union at twice it.
         fused = [turn_id for turn_id, _ in fuse_ranked(ranked)][:MAX_SQL_VARS]
-        return await self._off_loop(
-            self._records_in_order, fused, clauses, params, limit
-        )
+        return await off_loop(self._records_in_order, fused, clauses, params, limit)
 
     def _keyword_hits(
         self,
@@ -1354,7 +1337,7 @@ class TurnStore:
                 f"query, so this search cannot say what a turn was about"
             )
         return dict(
-            await self._off_loop(
+            await off_loop(
                 self._nearest_turns, sqlite_vec.serialize_float32(vectors[0]), k
             )
         )
