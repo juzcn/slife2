@@ -1559,13 +1559,18 @@ Three things, and they are one change:
   a member needs no record anywhere and a swarm is whatever the filesystem says;
   a member added while everything is up is picked up by the next look, which the
   send path takes anyway (below).
-- **An inbound message becomes a `send_message` on the agent server.**  The
-  message names its receiver (the topic's last segment), and the receiver's
-  conversation is `(maker, member)` — so the plugin calls
-  `send_message(agent=maker, subagent=member, prompt=…, channel="subagent:<sender>")`
-  and the turn runs where every other turn runs, in the shared agent server.
-  Nothing is drawn by a window, which is the point: the answer is for the *maker*,
-  which is a model.
+- **An inbound message becomes a `send_message` on the agent server — one rule,
+  both directions.**  The message names its receiver (the topic's last segment),
+  the receiver's conversation is `(maker, receiver)`, and the plugin runs
+  `send_message(agent=maker, subagent=<the receiver's half>, prompt=…,
+  channel="subagent:<sender>")`.  A message *to* a subagent is a turn in the
+  subagent's conversation; a message *from* one is a turn in its maker's, which
+  is the shape `agent-task` already has.  **And the subagent's reply is a tool
+  call of its own** (`subagent_send_message`, or `subagent_broadcast` for all its
+  maker's subagents), so nothing has to relay a turn's return value: every reply
+  is simply the next inbound message, and the rule above handles it.
+  A broadcast is the same rule once per member, since every member's responder
+  receives it.
 - **So the send path has to ensure the receiver's mesh exists.**  A message
   published to a member whose responder is not subscribed goes to nobody and
   reports nothing.  On the remote network that cannot happen — the peer's own
