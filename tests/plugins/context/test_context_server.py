@@ -240,11 +240,23 @@ async def test_a_model_reads_the_history_it_is_calling_from() -> None:
 @pytest.mark.asyncio
 async def test_a_call_that_says_nobody_is_refused() -> None:
     """Better told than quietly served: the hub forwards an identity it was
-    given, so a call arriving without one did not come through the hub."""
+    given, so a call arriving without one did not come through the hub.
+
+    **And the sentence is the house one**, with this plugin's own tail — a call
+    that named nobody, on a process that serves every agent, is the situation
+    `slife2.libs.plugin.audience.UNADDRESSED` is one sentence with two holes for.
+    What is this server's is the *why*: the road that always carries an identity
+    is the hub, so a reader who is told that knows where to look.
+    """
+    from slife2.libs.plugin.audience import UNADDRESSED
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
-        with pytest.raises(ToolError, match="did not say whose"):
+        with pytest.raises(ToolError) as caught:
             await client.call_tool("turn_list", {})
+
+    said = str(caught.value)
+    assert UNADDRESSED.split("{")[0] in said, said
+    assert "the toolhub" in said, said
 
 
 @pytest.mark.asyncio

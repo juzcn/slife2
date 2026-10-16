@@ -65,8 +65,8 @@ from fastmcp.exceptions import ToolError
 
 from slife2.clients.embedder import EmbedderConnection
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
-from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
+from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
 from slife2.libs.turn.tokens import clip_to_tokens, estimate_text_tokens
@@ -302,16 +302,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     # ── Whose cabinet ────────────────────────────────────────────────────
 
-    def agent_of(ctx: Context) -> str:
-        """The agent a call is on behalf of, or `""` when the call does not say.
-
-        A shared process cannot guess it: one cabinet serves every agent, and
-        which one is a fact only the caller has — the same rule `slife2-wechat`
-        states, and the reason a call that says nothing is refused rather than
-        answered with somebody else's diary.
-        """
-        found = request_client(ctx)
-        return found[0] if found else ""
+    #: Whose cabinet a call is about — or `""`, which every tool below turns into
+    #: `UNADDRESSED`.  **A shared process cannot guess it**: one cabinet serves
+    #: every agent, and which one is a fact only the caller has, which is why a
+    #: call that says nothing is refused rather than answered with somebody
+    #: else's diary.  `slife2.plugins.wechat.server` asks the same question and
+    #: gets the same answer out of the same helper; both answer in a *sentence*
+    #: rather than by raising, which is why neither is `protocol.agent_reader`.
+    agent_of = agent_or_blank
 
     UNADDRESSED = unaddressed("cabinet to act on", "the cabinet")
 

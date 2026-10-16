@@ -30,6 +30,7 @@ from slife2.libs.host.config import (
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
+from slife2.libs.plugin.audience import REFUSAL, refused
 from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.plugins.a2a.server import JOIN
@@ -37,17 +38,16 @@ from slife2.plugins.tui.server import ATTACH, Handover
 from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
-#: How every tool in this system says no: a sentence beginning with this, which
-#: a model reads as an answer and a person reads as a refusal.  Spelled once
-#: here because two callers now ask the same question of one answer — the app,
-#: which shows it as a failure, and this client, which must not adopt a model
-#: the server just refused.
-REFUSAL = "[refused]"
+__all__ = ["REFUSAL", "refused"]
 
 
-def refused(answer: str) -> bool:
-    """Whether a tool's answer is a refusal rather than a result."""
-    return answer.startswith(REFUSAL)
+#: Both names come from `slife2.libs.plugin.audience` and are re-exported, not
+#: defined here.  **The word is the plugins'**, and this module is one of its two
+#: readers: it used to be spelled here — in a *client* of the agent server, in the
+#: package that draws the terminal — so a protocol word was defined by the layer
+#: that parses it.  `slife2.tui.app` and `slife2.libs.harness.handover` import it
+#: from this module as they always have, which is why the re-export is explicit
+#: rather than left to an import nobody can see the reason for.
 
 
 def _unreadable(what: str, answer: Any) -> ConnectionError:

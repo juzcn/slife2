@@ -108,7 +108,7 @@ A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。�
 
 1、每个操作都可能失败，如果从代码级控制，就会有数个fallback，而设计的行为y应该必须成功，不允许fallback，可以重试，可以hard fail。不恰当的fallback隐藏bug，带来不可预测的后果。
 
-2、在和兴功能正常的条件下如果确实需要fallback时，要把fallback 和 相应的degrade mode作为一种设计，必须要得到设计批准。而不能随意fallback.
+2、在核心功能正常的条件下如果确实需要fallback时，要把fallback 和 相应的degrade mode作为一种设计，必须要得到设计批准。而不能随意fallback.
 
 3、Fallback设计主要针对外部服务，不可控的场景。我们自己的逻辑不允许fallback, 本机通讯、本机进程、本机函数等默认是可靠的。
 

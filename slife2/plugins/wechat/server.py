@@ -83,8 +83,8 @@ from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
 from slife2.libs.host.paths import agent_dir, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
-from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
+from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat.ilink import Http, IlinkClient
 from slife2.tui import notes
@@ -1353,20 +1353,20 @@ class Wechat:
     # conversation is asking: a shared process cannot tell whose phone a scan
     # belongs to, and the client id every call carries is the answer.
 
-    def who(self, ctx: Context) -> str:
-        """The agent a call is on behalf of, or `""` if the call does not say.
-
-        The identity is the caller's, never this process's — one wechat plugin
-        serves every agent, so "whose login" is a fact only the caller has.
-
-        **The agent and not the conversation**, so a worker shares its agent's
-        WeChat: a login belongs to the account that scanned the code, and a
-        subagent is a means to an end inside one of that agent's turns rather
-        than a second phone.  A worker asking about WeChat is asking about its
-        parent's, which is the only answer that could be true.
-        """
-        found = request_client(ctx)
-        return found[0] if found else ""
+    #: The agent a call is on behalf of, or `""` if the call does not say.  The
+    #: identity is the caller's, never this process's — one wechat plugin serves
+    #: every agent, so "whose login" is a fact only the caller has.
+    #:
+    #: **The agent and not the conversation**, so a worker shares its agent's
+    #: WeChat: a login belongs to the account that scanned the code, and a
+    #: subagent is a means to an end inside one of that agent's turns rather than
+    #: a second phone.  A worker asking about WeChat is asking about its parent's,
+    #: which is the only answer that could be true.
+    #:
+    #: `staticmethod` because the reading is `slife2.libs.plugin.protocol`'s and
+    #: not this class's — assigning the function bare would make it a *method*,
+    #: and `plugin.who(ctx)` would hand it this instance as the call.
+    who = staticmethod(agent_or_blank)
 
     def unaddressed(self) -> str:
         """What a tool says when a call arrived without a conversation on it."""

@@ -67,12 +67,13 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
 from slife2.libs.host.config import API_SERVER_NAMES, CONTEXT_SERVER_NAME, Config
 from slife2.libs.host.paths import agents_dir, turn_dbs
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import (
     close_server,
     describe,
@@ -360,18 +361,31 @@ def build_server(
         nor can write it.
 
         Raises:
-            ValueError: If the call arrived without one.  Every real caller is
+            ToolError: If the call arrived without one.  Every real caller is
                 the hub, which forwards what the agent gave it, so this is a
                 caller that reached this server directly — a test, or a plugin
                 that is not the agent — and it is better told than quietly served
                 whatever it named.
+
+        **The refusal is the house sentence with this plugin's own `why`**, which
+        is the hole `slife2.libs.plugin.audience.unaddressed` leaves for exactly
+        this case: the situation is the shared one — a call that did not say
+        whose it is, on a process that serves everybody — but the *reason* is
+        this plugin's, because the road that always supplies an identity is the
+        hub, and a reader who is told so knows where to look.  It was raised as a
+        bare `ValueError` with the sentence in it, which crossed the wire as the
+        same `ToolError` (FastMCP wraps what a handler raises) while being the
+        one refusal in this system that was not written in the shared words.
         """
         found = request_client(ctx)
         if found is None:
-            raise ValueError(
-                "this tool reads one conversation's memory and the call did not "
-                "say whose; it is called through the toolhub, which forwards the "
-                "caller's identity (`slife2.libs.plugin.audience`)"
+            raise ToolError(
+                unaddressed(
+                    "memory to read",
+                    "the memory",
+                    why="it is reached through the toolhub, which forwards the "
+                    "caller's identity (`slife2.libs.plugin.audience`)",
+                )
             )
         return found
 

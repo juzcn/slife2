@@ -46,7 +46,7 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.media.adapters import (
     MediaAdapter,
@@ -155,8 +155,7 @@ class Media:
         found = request_client(ctx)
         if not found or not found[0]:
             raise ToolError(
-                "[refused] this call did not say which conversation it is for, "
-                "so there is no agent directory to write into."
+                unaddressed("agent directory to write into", "the directory")
             )
         try:
             return media_dir(found[0], folder)
