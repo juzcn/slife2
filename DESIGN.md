@@ -1542,35 +1542,47 @@ conversation forever — which is why the shell is names and descriptions rather
 than code, and why its descriptions have to say *whose* roster they list
 (`a2a_list_agents` says "peer"; a subagent family must say "yours").
 
-**The road, worked out and not yet built.**  A subagent has no window, so
-something has to hold its place on the local network and run its turns — and the
-maker's window is the only window in the picture.  Four things, in this order,
-and the whole of it lands together because a network that pushes messages to
-nobody is worse than one that does not carry them:
+**The road: a subagent's turn is run by the network's own process, not by a
+window.**  The window is the only road this system has for "something outside the
+conversation became a turn in it" (`slife2.libs.harness.handover`: `to_window`,
+and a delivery that finds no window is a hard failure).  **A subagent has no
+window, and the TUI does not participate in a local network at all** — so the
+local network needs a road that is not one, and it turns out to need no new
+mechanism either: `send_message` is a *server* tool, and any peer may call it.
 
-- **One join per maker, not per member.**  The window holds the same kind of call
-  it holds on the remote network (`MCPMeshClient.hold`), and what that one call
-  means on this network is "the maker and its subagents are here".  Membership is
-  *read*, not registered: `subagent_dirs(maker)` — the directories with a
-  `subagent.yaml` in them, `schedule_dbs`' principle one level down — so a member
-  needs no record anywhere and the swarm is whatever the filesystem says.
-- **The message arrives on that held call.**  `hand_over`/`submit` finds a window
-  by *agent name*, and a subagent has none, so the local network cannot use the
-  same road: it pushes on the stream the maker's window is holding, which is what
-  the tui plugin's `attach` already does for every other channel.  The shape is
-  there to copy — `report_progress` with an encoded payload, `None` for the
-  keepalive that `_hold_open` already sends — and `MCPMeshClient.hold` is the one
-  place that has to learn to decode it instead of dropping progress.
-- **The window runs it as that member's turn.**  `MCPAgentClient` already carries
-  `subagent` in its payload and the agent server already answers it, so this is a
-  `subagent=` argument on `run_turn` and a queue item that keeps the pair; what is
-  drawn is `subagent:<member>` → `Subagent(<member>)> `, which is in.
-- **And the one way to lose a message silently**: a send to a member whose
-  responder is not subscribed publishes to nobody and reports nothing.  On the
-  remote network that is impossible — the peer's own window is holding its
-  `join` — and here nothing is, so `a2a_send_message` has to ensure the *target's*
-  session before publishing.  It cannot be done once at join time: a model may
-  `subagent_set` while the window is already holding.
+Three things, and they are one change:
+
+- **The network holds its members' places.**  Not a window's `join`: the local
+  plugin connects a member's mesh when it has one to serve, and membership is
+  *read* rather than registered — `subagent_dirs(maker)`, the directories that
+  carry a `subagent.yaml`, which is `schedule_dbs`' principle one level down.  So
+  a member needs no record anywhere and a swarm is whatever the filesystem says;
+  a member added while everything is up is picked up by the next look, which the
+  send path takes anyway (below).
+- **An inbound message becomes a `send_message` on the agent server.**  The
+  message names its receiver (the topic's last segment), and the receiver's
+  conversation is `(maker, member)` — so the plugin calls
+  `send_message(agent=maker, subagent=member, prompt=…, channel="subagent:<sender>")`
+  and the turn runs where every other turn runs, in the shared agent server.
+  Nothing is drawn by a window, which is the point: the answer is for the *maker*,
+  which is a model.
+- **So the send path has to ensure the receiver's mesh exists.**  A message
+  published to a member whose responder is not subscribed goes to nobody and
+  reports nothing.  On the remote network that cannot happen — the peer's own
+  window is holding its `join` — and here nothing is, so `a2a_send_message`
+  ensures the *target's* session before publishing.  It cannot be done once at
+  start: a model may `subagent_set` while everything is already up.
+
+**What this costs, stated rather than implied.**  `handover` argues that running
+a turn with nobody watching is a fallback — work advancing where no person can
+see it, answering a peer that believes it was heard.  That argument is about an
+*agent*, whose window is what makes it an agent somebody is running.  A local
+member is defined as not having one, and its answer does not go to a person at
+all: it goes to its maker, which is a model, and the maker reads it the way it
+reads anything else — the turn is in the member's store, and what the maker is
+handed is a message in *its* conversation.  So this is a second road on purpose
+and not a fallback: it is what the local network *is*, and the TUI's part in it
+is only to draw what it later reads (`subagent:<member>` → `Subagent(<member>)> `).
 
 **Build state.**  In order, each green before the next: **(1) the directory** —
 `agent_dir(agent, subagent)`, `database_path`, `turn_dbs`, and the docstring
