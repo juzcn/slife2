@@ -62,7 +62,11 @@ def _os_language() -> str:
     if _on_windows():  # pragma: no cover — Windows-only
         import ctypes
 
-        langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+        # `windll` is a Windows-only attribute of `ctypes`, so a checker
+        # analysing another platform cannot see it at all — the same ignore the
+        # kernel32 calls carry (`slife2.libs.host.runtime`), for the same reason:
+        # the attribute is real on the one platform this branch runs on.
+        langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()  # type: ignore[attr-defined]
         return locale.windows_locale.get(langid, "")
     return (
         os.environ.get("LC_ALL")

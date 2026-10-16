@@ -100,7 +100,7 @@ A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。�
 - 代码级 review, 目的是保持code clean
 
 1、codereview， find bugs, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）
-2、codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
+2、良好设计和完善的pytest是设计能够codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
 
 - Fallback code-review
 
