@@ -9,7 +9,7 @@ nobody understands has to be an error rather than an empty window.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -282,16 +282,31 @@ def test_now_is_a_time_of_day_and_not_midnight(
 
     Asserting `resolved.hour == datetime.now().hour` compared the module's
     reading of the clock against the test's own, one line later: an hour boundary
-    crossed in between fails a test about the grammar, and — because the module's
-    answer is *converted* to local time — so does any offset the runner applies
-    differently to the two.  The moment is pinned instead, which also makes the
-    midnight claim exact: `now` is not 00:00 of the pinned day.
+    crossed in between fails a test about the grammar.  The moment is pinned
+    instead.
+
+    **And the pin is the moment, not the clock that reads it.**  `normalize_bound`
+    hands the column a *local* string (`helpers/clock.at` converts), so a pinned
+    `+08:00` comes back as `09:31` here and as `01:31` on a UTC runner — which is
+    what this asserted, and why it failed on every CI lane and nowhere else.  The
+    rule is the one `test_a_bound_with_no_offset_is_local_time_too` states two
+    tests below: what every timezone shares is the *instant*, and an aware
+    datetime compares by exactly that.
     """
+    pinned = datetime.fromisoformat("2026-10-07T09:31:02+08:00")
     monkeypatch.setattr(timeutil, "now", lambda: "2026-10-07T09:31:02+08:00")
 
     resolved = datetime.fromisoformat(normalize_bound("now", role="since"))
-    assert resolved.date() == date(2026, 10, 7)
-    assert resolved.hour == 9
+
+    assert resolved == pinned, "the same moment, in whatever zone the runner keeps"
+    # `resolved.date() == date(2026, 10, 7)` stood here too, and it was the same
+    # mistake one field over: a runner at UTC−3 reads this instant as the *6th*.
+    # And the claim in the name — a time of day, not the start of one, which is
+    # what a `now` floored to 00:00 produced.  This one is about a clock, so it
+    # is said of the runner's own: the pinned instant is 01:31:02 UTC, whose
+    # seconds-of-day is not a whole number of hours, and no zone's offset turns a
+    # time like that into midnight.
+    assert resolved.time() != time(0, 0)
 
 
 # --- what it refuses ----------------------------------------------------------
