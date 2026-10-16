@@ -233,8 +233,12 @@ class AgentTask:
         §3 gives for `(agent, subagent)`: a name cannot go stale, and a handle a
         caller has to keep is a thing that can be lost.  It also says where the
         answer will come from.
+
+        `channel_for` is the spelling, and this is the name the *key* goes by in
+        a report: one string with two readers, rather than two `f"{CHANNEL}:…"`
+        that a later change to the format would have to find.
         """
-        return f"{CHANNEL}:{self.name}"
+        return channel_for(self)
 
     @property
     def identity(self) -> ClientId:
@@ -271,6 +275,25 @@ class AgentTask:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+
+
+def unknown_report(name: str) -> dict[str, Any]:
+    """The report for a name this process does not hold.
+
+    `AgentTask.report`'s shape with the three facts that are not there left
+    empty, because the two tools that ask about a task by name — the status and
+    the cancel — answer a name they have never heard of the same way, and a model
+    reading both should read one shape.  The id is still the key the task *would*
+    have: it is derived from the name rather than minted, so a name that is not
+    held is still named the way the answer would have named it.
+    """
+    return {
+        "task_id": f"{CHANNEL}:{name}",
+        "name": name,
+        "status": UNKNOWN,
+        "started_at": "",
+        "finished_at": "",
+    }
 
 
 def channel_for(task: AgentTask) -> str:
@@ -1024,13 +1047,7 @@ def build_server(
         agent = agent_of(ctx)
         task = find(agent, name.strip())
         if task is None:
-            return {
-                "task_id": f"{CHANNEL}:{name.strip()}",
-                "name": name.strip(),
-                "status": UNKNOWN,
-                "started_at": "",
-                "finished_at": "",
-            }
+            return unknown_report(name.strip())
         return task.report()
 
     @mcp.tool(name=AGENT_TASK_LIST, meta=FOR_THE_MODEL)
@@ -1081,13 +1098,7 @@ def build_server(
         agent = agent_of(ctx)
         task = find(agent, name.strip())
         if task is None:
-            return {
-                "task_id": f"{CHANNEL}:{name.strip()}",
-                "name": name.strip(),
-                "status": UNKNOWN,
-                "started_at": "",
-                "finished_at": "",
-            }
+            return unknown_report(name.strip())
         if task.status != RUNNING:
             # Already over: the answer is on its way, and it stays on its way.
             return task.report()
