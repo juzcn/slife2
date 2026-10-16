@@ -3187,14 +3187,16 @@ def build_server(
         maker, mine = who
         if mine:
             # The tree, and it stops at one level — not because a second level is
-            # unthinkable, but because nothing runs it: a subagent's turns are
-            # run by its maker's window, and there is no window down there (sdd
-            # §12.8 holds the rule this depends on).
+            # unthinkable, but because nothing would hold a place for it: the
+            # local network's membership is the maker's *own* subagents
+            # (`subagent_dirs`, one level in), and a place is what makes a member
+            # reachable at all (`slife2.plugins.a2a.server.place_for`).  sdd §12.8
+            # holds the rule this depends on.
             raise ToolError(
-                f"a subagent cannot make a subagent: {describe(who)}'s turns are "
-                f"run by the window of the agent that made it, and there is "
-                f"nothing one level further down to run them. Ask your own maker "
-                f"for what you need."
+                "a subagent cannot make a subagent: the local network holds a "
+                "place for one level in — the subagents of the agent you belong "
+                "to — so a subagent of yours would have nothing listening for "
+                "it. Ask your own maker for what you need."
             )
         held = subagent_dirs(maker)
         directory = agent_dir(maker) / safe_agent_name(name)

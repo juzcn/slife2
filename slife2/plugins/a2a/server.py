@@ -3,24 +3,33 @@
 v1's `slife.plugins.a2a.server`, and the two things that changed are §4's and
 §1.2's rather than anything about the mesh.
 
-**§4: one process, one mesh per agent.**  v1 spawned one plugin per agent, so its
+**§4: one process, one mesh per member.**  v1 spawned one plugin per agent, so its
 module globals *were* that agent's — one mesh, one set of queues, one identity.
 slife2's servers are shared, so the same things live in a :class:`Session` keyed
-by the **calling agent** (the first half of the client id every call carries),
-exactly as `slife2-wechat`'s login does.  That is not a formality here: the agent
-name *is* the mesh identity — the MQTT client id and the request topic's last
-segment — so a second agent is a second connection with a second card, and the
-name-collision check that protects it is per agent rather than per machine.  A
-peer on this machine and a peer on another one are the same thing to all of this:
-both are agents on the broker, and nothing in the code can tell them apart.
+by the **client id every call carries**, exactly as `slife2-wechat`'s login does.
+That is not a formality here: the name *is* the mesh identity — the MQTT client
+id and the request topic's last segment — so a second member is a second
+connection with a second card, and the name-collision check that protects it is
+per member rather than per machine.  A peer on this machine and a peer on another
+one are the same thing to all of this: both are agents on the broker, and nothing
+in the code can tell them apart.
+
+**A member is an agent, or one of an agent's subagents** — and the second half of
+the client id is an identity on the **local** network and only there, which is the
+whole of the difference between the two instances of this module.  Everything the
+local one adds is the part a peer without a process needs: a place held for it by
+somebody else (:data:`MEMBER`), a road that is not a window (`run_turn`), and a
+send path that gives the receiver its place before it publishes (`send_message`).
+`sdd` §3.5 and DESIGN.md §1.10 are where those are argued.
 
 **§1.2: the drain tool was the seam, and the seam is gone.**  v1's harness polled
 `__a2a_drain_incoming` once a second and injected what it found into the agent's
-inbox.  There is no harness here, and what replaced that seam is
-`slife2.libs.harness.handover`: an inbound message is handed to the terminal showing that
-conversation — the same queue the person's own typing goes into — and to the
-agent server when no window is showing it.  So the five queues become **one
-ordering queue per session** with one writer behind it, which is the job the
+inbox.  There is no harness here, and what replaced that seam is two roads out of
+one queue: an inbound message for an *agent* is handed to the terminal showing
+that conversation — `slife2.libs.harness.handover`, the same queue the person's own
+typing goes into — and one for a subagent, which has no window and never will, is
+run as a turn in its own conversation (`run_turn`).  So the five queues become
+**one ordering queue per session** with one writer behind it, which is the job the
 queues were doing for the harness: they kept arrival order, and they kept a mesh
 callback from blocking the MQTT reader loop.
 
@@ -80,6 +89,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import DeliveryFailed, hand_over, note_to_window
 from slife2.libs.host.config import (
+    AGENT_SERVER_NAME,
     BROADCAST,
     CANCEL_TASK,
     LIST_AGENTS,
@@ -92,9 +102,16 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import a2a_inbound_paths, home, in_home
-from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
+from slife2.libs.host.paths import a2a_inbound_paths, home, in_home, subagent_dirs
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.libs.plugin.protocol import (
+    close_server,
+    describe,
+    house_server,
+    open_server,
+    serve_plugin,
+    tool_payload,
+)
 from slife2.libs.turn.prompt import render
 from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
@@ -103,6 +120,7 @@ from slife2.plugins.a2a.mesh import (
     A2AMesh,
     AgentCard,
     format_presence_line,
+    member_name,
     safe_name,
 )
 
@@ -132,13 +150,19 @@ A2A_BROADCAST = REMOTE.tool(BROADCAST)
 #: (`slife2.tui.client`), like the tui plugin's `attach` and `submit`.
 JOIN = "join"
 
-#: The two reasons an agent is on the mesh (`Session.reasons`), and they differ
+#: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
 #: needs the mesh and never released, because what follows a send is a reply the
 #: agent is waiting for.  `WINDOW` is a window's (`join`), and it is released the
-#: moment that window stops holding the call.
+#: moment that window stops holding the call.  `MEMBER` is a subagent's, and it
+#: is never released either — but for a different reason, and that is why it is
+#: a third word rather than `USED`: nothing here is waiting for a reply, it is
+#: that a *name* has to be listened for before the message that would wake it can
+#: arrive (`send_message`).  A member holds it for as long as the process serves
+#: its maker, and leaving with the process is the offline card being honest.
 USED = "used"
 WINDOW = "window"
+MEMBER = "member"
 
 #: The channel an inbound message arrives on, and the first half of what it is
 #: keyed by: `a2a:jill`.  The window draws a bubble from the channel alone
@@ -287,18 +311,42 @@ def channel_for(net: Net, peer: str) -> str:
     return f"{net.channel}:{peer}"
 
 
+def peer_phrase(net: Net, peer: str) -> str:
+    """How a line about the far end names it: `Peer **jill**`, or `**jill**`.
+
+    **`Peer` is the remote network's word and the subagent network's is nothing**,
+    which is why this is a function rather than a hole in a template — the hole
+    would be empty.  The remote network needs the word for the reason
+    `MARKER_PREFIX` is `PeerAgent`: its `from` must not be read as the receiver.
+
+    On the subagent network the same sentence has two possible readers — a maker
+    reading about one of its subagents, and a subagent reading about its maker or
+    a sibling — and no relationship word is true for both: "your subagent" is
+    false for a subagent reading about its maker, and so is plain `Subagent`.
+    What the far end *is* is already on the line, in the word this project uses
+    for it: the `[SubagentPeer:…]` envelope, and the `Subagent(<name>)> ` bubble
+    the window draws from the channel.
+    """
+    return f"Peer **{peer}**" if net is REMOTE else f"**{peer}**"
+
+
 # ── one agent's mesh, and what is waiting to be handed over ──────────────────
 
 
 @dataclass
 class Session:
-    """One agent's mesh, its connect state, and its delivery queue.
+    """One member's mesh, its connect state, and its delivery queue.
 
     The queue is the piece §1.2's removal of the drain leaves behind.  A mesh
     callback runs on the MQTT reader's stack, so it must not await a hop to
     another server; and arrival order is the order the model should read things
     in.  One queue with one writer behind it is both, and it is exactly what
     v1's five queues were, minus the harness on the far end.
+
+    **`agent` is the maker and `subagent` the member, which is the client id
+    every server in this system keys by** — and which of them a delivery runs a
+    turn for is decided by the second: an agent's conversation is run by its
+    window, a subagent's by this plugin, because a subagent has none.
     """
 
     agent: str
@@ -308,6 +356,11 @@ class Session:
     #: on, the envelope a message opens with (`Net`).
     net: Net
     mesh: A2AMesh
+    #: The other half of this session's client id, and empty for an agent's own.
+    #: **It is what the member answers as** (`mesh.agent_name` is `subagent or
+    #: agent`), so it is also what a delivery that is not the window's has to
+    #: address its turn with (`run_turn`).
+    subagent: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
     #: is the only place the reason survives to `a2a_list_agents` — otherwise it
@@ -415,6 +468,107 @@ async def _hold_open(ctx: Context) -> None:
         await ctx.report_progress(0, None, None)
 
 
+async def run_turn(
+    config: Config,
+    agent: str,
+    subagent: str,
+    text: str,
+    channel: str,
+    *,
+    client: Client | None = None,
+) -> str:
+    """Run one turn in a subagent's conversation, and answer with what it said.
+
+    **This is the road a subagent has instead of a window, and it is the second
+    road on purpose rather than a fallback.**  `slife2.libs.harness.handover` argues the
+    point for an *agent*: the window is what runs it, and a delivery that finds
+    no window is a hard failure — because work advancing where no person can see
+    it, answering a peer that believes it was heard, is the thing that argument
+    refuses.  A subagent is defined as not having a window and never getting one,
+    so there is nothing to find; and its answer does not go to a person at all.
+    It goes to its maker, which is a model, and what the maker is handed is a
+    message in *its own* conversation — the member's turn is in the member's
+    store, where its maker can read it.  DESIGN.md §1.10 states that cost and
+    accepts it.
+
+    **The turn is run by the agent server, so it is an ordinary turn**: the same
+    loop, the same tools, the same store, addressed by the client id the message
+    named — `send_message(agent=<maker>, subagent=<receiver>)`, which is the
+    shape an agent task already has.  `watched` is left False for the reason
+    `Pending.watched` gives: nobody is watching, so a tool call the model puts up
+    for approval is granted rather than waiting for an answer nobody will send.
+
+    **No progress stream and no deadline.**  A caller with no handler gets none —
+    `report_progress` is a silent no-op without a progress token — and this is a
+    caller with nothing to draw.  `timeout=None` on the call because the turn's
+    length is the answer's own business, and `timeout=None` on the *connection*
+    because a deadline there is one on every request that crosses it, which for
+    this client is the whole turn (the agent server's own `hub()` says the same
+    thing about the same trap).
+
+    **What comes back is not relayed anywhere, and that is the design.**  A
+    subagent's answer reaches its maker as a tool call of its own — a
+    `task_response` — so the return value here is a log line and a test's
+    evidence; nothing else reads it (`_drain`).  Relaying it as well would be the
+    second road for one answer that §1.10 refuses: the maker would hear the same
+    thing twice, once as a fact and once as a reply.
+
+    Raises:
+        DeliveryFailed: The agent server could not be reached, so the message did
+            not reach the conversation it was addressed to.  Its own type, so
+            `_drain` says that in its own words and does not carry the message on
+            anywhere — the same answer the window road gives for the same
+            situation.
+    """
+    opened = client is None
+    try:
+        peer = client or await open_server(
+            config.server("agent").url,
+            name=AGENT_SERVER_NAME,
+            fallback_tool="send_message",
+            timeout=None,
+        )
+    except Exception as exc:  # noqa: BLE001 — a peer that is not there is a delivery that did not happen, and every way it can be missing means that
+        raise DeliveryFailed(
+            describe((agent, subagent)),
+            f"the agent server could not be reached: {exc}",
+        ) from exc
+    try:
+        answer = await peer.call_tool(
+            "send_message",
+            {
+                "agent": agent,
+                "subagent": subagent,
+                "prompt": text,
+                "channel": channel,
+            },
+            timeout=None,
+        )
+    finally:
+        if opened:
+            # `shield`, for `slife2.libs.harness.handover._peer`'s reason: a cancellation
+            # arriving while the close is awaiting would pass straight through
+            # it and leave the connection open — `CancelledError` is not an
+            # `Exception` — and the cancellation still propagates once the close
+            # has finished, so the caller's turn is cancelled as it expected.
+            await asyncio.shield(close_server(peer))
+    payload = tool_payload(answer)
+    said = payload.get("text")
+    if not isinstance(said, str):
+        # **A turn nobody can read is said rather than counted as nothing.**
+        # The answer is not relayed (see above), but it is the evidence that the
+        # turn happened at all — so an unreadable shape is a build mismatch worth
+        # a warning, and it must not read as a member that answered with silence.
+        logger.warning(
+            "a2a_turn_unreadable agent=%s — the turn's answer was not a shape "
+            "this build can read: %s",
+            describe((agent, subagent)),
+            payload,
+        )
+        return ""
+    return said
+
+
 def _wire(session: Session) -> None:
     """Attach this session's callbacks to its mesh.
 
@@ -503,7 +657,8 @@ def _wire(session: Session) -> None:
             # task involved.
             text = (
                 f"{marker(session.net, peer, type='message')}"
-                f"Peer **{peer}** replied to your message:\n\n{result}"
+                f"{peer_phrase(session.net, peer)} replied to your message:"
+                f"\n\n{result}"
             )
         else:
             # The peer answered, and this is what it said: `completed`,
@@ -511,7 +666,7 @@ def _wire(session: Session) -> None:
             # verdict it had, which is what separates them from `UNREACHABLE`.
             text = (
                 f"{marker(session.net, peer, corr_id or None, type='task_response')}"
-                f"Peer **{peer}** {outcome} async task "
+                f"{peer_phrase(session.net, peer)} {outcome} async task "
                 f"(ID: `{corr_id}`):\n\n{result}"
             )
         session.post(text, peer, f"a reply from {peer}")
@@ -527,6 +682,18 @@ def _wire(session: Session) -> None:
         # `a2a_list_agents`' answer.  Handing a transition to the conversation
         # instead spends a whole turn and a context on a fact nobody has to act
         # on, which is what v1 avoided by never putting presence in the inbox.
+        #
+        # **And on the local network nothing is drawn at all.**  The cards here
+        # are the maker's own subagents, so the line this would draw in the
+        # maker's window is `⚡ the member you woke is now awake` — the member
+        # waking up *because* something was sent, which the sender knows.  What a
+        # subagent's coming and going should look like on a terminal is not
+        # designed yet, so this draws nothing rather than inventing it: the card
+        # is still cached, which is what the roster reads
+        # (`a2a_list_agents`), and `_drain` drops the note a member's own session
+        # would otherwise hand to a window it does not have.
+        if session.net is LOCAL:
+            return
         text = format_presence_line(card, event)
         if text is None:
             return
@@ -589,16 +756,18 @@ async def _drain(
     session: Session,
     config: Config,
     window_client: Client | None,
+    agent_client: Client | None = None,
 ) -> None:
     """Hand over what the mesh delivers, one message at a time, in order.
 
-    **Two kinds of thing take this one road, and that is the point of it.**  A
-    message is handed to the conversation the window is running
-    (`slife2.libs.harness.handover.hand_over`: the window, and nothing else) and a note is
-    drawn in that window and nowhere else.  Sharing the queue is what keeps them
-    in arrival order with each other — a peer's arrival line lands between the
-    two turns it happened between — and one writer is what keeps a mesh callback
-    off the MQTT reader's stack.
+    **Two kinds of thing take this one queue, and that is the point of it.**  A
+    message is a turn somewhere — in the conversation the window is running
+    (`slife2.libs.harness.handover.hand_over`: the window, and nothing else) or, when it is
+    addressed to a subagent, in *that* conversation, run here (`run_turn`) — and
+    a note is drawn in a window and nowhere else.  Sharing the queue is what
+    keeps them in arrival order with each other — a peer's arrival line lands
+    between the two turns it happened between — and one writer is what keeps a
+    mesh callback off the MQTT reader's stack.
 
     **A delivery that fails is an error, and the message is not carried on
     anywhere.**  There is no second road for it (`slife2.libs.harness.handover`), so a peer's
@@ -618,7 +787,7 @@ async def _drain(
     wants it again can send it again.
 
     **A message that cannot be delivered must not take the writer with it.**
-    This task is one per agent for the life of the process and nothing watches
+    This task is one per member for the life of the process and nothing watches
     it until shutdown, so a raise escaping the loop is silent and permanent:
     the mesh still reports connected, and every later arrival queues behind a
     writer that no longer exists.  So each message is guarded on its own and a
@@ -628,6 +797,21 @@ async def _drain(
         text, peer, what, retries, note = await session.queue.get()
         try:
             if note:
+                if session.subagent:
+                    # **A note has no second road, and a subagent has no window.**
+                    # Presence is what these lines are — a peer arriving, a peer
+                    # going — and the roster a subagent can ask for is
+                    # `subagent_list_agents`, so drawing one for it would be a
+                    # turn spent on a fact nobody here has to act on; and it
+                    # cannot be drawn in its maker's window either, which is
+                    # where it would read as the harness telling somebody their
+                    # own subagent is online.  Dropped, and said at debug.
+                    logger.debug(
+                        "a2a_note_no_window agent=%s line=%s",
+                        describe((session.agent, session.subagent)),
+                        what,
+                    )
+                    continue
                 # A harness line for whoever is looking, and that is the whole of
                 # where it goes: a note is not a turn anybody runs, and it is not
                 # retried (a `✗ offline` that arrives after the window has moved on
@@ -643,14 +827,33 @@ async def _drain(
                     )
                 continue
             try:
-                await hand_over(
-                    config,
-                    session.agent,
-                    text,
-                    channel_for(session.net, peer),
-                    what=what,
-                    window_client=window_client,
-                )
+                if session.subagent:
+                    said = await run_turn(
+                        config,
+                        session.agent,
+                        session.subagent,
+                        text,
+                        channel_for(session.net, peer),
+                        client=agent_client,
+                    )
+                    # The length and not the words: the member's answer is its
+                    # own, and what it says to its maker is the reply it sends
+                    # (`run_turn`).  This line is the evidence that the turn ran.
+                    logger.info(
+                        "a2a_turn_answered agent=%s peer=%s chars=%d",
+                        describe((session.agent, session.subagent)),
+                        peer,
+                        len(said),
+                    )
+                else:
+                    await hand_over(
+                        config,
+                        session.agent,
+                        text,
+                        channel_for(session.net, peer),
+                        what=what,
+                        window_client=window_client,
+                    )
             except DeliveryFailed as exc:
                 # **An error, because the words are the only thing that could
                 # answer `peer` and they went nowhere.**  Its own key rather than
@@ -660,7 +863,7 @@ async def _drain(
                 # conversation's business.
                 logger.error(
                     "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
-                    session.agent,
+                    describe((session.agent, session.subagent)),
                     peer,
                     len(text),
                     exc,
@@ -682,9 +885,15 @@ async def _drain(
             # anything.  One message that could not be rendered or handed
             # over is dropped — a peer re-sends its own task, and the notice
             # has its retries — and the next one is read.
+            #
+            # **A member's turn that failed reaches here too**, and that is the
+            # honest answer for it: the message was received and its turn did not
+            # happen (a provider that answered 500, a store that refused), so the
+            # peer is owed an answer this process no longer holds a turn for, and
+            # the line names the conversation it was for (`describe`).
             logger.exception(
                 "a2a_delivery_failed agent=%s peer=%s — that message dropped",
-                session.agent,
+                describe((session.agent, session.subagent)),
                 peer,
             )
 
@@ -712,13 +921,17 @@ def announce_orphans(session: Session) -> None:
     the launcher's start-up instead of dying of it.
 
     A `task_response` for any of these is refused by the mesh, so the notice
-    names the one reply that still works.
+    names the one reply that still works — **and it is named in this network's
+    words**: one module serves both, and the tool a maker replies with is
+    `a2a_send_message` while the one a subagent replies with is
+    `subagent_send_message`.  The notice used to spell the remote one, so half
+    its readers were told to call a tool they do not have.
     """
     orphans = session.mesh.stale_inbound()
     if not orphans:
         return
     session.post(
-        render(ORPHAN_TEMPLATE, tasks=orphans),
+        render(ORPHAN_TEMPLATE, tasks=orphans, send=session.net.tool(SEND_MESSAGE)),
         ORPHAN_PEER,
         f"{len(orphans)} orphaned inbound task(s)",
         retries=ORPHAN_RETRIES,
@@ -730,14 +943,16 @@ def build_server(
     *,
     net: Net = REMOTE,
     window_client: Client | None = None,
+    agent_client: Client | None = None,
     source: Callable[[], Config] | None = None,
     connecting: bool = True,
 ) -> FastMCP:
     """Build the A2A server.
 
-    **Two seams, and both are peers**: the window and the agent server, which
-    are the two places a message can be handed to (`slife2.libs.harness.handover`).  A test
-    wires recorder versions of both over the in-memory transport and drives the
+    **Three seams, and every one is a peer**: the window and the agent server,
+    which are the two places a message can be handed to (`slife2.libs.harness.handover` for
+    the first, `run_turn` for the second), and the config source.  A test wires
+    recorder versions of the peers over the in-memory transport and drives the
     mesh's callbacks directly; there is no seam for the mesh itself, because the
     mesh is the thing under test and a broker is what a test would need to
     replace — see `tests/test_a2a.py`, which tests the driver without one.
@@ -747,9 +962,9 @@ def build_server(
     the config says rather than with a connection nobody asked for.
     """
     live: Callable[[], Config] = source or load_cached
-    #: One session per **(home, agent)** — see `session_of` for why the name
-    #: alone is not the identity this process serves.
-    sessions: dict[tuple[str, str], Session] = {}
+    #: One session per **(home, agent, subagent)** — see `session_of` for why
+    #: neither the name alone nor the pair is the identity this process serves.
+    sessions: dict[tuple[str, str, str], Session] = {}
 
     def mesh_settings() -> A2ASettings:
         """This network's settings, as the config has them *now*.
@@ -761,7 +976,7 @@ def build_server(
         """
         return net_settings(live(), net)
 
-    def mesh_for(member: str) -> A2AMesh:
+    def mesh_for(maker: str, subagent: str = "") -> A2AMesh:
         """A member's mesh, on this network and in the namespace it belongs to.
 
         `Net.unit_for` is the whole of the difference between the two networks
@@ -769,10 +984,18 @@ def build_server(
         is **per maker**, because two agents may each name a subagent
         `researcher` and one namespace would make those two one MQTT identity
         — which a broker settles by kicking the older one offline.
+
+        **The unit is the maker's and the identity is the member's**, which is
+        why both are arguments here and neither is derivable from the other: on
+        the local network a subagent shares its maker's namespace and is
+        addressed by its own name inside it.
         """
         found = mesh_settings()
         return A2AMesh(
-            replace(found, unit=net.unit_for(found.unit, member)), member, net.ledger
+            replace(found, unit=net.unit_for(found.unit, maker)),
+            maker,
+            net.ledger,
+            subagent=subagent,
         )
 
     async def writer_in(root: Path, session: Session) -> None:
@@ -786,24 +1009,30 @@ def build_server(
         is what handed another home's message to this one's window, which the tui
         refuses with `a2a_delivery_unreachable` while the peer is told nothing.
         The shape is `slife2.plugins.wechat.server.Wechat._spawn_in_home`'s, for the
-        same reason.
+        same reason.  It is the same fact for a subagent's turn: `run_turn` opens
+        its own client inside this, so the agent server writes the turn into the
+        store of the home the member is in.
         """
         with in_home(root):
-            await _drain(session, live(), window_client)
+            await _drain(session, live(), window_client, agent_client)
 
-    def session_of(agent: str, root: Path | None = None) -> Session:
-        """This agent's mesh, built on first use and kept.
+    def session_of(agent: str, subagent: str = "", root: Path | None = None) -> Session:
+        """This member's mesh, built on first use and kept.
 
-        **Keyed by the home as well as by the name, because a name is not an
-        identity here.**  One process serves every home, two homes may each be
-        running an agent called `jack`, and a table keyed by the name alone
-        answers the second home with the first one's mesh — the arrangement
-        `slife2.libs.plugin.audience.client_key` and `slife2.plugins.tui.server.Windows`
-        exist to prevent, and here it cost the mesh itself: the session's writer
-        ran in whichever home the *first* caller was in, so every message found
-        for the second home's agent was handed to the first home's conversation,
-        and the mesh's own ledger was opened there — a file that either does not
-        exist or says something else (`announce_ledgers`).
+        **Keyed by the home and by the whole client id, because neither the name
+        nor the pair is an identity here.**  One process serves every home, two
+        homes may each be running an agent called `jack`, and a table keyed by
+        the name alone answers the second home with the first one's mesh — the
+        arrangement `slife2.libs.plugin.audience.client_key` and
+        `slife2.plugins.tui.server.Windows` exist to prevent, and here it cost the mesh
+        itself: the session's writer ran in whichever home the *first* caller was
+        in, so every message found for the second home's agent was handed to the
+        first home's conversation, and the mesh's own ledger was opened there — a
+        file that either does not exist or says something else
+        (`announce_ledgers`).  The second half is the same argument one level in:
+        on the local network two agents may each have a `researcher`, and a
+        table keyed by the member's name alone would answer one with the other's
+        mesh — one MQTT identity for two agents' subagents.
 
         *root* is the home the caller means, and it is what the mesh and the
         writer resolve their files in.  A caller inside a served call passes
@@ -812,28 +1041,34 @@ def build_server(
         ledger was *found* in.
 
         Built rather than connected, and the difference is the whole of what
-        enrollment means here: building writes the agent's ledger
+        enrollment means here: building writes the member's ledger
         (`InboundStore.open`), which is the record of the *inbound tasks a
         process died holding* — a fact about work already received, not a claim
         about who is here now.  What connects is `join` (a window is showing the
-        agent) or the first `a2a_*` call that needs the mesh.
+        agent), the first `a2a_*` call that needs the mesh, or a message to a
+        subagent, which gives it its place before publishing (`place_for`).
         """
         where = root or home()
-        found = sessions.get((str(where), agent))
+        found = sessions.get((str(where), agent, subagent))
         if found is None:
             # Both of these resolve a home's own files — the mesh opens the
-            # agent's ledger at `agents/<agent>/a2a.yaml` — so the home goes
-            # around the build rather than being read off whatever directory the
-            # daemon happens to be started in.
+            # member's ledger at `agents/<agent>/<ledger>`, or one level in for a
+            # subagent — so the home goes around the build rather than being read
+            # off whatever directory the daemon happens to be started in.
             with in_home(where):
-                found = Session(agent=agent, net=net, mesh=mesh_for(agent))
+                found = Session(
+                    agent=agent,
+                    net=net,
+                    mesh=mesh_for(agent, subagent),
+                    subagent=subagent,
+                )
             _wire(found)
             found.writer = asyncio.create_task(writer_in(where, found))
-            sessions[(str(where), agent)] = found
+            sessions[(str(where), agent, subagent)] = found
         return found
 
-    async def connected(agent: str, reason: str) -> Session:
-        """The agent's mesh, connected — or a refusal naming why it is not.
+    async def connected(agent: str, reason: str, subagent: str = "") -> Session:
+        """This member's mesh, connected — or a refusal naming why it is not.
 
         Double-checked under the session's lock, v1's shape: two calls arriving
         together must not both dial the broker, and a mesh whose connect failed
@@ -861,14 +1096,15 @@ def build_server(
         gives back when its call ends.  Which one it is has to be said by the
         caller: a `join` that inherited a tool's reason would keep the agent
         online after the window it was joining for had gone.
+
+        **And a subagent's is `MEMBER`, which the same caller takes on somebody
+        else's behalf** — see `place_for`, which is the only caller that passes a
+        `subagent` at all.
         """
         settings = mesh_settings()
         if not settings.configured:
-            raise ToolError(
-                "this machine is not on the A2A mesh — there is no `a2a:` "
-                "section in slife2.yaml, which is the whole of the switch."
-            )
-        session = session_of(agent)
+            raise ToolError(switch_off(net))
+        session = session_of(agent, subagent)
         async with session.lock:
             if session.mesh.is_connected:
                 session.hold(reason)
@@ -885,25 +1121,93 @@ def build_server(
                     logger.error(
                         "a2a %s: the mesh would not be torn down after a failed "
                         "connect, so it may stay advertised: %s",
-                        agent,
+                        describe((agent, subagent)),
                         teardown,
                     )
                 raise ToolError(
-                    f"could not join the mesh as {agent!r} on {settings.address}: {e}"
+                    f"could not join the mesh as {session.mesh.agent_name!r} on "
+                    f"{settings.address}: {e}"
                 ) from e
             session.connect_error = ""
             session.hold(reason)
-            logger.info("a2a_mesh_connected agent=%s", agent)
+            logger.info("a2a_mesh_connected agent=%s", describe((agent, subagent)))
         return session
 
-    #: The refusal this plugin says, with its own reason rather than the shared
-    #: one: a peer sees an *identity*, not a piece of somebody's state.
-    agent_of = agent_reader(
-        "mesh it could be sent from",
-        "",
-        why="one process serves every agent, and the agent name is the identity "
-        "a peer sees",
-    )
+    def speaker(ctx: Any) -> tuple[str, str]:
+        """The `(agent, subagent)` a call is on behalf of — its client id.
+
+        **Both halves, because on the local network the second one is who is
+        speaking.**  A subagent's tool call carries the pair it is run under, and
+        a message from it has to leave as *it* rather than as its maker: the
+        maker is a peer it addresses (`subagent_send_message(agent="slife2")`),
+        and a reply published under the maker's own name would be the maker
+        talking to itself — and would find no completion bridge, because the task
+        it is answering is on *its* responder.
+
+        Empty for a subagent on the remote network, and that is not a gap: a
+        remote peer sees an agent name, a subagent is not an instance and never
+        claimed one (sdd §3.5), so its maker is the name anybody out there knows.
+        """
+        found = request_client(ctx)
+        if found is None or not found[0]:
+            raise ToolError(
+                unaddressed(
+                    "mesh it could be sent from",
+                    "",
+                    why="one process serves every agent, and the agent name is "
+                    "the identity a peer sees",
+                )
+            )
+        agent, subagent = found
+        return agent, (subagent if net is LOCAL else "")
+
+    def membership(agent: str) -> set[str]:
+        """The names of this agent's subagents, off the filesystem.
+
+        `subagent_dirs` is the whole of what "a member" means
+        (`slife2.libs.host.paths`): a directory under the agent's own carrying a
+        `subagent.yaml`, which is `schedule_dbs`' principle one level in.  Read
+        per use rather than cached, so a subagent made while everything is up is
+        a member by the next look — which is the look the send path takes anyway,
+        and the reason nothing has to keep a list of them.
+        """
+        return {directory.name for directory in subagent_dirs(agent)}
+
+    async def place_for(agent: str, peer: str) -> bool:
+        """Give *peer* its place on this network, when it is one of *agent*'s.
+
+        **The one thing a send has to do that publishing does not**, and a
+        subagent is the only member that needs it: a message published to a name
+        whose responder is not subscribed goes to nobody and reports nothing —
+        the requester ladder then runs out and the sender is told the peer was
+        never reached, which is what a maker saw for every `subagent_send_message`
+        before this existed.  An agent's own window holds its `join`, and a peer
+        on the remote network is somebody else's process, so on those there is
+        nothing to ensure; here nothing else is holding the name at all.
+
+        True when *peer* names a member of this agent's.  False is an ordinary
+        answer — the name may be the agent itself, which its own call has already
+        connected, or a peer on the remote network, which this process does not
+        place — and it is not an error for a send either way: what a send to a
+        name nobody holds does is the ladder's business.
+        """
+        if net is not LOCAL or not peer or peer not in membership(agent):
+            return False
+        await connected(agent, MEMBER, peer)
+        return True
+
+    async def place_for_all(agent: str) -> None:
+        """Give every member of *agent*'s its place — what a broadcast needs.
+
+        One rule rather than two: a broadcast is delivered to whoever is
+        subscribed, so publishing one to a maker's own network without this
+        reaches only the subagents some earlier message happened to wake.  The
+        roster is the same look (`membership`), taken once.
+        """
+        if net is not LOCAL:
+            return
+        for peer in sorted(membership(agent)):
+            await connected(agent, MEMBER, peer)
 
     async def announce_ledgers(config_now: Config) -> None:
         """Tell the model about what a previous process died holding.
@@ -946,7 +1250,7 @@ def build_server(
             # is for: the notice is about work *that* home's peer is owed, and
             # the session it goes to opens its mesh on that home's file and hands
             # over in that home (`session_of`).
-            announce_orphans(session_of(store.agent, ledger.home))
+            announce_orphans(session_of(store.agent, root=ledger.home))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -1101,13 +1405,22 @@ def build_server(
         `agent` is a peer's name, which `a2a_list_agents` gives you. A peer may
         be another agent on this machine or one somewhere else; the mesh does not
         tell you which, and nothing you send depends on it.
+
+        **The receiver's place is made here when the network is the local one.**
+        Everything else that is on a network is on it because somebody is there —
+        a window holding a `join`, a peer's own process — and a subagent is the
+        one member nothing speaks for, so a send to it is also the thing that
+        gives it a place to receive in (`place_for`).  Without that the message
+        was published to a name nobody was subscribed to: the requester ladder
+        ran out and the sender was told the subagent had never been reached, for
+        every message, for ever.
         """
         if message_type not in ("message", "task_request", "task_response"):
             raise ToolError(
                 f"message_type must be 'message', 'task_request' or "
                 f"'task_response', got {message_type!r}."
             )
-        who = agent_of(ctx)
+        sender, mine = speaker(ctx)
         # What the arguments say is settled before the mesh is dialled: a call
         # that cannot work must not be the reason a broker is contacted, and the
         # refusal reads better than a connect failure about a typo.
@@ -1116,12 +1429,16 @@ def build_server(
                 "task_id is required for message_type='task_response' — it "
                 "is the [PeerAgent:…] marker's task_id."
             )
-        session = await connected(who, USED)
+        session = await connected(sender, USED, mine)
         if message_type == "task_response":
             answer = session.mesh.complete_task(task_id, message, False)
             if answer != "ok":
                 raise ToolError(answer.removeprefix("Error: "))
             return {"peer": agent, "task_id": task_id, "completed": True}
+        # Before the publish, and only for a message somebody has to receive in.
+        # A `task_response` above needs nothing placed: what it completes is a
+        # bridge on *this* responder, which is already up.
+        await place_for(sender, agent)
         sent = await session.mesh.send_message(
             agent, message, message_type=message_type
         )
@@ -1152,8 +1469,12 @@ def build_server(
         finished result is never lost by asking), or 'not_found' for an id this
         process never sent.
         """
-        who = agent_of(ctx)
-        session = await connected(who, USED)
+        sender, mine = speaker(ctx)
+        session = await connected(sender, USED, mine)
+        # As in `send_message`: a withdrawal published to a member with nowhere
+        # to receive it goes to nobody, and the peer goes on working on a task
+        # somebody believes they took back.
+        await place_for(sender, agent)
         status = await session.mesh.cancel_task(agent, task_id)
         return {"peer": agent, "task_id": task_id, "status": status}
 
@@ -1170,37 +1491,66 @@ def build_server(
         whose card is still retained on the broker but which have said they are
         leaving, so they are listed rather than hidden.
 
+        **On the local network the roster is the maker's subagents, awake or
+        not**, and that is the difference the vocabulary turns on: a member with
+        no card is not a peer that left, it is one nothing has woken yet, and a
+        message to it wakes it (`place_for`) — so it is listed rather than
+        waiting for a first send to appear.  The names come from the same look
+        the send path takes (`membership`), and the status from the mesh: a
+        member that has taken its place is `online` on the wire.
+
         `error` says why the list is short when it is: the last failure to join,
         or another agent holding your name — the two states a bare "offline"
         cannot tell apart.
+
+        `org` and `unit` are the namespace the mesh is *in*, which on the local
+        network is the maker's rather than the section's (`Net.unit_for`): the
+        section says `local`, and this mesh publishes in `local-<maker>`.
         """
-        who = agent_of(ctx)
+        agent, mine = speaker(ctx)
         settings = mesh_settings()
         if not settings.configured:
             return {
-                "agent_name": who,
+                "agent_name": member_name(agent, mine),
                 "broker": settings.address,
                 "agents": [],
-                "error": (
-                    "this machine is not on the A2A mesh: there is no `a2a:` "
-                    "section in slife2.yaml, and that section is the switch."
-                ),
+                "error": switch_off(net),
             }
-        session = session_of(who)
+        session = session_of(agent, mine)
         mesh = session.mesh
+        own, *peers = mesh.list_agents()
+        found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}
+        if net is LOCAL:
+            # `offline` is the card vocabulary's word and the honest one here:
+            # nothing is listening for this member at this moment.  It says
+            # nothing about whether a message would reach it — that is the one
+            # thing a send does that this read does not.
+            #
+            # **The caller is not added to its own roster**, and it is the one
+            # name that can be: the mesh never caches its own card as a peer
+            # (`_handle_discovery` skips our own topic), so a *member* asking
+            # this question — which has itself in `membership` like any other
+            # member — would otherwise be listed twice, once as `you` and once as
+            # a member nothing has woken.
+            for name in membership(agent):
+                if name != mesh.agent_name:
+                    found.setdefault(safe_name(name), "offline")
         cards = [
-            {"agent_name": safe_name(c.agent_name), "status": safe_name(c.status)}
-            for c in mesh.list_agents()
+            {"agent_name": safe_name(own.agent_name), "status": safe_name(own.status)}
+        ] + [
+            {"agent_name": name, "status": status}
+            for name, status in sorted(found.items())
         ]
         error = mesh.collision or session.connect_error
         if not mesh.is_connected and not error:
             error = f"not connected to the broker at {settings.address}"
+        org, unit = mesh.namespace
         return {
-            "agent_name": who,
+            "agent_name": safe_name(own.agent_name),
             "status": mesh.status,
             "broker": settings.address,
-            "org": settings.org,
-            "unit": settings.unit,
+            "org": org,
+            "unit": unit,
             "agents": cards,
             "error": error,
         }
@@ -1217,9 +1567,15 @@ def build_server(
         information a peer may act on and not for anything you need a reply to —
         use `a2a_send_message` for that. Peers receive it as a `[PeerAgent:…]` of type
         'broadcast', with no task and no completion.
+
+        **A local broadcast wakes the whole roster first**, because published is
+        not subscribed: an event reaches whoever is listening, and a maker's
+        subagents listen only once somebody has given them a place
+        (`place_for_all`).
         """
-        who = agent_of(ctx)
-        session = await connected(who, USED)
+        sender, mine = speaker(ctx)
+        session = await connected(sender, USED, mine)
+        await place_for_all(sender)
         await session.mesh.broadcast(event)
         return {
             "broadcast": event,
@@ -1279,9 +1635,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "List {roster}.\n"
         "\n"
         'Every card is `{{"agent_name": …, "status": "online"|"offline"}}`, and\n'
-        "`status` on the first one is your own state on this network. Offline\n"
-        "entries are the ones whose card is still retained on the broker but\n"
-        "which have said they are leaving, so they are listed rather than hidden.\n"
+        "`status` on the first one is your own state on this network.\n"
+        "\n"
+        "{offline}\n"
         "\n"
         "`error` says why the list is short when it is."
     ),
@@ -1297,20 +1653,73 @@ _TOOL_TEXTS: dict[str, str] = {
 
 #: The holes, per network.  `roster` is the one that says what a model is
 #: looking at rather than who it is talking to — "you first, then each peer" is
-#: true of the remote network and false of the local one, where the reader is the
-#: agent that made them.
+#: true of the remote network and false of the subagent one, where the reader is
+#: the agent that made them.  `offline` is that same difference one line down and
+#: it is not cosmetic: a peer that said it was leaving and a subagent nobody has
+#: woken yet are both `offline` on the card, and what a model should do about
+#: them is the opposite — wait, and send.
 _NET_WORDS: dict[str, dict[str, str]] = {
     REMOTE.key: {
         "them": "another agent on the A2A mesh",
         "everyone": "every agent on the mesh",
         "roster": "the agents on the A2A mesh — you first, then each peer by name",
+        "name": "the A2A mesh",
+        "section": "`a2a:`",
+        "offline": (
+            "Offline entries are the ones whose card is still retained on the\n"
+            "broker but which have said they are leaving, so they are listed\n"
+            "rather than hidden."
+        ),
     },
     LOCAL.key: {
-        "them": "one of your subagents",
-        "everyone": "every subagent you have",
-        "roster": "your subagents — you first, then each by name",
+        # **"your subagent network" and not "your subagents"**, because a
+        # subagent reads these too: it is a member of the same network, it
+        # addresses its maker and its siblings on it, and its own answer to a
+        # task is a call to this tool — so a description that said whose
+        # *subagents* were being addressed would be false in exactly the turn a
+        # subagent is most likely to be reading it.  What is said is whose
+        # *network* it is, which is true for every member of it.
+        #
+        # **And the network is named `subagent`, which is this project's word for
+        # it** — the section, the tool prefix, the channel and the envelope are
+        # all that word.  `local` is the gloss this design uses when talking about
+        # the network itself (and the value `unit:` happens to carry); it is not
+        # what anything here is called, and a model taught it would be reading a
+        # word the rest of its tools do not use.
+        "them": "another agent on your subagent network",
+        "everyone": "every agent on your subagent network",
+        "roster": (
+            "the agents on your subagent network — you first, then each by name"
+        ),
+        "name": "the subagent network",
+        "section": "`subagent:`",
+        "offline": (
+            "A subagent is listed whether or not it is awake: `offline` means\n"
+            "nothing is listening for it at this moment, and a message to it\n"
+            "wakes it."
+        ),
     },
 }
+
+
+def switch_off(net: Net) -> str:
+    """What a machine that has not written this network's section is told.
+
+    **One sentence and two holes, because the fact is one**: `_a2a`'s rule is
+    that the section's *presence* is the switch, so the only thing that differs
+    between the networks is what the network is called and which section to
+    write.  Said here rather than at each of its readers — the tool that raises,
+    the roster's `error` field, and the start-up note — because a sentence that
+    names a section is one place to name the wrong one, and the remote network's
+    words were being said on the subagent network: a machine with a `subagent:`
+    section and no mesh was told there was no `a2a:` section, and taught a name
+    for a thing the rest of its tools do not use.
+    """
+    words = _NET_WORDS[net.key]
+    return (
+        f"this machine is not on {words['name']} — there is no {words['section']} "
+        f"section in slife2.yaml, and that section is the whole of the switch."
+    )
 
 
 def describe_tool(net: Net, verb: str) -> str:
@@ -1335,17 +1744,16 @@ def server_note(config: Config, net: Net) -> str:
     """What one instance says about itself at start: which network, and where.
 
     Two texts because they are two different things to a reader — a machine off
-    the mesh has no peers, and one with no subagent network has no local agents
-    — and `serve_plugin`'s note is a callable for exactly this: which config it
-    describes is only known in there.
+    the mesh has no peers, and one with no subagent network has no subagents to
+    reach — and `serve_plugin`'s note is a callable for exactly this: which
+    config it describes is only known in there.  Both halves come out of the same
+    word-set the refusals use (`switch_off`), so the line that says a network is
+    off and the refusal for trying to use it name the same section.
     """
     settings = net_settings(config, net)
+    words = _NET_WORDS[net.key]
     if not settings.configured:
-        return (
-            "off the mesh (no `a2a:` section)"
-            if net is REMOTE
-            else "no subagent network (no `subagent:` section)"
-        )
+        return f"off {words['name']} (no {words['section']} section)"
     return f"{net.bubble} network on {settings.address}, broker started if absent"
 
 

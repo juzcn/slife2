@@ -856,8 +856,9 @@ def test_terminate_reads_a_process_that_vanished_as_gone(
 
 
 # --- the close a cancellation cannot take away -------------------------------
-# `slife2.libs.harness.handover` hands a message to a window (or, as the fallback, to the
-# agent server) and closes the connection it opened on the way out.  That close
+# `slife2.libs.harness.handover` hands a message to a window — one road, and a
+# delivery that finds none is a hard failure — and closes the connection it opened
+# on the way out.  That close
 # lives in one helper there, `_peer`, and has to finish even when the caller is
 # cancelled — which is the case the `finally` exists for.  Exercised from here
 # because it is a lifecycle primitive and the hand-over module has no test

@@ -89,13 +89,23 @@ class InboundStore:
         self._load()
 
     @classmethod
-    def open(cls, agent: str, ledger: str) -> InboundStore:
+    def open(cls, agent: str, ledger: str, subagent: str = "") -> InboundStore:
         """The ledger for one agent *on one network*, created and stamped with its name.
 
         `ledger` is `Net.ledger`, and it is the network's own file: what a
         ledger records is the completion bridges *this* mesh is holding, so two
         processes serving one agent's name over two networks must not share one
         (see `Net.ledger` for what sharing cost).
+
+        `subagent` is the other half of the client id, and it is here for the
+        same reason the file is per network: a subagent is a peer on the local
+        one with a responder of its own, so its bridges are its own file — in
+        its own directory, where `a2a_inbound_path` puts it.  Empty for an
+        agent's own mesh, which is every caller but that one.  **The `agent:`
+        key inside names the mesh rather than the directory** — the member, for
+        a member's file — and the other half of the address is the directory the
+        file is in, for the reason this key exists at all: a name read off a
+        directory is the sanitised one.
 
         This is the only way a ledger comes into existence, and the file's
         existence says one thing: this agent has had inbound tasks, so a *later*
@@ -104,7 +114,9 @@ class InboundStore:
         died holding.  **It is not an enrollment list**, and treating it as one
         (a start joining the mesh as every agent that had ever spoken) made
         presence mean "has spoken at least once, ever".  What puts an agent on
-        the mesh is a window showing it (`slife2.plugins.a2a.server.join`).
+        the mesh is a window showing it (`slife2.plugins.a2a.server.join`), and
+        what puts a subagent on it is its maker's next message, which gives it a
+        place before publishing (`slife2.plugins.a2a.server.place_for`).
 
         **So this writes, where v1's constructor only read.**  v1's file turned up
         when a task did, and a shared process needs the file to say *whose* it is
@@ -112,7 +124,7 @@ class InboundStore:
         what an orphan notice is addressed to.  It is also where the
         ``pending → stale`` migration above gets persisted.
         """
-        store = cls(a2a_inbound_path(agent, ledger), agent)
+        store = cls(a2a_inbound_path(agent, ledger, subagent), subagent or agent)
         store._save()
         return store
 

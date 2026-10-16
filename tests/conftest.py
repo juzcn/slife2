@@ -48,8 +48,9 @@ from slife2.libs.turn import tokens
 #:
 #: The list is the whole guard, so it is worth saying what each dial reaches:
 #:
-#:   * `handover` — the window, and the agent server as the fallback.  Both put
-#:     words into somebody's conversation.
+#:   * `handover` — the window, and one road only: a delivery that finds no
+#:     window is a hard failure.  A subagent's road is not this module's — it is
+#:     the a2a plugin's own, and it is the second entry added below.
 #:   * `launcher` — the hub, and only for `open_catalogue`: the ask that makes a
 #:     home's `agents/tools.db` exist.  It writes no conversation, but the file it
 #:     makes is *a home's*, so a test that reached a live hub would build a live
@@ -78,6 +79,12 @@ _DIALERS: dict[str, tuple[str, ...]] = {
     "slife2.plugins.context.server": ("open_server",),
     "slife2.clients.model": ("open_server",),
     "slife2.clients.embedder": ("open_server",),
+    # The a2a plugin, which dials for one thing only: a subagent's turn.  A
+    # subagent has no window, so a message to it is run as a turn on the agent
+    # server (`slife2.plugins.a2a.server.run_turn`) — a live, paid model call
+    # from a test that forgot `agent_client=`, which is exactly the leak this
+    # list exists to make loud.
+    "slife2.plugins.a2a.server": ("open_server",),
 }
 
 
@@ -134,7 +141,8 @@ def no_live_stack(monkeypatch: pytest.MonkeyPatch) -> None:
             + ". This machine's slife2 may be running, and a test that reaches it "
             "types into a live conversation. Hand the plugin the peer instead: "
             "`window_client=`, `hub_client=`, `context_client=`, "
-            "`backend=`, `tasks_client=` — or patch this name in the module under "
+            "`backend=`, `tasks_client=`, `agent_client=` — or patch this name in "
+            "the module under "
             "test if the connection is the thing being tested."
         )
 

@@ -618,10 +618,11 @@ def a2a_inbound_paths(ledger: str) -> list[Ledger]:
     ]
 
 
-def a2a_inbound_path(agent: str, ledger: str) -> Path:
-    """One agent's ledger for one network: `<agent>/<ledger>`.
+def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
+    """One conversation's ledger for one network: `<agent>/<ledger>`, or
+    `<agent>/<subagent>/<ledger>`.
 
-    What it holds is the inbound tasks this agent's mesh is holding a completion
+    What it holds is the inbound tasks *this mesh* is holding a completion
     bridge for, which is what lets a *restart* tell its orphans from ids it has
     never seen (`slife2/plugins/a2a/inbound_store.py`).  Beside `turns.db` and
     `wechat.yaml` for §5's reason — an agent's state is a directory — and YAML
@@ -631,8 +632,16 @@ def a2a_inbound_path(agent: str, ledger: str) -> Path:
     `ledger` is `Net.ledger`, and it is required rather than defaulted because
     the default would be a second spelling of one network's name in a module
     that has no business knowing which network is calling.
+
+    **The second half is the client id's, and it is the layout rather than a
+    label**: a subagent is a peer on the local network, so it has a mesh of its
+    own with a responder of its own (`slife2.plugins.a2a.mesh`), and *that*
+    mesh's bridges are what its ledger records.  Both halves go to `agent_dir`,
+    which is where the nesting is written down once — so a member's ledger is
+    inside the member's own directory, and removing the subagent takes the file
+    that only its mesh could read.
     """
-    return agent_dir(agent) / ledger
+    return agent_dir(agent, subagent) / ledger
 
 
 #: The file that makes a directory a subagent's.  Spelt once for the reason

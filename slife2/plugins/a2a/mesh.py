@@ -28,13 +28,16 @@ own (presence publishing stays inside the SDK, untouched); the outbound
 client (identifier ``{org}/{unit}/{agent}-out``) only subscribes discovery
 + our reply sessions and publishes requests — never presence.
 
-**One mesh per agent, in a process that serves several.**  v1's identity *was*
+**One mesh per member, in a process that serves several.**  v1's identity *was*
 the process: `--agent` named the MQTT client id, so there was one of these.  Here
-the plugin holds one per agent it serves, and everything below is unchanged by
+the plugin holds one per member it serves, and everything below is unchanged by
 that — the collision check, the two client ids and the topic namespace are all
 keyed by the name this object was built with.  What the name *is* comes from the
 caller's client id rather than from the config, which is why it is a constructor
-argument here and a config field in v1.
+argument here and a config field in v1.  **A member is either the agent or one of
+its subagents**: the second is a peer on the *local* network and only there, so
+it is a client id's second half — the two arguments below — and the name it
+answers as is the one it is addressed by.
 
 **What puts an agent on the mesh is somebody being there.**  One of these is
 connected because a window is showing that agent — `slife2.tui.client.MeshClient`
@@ -44,6 +47,14 @@ call needed the mesh and kept it for as long as the task it started may still be
 answered.  v1's plugin *was* the agent's process, so its lifetime settled this by
 construction; a shared process has to decide, and `slife2.plugins.a2a.server`'s `join`
 is where it is decided.
+
+**A subagent's place is the third case, and it is the plugin's own.**  Nobody is
+watching a subagent and nothing of its own ever reaches for the mesh, so the
+place is held for it by the one party that knows it is wanted: the maker's next
+message, which cannot be delivered to a name nobody is listening for.  So
+`slife2.plugins.a2a.server.place_for` gives the receiver its place before it
+publishes — once, for the rest of the process — and this object is what it holds
+(DESIGN.md §1.10, "the road").
 
 The timeouts are v1's numbers, and they are module constants rather than v1's
 `slife.timeouts` registry: that registry existed so a value could be re-read at
@@ -114,6 +125,19 @@ _MAX_TRACKED_SENDS = 500  # delivery-tracking cap (mirrors the task store)
 #: long session (or sends evicted from the capped ``_sends`` cache before
 #: their reply) would otherwise grow ``_corr_to_task`` without limit.
 _MAX_CORR_ENTRIES = 2 * _MAX_TRACKED_SENDS
+
+
+def member_name(agent: str, subagent: str = "") -> str:
+    """What a member answers as, from the client id it is one member of.
+
+    `subagent or agent`, and it is a function because it is *one* rule with more
+    than one reader: the mesh's identity, the card it publishes and the topic it
+    is addressed on are all this (`A2AMesh.__init__`), and a caller deciding what
+    to call somebody — `a2a_list_agents`' first row — has to answer the same word
+    without building a mesh to get it (a machine off the mesh has no session and
+    still gets an answer).
+    """
+    return subagent or agent
 
 
 class FIFOCache(dict):
@@ -536,8 +560,20 @@ class A2AMesh:
     :meth:`list_agents`, :meth:`complete_task`.
     """
 
-    def __init__(self, config: A2ASettings, agent: str, ledger: str) -> None:
-        """*ledger* is `Net.ledger` — which network's inbound file this mesh owns.
+    def __init__(
+        self, config: A2ASettings, agent: str, ledger: str, *, subagent: str = ""
+    ) -> None:
+        """*agent* and *subagent* are the client id this mesh is one member of.
+
+        **The whole id, because a member is the second half of one.**  The name
+        it answers as is `subagent or agent` — that is the MQTT client id, the
+        request topic's last segment and our card's name — and the pair is what
+        its ledger is filed under (`InboundStore.open`), so a subagent's file
+        lives in the subagent's own directory rather than beside its maker's.
+        Empty for an agent's own mesh, which is every caller but the local
+        network's.
+
+        *ledger* is `Net.ledger` — which network's inbound file this mesh owns.
 
         A parameter rather than read off the section, because which network this
         is is not a fact about the settings: both networks are configured out of
@@ -549,7 +585,7 @@ class A2AMesh:
             org=config.org or "default",
             unit=config.unit or "default",
         )
-        self.agent_name = agent
+        self.agent_name = member_name(agent, subagent)
         self._mqtt_cfg = MqttConfig(
             host=config.broker_host,
             port=config.broker_port,
@@ -571,7 +607,9 @@ class A2AMesh:
         #: Inbound tasks awaiting a result — persisted, per agent, so a
         #: restarted process can tell the ones its predecessor died holding
         #: (which can never be completed) from ids it has simply never seen.
-        self._inbound = InboundStore.open(self.agent_name, ledger)
+        #: The client id's, not `agent_name`'s: a member's bridges are its own
+        #: and its file lives inside its own directory.
+        self._inbound = InboundStore.open(agent, ledger, subagent)
         self._responder = MeshResponder(
             agent_id=self.agent_name,
             mqtt=self._mqtt_cfg,
@@ -642,6 +680,20 @@ class A2AMesh:
     @property
     def broker_address(self) -> str:
         return f"{self._config.broker_host}:{self._config.broker_port}"
+
+    @property
+    def namespace(self) -> tuple[str, str]:
+        """The `(org, unit)` this mesh actually publishes and subscribes in.
+
+        **Not the section's, and on the local network they differ.**  A unit is
+        the topic path's second segment, and the local network's is per maker
+        (`Net.unit_for`, which is what keeps two agents' `researcher` from being
+        one MQTT identity) — so a caller reporting the section's unit would name
+        a namespace nobody is in, and a model reading it would have no way to
+        tell.  The `default` folds are this object's own too: a section that
+        named neither would otherwise report an empty segment.
+        """
+        return self._topics.org, self._topics.unit
 
     @property
     def collision(self) -> str:

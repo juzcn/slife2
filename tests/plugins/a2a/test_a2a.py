@@ -27,7 +27,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,7 @@ from slife2.libs.host.config import (
     SEND_MESSAGE,
     A2ASettings,
     default_config,
+    net_settings,
 )
 from slife2.libs.host.paths import (
     a2a_inbound_path,
@@ -54,6 +55,7 @@ from slife2.libs.host.paths import (
     home,
     in_home,
     register_home,
+    subagent_file,
 )
 from slife2.libs.host.runtime import read_record
 from slife2.libs.host.statefile import reader as read_state_yaml
@@ -1014,17 +1016,22 @@ async def drain_until_idle(
     session: Session,
     *,
     window: Window | None = None,
+    agent: AgentServer | None = None,
 ) -> None:
-    """Run the writer until it has handed over everything queued.
+    """Run the writer until it has delivered everything queued.
 
-    The real `_drain`, on the real `hand_over` — started, given a moment to
-    finish, and cancelled the way the lifespan cancels it.
+    The real `_drain`, on the real roads out of it — `hand_over` for an agent's
+    conversation and `run_turn` for a member's — started, given a moment to
+    finish, and cancelled the way the lifespan cancels it.  The two peers are
+    injected separately because which one a delivery takes is what these tests
+    are about.
     """
     task = asyncio.create_task(
         _drain(
             session,
             default_config(),
             window.client if window else None,
+            agent.client if agent else None,
         )
     )
     deadline = (  # timeouts: the value this test is built around, not a budget
@@ -1783,6 +1790,10 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
     assert channel_for(REMOTE, peer) == f"{CHANNEL}:{ORPHAN_PEER}"
     assert what == "1 orphaned inbound task(s)"
     assert TASK in text and PEER in text
+    # The tool it tells the model to reply with is *this* network's; the subagent
+    # network's half of that is `test_the_orphan_notice_names_the_tool_this_
+    # network_has`, and the name it used to spell was this one.
+    assert REMOTE.tool(SEND_MESSAGE) in text
     # It is a message for the model to act on, not a line for a window to draw.
     assert note is False
     # It carries the retries, and it is the only message that does: everything
@@ -2077,6 +2088,14 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     The *descriptions* move with them, which is the half that is easy to leave
     behind: a tool called `subagent_send_message` that says it sends to "a peer
     on the A2A mesh" teaches a model the opposite of what its name says.
+
+    **And the subagent network's words are a *member's*, not only its maker's.**
+    A subagent reads this description in the very turn a message is run for it —
+    its answer to a task is a call to this tool — so "one of your subagents"
+    would be false for half its readers: a subagent has none, and what it
+    addresses is its maker and its siblings.  Whose *network* it is is true for
+    every member of it, and the network is named `subagent`, which is this
+    project's word for it rather than the gloss the design talks about it with.
     """
     tools = await build_server(
         default_config(), net=LOCAL, connecting=False
@@ -2093,9 +2112,12 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     assert A2A_SEND_MESSAGE not in by_name, "and not the remote network's names"
 
     send = by_name[LOCAL.tool(SEND_MESSAGE)]
-    assert send.description.startswith("Send a message to one of your subagents.")
+    assert send.description.startswith(
+        "Send a message to another agent on your subagent network."
+    )
     assert LOCAL.marker in send.description, "its own envelope, in its own text"
     assert REMOTE.marker not in send.description
+    assert "on the A2A mesh" not in send.description, "not the remote network's words"
     assert LOCAL.tool(SEND_MESSAGE) in by_name[LOCAL.tool(BROADCAST)].description
 
 
@@ -2637,3 +2659,520 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     assert get_store().get(TASK).status == "cancelled"
     get_store().record_error(TASK)
     assert get_store().get(TASK).status == "cancelled"
+
+
+# ── the local network: a member takes its place ─────────────────────────────
+#
+#  A subagent has no process and no window, so nothing of its own ever reaches
+#  for the mesh: what puts it on the network is the maker's next message, which
+#  cannot be delivered to a name nobody is listening for.  These are the three
+#  halves of that — the place (`place_for`), the road a message to it takes
+#  (`run_turn`), and the roster a maker reads (`a2a_list_agents`) — and the one
+#  thing deliberately absent is the wire itself: a real broker is what
+#  `test_a_window_that_goes_away_takes_the_agent_off_the_mesh` needs, and what
+#  these replace with a mesh whose `connect` is a recorder.
+
+
+@dataclass
+class AgentServer:
+    """A recorder standing in for `slife2-agent`, and the turns it was handed.
+
+    One tool, because a turn is one tool on that server (`send_message`), and
+    what a member's delivery has to be right about is *which conversation* it
+    asked for and what it said.  The answer is not relayed anywhere
+    (`run_turn`), so nothing here needs to be more than an answer.
+    """
+
+    client: Client | None = None
+    #: The model failed, or the store refused — the server answering and saying
+    #: no, which is not the same thing as the server not being there.
+    refuse: bool = False
+    turns: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.mcp: FastMCP = FastMCP("agent")
+
+        @self.mcp.tool
+        async def send_message(
+            agent: str,
+            prompt: str = "",
+            subagent: str = "",
+            channel: str = "",
+        ) -> dict[str, Any]:
+            self.turns.append(
+                {
+                    "agent": agent,
+                    "subagent": subagent,
+                    "prompt": prompt,
+                    "channel": channel,
+                }
+            )
+            if self.refuse:
+                raise ToolError("the provider answered 500")
+            return {"text": f"{agent}/{subagent} did it"}
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def agent_server() -> AsyncIterator[AgentServer]:
+    node = AgentServer()
+    async with Client(node.mcp) as client:
+        node.client = client
+        yield node
+
+
+def write_subagent(maker: str, name: str) -> Path:
+    """A directory that *is* a subagent: one carrying `subagent.yaml`.
+
+    `subagent_dirs` is the whole of what membership means, so this is what the
+    send path's look finds — written the way the agent server writes it
+    (`subagent_set`), because the two have to agree about what makes a member.
+    """
+    path = subagent_file(maker, name)
+    path.write_text(f"name: {name}\nrole: test\n", encoding="utf-8")
+    return path
+
+
+def local_member(
+    home_root: Path, subagent: str = "tester", maker: str = AGENT
+) -> Session:
+    """A real member session on the local network — the genuine wiring, no broker.
+
+    Built the way `build_server`'s `session_of` builds one, because what is under
+    test is the delivery and the identity: the mesh is real, the pair is real, and
+    only the connection is left out.
+    """
+    member = net_settings(default_config(), LOCAL)
+    with in_home(home_root):
+        session = Session(
+            agent=maker,
+            net=LOCAL,
+            mesh=A2AMesh(
+                replace(member, unit=LOCAL.unit_for(member.unit, maker)),
+                maker,
+                LOCAL.ledger,
+                subagent=subagent,
+            ),
+            subagent=subagent,
+        )
+    _wire(session)
+    return session
+
+
+def local_build(**overrides: Any) -> FastMCP:
+    """The **local** instance: on a network, and with no broker to dial.
+
+    `build`'s sibling, and the second one exists because the two networks are
+    read from different places: `a2a` is a section of its own, and the local
+    network is the other half of `subagent`
+    (`slife2.libs.host.config.SubagentSettings.network`) — which is also why one
+    agent may be on one of them and not the other.
+    """
+    config = default_config()
+    object.__setattr__(
+        config, "subagent", replace(config.subagent, network=settings(**overrides))
+    )
+    return build_server(config, net=LOCAL, source=lambda: config, connecting=False)
+
+
+@pytest.mark.asyncio
+async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
+    tmp_path: Path, agent_server: AgentServer, window: Window
+) -> None:
+    """**The road, and the bug it fixes.**  `subagent_send_message` promised a
+    result in the conversation for every message and never delivered one: the
+    request was published to the member's request topic and *nobody was
+    subscribed to it*, so the requester ladder ran out and the sender was told
+    the subagent had never been reached.
+
+    A subagent has no window and never gets one, so the turn is run here, on the
+    agent server, addressed by the client id the message named.  The pair is what
+    matters: `subagent` is the *member*, and the prompt arrives wearing the local
+    network's envelope with the sender in it.
+    """
+    session = local_member(tmp_path)
+    session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
+    await drain_until_idle(session, agent=agent_server)
+
+    assert agent_server.turns == [
+        {
+            "agent": AGENT,
+            "subagent": "tester",
+            "prompt": f"{marker(LOCAL, AGENT, TASK)}add one and one",
+            "channel": channel_for(LOCAL, AGENT),
+        }
+    ], "the turn did not reach the member's own conversation"
+    assert window.handed == [], "a subagent's message is not a window's"
+    # And it is filed where the member lives: the bridges this mesh holds are the
+    # member's, so its ledger is inside its own directory (`a2a_inbound_path`).
+    assert (tmp_path / "agents" / AGENT / "tester" / LOCAL.ledger).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_members_turn_that_failed_is_logged_and_not_carried_on(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A member's turn that failed has *not* happened, and nothing claims it did.
+
+    The message was received — the responder acked it — and the turn did not run:
+    a provider that answered 500, a store that refused.  So the peer is owed an
+    answer this process no longer holds a turn for, and the line names the
+    conversation it was for.
+    """
+    failed = AgentServer(refuse=True)
+    async with Client(failed.mcp) as client:
+        failed.client = client
+        session = local_member(tmp_path)
+        session.mesh.on_inbound_task(AGENT, "this one fails", TASK)
+        with caplog.at_level(logging.ERROR, logger="slife2.plugins.a2a.server"):
+            await drain_until_idle(session, agent=failed)
+
+    assert len(failed.turns) == 1, "the turn was not attempted"
+    assert any(
+        "a2a_delivery_failed" in record.getMessage()
+        and f"{AGENT}/tester" in record.getMessage()
+        for record in caplog.records
+    ), "a member's turn that failed left no trace naming its conversation"
+
+
+@pytest.mark.asyncio
+async def test_no_presence_line_is_drawn_for_a_member(
+    tmp_path: Path, window: Window
+) -> None:
+    """**A subagent coming and going is not drawn anywhere yet.**
+
+    On the remote network a peer's transition is a line in the window showing the
+    agent, and it is worth one: nothing else ever says a peer arrived.  Here the
+    card is the maker's own subagent — the one *it* has just woken by sending to
+    it — so the line would tell the sender what it had already done.  What a
+    member's coming and going should look like on a terminal is not designed yet,
+    so nothing is drawn rather than something invented; the card is still cached,
+    which is what the roster reads.
+    """
+    session = local_member(tmp_path)
+    card = AgentCard(agent_name=AgentName("tester"), status="online")
+    session.mesh.on_agent_change(card, "online")
+    await drain_until_idle(session, window=window)
+
+    assert window.noted == []
+    assert session.queue.empty(), "nothing was even queued for a window"
+
+
+@pytest.mark.asyncio
+async def test_a_members_own_session_hands_a_note_to_no_window(
+    tmp_path: Path, window: Window
+) -> None:
+    """The reader's half of that rule, which the network's silence does not cover.
+
+    `note_to_window` addresses the *agent* — `session.agent` — and a member's
+    session has its maker's name in that field, so a note that ever did reach one
+    would be drawn in its maker's window, as though the maker's own presence had
+    changed.  A note has no second road, and a member has no window: dropped.
+    """
+    session = local_member(tmp_path)
+    session.post("⚡ jill online", PEER, "jill is online", note=True)
+    await drain_until_idle(session, window=window)
+
+    assert window.noted == []
+
+
+@pytest.mark.asyncio
+async def test_a_send_to_a_subagent_gives_it_its_place_before_publishing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**The other half of the road: a name nobody is listening for.**
+
+    A message published to a member whose responder is not subscribed goes to
+    nobody and reports nothing, so the send path gives the receiver its place
+    first — and the order is the point rather than a detail: the request has to
+    go out onto a broker the peer is already subscribed to, or the peer's own ack
+    is what is missed.  The sender's place is taken too, and by the same rule,
+    because a reply comes back to *its* topic.
+    """
+    places: list[str] = []
+    published: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        places.append(self.agent_name)
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        published.append(f"{self.agent_name}->{agent}")
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "please do this"},
+                meta=client_meta(AGENT),
+            )
+
+    assert places == [AGENT, "tester"], "the receiver's place was not taken first"
+    assert published == [f"{AGENT}->tester"], "the send did not go out as the maker"
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_answers_as_itself_rather_than_as_its_maker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A member's reply is published by the member.**
+
+    It arrives as a call from the member's own conversation, so the client id
+    already says who is speaking — and it has to be used.  Published under the
+    maker's name the reply would be the maker talking to itself, and it would
+    complete nothing: the bridge it is answering is on *the member's* responder,
+    and `complete_task` against the wrong mesh answers "unknown task_id" to the
+    very peer that sent it.
+    """
+    places: list[str] = []
+    published: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        places.append(self.agent_name)
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        published.append(f"{self.agent_name}->{agent}")
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": AGENT, "message": "done", "message_type": "message"},
+                meta=client_meta(AGENT, "tester"),
+            )
+
+    # Only the member's own place: the maker is not one of its own subagents, and
+    # what carries its side of the conversation is the window that sent the task.
+    assert places == ["tester"], "the reply was not published as the member"
+    assert published == ["tester->jack"]
+
+
+@pytest.mark.asyncio
+async def test_a_broadcast_wakes_every_member_before_it_is_published(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Published is not subscribed: a broadcast reaches whoever is listening.
+
+    A maker with two subagents has two responders, and only the ones some earlier
+    message happened to wake are up — so "every subagent you have" is a promise
+    the send path has to make true, once per member.
+    """
+    places: list[str] = []
+    published: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        places.append(self.agent_name)
+
+    async def broadcast(self: Any, event: str) -> None:
+        published.append(f"{self.agent_name}: {event}")
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "broadcast", broadcast)
+
+    with in_home(tmp_path):
+        for name in ("tester", "tester2"):
+            write_subagent(AGENT, name)
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(BROADCAST), {"event": "stand up"}, meta=client_meta(AGENT)
+            )
+
+    assert places == [AGENT, "tester", "tester2"]
+    assert published == [f"{AGENT}: stand up"]
+
+
+@pytest.mark.asyncio
+async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
+    tmp_path: Path,
+) -> None:
+    """**The roster is the membership, not the cache.**
+
+    `subagent_list_agents` answered with the broker's retained cards, so a
+    subagent that had been made and not yet messaged was simply absent from the
+    list of "your subagents" — the one question the tool is for.  A card is a
+    *presence*, and the absence of one here means "nothing is listening yet",
+    which is a thing a model can act on: a message to it wakes it.  The names
+    come from the same look the send path takes, so the two agree by
+    construction.
+    """
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True, unit="local")
+        async with Client(server) as client:
+            answer = await client.call_tool(
+                LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT)
+            )
+
+    data = answer.data
+    assert data["agents"] == [
+        {"agent_name": AGENT, "status": "offline"},
+        {"agent_name": "tester", "status": "offline"},
+    ]
+    # **The namespace the mesh is in, not the section's.**  The section says
+    # `local` and this mesh publishes in `local-jack` (`Net.unit_for`), so the
+    # answer used to name a namespace nobody was in.
+    assert data["unit"] == "local-jack"
+
+
+@pytest.mark.asyncio
+async def test_the_remote_network_places_nothing_and_lists_only_cards(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same two reads on the other network, where neither rule applies.
+
+    A remote peer is somebody else's process, and its own window is holding its
+    `join` — so there is nothing here to place; and a peer's absence from the
+    roster is a fact about that peer rather than a member waiting to be woken.
+    """
+    places: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        places.append(self.agent_name)
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        # A directory that would be a *member* on the local network, and is
+        # nothing at all here.
+        write_subagent(AGENT, PEER)
+        config = default_config()
+        object.__setattr__(config, "a2a", settings(configured=True))
+        server = build_server(config, source=lambda: config, connecting=False)
+        async with Client(server) as client:
+            await client.call_tool(
+                A2A_SEND_MESSAGE,
+                {"agent": PEER, "message": "hello"},
+                meta=client_meta(AGENT),
+            )
+            answer = await client.call_tool(
+                A2A_LIST_AGENTS, {}, meta=client_meta(AGENT)
+            )
+
+    assert places == [AGENT], "a peer on the remote network is not this process's"
+    # The cards and nothing else: `jill` is a directory that would be a member on
+    # the local network, and here it is not a peer of any kind.  `online` is the
+    # sender itself, which the send above put on the mesh.
+    assert answer.data["agents"] == [{"agent_name": AGENT, "status": "online"}]
+
+
+@pytest.mark.asyncio
+async def test_a_members_own_roster_lists_it_once(tmp_path: Path) -> None:
+    """**`you first` is one row, and a member is in two of the lists.**
+
+    A subagent asking this question is a member of the roster it is asking
+    about — so the membership look finds its own name, under which it would be
+    listed a second time, as a member nothing has woken, beside the row that is
+    the asker.  The maker is not here because this mesh is never connected: on a
+    broker its card is in the same unit and it is listed like any other peer.
+    """
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        write_subagent(AGENT, "tester2")
+        server = local_build(configured=True, unit="local")
+        async with Client(server) as client:
+            answer = await client.call_tool(
+                LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT, "tester")
+            )
+
+    names = [card["agent_name"] for card in answer.data["agents"]]
+    assert names == ["tester", "tester2"], "the asker is its own first row, once"
+    assert answer.data["agent_name"] == "tester"
+
+
+@pytest.mark.asyncio
+async def test_the_orphan_notice_names_the_tool_this_network_has(
+    tmp_path: Path,
+) -> None:
+    """**A reply tool is named in the reader's own words.**
+
+    The notice tells a model the one reply an orphaned task can still get, and it
+    spelled `a2a_send_message` on *both* networks — so a reader on the subagent
+    network was told to call a tool it was never handed (`subagent_*` is what it
+    has), and the same line taught it the name of the mechanism.  One template,
+    one hole, and the plugin fills it from the session it is posting for — the
+    same reason the tool descriptions are built per network
+    (`describe_tool`).
+    """
+    with in_home(tmp_path):
+        InboundStore.open(AGENT, LOCAL.ledger, "tester").add(TASK, PEER)
+    session = local_member(tmp_path)
+
+    announce_orphans(session)
+
+    text, peer, what, retries, note = session.queue.get_nowait()
+    assert "subagent_send_message" in text
+    assert "a2a" not in text.lower(), "the mechanism is not the network's name"
+    assert TASK in text and PEER in text
+
+
+@pytest.mark.asyncio
+async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> None:
+    """**The refusal names the section that would turn this network on.**
+
+    One module serves both, and the sentence naming the switch was the remote
+    network's: a machine with a `subagent:` section and no mesh was told there is
+    no `a2a:` section — a key it does not have — and taught the word `A2A` for
+    the network the rest of its tools call `subagent`.
+    """
+    server = build_server(default_config(), net=LOCAL, connecting=False)
+    async with Client(server) as client:
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "hello"},
+                meta=client_meta(AGENT),
+            )
+        answer = await client.call_tool(
+            LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT)
+        )
+
+    said = str(refused.value)
+    assert "`subagent:` section" in said, "the refusal names the wrong section"
+    assert "a2a" not in said.lower()
+    assert "`subagent:` section" in answer.data["error"]
+    assert "a2a" not in answer.data["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_on_the_subagent_network_carries_no_remote_word(
+    tmp_path: Path, window: Window
+) -> None:
+    """**The words follow the network, and here the envelope is the word.**
+
+    The two terminal lines render `Peer **x** …` on the remote network, where the
+    word exists so that the marker's `from` is not read as the receiver — the
+    reason `MARKER_PREFIX` is `PeerAgent`.  On the subagent network the same
+    sentence has two possible readers (a maker reading about its subagent, a
+    subagent reading about its maker or a sibling) and no relationship word is
+    true for both, so the line names the far end by name and lets
+    `[SubagentPeer:…]` and the `Subagent(<name>)> ` bubble say what it is.
+    """
+    session = local_member(tmp_path, subagent="")
+    session.mesh.on_task_completion(TASK, "done", COMPLETED, "tester", "task")
+    await drain_until_idle(session, window=window)
+
+    said = window.handed[0]
+    assert said["text"] == (
+        f"{marker(LOCAL, 'tester', TASK, type='task_response')}"
+        f"**tester** completed async task (ID: `{TASK}`):\n\ndone"
+    )
+    assert said["channel"] == channel_for(LOCAL, "tester")

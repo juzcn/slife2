@@ -2554,9 +2554,10 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
 async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
     """The tree stops at one level, and stops by name rather than by accident.
 
-    A subagent's turns are run by its maker's window, and there is nothing one
-    level further down to run them — so this is a refusal from the tool rather
-    than a member that exists and can never answer (sdd §12.8).
+    The local network holds a place for a maker's *own* subagents and no further
+    in (`slife2.plugins.a2a.server.place_for`), so a member of a member would be
+    a conversation with nothing listening for it — a refusal from the tool rather
+    than a subagent that exists and can never answer (sdd §12.8).
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
