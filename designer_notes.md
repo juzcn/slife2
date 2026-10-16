@@ -41,6 +41,11 @@ agent-task:<name>, 从Agent Task的结果中注入到当前Agent loop中， Asyn
 
 async-tool:<name>, 从async tool的async执行结果中进当前loop, AsyncTool(pdf_to_md)>, [AgentToolResult:json]
 
+增加了2个新channel , agent, subagent, 
+
+agent， agent发给subagent的信息，Agent(name)>， Agent:json
+subagent， suabgent发给agent或其它subagent的信息， Subagent(name)>, Subagent:json
+
 - In memory Harness Marker
 
 [TURN:json]
