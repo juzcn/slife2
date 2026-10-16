@@ -80,6 +80,22 @@ def test_a_background_calls_result_wears_the_tool_that_produced_it() -> None:
     assert channel_prefix(channel_for("pdf_to_md")) == "AsyncTool(pdf_to_md)> "
 
 
+def test_one_of_the_agents_own_subagents_is_drawn_as_a_subagent() -> None:
+    """`Subagent(name)> `, and the word is right here for the reason it is wrong
+    on the envelope.
+
+    A bubble is read by the agent that made the subagent, so the relationship is
+    what a person needs; the envelope beside the same message says
+    `[SubagentPeer:` because it is read by whoever the turn runs for, and that can
+    be a subagent rather than its maker (`slife2.plugins.a2a.server.describe_tool`
+    is the other half of this pair).
+    """
+    from slife2.libs.host.config import LOCAL
+
+    assert channel_prefix(f"{LOCAL.channel}:researcher") == "Subagent(researcher)> "
+    assert channel_prefix(LOCAL.channel) == f"{LOCAL.channel}> "
+
+
 def test_a_scheduled_trigger_says_which_task_came_due() -> None:
     """The clock's messages wear **no marker** — there is nothing to match a
     result to, because a trigger is not a result (DESIGN.md §1.7) — so the

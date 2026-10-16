@@ -61,6 +61,7 @@ from slife2.libs.harness.markers import strip as strip_marker
 # imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
+from slife2.libs.host.config import LOCAL
 from slife2.plugins.a2a.server import CHANNEL as A2A_CHANNEL
 from slife2.plugins.a2a.server import MARKER_PREFIX as A2A_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
@@ -187,6 +188,14 @@ def channel_prefix(channel: str) -> str:
         # another *agent* spoke, which is the same word its marker uses
         # (`slife2.plugins.a2a.server.MARKER_PREFIX`).
         return f"PeerAgent({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{LOCAL.channel}:"):
+        # One of this agent's own subagents, and **the one place the word is a
+        # role rather than the envelope's**.  A bubble is read by the agent that
+        # made the subagent, so `Subagent(name)` says exactly what a person needs
+        # to know; the *envelope* on the same message says `[SubagentPeer:` for
+        # the opposite reason — it is read by whoever the turn runs for, and that
+        # can be a subagent rather than its maker (`slife2.libs.host.config.LOCAL`).
+        return f"{LOCAL.bubble}({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
     # this window inventing a speaker (DESIGN.md §1.3).
