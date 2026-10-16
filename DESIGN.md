@@ -2811,9 +2811,9 @@ machinery below changed when the state moved in.
 append the user message
 for step in 1..max_steps:                     ← 0 = no cap: until the model stops
     Phase A: exhaust the model stream, forwarding deltas       ← no tool runs here
-    append the assistant message, from the *result*
-    if no tool calls: done
-    Phase B: run each call, feed every result back             ← never raises
+    if no tool calls: append the assistant message, done
+    Phase B: run each call, and fit its result                 ← the fit can raise
+    append the message and every one of its results at once    ← no await inside
 ```
 
 **The step cap is opt-in.** `max_steps: 0` — and an absent key, which the config
@@ -2852,6 +2852,20 @@ Three load-bearing details:
   arguments, a tool that throws — all become error text handed back to the
   model, which can read it and correct itself. The error path is a feedback
   channel, not a failure mode.
+- **A batch is written at once, and only once it has all been answered.** The
+  assistant message carries *every* call of the step, and a provider rejects a
+  history in which one of them is unanswered — so the message and its results
+  are appended together, with no `await` between them. This was written the
+  other way round first, on the argument that nothing in Phase B can raise; the
+  argument is false, and by one step. *Running* a call cannot raise (the
+  registry turns a failure into text), but **fitting** its result is the
+  caller's own callback — a cabinet that will not open, a discriminator that
+  stalled — and appending the message before the fitting left exactly the
+  rejected history behind. Nothing repaired it afterwards: a failed turn keeps
+  its messages, so that conversation failed every later turn until it was
+  rebuilt. Fitting against the list *before* the step's answer is also the
+  honest list to judge a result by, since it no longer holds a half-written
+  batch. `sdd §12.5` is where this arrived from.
 - **The observer is one method on a tagged union**, not v1's eight-method
   handler. Adding an event to a union breaks only the observers that want
   exhaustiveness; adding a method breaks every observer in the codebase. A

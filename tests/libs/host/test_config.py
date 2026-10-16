@@ -1320,6 +1320,39 @@ def test_the_broker_flag_overrides_the_address_and_nothing_else(
     assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
 
 
+A_MESH_AND_LOCAL = (
+    A_MESH
+    + """
+subagent:
+  broker:
+    host: localhost
+    port: 1884
+  org: a-local-org
+  unit: a-local-unit
+"""
+)
+
+
+def test_the_broker_flag_leaves_the_local_network_alone(tmp_path, monkeypatch) -> None:
+    """**The flag names somebody else's broker, and a subagent has no business
+    on one.**
+
+    `--a2a-broker` is an override of the *remote* section only
+    (`Net`/`_a2a`'s `override`), and the local network's broker is this
+    machine's own and the file's to say.  When the flag reached both, the local
+    mesh was dialled at the remote address under its per-maker namespace — and
+    since `slife2.plugins.a2a.broker.ensure` never starts a broker that is not
+    this machine's, the local one stopped being brought up at all.
+    """
+    monkeypatch.setenv(A2A_BROKER_ENV_VAR, "somebody-elses.example:2883")
+    config = load(write(tmp_path, A_MESH_AND_LOCAL))
+
+    assert config.a2a.address == "somebody-elses.example:2883"
+    assert config.a2a.overridden
+    assert config.subagent.network.address == "localhost:1884"
+    assert not config.subagent.network.overridden
+
+
 def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
     config = load(write(tmp_path, A_MESH))

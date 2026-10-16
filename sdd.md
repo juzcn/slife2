@@ -475,9 +475,11 @@ by raising.
 **Cancellation is a repair, not an unwind.** A turn cut off mid-stream leaves the
 user's message in the conversation and nothing the model produced, because an
 assistant message whose tool calls are only partly answered is the one history
-state every provider rejects. The same repair is what a failure on the way out
-of a tool batch needs: whatever ends a turn, the history it leaves is one a
-provider will accept (§12, where that path is listed as still open).
+state every provider rejects. **A batch is written the same way**: the loop runs
+every call and fits every result *first*, then appends the assistant message and
+its answers together with no `await` between them — so nothing that ends a turn
+mid-batch, a cancellation or a failure, can leave that history behind (§12.5,
+which this settled).
 
 ### 4.2 What the harness adds to a conversation
 
@@ -698,7 +700,14 @@ that matter:
 - **A stream that goes quiet is a stall, not a long answer.** `MCPBackend`'s
   drain watches the wait for *one chunk*, and a provider silent for the stall
   window is indistinguishable from one that has hung. The clock is on the chunk,
-  never on the call: a model that streams for an hour is fine.
+  never on the call: a model that streams for an hour is fine. **The watchdog is
+  armed by iterating the chunks**, so every caller of a model has to read the
+  stream and not only await its result — there is no other clock on the call
+  (`open_backend` passes no timeout, deliberately). The loop drains; the
+  harness's own discriminator call is the caller that did not, and a provider
+  that took the call and went quiet hung that step for ever with the
+  conversation's lock held, where the same silence fails a turn in the stall
+  window.
 
 **A provider difference is config, not a branch.** `thinking`, `reasoning` and
 `store` are fields of a model's entry, and each server sends only what its config
@@ -1286,11 +1295,15 @@ code against its own docstrings. What would settle each is named with it.
    daily expression fire twice, because the suppression compares instants and the
    repeated hour is two of them. *Settled by:* the rule stated in the expression
    layer, and a test in a zone that has the transition.
-5. **A history left with an unanswered tool call.** The repair runs on
-   cancellation; a failure that lands mid tool-batch needs the same repair by a
-   different path, and the loop's comment assumes a tool execution cannot raise.
-   *Settled by:* the failure path running the same repair, with a test that fails
-   a tool the way a transport does.
+5. **A history left with an unanswered tool call.** *Settled*, and not by the
+   repair that was proposed: the loop no longer creates the state. The
+   assumption underneath it was that a tool execution cannot raise, and running
+   one cannot — but *fitting* its result is the caller's own callback, and a
+   cabinet that will not open or a stalled discriminator raises there, between
+   the assistant message and its answers. So the batch is now collected first
+   and written after, with no `await` between the message and its results,
+   which is the rule the harness pair already followed (§4.1). Cancellation
+   stops needing the repair for the same reason.
 6. **Where a retry policy lives.** Two channels keep their own backoff and reset
    it on different events. *Settled by:* one policy in `helpers/timeouts.py` and
    one reason to reset.

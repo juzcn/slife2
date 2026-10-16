@@ -365,9 +365,15 @@ def bind_timeout(
                 arguments.pop("timeout", None)
         return None
 
-    if asked is None:
-        asked = parse_timeout(arguments.pop("timeout", None))
-    return asked
+    # **The bare key comes out whatever `_timeout` said**, which is the rule the
+    # paragraph above states and the one case that was missing it: popping only
+    # when `_timeout` was absent left `timeout` in the arguments of a call that
+    # wrote both, and this tool does not declare it — so the call died on
+    # "Unexpected keyword argument" with a bound the model *had* asked for
+    # sitting right there.  `_timeout` is the harness's own spelling and wins
+    # when both are given.
+    bare = parse_timeout(arguments.pop("timeout", None))
+    return asked if asked is not None else bare
 
 
 class ToolFailed(Exception):

@@ -237,6 +237,19 @@ async def _asked(
     # has come apart, and the turn it is serving is about to fail on its next
     # request anyway — so absorbing it would buy a worse trace, not a turn.
     stream = backend.stream([Message(role="user", content=instruction)], [])
+    # **Drained, though nothing here displays a chunk**, and that is what puts a
+    # clock on this call.  The stall watchdog lives in the drain
+    # (`slife2.clients.model.MCPBackend._drain`) and is armed by *iterating* the
+    # chunks, so awaiting `result` alone waits on a connection with no deadline
+    # of any kind: `open_backend` passes no timeout — the watchdog is the bound,
+    # for the reason the loop gets away with it — and a provider that took the
+    # call and then went quiet would hang this step for ever with the
+    # conversation's lock held.  The same silence fails a turn in the loop in
+    # `timeouts.work.stall` seconds.  The chunks are discarded because this is
+    # one question and one answer: `read_reply` reads the result, and a step of
+    # the discriminator's own is not something the window draws.
+    async for _ in stream.chunks:
+        pass
     reply = (await stream.result).text
     return dumps.read_reply(reply)
 

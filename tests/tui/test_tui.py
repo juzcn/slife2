@@ -1192,6 +1192,33 @@ async def test_a_restored_message_from_another_channel_wears_it() -> None:
         assert "peer-1" not in shown(app), "the marker reached the screen"
 
 
+async def test_a_restored_subagent_message_unwraps_its_own_envelope() -> None:
+    """**The fifth marker, which the config owns and no plugin exports.**
+
+    The local network is a second envelope rather than a second name for the
+    remote one — `[SubagentPeer:` against `[PeerAgent:` — and the window already
+    knows the channel, because `channel_prefix` gives it `Subagent(jill)> `. The
+    strip list held the four prefixes the plugins export and missed this one, so
+    a subagent's handed-over answer was drawn with its raw envelope in front of
+    it: the exact failure that list exists to prevent.
+    """
+    client = answering_with(
+        stored(
+            Message(
+                role="user",
+                content='[SubagentPeer:{"from": "jill", "type": "message"}] 查一下',
+            ),
+            asked="2020-03-04T09:05:00+08:00",
+            channel="subagent:jill",
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "[2020-03-04 09:05] Subagent(jill)> 查一下" in shown(app)
+        assert "SubagentPeer" not in shown(app), "the marker reached the screen"
+
+
 async def test_the_persons_own_words_are_never_unwrapped() -> None:
     """Typing a marker-shaped message is not a way to lose the front of it.
 

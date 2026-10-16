@@ -80,9 +80,11 @@ already running somewhere this config does not name.
 **`--a2a-broker` points the mesh at a broker instead of the one in the config** —
 somebody else's, a team's, one already running on another machine — so joining
 one for a session does not mean editing a file every session reads. It overrides
-`a2a.broker` and nothing else: which network this is (`org`/`unit`) is still the
-section's, and a machine with no `a2a:` section is still off the mesh, so the
-flag is refused there rather than switching one on. **A broker belongs to a
+`a2a.broker` and nothing else — **not the local network's broker**, which is
+`subagent:`'s and is this machine's own, so an agent's subagents stay where the
+file put them. Which network this is (`org`/`unit`) is still the section's, and a
+machine with no `a2a:` section is still off the mesh, so the flag is refused
+there rather than switching one on. **A broker belongs to a
 running stack**, which is why the flag can only be honoured by the command that
 starts the mesh: if the servers are already up they are on the broker they were
 started with, and `slife2` says so and stops rather than leaving you on the

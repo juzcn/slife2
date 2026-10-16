@@ -642,7 +642,18 @@ class ToolStore:
             }
             for row in rows:
                 name = str(row.get("name") or "")
-                if not name:  # a tool with no name is one nothing could call
+                # **Whitespace is no name either**, and it is the same fact the
+                # sentence above states: nothing can call a tool whose name is
+                # blank.  It is not merely untidy to admit one — `tool_document`
+                # builds the chunk text from this name, and `embed_chunks` drops
+                # every paragraph that strips to empty, so such a row yields no
+                # chunk at all.  `sync_indexes` terminates on "a selected row is
+                # no longer missing", and `tools_without_vectors` asks for rows
+                # with no chunk row, so the row it wrote is selected again and
+                # again for ever: the hub awaits that loop while building its
+                # store, so one such tool from any source hung every turn of
+                # every home, on one core, with nothing said.
+                if not name.strip():
                     skipped += 1
                     continue
                 if name in owned_elsewhere:

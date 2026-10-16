@@ -11,9 +11,11 @@ whose failure is expected.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
+from collections.abc import AsyncIterator
 from dataclasses import replace
 
 import pytest
@@ -27,7 +29,7 @@ from slife2.libs.host.config import (
     default_config,
 )
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
-from slife2.libs.model.base import StreamChatResult
+from slife2.libs.model.base import Stream, StreamChatResult
 from slife2.libs.turn.messages import ToolCall
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.agent.server import build_server
@@ -91,6 +93,43 @@ def config_over(tokens: int):
             "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
         },
     )
+
+
+#: How long a `StreamedBackend` result waits for somebody to read its chunks
+#: before it gives up.  Not a budget the product has — the real bound is the
+#: stall watchdog (`slife2.helpers.timeouts`) — but the stand-in for one, so a
+#: caller that never drains fails a test in a second instead of hanging it.
+UNREAD_SECONDS = 1.0
+
+
+class StreamedBackend(FakeBackend):
+    """A `FakeBackend` whose result arrives only once its chunks are read.
+
+    **The coupling the real backend has and this fake did not.**  `MCPBackend.
+    stream` hands back a `Stream` whose `chunks` is the drain — the thing that
+    holds the stall watchdog — and whose `result` is the call itself, so a
+    caller that awaits the result *without* iterating the chunks waits on a
+    connection nothing is watching for silence.  Two independent halves cannot
+    show that, which is how a discriminator call that awaited `result` alone
+    went unnoticed: on the real backend it is a turn that hangs for ever rather
+    than one that fails.
+    """
+
+    def stream(self, messages, tools):
+        stream = super().stream(messages, tools)
+        inner = stream.chunks
+        read = asyncio.Event()
+
+        async def chunks() -> AsyncIterator:
+            async for chunk in inner:
+                yield chunk
+            read.set()
+
+        async def result() -> StreamChatResult:
+            await asyncio.wait_for(read.wait(), timeout=UNREAD_SECONDS)
+            return await stream.result
+
+        return Stream(chunks=chunks(), result=result())
 
 
 def calling(name: str, arguments: dict) -> ScriptedTurn:
@@ -191,6 +230,45 @@ async def test_a_result_past_the_window_becomes_a_window_over_it(
     asked = backend.calls[1][0][-1].content
     assert " 100  line 100 of a tool output" in asked
     assert "look something up" in asked
+
+
+@pytest.mark.asyncio
+async def test_the_discriminator_call_is_read_as_a_stream(
+    tmp_path, monkeypatch
+) -> None:
+    """**The discriminator drains its stream, so a silent provider fails it.**
+
+    The stall watchdog that bounds every model call lives in the drain
+    (`slife2.clients.model.MCPBackend._drain`) and is armed by *iterating* the
+    chunks — and `open_backend` deliberately passes no timeout, because the
+    watchdog is the bound.  So a discriminator that awaited `stream.result`
+    alone would wait on a connection with no deadline at all: a provider that
+    took the call and then went quiet would hang the turn for ever with the
+    conversation's lock held, where the same silence fails a turn in the loop
+    in `timeouts.work.stall` seconds.
+
+    `StreamedBackend` is what makes that difference visible — its result does
+    not arrive until its chunks have been read — so this test is about the
+    *contract* the loop above already keeps and this step has to keep too.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    cfg = config_over(WINDOW)
+    backend = StreamedBackend(
+        calling("fake__echo", {"text": HUGE}),
+        answered(PICKED),
+        answered("done"),
+    )
+    kept: dict[str, str] = {}
+
+    await turn(cfg, backend, kept)
+
+    results = [
+        message for message in stored_messages() if message.get("role") == "tool"
+    ]
+    window = results[-1]["content"]
+    assert window, "the turn finished rather than hanging on an unread stream"
+    assert "line 100 of a tool output" in window
+    assert estimate_text_tokens(window) <= WINDOW
 
 
 @pytest.mark.asyncio

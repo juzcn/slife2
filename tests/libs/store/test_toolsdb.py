@@ -167,6 +167,30 @@ def test_a_name_belonging_to_another_source_is_refused(tmp_path) -> None:
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"]
 
 
+def test_a_tool_whose_name_is_whitespace_is_no_name_either(tmp_path) -> None:
+    """**A blank name is skipped, and the index sync stays finite.**
+
+    It is the same fact as "a tool with no name is one nothing could call", and
+    it is not cosmetic: `tool_document` builds a row's chunk text out of its
+    name, `embed_chunks` drops every paragraph that strips to empty, and
+    `tools_without_vectors` asks for rows with *no* chunk row — so such a row is
+    written with no chunk and then selected again for ever.  `sync_indexes`
+    terminates on "a selected row is no longer missing", and the hub awaits it
+    while building its store, so one such tool from any source stopped every
+    turn of every home with nothing said and a core spinning.
+    """
+    store = store_at(tmp_path)
+    outcome = merge(store, "px", "mcp", [tool(" "), tool("px__real")])
+
+    assert outcome["skipped"] == 1
+    assert [row[0] for row in rows_in(store)] == ["px__real"]
+
+    # The loop the row would have made infinite, bounded so that a regression
+    # fails in seconds rather than hanging the suite.
+    done = asyncio.run(asyncio.wait_for(store.sync_indexes(EMBEDDER), timeout=5))
+    assert "identity" in done, "the sync returned rather than selecting the row again"
+
+
 def test_a_source_that_answers_again_puts_its_rows_back(tmp_path) -> None:
     """`error` is a verdict about now, and the next successful list withdraws it.
 

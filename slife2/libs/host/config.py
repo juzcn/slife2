@@ -2109,7 +2109,15 @@ def _a2a(
     same thing — so on a machine with no `a2a:` the flag is refused, by name,
     rather than answered with a mesh nobody asked the file for.
     """
-    override = os.environ.get(A2A_BROKER_ENV_VAR, "").strip()
+    # **Read through the parameter, which is the whole of who gets it.**  This
+    # line used to name `A2A_BROKER_ENV_VAR` itself, so the parameter above was
+    # dead and `--a2a-broker` reached *both* networks: the local mesh was dialled
+    # at somebody else's broker under its per-maker namespace, and because
+    # `slife2.plugins.a2a.broker.ensure` never starts a broker that is not this
+    # machine's, the local one was no longer brought up either.  A subagent has
+    # no business on anybody else's broker — the docstring above is the rule, and
+    # this is the one line that has to obey it.
+    override = os.environ.get(override, "").strip() if override else ""
     if raw is None and override:
         raise ConfigError(
             f"--a2a-broker {override!r} names a broker to use, but this machine "

@@ -25,10 +25,11 @@ own readiness probe, which is what a real start waits on too.
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -38,7 +39,7 @@ import pytest_asyncio
 from fastmcp import Client
 
 from slife2.libs.host import launcher
-from slife2.libs.host.config import load
+from slife2.libs.host.config import LOCAL_SERVERS, load
 from slife2.libs.host.paths import DATA_ENV_VAR, data_dir
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.turn.tokens import estimate_text_tokens
@@ -68,16 +69,64 @@ INPUT_TOKENS = 8192
 WINDOW = 300
 
 
-def _free_port() -> int:
-    """A port nothing is on, for a config that has to name one.
+#: Where this worker's ports come from.  **A band per xdist worker, because the
+#: obvious allocator is racy.**  Binding port 0, reading the number and closing
+#: it hands back a port that belongs to nobody until somebody binds it, so two
+#: workers drawing at the same moment can be given the same one — measured on
+#: this machine at about one run in fifty with three workers.  The daemon that
+#: loses the race cannot bind, and everything that depends on it is then
+#: reported "not attempted: … did not come up", which names neither a port nor a
+#: collision.  Bands cannot overlap, so the race is gone rather than unlikely.
+_PORT_BASE = 20_000
+_BAND_PORTS = 250
+
+
+def _worker_band() -> int:
+    """Which xdist worker this is.  A run with no xdist is band 0."""
+    name = os.environ.get("PYTEST_XDIST_WORKER", "")
+    return int(name[2:]) if name[:2] == "gw" and name[2:].isdigit() else 0
+
+
+def _free_ports(names: Iterable[str]) -> dict[str, int]:
+    """One port per name, all of them from this worker's own band.
 
     The config cannot say `port: 0` (`slife2.libs.host.config._server` refuses
     it, for the reason a port is how a launcher finds a server again), so a test
     that must not collide with a developer's running stack picks them itself.
+
+    **Every socket is held until the whole set has been chosen**, so nothing
+    else — another worker, or the next port this loop asks for — can be handed
+    one of them.  Releasing each as it is found would leave the same race one
+    call smaller.
     """
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    start = _PORT_BASE + (_worker_band() % 32) * _BAND_PORTS
+    end = start + _BAND_PORTS
+    chosen: dict[str, int] = {}
+    held: list[socket.socket] = []
+    port = start
+    try:
+        for name in names:
+            while True:
+                if port >= end:
+                    raise RuntimeError(
+                        f"no free port left in this worker's band "
+                        f"({start}-{end}); something else here is holding them"
+                    )
+                probe = socket.socket()
+                try:
+                    probe.bind(("127.0.0.1", port))
+                except OSError:
+                    probe.close()
+                    port += 1
+                    continue
+                held.append(probe)
+                chosen[name] = port
+                port += 1
+                break
+    finally:
+        for probe in held:
+            probe.close()
+    return chosen
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
@@ -287,28 +336,16 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
     provider = StubProvider()
     provider.start()
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    ports = {
-        name: _free_port()
-        for name in (
-            "openai-completions",
-            "embeddings",
-            "agent",
-            "context",
-            "toolhub",
-            "skills-server",
-            "cli-server",
-            "mcp-tools",
-            "restapi-tools",
-            "wechat",
-            "cabinet",
-            "media",
-            "file-tunnel",
-            "tui",
-            "agent-task",
-            "schedule",
-            "a2a",
-        )
-    }
+    # **Derived from `LOCAL_SERVERS`, not written out.**  A hand-kept list is a
+    # list that goes stale, and this one had: `subagent` was missing, so it
+    # started on the built-in default port instead of a picked one — and since
+    # these tests run concurrently, every worker's stack raced for that one
+    # address.  The first to bind it won; the others found it answering, called
+    # it "running (external)", and their teardown asserted on a server they had
+    # never started.  The lane was red on every run and the assertion below said
+    # nothing about ports.  Every plugin this config names now gets a port
+    # nobody else is on, which is what `_config_text`'s own comment promises.
+    ports = _free_ports((*LOCAL_SERVERS, "openai-completions"))
     (tmp_path / "slife2.yaml").write_text(
         _config_text(provider.base_url, ports), encoding="utf-8"
     )

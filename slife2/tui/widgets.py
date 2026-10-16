@@ -81,6 +81,13 @@ MARKERS: tuple[str, ...] = (
     ASYNC_TASK_MARKER,
     ASYNC_CALL_MARKER,
     A2A_MARKER,
+    # **The local network's, which is a second envelope and not a second name
+    # for the remote one.**  This list held the four the plugins export and
+    # missed the one the *config* owns (`LOCAL.marker`, `[SubagentPeer:`) — so a
+    # subagent's handed-over answer was drawn with its raw envelope in front of
+    # it, which is the exact failure the imports above exist to prevent:
+    # `channel_prefix` already knows this channel and gives it `Subagent(jill)>`.
+    LOCAL.marker,
 )
 
 #: So `_add` can hand back the widget type it was given.

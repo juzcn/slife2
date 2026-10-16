@@ -207,6 +207,30 @@ async def test_a_bare_timeout_on_a_tool_without_one_is_read_and_stripped() -> No
 
 
 @pytest.mark.asyncio
+async def test_a_bare_timeout_is_stripped_even_when_timeout_was_also_given() -> None:
+    """**Both spellings at once, and the bare one still never reaches the tool.**
+
+    The harness's `_timeout` wins, but winning is not the same as excusing the
+    other key: a tool that does not declare `timeout` refuses the whole call for
+    an argument its schema does not have, so the bare key has to come out
+    whether or not `_timeout` was written.  The call that writes both is exactly
+    the one where it used to stay.
+    """
+    seen: list[dict[str, Any]] = []
+
+    async def capture(arguments: dict[str, Any]) -> str:
+        seen.append(dict(arguments))
+        return "ran"
+
+    call = ToolCall(
+        id="1", name="capture", arguments={"e": "1", "_timeout": 30, "timeout": 60}
+    )
+    await one(call, [a_tool("capture", capture)]).run_turn([], "hi")
+
+    assert seen[0] == {"e": "1"}, "neither spelling is the tool's business"
+
+
+@pytest.mark.asyncio
 async def test_the_meta_parameters_reach_the_history_but_not_the_tool() -> None:
     """The strip is a copy: what the model said is what the conversation keeps."""
     seen: list[dict[str, Any]] = []

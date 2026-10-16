@@ -94,13 +94,15 @@ Subagent设计， 主agent 和 它的子agent组成另一个 A2A 网
 如果用headless建，是不是所有机制都有了？
 
 
-subagent-set: subaggent 可以通过参数配置使用的llm，默认用主agent的LLM，
-
-另外增加2个参数，
-
-- fork, 默认false，当为true时，共享主agent的一切，包括turns,自己的turn不落盘。clone主agent的上下文到subagent.
-- role, Subagent的角色，默认为subagent
-
-
 A2A 网 与 A2A-Subagent网是独立的两张网，可能broker 也不一样。顺便把这个功能做了：--a2a-broker host:port , use external broker。我们可以把A2A的agent理解为Remote Agent, Suagent是一个Local Agent.
   
+
+- 代码级 review
+
+1、codereview， find bugs, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）
+2、codereview, find duplicate and dead codes, fix them one by one, update docs（README.zh-CN.md， sdd, design, readme.md）.
+3、codereview, 优化pytest，完善e2e, update docs（README.zh-CN.md， sdd, design, readme.md）
+
+- 结构级 review
+
+4、codereview for fallback,觉得每个操作都可能失败就会有无穷多个fallback，而设计的行为正常必须成功的不允许fallback.fallback是不影响正常行为degrade，degrade必须要得到设计批准。我们有时候更愿意hard fail，而不做一些隐藏bug的fallbcak。失败可以重试。真正需要fallback时。要让fallback成为一种/设计行为。fix them one by one , update docs（README.zh-CN.md， sdd, design, readme.md）

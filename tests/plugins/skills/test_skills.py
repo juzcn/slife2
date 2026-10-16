@@ -144,6 +144,32 @@ def test_a_manifest_that_cannot_be_read_still_yields_its_skill(
     assert [one.name for one in scan()] == ["fine", "locked"]
 
 
+@pytest.mark.asyncio
+async def test_a_manifest_that_is_not_utf8_is_the_same_unreadable_file(
+    root: Path,
+) -> None:
+    """**A file saved in the machine's own codepage, not as UTF-8.**
+
+    The same person `bom_skill` is about, one step further: an editor on a
+    Chinese Windows writes GBK, and GBK bytes are not text this build can read.
+    It has to fail the way every other unreadable manifest does — the skill is
+    *kept*, with an empty header — because `UnicodeDecodeError` is a
+    `ValueError` and the `except OSError` guards around the read miss it: the
+    raw codec error escaped `scan` into `catalogue`, and a single such file then
+    failed `list_sources` for the whole hub, every turn, until somebody found it.
+    """
+    skill(root, "fine", header="name: fine\n")
+    folder = root / "gbk"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_bytes("---\nname: 读\n---\n\n正文。\n".encode("gbk"))
+
+    assert [one.name for one in scan()] == ["fine", "gbk"], "kept, not hidden"
+
+    text, ok = await use("gbk")
+    assert ok is False
+    assert "cannot be read" in text and "UTF-8" in text, text
+
+
 def test_an_empty_directory_is_no_skills(root: Path) -> None:
     """A fresh install has none, and that is not an error."""
     assert scan() == []

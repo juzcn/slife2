@@ -308,21 +308,20 @@ class AgentLoop:
             total_usage = total_usage + result.usage
             last_text = result.text
             last_usage = result.usage
-            messages.append(
-                Message(
-                    role="assistant",
-                    content=result.text or None,
-                    # Kept on the message rather than only streamed at the
-                    # reader: it is part of what the model said, and the turn
-                    # log is where a conversation is read back from.  It does
-                    # not go to the model again — `Message.to_wire` leaves it
-                    # out, which is the whole of that decision.
-                    thinking=result.thinking,
-                    tool_calls=list(result.tool_calls),
-                )
+            answer = Message(
+                role="assistant",
+                content=result.text or None,
+                # Kept on the message rather than only streamed at the
+                # reader: it is part of what the model said, and the turn
+                # log is where a conversation is read back from.  It does
+                # not go to the model again — `Message.to_wire` leaves it
+                # out, which is the whole of that decision.
+                thinking=result.thinking,
+                tool_calls=list(result.tool_calls),
             )
 
             if not result.tool_calls:
+                messages.append(answer)
                 await self._emit(
                     observer,
                     TurnFinished(
@@ -341,16 +340,35 @@ class AgentLoop:
                     stop_reason=result.stop_reason or "stop",
                 )
 
-            # Phase B: run the batch and feed every result back.
+            # Phase B: run the whole batch, and write it down only once every
+            # call of it has an answer.
+            #
+            # **The assistant message and its answers are appended together,
+            # with no await between them** — the same rule the harness pair
+            # above follows, for the same reason.  An assistant message whose
+            # calls are only partly answered is the one history state every
+            # provider rejects, and appending the message before fitting its
+            # results left exactly that whenever a fit raised: `_fit` is the
+            # caller's own callback, so it is the step that can fail (a cabinet
+            # that will not open, a discriminator that stalled), and nothing
+            # downstream repairs a failure — a failed turn keeps its messages,
+            # so the conversation failed every later turn until it was rebuilt.
+            #
+            # What `_fit` is handed is therefore the conversation *before* this
+            # step's answer, which is also the honest list to judge a result
+            # against: it no longer contains a half-written batch.
+            answers: list[Message] = []
             for call in result.tool_calls:
                 text, _ok = await self._one(call, observer, step)
-                messages.append(
+                answers.append(
                     Message(
                         role="tool",
                         content=await self._fit(call, text, messages),
                         tool_call_id=call.id,
                     )
                 )
+            messages.append(answer)
+            messages.extend(answers)
 
         # Only a capped turn ever gets here: with no cap the iterator does not
         # end, so the only way out of the loop is the return above.

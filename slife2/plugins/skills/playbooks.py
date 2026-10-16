@@ -171,7 +171,24 @@ def _read(manifest: Path) -> str:
     `scan` and `document` are the two, and a third reader would be a third place
     where the mark silently wins.
     """
-    return manifest.read_text(encoding="utf-8-sig")
+    try:
+        return manifest.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        # **A file that is not UTF-8 is a file that could not be read**, which is
+        # the failure every caller already answers: `scan` keeps the skill with
+        # an empty header, `use` refuses it by name, and the catalogue gives it a
+        # row that says `error`.  Translated here rather than caught as a decode
+        # error at each of them, because "this file cannot be read" is one fact
+        # and this is the only place that reads one — and a `UnicodeDecodeError`
+        # is a `ValueError`, so every `except OSError` guard around this call
+        # missed it and the raw codec error reached the hub instead, failing the
+        # whole `list_sources` for every home.  The person is the one the
+        # docstring above is about, one step further: an editor that saved the
+        # file in the machine's own codepage rather than as UTF-8.
+        raise OSError(
+            f"not UTF-8 text ({exc.reason} at byte {exc.start}) — save the file "
+            f"as UTF-8"
+        ) from exc
 
 
 def split_frontmatter(content: str) -> tuple[str, str]:
