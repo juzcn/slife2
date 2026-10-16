@@ -311,6 +311,71 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             return None, UNADDRESSED  # type: ignore[return-value]
         return await store(agent), ""
 
+    # ── The three moves every kind makes ─────────────────────────────────
+    #
+    # Five kinds are served below — notes, diary days, files, reports, and the
+    # tool outputs the harness dumps — and each is the same three moves: a page,
+    # one row, a delete.  What differs between them is the kind and the sentence
+    # a miss answers with, and those are arguments; what must *not* differ, and
+    # did while each kind had its own copy, is everything a copy gets wrong
+    # quietly: the `""` that means "no bound" on every listing, and the thread
+    # hop that keeps a store call off the loop.  Eleven lines per listing and the
+    # sentences a model reads are not a good place for four chances to disagree.
+    #
+    # Each answers `(what, refusal)` — `cabinet`'s own shape, read one step on —
+    # so a tool stays three or four lines whatever kind it serves.  The answers
+    # that need the *store* after the fetch rather than the row (`file_read`
+    # resolves a path, `dump_read` renders a window) keep their own body and say
+    # so by asking `cabinet` directly.
+
+    async def page_of(
+        ctx: Context,
+        kind: str,
+        *,
+        since: str = "",
+        until: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        **filters: Any,
+    ) -> tuple[dict[str, Any], str]:
+        """One page of one kind, or `({}, the refusal)`."""
+        opened, refusal = await cabinet(ctx)
+        if refusal:
+            return {}, refusal
+        return (
+            await off_loop(
+                opened.listing,
+                kind,
+                since=since or None,
+                until=until or None,
+                limit=limit,
+                offset=offset,
+                **filters,
+            ),
+            "",
+        )
+
+    async def row_of(
+        ctx: Context, kind: str, key: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        """One row of one kind — `(None, "")` when there is no such row.
+
+        A miss is not a refusal, and the difference is the tool's to say: a note
+        is missing *about* a subject, a report is missing *called* a title, and
+        those are the words a model reads back.
+        """
+        opened, refusal = await cabinet(ctx)
+        if refusal:
+            return None, refusal
+        return await off_loop(opened.get, kind, key), ""
+
+    async def remove_of(ctx: Context, kind: str, key: str) -> tuple[bool, str]:
+        """Delete one row of one kind — `(it went, the refusal)`."""
+        opened, refusal = await cabinet(ctx)
+        if refusal:
+            return False, refusal
+        return await opened.remove(kind, key) is not None, ""
+
     # ── Notes ────────────────────────────────────────────────────────────
 
     @mcp.tool(name="note_edit", meta=FOR_THE_MODEL)
@@ -349,10 +414,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             subject: The note's subject, from `note_list`.
         """
-        opened, refusal = await cabinet(ctx)
+        deleted, refusal = await remove_of(ctx, NOTE, subject)
         if refusal:
             return refusal
-        if await opened.remove(NOTE, subject) is None:
+        if not deleted:
             return (
                 f"There is no note about {subject!r} — `note_list` shows what there is."
             )
@@ -366,10 +431,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             subject: The note's subject, from `note_list` or a search result.
         """
-        opened, refusal = await cabinet(ctx)
+        row, refusal = await row_of(ctx, NOTE, subject)
         if refusal:
             return refusal
-        row = await off_loop(opened.get, NOTE, subject)
         if row is None:
             return (
                 f"There is no note about {subject!r} — `note_list` shows what there is."
@@ -393,17 +457,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many to show; a page, not a cap on the answer.
             offset: Skip this many, to page.
         """
-        opened, refusal = await cabinet(ctx)
+        page, refusal = await page_of(
+            ctx, NOTE, since=since, until=until, limit=limit, offset=offset
+        )
         if refusal:
             return refusal
-        page = await off_loop(
-            opened.listing,
-            NOTE,
-            since=since or None,
-            until=until or None,
-            limit=limit,
-            offset=offset,
-        )
         return _listing(NOTE, "notes", page, lambda row: str(row["key"]))
 
     # ── The diary ────────────────────────────────────────────────────────
@@ -447,10 +505,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             date: The day, `YYYY-MM-DD`.
         """
-        opened, refusal = await cabinet(ctx)
+        row, refusal = await row_of(ctx, DIARY, date)
         if refusal:
             return refusal
-        row = await off_loop(opened.get, DIARY, date)
         if row is None:
             return f"There is no diary entry for {date}."
         return _document(DIARY, row)
@@ -471,17 +528,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many to show.
             offset: Skip this many, to page.
         """
-        opened, refusal = await cabinet(ctx)
+        page, refusal = await page_of(
+            ctx, DIARY, since=since, until=until, limit=limit, offset=offset
+        )
         if refusal:
             return refusal
-        page = await off_loop(
-            opened.listing,
-            DIARY,
-            since=since or None,
-            until=until or None,
-            limit=limit,
-            offset=offset,
-        )
         return _listing(DIARY, "diary entries", page, lambda row: str(row["key"]))
 
     # ── Files ────────────────────────────────────────────────────────────
@@ -579,10 +630,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             path: The file's cabinet-relative path, from `file_list`.
         """
-        opened, refusal = await cabinet(ctx)
+        deleted, refusal = await remove_of(ctx, FILE, path)
         if refusal:
             return refusal
-        if await opened.remove(FILE, path) is None:
+        if not deleted:
             return (
                 f"There is no saved file at {path!r} — `file_list` shows what there is."
             )
@@ -647,18 +698,17 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many to show.
             offset: Skip this many, to page.
         """
-        opened, refusal = await cabinet(ctx)
-        if refusal:
-            return refusal
-        page = await off_loop(
-            opened.listing,
+        page, refusal = await page_of(
+            ctx,
             FILE,
-            since=since or None,
-            until=until or None,
+            since=since,
+            until=until,
             limit=limit,
             offset=offset,
             category=category.strip(),
         )
+        if refusal:
+            return refusal
         return _listing(
             FILE,
             "files",
@@ -712,10 +762,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             title: The report's title, from `report_list`.
         """
-        opened, refusal = await cabinet(ctx)
+        row, refusal = await row_of(ctx, REPORT, title)
         if refusal:
             return refusal
-        row = await off_loop(opened.get, REPORT, title)
         if row is None:
             return f"There is no report called {title!r} — `report_list` shows what there is."
         return _document(REPORT, row)
@@ -736,17 +785,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many to show.
             offset: Skip this many, to page.
         """
-        opened, refusal = await cabinet(ctx)
+        page, refusal = await page_of(
+            ctx, REPORT, since=since, until=until, limit=limit, offset=offset
+        )
         if refusal:
             return refusal
-        page = await off_loop(
-            opened.listing,
-            REPORT,
-            since=since or None,
-            until=until or None,
-            limit=limit,
-            offset=offset,
-        )
         return _listing(REPORT, "reports", page, lambda row: str(row["key"]))
 
     # ── Reading a dump back ──────────────────────────────────────────────
