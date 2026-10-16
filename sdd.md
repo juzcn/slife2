@@ -696,7 +696,17 @@ conversation, its cabinet, its ledger, its login, what it generated.  Because a
 directory is what an agent *is* here (§7), one level in, and **the container is
 what keeps that level from being a name the agent might also want**: `cabinet`,
 `media` and `turns.db` are `jack`'s own, and a subagent called `cabinet` would
-have been that directory. So removing a subagent is removing one directory, and removing the
+have been that directory.
+
+**Removing one is one act across three processes, and the network is told
+first.** This server stops the conversation and the store forgets the list it
+would restore from, and neither of those reaches the *place* the subagent holds
+on its network — an MQTT connection subscribed to its name, which a deleted
+directory cannot unsubscribe. So `subagent_remove` tells the plugin (`forget`,
+the same verb the context store's tool uses) before it deletes anything, which is
+also why a notification that cannot be made leaves the subagent exactly as it
+was. Nothing is asked of the member and nothing waits for it: whether it is
+mid-turn or idle, removal is a forced cleanup. So removing a subagent is removing one directory, and removing the
 agent takes its subagents with it; there is no second record of who made whom,
 because where a name's files are says it. What a subagent shares with its maker
 is the **home** — `slife2.yaml`, `agents/tools.db`, `skills/` — which is exactly

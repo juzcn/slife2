@@ -44,7 +44,12 @@ from fastmcp.exceptions import ToolError
 from ruamel.yaml import YAML
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.config import DEFAULT_AGENT, ModelSettings, default_config
+from slife2.libs.host.config import (
+    DEFAULT_AGENT,
+    A2ASettings,
+    ModelSettings,
+    default_config,
+)
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.plugin.audience import client_meta
@@ -3182,3 +3187,72 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
 
     assert len(calls) == 2, "a holder that let go was not waited out"
     assert not directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_removing_a_subagent_tells_the_network_before_it_deletes(
+    context, hub
+) -> None:
+    """**The place on the network goes first, and it is the third `forget`.**
+
+    A removal is one directory and three processes hold something of it: this
+    server holds the conversation, the context store holds the list it would
+    restore from, and the subagent network holds the *place* — an MQTT connection
+    subscribed to the name, answering whoever sends to it.  A deleted directory
+    cannot unsubscribe anything, so the plugin is told, and this is asserted at
+    the one moment the order is visible: the recorder looks at the filesystem as
+    the call arrives, and finds the subagent still there.
+    """
+    told: list[dict[str, Any]] = []
+    still_there: list[bool] = []
+    mcp: FastMCP = FastMCP("mesh")
+
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        told.append({"agent": agent, "subagent": subagent})
+        still_there.append(subagent_of(DEFAULT_AGENT, subagent).exists())
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
+
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=FakeBackend(),
+            mesh_client=mesh,
+        )
+        await set_subagent(server, "researcher")
+        directory = subagent_of(DEFAULT_AGENT, "researcher")
+        assert directory.is_dir(), "nothing to remove, so nothing to tell"
+
+        answer = await remove_subagent(server, "researcher")
+
+    assert answer.data["removed"] is True
+    assert told == [{"agent": DEFAULT_AGENT, "subagent": "researcher"}]
+    assert still_there == [True], "the network was told after the files went"
+    assert not directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_machine_with_no_subagent_network_removes_without_telling_anyone(
+    context, hub
+) -> None:
+    """The one case `leave_the_mesh` returns without a call, and it is the usual one.
+
+    A machine with no `subagent:` section has no network to tell — that section's
+    presence is what a network *is* (`SubagentSettings.network.configured`) — so a
+    removal is this server's loop and the files, and nothing is dialled.  Which is
+    what every test above this one exercises: their config has no such section,
+    and the `no_live_stack` guard would refuse the dial if one were made.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await set_subagent(server, "researcher")
+
+    assert (await remove_subagent(server, "researcher")).data["removed"] is True
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()

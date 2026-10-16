@@ -141,7 +141,8 @@ def no_live_stack(monkeypatch: pytest.MonkeyPatch) -> None:
             + ". This machine's slife2 may be running, and a test that reaches it "
             "types into a live conversation. Hand the plugin the peer instead: "
             "`window_client=`, `hub_client=`, `context_client=`, "
-            "`backend=`, `tasks_client=`, `agent_client=` — or patch this name in "
+            "`backend=`, `tasks_client=`, `agent_client=`, `mesh_client=` — or patch "
+            "this name in "
             "the module under "
             "test if the connection is the thing being tested."
         )

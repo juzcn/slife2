@@ -150,6 +150,15 @@ A2A_BROADCAST = REMOTE.tool(BROADCAST)
 #: (`slife2.tui.client`), like the tui plugin's `attach` and `submit`.
 JOIN = "join"
 
+#: The other call that is not the model's: **give up a member's place on the
+#: mesh** (`forget`).  Its caller is the agent server, in the middle of
+#: `subagent_remove` — a member can stop existing while this process is serving
+#: it, and a directory that is gone cannot unsubscribe anything.  Spelled there
+#: too, for the reason `JOIN` is spelled in `slife2.tui.client`: a name crossing a
+#: process boundary is written in two places, and the pair is held together by
+#: those two comments.
+FORGET = "forget"
+
 #: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
 #: needs the mesh and never released, because what follows a send is a reply the
@@ -1075,6 +1084,45 @@ def build_server(
             sessions[(str(where), agent, subagent)] = found
         return found
 
+    async def drop_session(session: Session, key: tuple[str, str, str]) -> None:
+        """Give up one session: **its writer, its connections, and its entry.**
+
+        Three things, and they are one act: a session is a task and a pair of
+        connections that only mean something together.  The writer goes first,
+        because it is what delivers what the mesh hands it — nothing new is taken
+        on — and it is cancelled rather than asked to finish, which is what a
+        forced cleanup means for a session that happens to be mid-turn.  Then the
+        connections are retired: `disconnect` publishes the offline card, which is
+        how a broker stops advertising a name nobody holds.  The entry is dropped
+        last, so a caller arriving in between finds something coherent rather than
+        half of a session.
+
+        **Never its own caller.**  A session's writer is `_drain`, and a teardown
+        that cancelled the frame it was called from would never return
+        (`mesh.A2AMesh.disconnect` states the same rule for the same reason).
+        Nothing does that today — the callers are `forget` and the lifespan — and
+        the guard is one comparison.
+
+        **A teardown that could not retire the name is reported, not swallowed**
+        (DESIGN.md §1.8): the offline card is how a peer is told this member left,
+        and a failure here leaves it advertised with nobody to retire it.
+        """
+        sessions.pop(key, None)
+        writer, session.writer = session.writer, None
+        if writer is not None and writer is not asyncio.current_task():
+            writer.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await writer
+        try:
+            await session.mesh.disconnect()
+        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this member left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+            logger.error(
+                "a2a %s: the mesh would not leave the broker, so it may stay "
+                "advertised: %s",
+                describe((session.agent, session.subagent)),
+                e,
+            )
+
     async def connected(agent: str, reason: str, subagent: str = "") -> Session:
         """This member's mesh, connected — or a refusal naming why it is not.
 
@@ -1387,6 +1435,43 @@ def build_server(
     # the conversation later (a [PeerAgent:…] marker of type 'task_response');
     # 'task_response' completes an inbound task; 'message' is a bare
     # conversation.  No waiting, no timeout parameter.
+
+    @mcp.tool(name=FORGET)
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        """Give up this member's place on the mesh, and forget its session.
+
+        **A member can stop existing while a process is serving it**, and this is
+        how that process is told.  `subagent_remove` runs in the agent server: it
+        stops the loop and deletes the directory, and neither of those reaches an
+        MQTT connection this process is holding for a name that is gone — a
+        responder still subscribed to a dead subagent's topic, answering whoever
+        sends to it, keeping its card on the broker.
+
+        **The counterpart of `join`, and not of a delivery.**  Nobody is owed
+        anything by this call and it holds nothing open: it answers whether there
+        was a session to forget, and a name that is used again afterwards gets a
+        session built from scratch (`place_for`), which is the same road a member
+        that was never woken takes.  A machine with nothing to forget — a member
+        that never took its place, or a `subagent` this process never built —
+        answers `forgotten: false` rather than refusing anything.
+
+        **Nothing is asked of the member and nothing waits for it.**  Whether its
+        conversation is mid-turn or idle, the removal it is part of has already
+        been decided by the agent that owns it: the turn in flight dies with the
+        session (`drop_session`), which is what a *forced* cleanup means and why
+        this is not a message to the member.
+
+        Args:
+            agent: Whose member it is — the client id's first half.
+            subagent: The member's own name.  Empty is the agent itself, which
+                only the remote network has a session for.
+        """
+        found = sessions.get((str(home()), agent, subagent))
+        if found is None:
+            return {"agent": agent, "subagent": subagent, "forgotten": False}
+        await drop_session(found, (str(home()), agent, subagent))
+        logger.info("a2a_member_forgotten agent=%s", describe((agent, subagent)))
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
 
     @mcp.tool(
         name=net.tool(SEND_MESSAGE),

@@ -87,6 +87,7 @@ from slife2.plugins.a2a.server import (
     A2A_SEND_MESSAGE,
     A2A_TYPES,
     CHANNEL,
+    FORGET,
     JOIN,
     MAX_QUEUED,
     ORPHAN_PEER,
@@ -2065,6 +2066,7 @@ async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         A2A_CANCEL_TASK,
         A2A_LIST_AGENTS,
         A2A_SEND_MESSAGE,
+        FORGET,
         JOIN,
     ]
 
@@ -2076,6 +2078,9 @@ async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         A2A_SEND_MESSAGE,
     ]
     assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
+    assert not for_the_model(by_name[FORGET].meta), (
+        "and a removal's is the agent server's"
+    )
 
 
 @pytest.mark.asyncio
@@ -2105,6 +2110,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     by_name = {t.name: t for t in tools}
 
     assert sorted(by_name) == [
+        FORGET,
         JOIN,
         LOCAL.tool(BROADCAST),
         LOCAL.tool(CANCEL_TASK),
@@ -3182,3 +3188,75 @@ async def test_a_reply_on_the_subagent_network_carries_no_remote_word(
         f"**tester** completed async task (ID: `{TASK}`):\n\ndone"
     )
     assert said["channel"] == channel_for(LOCAL, "tester")
+
+
+@pytest.mark.asyncio
+async def test_forget_gives_up_a_members_place(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**The counterpart of `join`**, and the only way a place is given up while a process lives.
+
+    A member can stop existing while the plugin is serving it — `subagent_remove`
+    stops the loop and deletes the directory, and neither of those unsubscribes
+    anything — so the plugin is told, with the one verb this system uses for a
+    thing that should not exist any more.  What it does is what its lifespan does
+    for every session: cancel the writer, retire the connections
+    (`drop_session`).
+
+    **And the proof that the place was really given up is that taking it again
+    builds a new one**, which is the same road a member that was never woken
+    takes: the name is still a subagent on disk — a removal that *did* delete it
+    would leave the send with nowhere to go — so the next send connects it from
+    scratch.
+    """
+    connected: list[str] = []
+    disconnected: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        connected.append(self.agent_name)
+
+    async def disconnect(self: Any, **kwargs: Any) -> None:
+        disconnected.append(self.agent_name)
+
+    async def send_message(self: Any, agent: str, message: str, **kw: Any) -> str:
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "hello"},
+                meta=client_meta(AGENT),
+            )
+            first = await client.call_tool(
+                FORGET,
+                {"agent": AGENT, "subagent": "tester"},
+                meta=client_meta(AGENT),
+            )
+            # The member's is the only connection this retires, and reading it
+            # here is what makes that assertable: the lifespan retires the rest
+            # when this client exits, which is a shutdown and not a removal.
+            assert disconnected == ["tester"]
+            again = await client.call_tool(
+                FORGET,
+                {"agent": AGENT, "subagent": "tester"},
+                meta=client_meta(AGENT),
+            )
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "again"},
+                meta=client_meta(AGENT),
+            )
+
+    assert first.data["forgotten"] is True
+    assert again.data["forgotten"] is False, "a place given up twice is given up once"
+    assert connected == [AGENT, "tester", "tester"], (
+        "the place was not given up: the same session answered the second send"
+    )

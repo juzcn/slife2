@@ -1853,8 +1853,10 @@ publishes, which is what every `subagent_send_message` before it was missing.  T
 display half is **done** for a member's *answer* (`subagent:<name>` →
 `Subagent(<name>)> `) and deliberately not for its coming and going: a subagent's
 presence is not drawn anywhere yet, so `on_agent_change` draws nothing on this
-network rather than inventing a line.  What is still unstated is who holds a
-place two levels in (sdd §12); and **(5) what one
+network rather than inventing a line.  **And removing a subagent tells it**
+    (`forget`, called by `subagent_remove` before anything is deleted), because a
+    place on the network outlives the directory it was held for.  What is still
+    unstated is who holds a place two levels in (sdd §12); and **(5) what one
 subagent is** — `role`, `fork`, and the subagent's own file that holds them —
 **done**, which is the second pass above.  What is still open there is a per-role
 prompt template.

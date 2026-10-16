@@ -108,6 +108,7 @@ from slife2.libs.host.config import (
     API_SERVER_NAMES,
     CABINET_SERVER_NAME,
     CONTEXT_SERVER_NAME,
+    LOCAL,
     TOOLHUB_SERVER_NAME,
     Config,
     ConfigError,
@@ -179,6 +180,13 @@ MAX_QUEUED = 32
 #: asks.  A *builder* rather than the callback, because half of what the callback
 #: needs — the backend — is decided inside `make_loop`.
 Compressor = Callable[[LLMBackend, ClientId], Compress]
+
+#: The call the subagent network answers for a member that no longer exists —
+#: `slife2.plugins.a2a.server`'s tool of that name, and **spelled here too**: a
+#: name crossing a process boundary is written in two places, which is what
+#: `JOIN`'s own comment says about the window's call.  It is not a tool the model
+#: has; its only caller is `subagent_remove`, through `leave_the_mesh`.
+FORGET = "forget"
 
 #: The two tools that make and unmake a subagent — the whole of what this adds to
 #: the mesh's vocabulary, and two verbs rather than four (sdd §3.5): a subagent
@@ -610,6 +618,7 @@ def build_server(
     hub_client: Client | None = None,
     cabinet_client: Client | None = None,
     window_client: Client | None = None,
+    mesh_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
     """Build the agent MCP server.
@@ -627,6 +636,12 @@ def build_server(
     than asks: a background call's result, on its way back into the conversation
     it came from (`slife2.libs.harness.handover`, which is where the window-is-the-only-road
     policy is argued).  `slife2.plugins.agent_task.server` takes it for the same reason.
+
+    `mesh_client` is the seam for the other peer reached *directly*, and for a
+    removal rather than a tool call: `subagent_remove` tells the subagent network
+    that a member is gone (`leave_the_mesh`), because a place on that network
+    outlives the directory it was held for.  Opened per call and closed with it —
+    once per removed subagent, not once per turn.
 
     Otherwise a connection is opened **per model server, on first use, and kept
     for the process**.  Not per turn — that would pay a handshake for every step
@@ -807,6 +822,71 @@ def build_server(
                     fallback_tool="dump_read",
                 )
             return cabinet_conn
+
+    async def leave_the_mesh(
+        agent: str, subagent: str, *, client: Client | None = None
+    ) -> None:
+        """Tell the subagent network that this member is gone.
+
+        **A removal is one directory and three processes hold something of it.**
+        This server holds the conversation (`loops`), the context store holds the
+        list it would restore from, and the subagent network holds the member's
+        *place*: an MQTT connection subscribed to its topic, answering whoever
+        sends to it, with a card on the broker saying it is here.  A directory
+        that has been deleted cannot unsubscribe any of that, so the network is
+        told — the same act the other two get, in the one vocabulary this system
+        has for it (`forget`, which is what `slife2-context`'s tool of the same
+        name means and what `slife2.plugins.a2a.server`'s does).
+
+        **Called before anything is taken away, and that is the order.**  A peer
+        that is not there is a broken system rather than a degraded one
+        (`slife2.libs.plugin.protocol.open_server`), this one is dialled on every
+        removal, and a notification that cannot be made must leave the subagent
+        exactly as it was — which it does, because by then nothing has been
+        deleted.  A machine that configures that section has its plugin running
+        (`slife2.libs.host.launcher` starts every one of them), so the only way
+        this cannot be reached is the whole stack being wrong.
+
+        A machine with no `subagent:` section has no such network and nothing to
+        tell: `configured` is that section's presence, and it is the one case this
+        returns without a call.
+
+        `client` is the seam for a test — a recorder answers what the plugin would
+        — and an injected client is used as it is and left open.
+
+        **The call's patience is `work.management`**, the registry's number for a
+        management call answered out of a plugin's memory: this one reads a table
+        and publishes an offline card, and it must not be the call that keeps a
+        removal waiting.
+        """
+        if not current().subagent.network.configured:
+            return
+        opened = client is None
+        try:
+            peer = client or await open_server(
+                current().server(LOCAL.key).url,
+                name=LOCAL.server_name,
+                fallback_tool=FORGET,
+                timeout=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - every way this peer can be missing means the same thing here, and the caller is a removal that has not started
+            raise ToolError(
+                f"{describe((agent, subagent))} was not removed: the subagent "
+                f"network could not be reached, so its place on it could not be "
+                f"given up ({exc}).  Nothing has been deleted."
+            ) from exc
+        try:
+            await peer.call_tool(
+                FORGET,
+                {"agent": agent, "subagent": subagent},
+                timeout=_T.timeouts.work.management,
+            )
+        finally:
+            if opened:
+                # `shield`, for `slife2.libs.harness.handover._peer`'s reason: a
+                # cancellation arriving while the close is awaiting would pass
+                # straight through it and leave the connection open.
+                await asyncio.shield(close_server(peer))
 
     def compress_for(backend: LLMBackend, client_id: ClientId) -> Compress:
         """How one conversation's tool results are fitted into it.
@@ -3301,7 +3381,15 @@ def build_server(
                     f"not yours to remove, and this call will not delete it."
                 )
             return {"name": directory.name, "removed": False}
-        # The loop first — in-process, and before the files: a loop left behind
+        # **The network first, and before anything is taken away.**  A place on
+        # the subagent network outlives the directory it was held for: the plugin
+        # has a responder subscribed to this name, so a removal that only stopped
+        # the loop and deleted the files would leave something still answering for
+        # a subagent that no longer exists — and a notification that cannot be
+        # made has to leave the subagent exactly as it was, which is why it is
+        # this first (`leave_the_mesh`).
+        await leave_the_mesh(maker, directory.name, client=mesh_client)
+        # The loop next — in-process, and before the files: a loop left behind
         # writes its store again on the next message to a name that is supposed
         # to have stopped existing.
         #
