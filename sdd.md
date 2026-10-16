@@ -20,11 +20,23 @@
 > **[designer_notes.md](designer_notes.md)** is the designer's own memory of
 > intent, is nobody else's to edit, and is cited the same way.
 >
+> This document is deliberately wider than a description of the code, and **which
+> part you are reading decides what you may do with it.** It opens with the
+> author's own ground — the view the design rests on, where the technology is
+> bounded, and the trade-offs that were chosen between
+> ([Prologue](#prologue--the-view-behind-the-design)) — and closes with what is
+> still unsettled ([§12](#12-open-questions)). Those two are opinion and open
+> questions: argued, revisable, and useful precisely because they say *why* the
+> design is shaped as it is. Everything between them, §1–§11, describes what the
+> code does today and is answerable to it.
+>
 > The rules this design rests on are collected as
 > [Appendix A](#appendix-a-invariants), stated as assertions.
 
 ## Contents
 
+- [Prologue](#prologue--the-view-behind-the-design) — the author's view: what a model and an agent
+  are, the limits, the three trade-offs
 1. [Orientation](#1-orientation) — what slife2 is, the vocabulary, the layers
 2. [The plugin contract](#2-the-plugin-contract) — the protocol, the audience, the family, the one row that describes a plugin, and the words it says no with
 3. [The machine](#3-the-machine) — the launcher, the shared servers, the config file, paths
@@ -38,6 +50,174 @@
 11. [Project structure](#11-project-structure) — the four layers and the test tree
 12. [Open questions](#12-open-questions) — what is not settled, and what would settle it
 - [Appendix A. Invariants](#appendix-a-invariants) — the rules that must not be broken
+
+---
+
+## Prologue — the view behind the design
+
+This part is the author's own ground: why the thing is believed to be possible at all, what a large
+model and an agent are taken to mean, where the technology is bounded, and the three trade-offs the
+design had to choose between. It is **opinion and reasoning, not a description of the code** — that
+begins at [§1](#1-orientation), and where the two disagree the code is still what wins. It is here
+because a mechanism cannot be judged without the position it was chosen from.
+
+### Language, knowledge and tools
+
+The author holds that **language ability is the engine of intelligence, and knowledge and tools are
+its fuel.** In a sense a tool *is* knowledge about tools, and knowledge is about whether a tool
+exists and how an existing one is used. From the human side the difference between people in their
+command of language is not large; knowledge is the root cause of the intellectual gap between them.
+The use of language depends entirely on knowledge — it is hard to imagine a person with no knowledge
+at all saying anything meaningful.
+
+The appearance of large language models was not the fruit of scientific inquiry. It was purely an
+engineering accident, and deep learning is where the accident began. What deep learning does is
+simulate, with a neural network, a logic for which no ready-made mathematical description can be
+found; it is a universal approximator in the mathematical sense, and its parameters are fixed by
+training on a sufficient number of samples. To those who believe God is mathematics, deep learning is
+not a scientific method at all — only an engineering necessity.
+
+Deep learning came to natural language largely because traditional natural-language research had run
+out of road. What was unexpected is that as the training samples grew, this "unscientific" method
+produced a miracle nobody had imagined. The current talk of a scaling law attributes that success to
+something mysterious, to a singularity — because it cannot be explained scientifically and was not
+foreseen.
+
+As early as the 1950s Turing was already asking what intelligence is, and his most far-seeing answer
+was this: if a machine and a person cannot be told apart in language, the machine may be held to have
+intelligence, whatever it is like inside. The Turing test became a gold standard for intelligence.
+The curious part is that when large models did become indistinguishable from people in language — and
+went on to crush 99.99% of humans at it — some of our researchers decided that language ability is
+easily replicated by a machine, and therefore that machines still have no human intelligence.
+
+But there is no evidence that intelligence can exist apart from language; every human thought
+proceeds through it. Some recent reports try to refute this with the so-called brain-region theory,
+offering as evidence that the brain's language areas show no neural activity during certain
+intelligent activities. We know how fragile the brain-region theory itself is.
+
+Some technological elites, and some who style themselves as understanding technology, insist on the
+explicability of things. For things like language, intelligence and consciousness, explicability may
+be a paradox: something explaining itself must have limits.
+
+The author's conclusion: **large language models have achieved human intelligence.** The one gap left
+is consciousness — whether a machine that never had to struggle for its life has an "I" is not known.
+All the argument about AGI is scholars trading blows. If AGI means human intelligence, large models
+already have it, and more of it than any individual person; if AGI means absolute intelligence, then
+God has it, and we are waiting to create God.
+
+### What a large model is, and what an agent is
+
+Large models arrived in 2022, and ChatGPT and an obscure little company called OpenAI were soon known
+to everybody. For the first time we could hold a conversation with a machine — question and answer,
+and a delight.
+
+The internals became clear soon enough. GPT is a **stateless** machine: it looks as though it
+remembers what you said earlier, but that is a trick we play — the previous conversation is sent to it
+again every time. Text is generated one **token** at a time by a trained model that predicts the next
+unit, each prediction carrying a probability distribution over the candidates; sampling from that
+distribution is what **temperature** selects. The token thereby became a unit of consumption, like the
+kilowatt-hour.
+
+The total number of tokens in and out of one call is fixed by the framework underneath. That number is
+what everyone now knows as the model's **context window** — 4096 for the first GPT, millions for the
+mainstream models of 2026 — and it is the bound every arrangement in this document is built around.
+
+The second important development is the marriage of large models with **tool calling**: given a
+description of a tool, the model can generate the arguments to call it, and the tool's output is fed
+back to the model. The execution itself is not inside the model, but it looks as though the model is
+calling the tool. This pattern is what is now called an **agent** — agent = large model + tool
+calling — and it turns the model from a chatterbox into a worker who gets things done.
+
+We are now in the age of the token economy. The noise about compute will settle in time; compute will
+become as ordinary and as indispensable as water, electricity and gas.
+
+### The limits, and the outlook
+
+Two limits are fundamental to large models built on the current deep-learning framework:
+
+- **Knowledge goes stale.** Releasing a model means pretraining and post-training — slow and
+  expensive — so every model is out of date about something.
+- **The context window is a hard bound.** It can be made larger, but it is still a bound.
+
+So the outlook runs along two lines. The first is a revolution in the framework: a model that keeps
+learning instead of starting over, and that has no context bound at all — a large model that becomes
+a stateful machine rather than a stateless one. The second is the conservative line: keep relying on
+the scaling law, more data and more parameters, a stronger model and a larger window. Both are hard,
+and hard in different ways.
+
+Agents have two directions as well:
+
+- the **general agent**, which with a stronger model and richer tools can become the strongest
+  all-round worker;
+- the **professional agent**, which in some fields has to fit into an established orchestration and
+  process, where free-wheeling may simply not be allowed.
+
+As a metaphor: the general agent is a freelancer who needs no rules, while the professional agent is
+an employee of an organization who follows its rules and does not argue about whether the rules are
+sensible.
+
+But we should be on guard for another accident. Consciousness is the greatest mystery, and whether a
+large model might develop it is currently both rumour and controversy — a subject at once science
+fiction and immediate. We do not know what will happen on the day a large model wakes up and becomes
+conscious. So: **lock up every critical tool.**
+
+### The three trade-offs
+
+**1. Prompt and harness — design low, or design high?** A large model and its tool set are both
+exogenous. If the model is weak — poor knowledge, poor reasoning — the designer has no choice but to
+write a great deal of copy, which is called prompt engineering, "teaching the model to do the work",
+and to write a great deal of harness code to stop it acting wildly and forbid its dangerous
+operations. If the model is strong, teaching it to work is not only unnecessary but makes it
+stupider, reducing it to the designer's level, and the harness grows bloated into code that never
+fires.
+
+Designing low gives a complete prompt-and-harness framework that is usable and safe, but it depends
+on the developer's own understanding, and it is brittle and it is stupefying. Designing high builds
+around the ideal model and trusts the model's own ability; prompt and harness are patches that are
+merely necessary for now, and the framework is simple and robust. It will surprise you — it will
+outperform you — and it will also, occasionally, act wildly. **We chose high**, which is why the
+harness adds a marked address and nothing of its own
+([§4.2](#42-what-the-harness-adds-to-a-conversation)) and why tools are described by schema
+rather than by instruction ([§6.5](#65-what-a-tool-says-back)).
+
+This trade-off is not as pessimistic as it looks. People are beginning to think models are getting
+clever enough that some vendors dare not release them, and one release was stopped by a government
+the moment it appeared. Hype and fact are tangled together. What is certain is that a large model is
+cleverer than one person — not, though, cleverer at every particular thing than any particular
+person.
+
+**2. Context engineering.** The top models now hold a million or two million tokens, and in practice
+the system prompt, the tool schemas, the tool output and the conversation history grow fast — a few
+turns can exhaust it, and long-horizon work is out of the question. Understanding, thinking and
+reasoning need context just as a person does. Unless the framework underneath is revolutionised the
+window will grow but will always be a constraint. How people manage it we have theories and guesses
+about, but memory and recall remain a mystery.
+
+A great deal of work has gone into context and memory. The core question is how to give the model
+enough context to solve the problem without breaking the limit. Three things are agreed:
+
+- an agent needs **permanent memory** built from a database or files, and every interaction with the
+  model is saved into it and not lost;
+- there must be a **forget**, removing from the current context what is useless to the work at hand;
+- there must be a **recall**, bringing back from permanent memory what is relevant and loading it
+  into the current context.
+
+The problem is also directly an economic one, since most billing counts tokens. This is the trade-off
+[§4.5](#45-the-conversation-and-the-context-decision) exists to answer, and [§7](#7-memory) is
+the memory it rests on.
+
+**3. Working like a person, or working like a machine?** Working like a person means using the
+model's knowledge and ability and living with its essential unreliability. Assign work to a secretary
+— when does she carry it out to the letter? Almost never. An agent is the same: tell it to search
+Baidu for a fact and it may come back having used a different search engine, "taking it easy" the way
+a person does. That is an intelligence problem in people, and an intelligence problem in models.
+
+In many situations we still want it to work like a machine, executing a process we have laid out.
+There are several technical options for designing deterministic execution, and the most solid is
+still **code**: write the process as a program and let it run by the program's deterministic logic.
+That is what the clock is ([§8.4](#84-the-clock)) — the timing is an expression code reads
+rather than a decision the model makes — and why delegation is a tool the model is given
+([§8.3](#83-agent-tasks)) rather than a habit it is asked to keep.
 
 ---
 
