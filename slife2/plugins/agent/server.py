@@ -180,6 +180,28 @@ Compressor = Callable[[LLMBackend, ClientId], Compress]
 SUBAGENT_SET = "subagent_set"
 SUBAGENT_REMOVE = "subagent_remove"
 
+#: What a subagent is when the call that made it named no role, and the word the
+#: shipped `subagent.j2` opens with.  A **role** is what a subagent is *for* —
+#: the one part of what it is that its maker decides and not the system — and it
+#: is kept in the subagent's own file, which is where everything about one
+#: subagent lives (`subagent_spec`).
+DEFAULT_ROLE = "subagent"
+
+#: The system prompt a subagent's conversation opens with, shipped and rendered
+#: per conversation (`slife2.libs.turn.prompt`).  **Not the template an agent's
+#: own conversation uses** (`agent.system_prompt`): the two have different things
+#: to say — this one says what a subagent is, that it was made rather than
+#: started, and that nobody is watching it — and an operator's prompt for their
+#: own agent cannot say any of that.  A bare name, so it is looked up among the
+#: templates shipped beside `system.j2`.
+#:
+#: **One template for every role, for now.**  `role` reaches it as a word ("You
+#: are scout, a code reviewer") and not yet as a choice of *file*: a per-role
+#: template is the step this design leaves open, and it is left open on purpose
+#: rather than guessed at — a role that selects `prompts/<role>.j2` needs an
+#: answer for a role with no file, and that answer is a design decision.
+SUBAGENT_PROMPT = "subagent.j2"
+
 #: What this process holds one conversation's state under: `(home, agent,
 #: subagent)`, built by `slife2.libs.plugin.audience.client_key`.  Not `ClientId`,
 #: which is what travels on the wire — a home rides in the call's `_meta` rather
@@ -498,6 +520,15 @@ class Loop:
     #: them — so every conversation this server holds is recorded, in the store its
     #: own key names.  The worker the old rule was for was never built: nothing in
     #: this tree ever created a conversation with a non-empty `subagent`.
+    #:
+    #: **A `fork` is the one conversation that is not recorded**, and it is not
+    #: the old rule coming back: the old one asked *who is asking*, and this one
+    #: asks *what this conversation is made of*.  A fork is made of its maker's
+    #: conversation — copied out of it, and then its own — so writing it down
+    #: would file one agent's work under another's history and put a second copy
+    #: of that history in the store.  Nothing about it is written: no restore,
+    #: no rebuild, no record (`adopt_maker` is all three).
+    fork: bool = False
 
 
 def build_server(
@@ -964,7 +995,9 @@ def build_server(
 
     # --- the registry --------------------------------------------------------
 
-    def opening_messages(agent: str, subagent: str, live: Config) -> list[Message]:
+    def opening_messages(
+        agent: str, subagent: str, live: Config, spec: SubagentSpec
+    ) -> list[Message]:
         """What a conversation starts with: its system prompt, and nothing else.
 
         Rendered when the conversation starts rather than once at startup,
@@ -982,6 +1015,13 @@ def build_server(
         one way to get that wrong: it would tell a subagent that somebody is
         watching whenever its maker's window is open.
 
+        **And it is told what it is, from its own file** (`subagent_spec`): the
+        `role` its maker named it with, and whether it was made as a fork — the
+        one thing about a fork a model cannot work out for itself, since what it
+        is handed looks exactly like a conversation it has been having.  Its
+        prompt is `subagent.j2` and not the config's (`SUBAGENT_PROMPT`), because
+        the two say different things.
+
         **And it is rendered with whether anybody is watching**, read off the
         claim the client under that name wrote (`AgentClaim.headless`).  A
         prompt is where a model is told who it is talking to, and an unattended
@@ -994,14 +1034,20 @@ def build_server(
         that runs here anyway is unattended for the same reason.
         """
         if subagent:
-            claim = None
+            system = render_system_prompt(
+                SUBAGENT_PROMPT,
+                agent_name=subagent,
+                role=spec.role,
+                fork=spec.fork,
+                headless=True,
+            )
         else:
             claim = read_claim(agent)
-        system = render_system_prompt(
-            live.agent.system_prompt,
-            agent_name=subagent or agent,
-            headless=claim is None or claim.headless,
-        )
+            system = render_system_prompt(
+                live.agent.system_prompt,
+                agent_name=agent,
+                headless=claim is None or claim.headless,
+            )
         return [Message(role="system", content=system)] if system else []
 
     def reap() -> None:
@@ -1049,8 +1095,14 @@ def build_server(
         loop = loops.get(client)
         if loop is None:
             live = current()
-            name, provider, settings = live.resolve(model)
-            messages = opening_messages(agent, subagent, live)
+            # What this subagent's own file says it is — its model, its role,
+            # whether it is a fork — read *here*, when its conversation starts,
+            # which is what makes a `model_switch` in between reach it the way it
+            # reaches the maker's own next turn.  An agent's own conversation has
+            # no such file and is the defaults.
+            spec = subagent_spec(agent, subagent)
+            name, provider, settings = live.resolve(model or spec.model)
+            messages = opening_messages(agent, subagent, live, spec)
             loop = Loop(
                 agent=agent,
                 subagent=subagent,
@@ -1066,12 +1118,13 @@ def build_server(
                 # The head is what an empty list covers, so a conversation that
                 # restores nothing carries nothing either.
                 covered=len(messages),
+                fork=spec.fork,
             )
             loops[client] = loop
             logger.debug(
                 "started %s on %s",
                 describe((agent, subagent)),
-                model or "the default model",
+                model or spec.model or "the default model",
             )
         loop.last_used = time.monotonic()
         return loop
@@ -1124,6 +1177,16 @@ def build_server(
         if not outcome.messages:
             # A caller cancelled while queued, in which case its turn never
             # started and there is nothing to record.
+            return None
+        if loop.fork:
+            # **A fork is not written down, and the answer it owes is not an
+            # id.**  Its turns are its own copy of its maker's conversation plus
+            # what it has done since, held in memory and gone with the loop — so
+            # there is no row to name and nothing for a caller to point at.
+            # `None` is what says so: the caller then leaves this turn's messages
+            # unbacked and unannotated, which is what a conversation with no log
+            # wants (`annotate_turn` would otherwise write a turn id into the one
+            # conversation that can never look one up).
             return None
         return await remember_turn(
             loop.agent,
@@ -1205,6 +1268,68 @@ def build_server(
                 len(loop.turn_ids),
                 describe((loop.agent, loop.subagent)),
             )
+
+    async def adopt_maker(loop: Loop) -> None:
+        """A fork's context: a copy of its maker's conversation, taken now.
+
+        **This is what a fork starts from instead of a store**, and it is the
+        whole of what `fork: true` buys: *share everything with the agent that
+        made you*, answered with the one thing a conversation is — the context
+        it is made of.  Copied rather than shared, because the two part company
+        from here: what the fork does with it is a turn in the fork's
+        conversation, and nothing the maker says afterwards reaches it.
+
+        **The maker's conversation is read the way its own next turn would read
+        it** — out of memory when it is loaded, and out of the store when it is
+        not, which is the same step (`restore_into`) a turn of the maker's takes.
+        That is what makes a fork work from anywhere a maker can call from: a
+        turn of its own, an agent task working in its name, a scheduled fire.
+
+        **The copy ends at the last exchange that finished** (`settled_messages`),
+        and that is not tidiness.  A maker calls `subagent_set` *as* a tool call,
+        so the last thing in its list is an assistant message whose call has no
+        result yet — and a history that ends that way is the one state every
+        provider refuses.  So the fork is handed the conversation as it stood
+        when its maker asked for it, which is the reading a person would give
+        "what we had said so far" too.
+
+        **And the head is replaced rather than copied.**  The maker's system
+        prompt names the maker and says whether anybody is watching; a fork is
+        told what it is instead — its own name, its role, and that it is a fork,
+        which is the thing it could not otherwise know, since what it is handed
+        is indistinguishable from a conversation of its own.  `opening_messages`
+        is where those words are, and this is why they have to be *words*: a
+        model reading somebody else's conversation under its own name with
+        nothing said is a model answering as somebody it is not.
+        """
+        maker = conversation(loop.agent, "", "")
+        if not maker.restored:
+            await restore_into(maker)
+            maker.restored = True
+        body = settled_messages(maker.messages)
+        if body and body[0].role == "system":
+            body = body[1:]
+        # Copied, not aliased: the two loops must not share a message object.
+        # `repaired_error` drops an attachment by *rewriting* the messages that
+        # carry it (`attachments.drop`), so a fork sharing objects with its maker
+        # would have its own copy rewritten when the maker's turn failed.  `_adopt`
+        # copies for the same reason, the same way — a message list handed to two
+        # conversations is a message list with two owners.
+        loop.messages = loop.messages + [
+            Message.from_wire(message.to_wire()) for message in body
+        ]
+        # Nothing in this list is backed by a turn this conversation can name —
+        # it has no log — so the carried tail is empty and this is the whole of
+        # it.  `rebuild`'s `carried` is the only reader, and a fork never runs a
+        # rebuild; the number is kept in step anyway rather than left to say
+        # something untrue.
+        loop.covered = len(loop.messages)
+        logger.info(
+            "forked %s from %s: %d message(s)",
+            describe((loop.agent, loop.subagent)),
+            describe((loop.agent, "")),
+            len(loop.messages) - 1,
+        )
 
     async def rebuild_into(loop: Loop, prompt: str) -> ContextChosen:
         """Ask what this turn runs on, take the answer, and report the counts.
@@ -2484,7 +2609,19 @@ def build_server(
                 # The claim is on the loop for the same reason a per-call flag
                 # was not enough.
                 if not loop.restored:
-                    await restore_into(loop)
+                    # **A fork is put back on its maker's conversation, not on a
+                    # stored one.**  It has no store — nothing about it is
+                    # written down — so this is its own step, and it is taken
+                    # here for the reason the restore is: this is where a
+                    # conversation begins.  Which includes beginning again: a
+                    # fork the idle sweep let go starts afresh from its maker as
+                    # it stands then, and that is the same rule and not a
+                    # fallback — a conversation nobody wrote down is a
+                    # conversation whose next start is a new copy.
+                    if loop.fork:
+                        await adopt_maker(loop)
+                    else:
+                        await restore_into(loop)
                     loop.restored = True
                 try:
                     # **The rebuild is inside this `try` too**, and not for
@@ -2501,24 +2638,33 @@ def build_server(
                     # very prompt, would be destroyed by it — and it reads the
                     # list the previous turn's write maintains, so it has to wait
                     # for that write the way the next turn does.
-                    chosen = await rebuild_into(loop, item.prompt)
-                    observer = ProgressObserver(ctx)
-                    # **Reported before the turn**, because it is a fact about
-                    # what the turn runs on and not about how it went — and
-                    # because the answer that follows is the thing it is about.
-                    # The discriminator is one model call the caller never sees,
-                    # so this is the only place its decision is visible at all.
                     #
-                    # **Through the loop's own fault tolerance**, like every
-                    # other event this conversation raises.  A broken progress
-                    # stream throws from `on_event` (`ctx.report_progress` on a
-                    # closed stream), and a throw from *here* lands before the
-                    # prompt has been appended or recorded at all — so the
-                    # caller's message is lost outright, where the same observer
-                    # failing on a `TextDelta` is swallowed one layer down
-                    # (`AgentLoop._emit`).  Asked for by class rather than instance
-                    # because the `AgentLoop` is not built until the turn below.
-                    await AgentLoop._emit(observer, chosen)
+                    # **And a fork is not rebuilt at all.**  There is no log to
+                    # go back to and no keep-list worth deciding, because what a
+                    # fork runs on is the copy it was handed plus its own turns.
+                    # Asked of the loop rather than of the store: a discriminator
+                    # call spent deciding what a fork already knows the answer to
+                    # would be a model call whose only outcome is "keep what you
+                    # have".
+                    observer = ProgressObserver(ctx)
+                    if not loop.fork:
+                        chosen = await rebuild_into(loop, item.prompt)
+                        # **Reported before the turn**, because it is a fact about
+                        # what the turn runs on and not about how it went — and
+                        # because the answer that follows is the thing it is about.
+                        # The discriminator is one model call the caller never sees,
+                        # so this is the only place its decision is visible at all.
+                        #
+                        # **Through the loop's own fault tolerance**, like every
+                        # other event this conversation raises.  A broken progress
+                        # stream throws from `on_event` (`ctx.report_progress` on a
+                        # closed stream), and a throw from *here* lands before the
+                        # prompt has been appended or recorded at all — so the
+                        # caller's message is lost outright, where the same observer
+                        # failing on a `TextDelta` is swallowed one layer down
+                        # (`AgentLoop._emit`).  Asked for by class rather than instance
+                        # because the `AgentLoop` is not built until the turn below.
+                        await AgentLoop._emit(observer, chosen)
                     # How long the list was when this turn began.  What the write
                     # below covers is what the turn *appends*, and the difference
                     # is the whole of it — see `covered` in the success branch.
@@ -2642,7 +2788,9 @@ def build_server(
                     # over rather than an empty list.
                     "messages": [
                         m.to_wire()
-                        for m in opening_messages(agent, subagent, current())
+                        for m in opening_messages(
+                            agent, subagent, current(), subagent_spec(agent, subagent)
+                        )
                     ],
                 },
             )
@@ -2693,7 +2841,13 @@ def build_server(
         return {"reset": forgotten}
 
     @mcp.tool(name=SUBAGENT_SET, meta=FOR_THE_MODEL)
-    async def subagent_set(ctx: Context, name: str, model: str = "") -> dict[str, Any]:
+    async def subagent_set(
+        ctx: Context,
+        name: str,
+        model: str = "",
+        role: str = DEFAULT_ROLE,
+        fork: bool = False,
+    ) -> dict[str, Any]:
         """Make a subagent: an agent of your own, named, with its own memory.
 
         A subagent is an agent that belongs to you — the same tools, the same way
@@ -2705,7 +2859,9 @@ def build_server(
 
         **A subagent you already have is the same subagent** — `set` rather than
         `add`, so naming one twice is safe.  What a second call changes is its
-        model; when it was made does not change.
+        model and its role; when it was made, and whether it was made as a fork,
+        are what they were — a fork's conversation is a copy already taken, and
+        what it is made of is not something a later call can re-decide.
 
         Args:
             name: What to call it.  A name is one subagent and one directory
@@ -2714,10 +2870,24 @@ def build_server(
                 default — is *your* model, read when the subagent first runs
                 rather than now, so a `model_switch` you make in between reaches
                 it the way it reaches your own next turn.
+            role: What it is for, as a word: it goes into the prompt the subagent
+                starts with, which reads `You are <name>, a <role>`.  The default
+                is the plain one — `subagent` — and anything else is worth saying
+                only when it changes what the agent would do, the way "code
+                reviewer" does.
+            fork: Whether it starts from a **copy of your own conversation**
+                instead of from nothing.  A fork is handed everything you have
+                said so far, as it stood at the moment you made it, and nothing it
+                does is written down: what it answers is the whole of what comes
+                back, and it keeps no memory between your messages.  Ask one a
+                question *about* what you are in the middle of when you want the
+                answer to that question to be the only thing that enters your
+                history.
 
         Returns:
-            `name` (made safe to be a directory), `model`, `created_at`, and
-            `created`: whether this call was the one that made it.
+            `name` (made safe to be a directory), `model`, `role`, `fork`,
+            `created_at`, and `created`: whether this call was the one that made
+            it.
         """
         who = request_client(ctx)
         if who is None or not who[0]:
@@ -2754,27 +2924,35 @@ def build_server(
         if created:
             agent_dir(maker, directory.name)
         record = read_subagent(maker, directory.name)
+        # What a second call does not get to rewrite, and both are the same
+        # reason: whether it is a fork is settled by the copy that was taken when
+        # it was made, and when it was made is not a question a later call is
+        # answering.  A `set` says what this subagent runs on and what it is for.
+        made_fork = fork if created else record.get("fork") is True
         _write_subagent(
             maker,
             directory.name,
             {
                 "name": directory.name,
                 "model": model,
-                # Kept rather than rewritten: a `set` says what a subagent runs
-                # on, and when it was made is not something a later call gets to
-                # change.
+                "role": role or DEFAULT_ROLE,
+                "fork": made_fork,
                 "created_at": record.get("created_at") or made_at,
             },
         )
         logger.info(
-            "subagent %s %s (model %s)",
+            "subagent %s %s (model %s, role %s%s)",
             describe((maker, directory.name)),
             "made" if created else "set",
             model or "the maker's",
+            role or DEFAULT_ROLE,
+            ", fork" if made_fork else "",
         )
         return {
             "name": directory.name,
             "model": model,
+            "role": role or DEFAULT_ROLE,
+            "fork": made_fork,
             "created_at": record.get("created_at") or made_at,
             "created": created,
         }
@@ -2838,6 +3016,59 @@ def build_server(
     return mcp
 
 
+@dataclass(frozen=True)
+class SubagentSpec:
+    """What a subagent's own file says it is: what to run it on, and what it is.
+
+    **A subagent's configuration is a file inside the subagent** — beside its
+    conversation and its work, the way a WeChat login is
+    (`slife2.plugins.wechat.server.SESSION_LOGIN`) — and it is *found* by looking
+    rather than listed anywhere (`slife2.libs.host.paths.subagent_dirs`).  That
+    is what makes the config as short-lived as the thing it configures: a
+    subagent made today and removed tomorrow takes its settings with it, and
+    nothing in `slife2.yaml` has to be kept in step with a directory that is no
+    longer there.
+
+    So this is read where it is used and never cached, which is the same rule the
+    config file itself gets: a subagent that has been named twice runs on what
+    the second call said, and a `model_switch` reaches one that has not started
+    yet.
+    """
+
+    #: `provider/model`, or empty for the maker's own — which is not a fallback
+    #: but the default the note asked for: a subagent is an agent the maker owns,
+    #: so it runs where the maker runs unless it was told otherwise.
+    model: str = ""
+    #: What it is for, in the words its prompt uses (`DEFAULT_ROLE`).
+    role: str = DEFAULT_ROLE
+    #: Whether it was made as a copy of its maker's conversation (`Loop.fork`).
+    fork: bool = False
+
+
+def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
+    """One conversation's own settings, or the defaults for the maker's own.
+
+    The maker's own conversation has no such file and is not supposed to: what
+    makes a directory a subagent's is the record inside it, and an agent's own
+    conversation is not one (`slife2.libs.host.paths.subagent_file`).  So `""`
+    answers the defaults rather than being looked up, which keeps
+    `agent_dir(agent, "")` — the agent's own directory — out of a question about
+    a file that lives one level in.
+    """
+    if not subagent:
+        return SubagentSpec()
+    record = read_subagent(agent, subagent)
+    return SubagentSpec(
+        model=str(record.get("model") or ""),
+        role=str(record.get("role") or DEFAULT_ROLE),
+        # `is True` rather than `bool(…)`: this file is written by `subagent_set`
+        # and YAML spells a boolean as one, so a quoted "false" is a hand-edit
+        # that means nothing rather than a second spelling of False — and reading
+        # it as True would make a subagent a fork on the strength of a typo.
+        fork=record.get("fork") is True,
+    )
+
+
 def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
     """What a subagent was made with, or `{}` when there is none to read.
 
@@ -2869,8 +3100,50 @@ def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
     return loaded
 
 
+def settled_messages(messages: list[Message]) -> list[Message]:
+    """A conversation cut back to the last exchange that finished.
+
+    **A history a provider will accept, which a live list is not always.**  A
+    turn is `[head, user, assistant(calls), results, assistant, …]`, and a list
+    caught mid-turn ends on one of two shapes that cannot be sent: an assistant
+    message whose calls have no results yet, or a batch of results that does not
+    answer every call above it — a step runs its calls in order, so a turn parked
+    on the second of two has answered the first.  Every other ending is a
+    history, and is left exactly as it is: a user message, an answer the model
+    gave, an exchange that finished.  Cutting those would be the copy losing
+    things its maker knows, which is the one thing a fork is for.
+
+    It is here for the fork (`adopt_maker`), which is taken while its maker is
+    *in* a turn — the maker calls `subagent_set` as a tool call, so its own list
+    necessarily ends mid-exchange — and a copy of that list is a conversation
+    nobody can be sent.  What it costs is the exchange the maker had not
+    finished: a tool round nobody has spoken about yet, which is the part of the
+    conversation that is still in motion.
+    """
+    if not messages:
+        return messages
+    results = 0
+    while results < len(messages) and messages[-1 - results].role == "tool":
+        results += 1
+    above = messages[-1 - results] if results < len(messages) else None
+    if above is None or above.role != "assistant" or not above.tool_calls:
+        # The results answer nothing, or there are none: the list ends on a
+        # message that stands on its own.
+        return messages
+    if len(above.tool_calls) == results:
+        return messages
+    return messages[: -1 - results]
+
+
 def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     """Write a subagent's record — the file that makes its directory one.
+
+    It holds the whole of what a subagent *is*, and it is the whole of that: the
+    name it answers to, what it runs on, the role it was made for, whether it is a
+    fork, and when it was made (`SubagentSpec` reads three of those back).  A
+    second place holding any of it — a section in `slife2.yaml`, a table in a db —
+    would be a thing to keep in step with a directory that is deleted without
+    notice, and this file is deleted with it.
 
     Written whole every time, because it is one small mapping and a merge would
     be a second rule about which keys survive a `set`.  Block style, like the two

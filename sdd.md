@@ -390,6 +390,31 @@ because where a name's files are says it. What a subagent shares with its maker
 is the **home** — `slife2.yaml`, `agents/tools.db`, `skills/` — which is exactly
 what two agents started in one data directory share; it shares nothing else.
 
+**What one subagent is, is written inside it.** Its own file — `subagent.yaml`,
+beside its conversation in its own directory — holds the model it runs on, the
+role it was made for, whether it was made as a fork, and when it was made. A file
+and not a section of `slife2.yaml`, for the reason a WeChat login is one (§3.1):
+these are settings for a thing that is made today and removed tomorrow, so
+removing it takes them with it, nothing else has to be kept in step, and a
+subagent is found by looking rather than by being listed anywhere
+(`slife2.libs.host.paths.subagent_dirs`). What stays in the config is what is the
+*machine's*: how many a maker may have, and where its network meets.
+
+- **`role` is what a subagent is for**, in the words its prompt uses. It is the
+  one part of what a subagent is that its maker decides, and the prompt it
+  reaches is the subagent's own shipped template (`subagent.j2`) rather than the
+  operator's `agent.system_prompt`: a subagent is told what it is, and a prompt
+  written for the agent somebody is running cannot say that. Which
+  template a *role* selects is a step still to come (DESIGN §1.10).
+- **`fork: true` makes a subagent out of its maker's conversation.** A fork is
+  handed a copy of everything its maker had said and been told, as it stood when
+  the fork was made, and **nothing about it is written down**: its turns are not
+  recorded anywhere, it has no stored context to be restored from, and a start
+  after a restart is a fresh copy rather than a continuation. The copy is cut
+  back to the last exchange that finished, because a maker calls `subagent_set`
+  *as* a tool call and a conversation ending mid-exchange is one no provider
+  accepts.
+
 **The only entry is a message.** A subagent has no window, so the road every
 channel delivers along (§8) is held for it by its maker: the maker's window
 carries the subagent's place on the net and runs its turns, and what the subagent

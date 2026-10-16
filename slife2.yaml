@@ -336,8 +336,15 @@ agent-task:
 # ── Subagents ─────────────────────────────────────────────────────────────────
 # The agents one agent makes: `subagent_set` names one, `subagent_remove` takes
 # it and everything it wrote away, and between those two it is an agent of the
-# maker's own — the same tools, the same prompt, its own conversation and its own
+# maker's own — the same tools, its own prompt, its own conversation and its own
 # directory under the maker's (`agents/<agent>/<subagent>/`).
+#
+# **What one subagent is, is not configured here.**  The model it runs on, the
+# role it was made for and whether it was made as a fork live in the subagent's
+# own file — `agents/<agent>/<subagent>/subagent.yaml`, beside its conversation —
+# because a subagent is made today and removed tomorrow, and that file goes with
+# the directory it is in.  What is here is the machine's: how many a maker may
+# have, and where its network meets.
 #
 # **A section is two things, and that is the one place this build has two
 # readers of one key.**  The cap below is the agent server's, and the network

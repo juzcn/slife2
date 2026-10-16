@@ -1542,6 +1542,56 @@ conversation forever — which is why the shell is names and descriptions rather
 than code, and why its descriptions have to say *whose* roster they list
 (`a2a_list_agents` says "peer"; a subagent family must say "yours").
 
+**The second pass: what one subagent is, and what a fork is.**  `subagent_set`
+grew two parameters and the record grew two keys, and both are answers to one
+question — *where does one subagent's setting live?*
+
+- **In the subagent, and nowhere else.**  The model, the role and whether it is a
+  fork are in `agents/<maker>/<name>/subagent.yaml`, beside a conversation and a
+  cabinet that are already per-subagent, and that file is deleted with the
+  directory.  A key in `slife2.yaml` was the alternative and it loses on what this
+  thing is: a subagent is made today and removed tomorrow, so a config key would
+  be a setting to keep in step with a directory that can vanish without notice.
+  The `subagent:` section stays for `max_running` and the local network, and the
+  line between them is whose fact it is: *this subagent's* runs on this model in
+  this role, and *the machine's* is the cap and where the network meets.
+- **`fork` is a copy, not a shared list.**  "Share everything with the agent that
+  made you" is answered with the context — copied at the moment the fork is made —
+  and the fork's own turns are written nowhere: not under its own key, because a
+  store's job is to be *that* conversation's memory and this conversation is
+  somebody else's, and not under its maker's, because that would file one agent's
+  work as another's history.  What that costs is stated rather than hidden: a
+  fork's memory is the loop's, so a restart or the idle sweep means its next start
+  is a fresh copy of its maker as it stands then.  That is the rule read at a
+  second boundary rather than a gap, and it is exactly what distinguishes a fork
+  from a plain subagent, whose turns are recorded and which therefore comes back.
+- **The copy has to be *sendable*.**  A maker is mid-turn when it calls
+  `subagent_set` — the call *is* a tool call — so its live list ends with an
+  assistant message whose results have not come back yet, which is the one history
+  every provider refuses (`trim_tools` guards the same pair from the other side).
+  So the copy is cut back to the last exchange that finished
+  (`slife2.plugins.agent.server.settled_messages`), which keeps a tool round the
+  model has already been told about and drops the one still in motion.  The
+  partial batch is in the rule because it is reachable: `_one` runs a step's calls
+  in order, so a turn parked on the second of two has answered the first.
+- **All three of a fork's omissions come off one flag.**  No restore (nothing is
+  stored to restore from), no rebuild (no log to go back to, and a discriminator
+  call would be spent deciding "keep what you have"), no record.  That is why it
+  is a field on the `Loop` rather than the `records` property coming back: the old
+  rule asked *who is asking* — a subagent's turns are not filed under a
+  conversation they were never part of — and this one asks *what this conversation
+  is made of*.
+- **A subagent's prompt is its own, and one template serves every role.**
+  `subagent.j2` ships beside `system.j2`: the operator's `agent.system_prompt` is
+  a prompt for the agent they are running, and it cannot say the two things a
+  subagent needs to be told — what it is, and that nobody is watching.  `role`
+  reaches that template as a word ("You are scout, a code reviewer") and not yet
+  as a choice of *file*.  **The per-role template is the step left open**, and it
+  is left open rather than guessed at: `role: reviewer` wanting `reviewer.j2`
+  needs an answer for a role with no file, and whether that answer is a refusal or
+  a fall back to the shipped one is the designer's to give — a call-site fallback
+  would be a degrade nobody approved (§10.2).
+
 **The road: a subagent's turn is run by the network's own process, not by a
 window.**  The window is the only road this system has for "something outside the
 conversation became a turn in it" (`slife2.libs.harness.handover`: `to_window`,
@@ -1599,7 +1649,10 @@ own section and port, the four tool names *and descriptions* per network — **d
 and seen running**: one `slife2` brings up both, `slife2-subagent` on 8041
 serving `subagent_*`; **(4) the road** — the four things above, and the display
 half of it is **done** (`subagent:<name>` → `Subagent(<name>)> `).  What is still
-unstated is whose window runs a turn two levels down (sdd §12).
+unstated is whose window runs a turn two levels down (sdd §12); and **(5) what one
+subagent is** — `role`, `fork`, and the subagent's own file that holds them —
+**done**, which is the second pass above.  What is still open there is a per-role
+prompt template.
 
 ## 2. Streaming: one pattern, used twice
 

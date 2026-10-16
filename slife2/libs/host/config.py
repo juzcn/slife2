@@ -822,10 +822,21 @@ class SubagentSettings:
 
     Everything else about a subagent is an agent's and comes out of `agent:`, for
     `AgentTaskSettings`' reason one class up: a subagent is an agent that belongs
-    to another one, so a prompt or a step count that meant something different
-    for it would be two agents wearing one name.
+    to another one, so a step count that meant something different for it would
+    be two agents wearing one name.
 
-    What is left is the number only this feature has an opinion about.
+    **What is not here, and not in any config, is anything about *one*
+    subagent.**  The model it runs on, the role it was made for and whether it
+    was made as a fork are in the subagent's own file, inside its own directory,
+    and they are deleted with it
+    (`slife2.plugins.agent.server.subagent_spec`): a subagent is made today and
+    removed tomorrow, so its settings go where its directory goes rather than
+    into a file an operator has to keep in step with it.  Its *prompt* is not
+    `agent.system_prompt` either — it is the shipped `subagent.j2`, because what a
+    subagent has to be told is what it is, and a prompt written for the agent
+    somebody is running cannot say that.
+
+    What is left is what the *machine* has an opinion about.
     """
 
     #: Where a subagent's network is, from the same section — `broker`, `org`

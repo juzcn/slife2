@@ -566,10 +566,13 @@ def subagent_file(agent: str, subagent: str) -> Path:
     under the same parent as the subagents do, and what keeps a removal off it is
     the absence of this file rather than a list of names to avoid.
 
-    What it holds is what the subagent was *made with* — the model it runs on,
-    and when it was made.  Its conversation is elsewhere (`turns.db` beside this)
-    and its work is elsewhere again; this is the part of an agent's identity that
-    is neither.
+    What it holds is the whole of what the subagent *is* — the model it runs on,
+    the role it was made for, whether it was made as a fork, and when it was made
+    — because that is the part of an agent's identity that is neither its
+    conversation (elsewhere: `turns.db` beside this) nor its work (elsewhere
+    again).  **The file is deleted with the directory**, which is what makes a
+    subagent's settings as short-lived as the subagent: nothing else records
+    them, so nothing has to be kept in step when one is removed.
     """
     return agent_dir(agent, subagent) / _SUBAGENT_YAML
 

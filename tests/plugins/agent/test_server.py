@@ -2242,12 +2242,20 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
 
 
 async def set_subagent(
-    server: FastMCP, name: str, *, agent: str = DEFAULT_AGENT, model: str = ""
+    server: FastMCP,
+    name: str,
+    *,
+    agent: str = DEFAULT_AGENT,
+    model: str = "",
+    role: str = "subagent",
+    fork: bool = False,
 ):
     """Name a subagent, with the caller's client id attached — as a turn does."""
     async with Client(server) as client:
         return await client.call_tool(
-            SUBAGENT_SET, {"name": name, "model": model}, meta=client_meta(agent)
+            SUBAGENT_SET,
+            {"name": name, "model": model, "role": role, "fork": fork},
+            meta=client_meta(agent),
         )
 
 
@@ -2268,25 +2276,39 @@ def subagent_of(agent: str, name: str) -> Path:
 async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None:
     """`subagent_set` makes a member: a directory, and the record that says so.
 
-    The record is what `subagent_remove` proves its blast radius with, and the
-    model is the part of a subagent's identity that is neither its conversation
-    nor its work — so both are in the file rather than in a registry somewhere.
+    The record is what `subagent_remove` proves its blast radius with, and it
+    holds the whole of what a subagent *is* — the model it runs on, the role it
+    was made for, whether it is a fork, and when it was made — which is the part
+    of an agent's identity that is neither its conversation nor its work, so it
+    is in the file rather than in a registry somewhere.  Which is also what makes
+    a subagent's settings as short-lived as the subagent: `subagent_remove`
+    deletes the directory, and there is nothing else holding them.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    made = await set_subagent(server, "researcher", model="deepseek/deepseek-flash")
+    made = await set_subagent(
+        server,
+        "researcher",
+        model="deepseek/deepseek-flash",
+        role="code reviewer",
+        fork=True,
+    )
 
     assert made.data["created"] is True
     assert made.data["name"] == "researcher"
     assert made.data["model"] == "deepseek/deepseek-flash"
+    assert made.data["role"] == "code reviewer"
+    assert made.data["fork"] is True
     assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
     record = subagent_file(DEFAULT_AGENT, "researcher")
     assert record.is_file(), "the file is what makes the directory a subagent's"
     assert YAML(typ="safe").load(record.read_text(encoding="utf-8")) == {
         "name": "researcher",
         "model": "deepseek/deepseek-flash",
+        "role": "code reviewer",
+        "fork": True,
         "created_at": made.data["created_at"],
     }
 
@@ -2295,19 +2317,28 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
 async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> None:
     """`set` rather than `add`: what a model may say twice without thinking.
 
-    The model it runs on is what a second call changes; when it was made is not
-    something a later call gets to rewrite.
+    What a second call changes is what the subagent *runs on* and what it is
+    *for* — its model and its role, which are its settings.  What it does not
+    change is when it was made and whether it was made as a fork, and those two
+    are one answer rather than two rules: a fork's conversation is a copy
+    already taken, so a later call cannot re-decide what it is made of — the
+    same reason `created_at` is kept.  Removing it and naming it again is how a
+    maker asks for a different one.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    first = await set_subagent(server, "researcher", model="one/one")
-    again = await set_subagent(server, "researcher", model="two/two")
+    first = await set_subagent(server, "researcher", model="one/one", fork=True)
+    again = await set_subagent(
+        server, "researcher", model="two/two", role="code reviewer", fork=False
+    )
 
     assert first.data["created"] is True
     assert again.data["created"] is False, "the same subagent, not a second one"
     assert again.data["model"] == "two/two"
+    assert again.data["role"] == "code reviewer"
+    assert again.data["fork"] is True, "made as a fork, and that is what it is"
     assert again.data["created_at"] == first.data["created_at"]
     assert len(subagent_dirs(DEFAULT_AGENT)) == 1
 
@@ -2474,3 +2505,330 @@ async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
     assert f"You are {DEFAULT_AGENT}," not in subagent_prompt, (
         "its maker's name would be a model told it is somebody else"
     )
+
+
+def a_second_model():
+    """A config with two models on it, so "which one it runs on" is observable.
+
+    The default config has one provider, and a subagent that names no model is
+    supposed to run on its maker's — so a second model is what makes the
+    difference between "read the subagent's file" and "read the default" visible
+    at all.
+    """
+    from slife2.libs.host.config import ProviderSettings
+
+    base = default_config()
+    return replace(
+        base,
+        providers={
+            **base.providers,
+            "other": ProviderSettings(
+                api="openai-completions",
+                base_url="https://example.test",
+                api_key_ref="${K:-x}",
+                models={"slow": ModelSettings(model="slow")},
+            ),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_runs_on_the_model_its_own_file_names(context, hub) -> None:
+    """The point of naming a model: the subagent runs on it, and not on another.
+
+    Read when its conversation starts and not when the record was written, which
+    is what makes the file a *config* rather than a note: a subagent that has not
+    started yet runs on what its file says now, and one that has started keeps
+    what it began on — the same rule `model_switch` and the config's `default:`
+    follow, one level in.
+    """
+    server = build_server(
+        a_second_model(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("ok"), text_turn("ok")),
+    )
+    await set_subagent(server, "researcher", model="other/slow")
+
+    named = await send(server, "one", subagent="researcher")
+    plain = await send(server, "one", subagent="helper")
+
+    assert named.data["model"] == "other/slow"
+    assert plain.data["model"] == "deepseek/deepseek-flash", "the maker's own"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
+    tmp_path, context, hub
+) -> None:
+    """`role` reaches the prompt, and the prompt is not the operator's.
+
+    `agent.system_prompt` is what an agent's *own* conversation opens with — a
+    person's prompt for the agent they are running, naming them and saying
+    whether anybody is watching — and a subagent is told what it is instead
+    (`subagent.j2`).  Which is why `role` is a word and not a template: it is the
+    one part of what a subagent is that its maker decides.
+    """
+    backend = FakeBackend(text_turn("ok"), text_turn("ok"))
+    server = build_server(
+        config(system_prompt=template(tmp_path, "be terse")),
+        context_client=context,
+        hub_client=hub,
+        backend=backend,
+    )
+    await set_subagent(server, "researcher", role="code reviewer")
+    await set_subagent(server, "helper")
+
+    await send(server, "one", subagent="researcher")
+    await send(server, "one")
+
+    named = backend.calls[0][0][0].content
+    assert named.startswith("You are researcher, a code reviewer.")
+    assert "Nobody is watching" in named
+    assert backend.calls[1][0][0].content == "be terse", "the operator's, for its maker"
+    record = YAML(typ="safe").load(
+        subagent_file(DEFAULT_AGENT, "helper").read_text(encoding="utf-8")
+    )
+    assert record["role"] == "subagent", "the role a subagent is made with unnamed"
+
+
+@pytest.mark.asyncio
+async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
+    context, hub
+) -> None:
+    """`fork: true` is a subagent made of somebody else's conversation.
+
+    What it is handed is the maker's context as it stood when the fork was made —
+    everything the maker had said and been told — and `prompts_seen` is the
+    request the fork's first turn actually sent, so the claim is about the model
+    call and not about a field somewhere.
+    """
+    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "two", subagent="researcher")
+
+    assert prompts_seen(backend, 1) == [
+        "user:one",
+        "assistant:the maker's answer",
+        "user:two",
+    ]
+    head = backend.calls[1][0][0].content
+    assert head.startswith("You are researcher, a subagent.")
+    assert "copy of the one that made you" in head, (
+        "the one thing a fork cannot work out for itself: what it is handed "
+        "looks exactly like a conversation of its own"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fork_taken_from_a_maker_that_has_said_nothing(context, hub) -> None:
+    """The empty case, which is an ordinary one: a maker that is just starting.
+
+    Nothing is carried and nothing fails — the fork is handed an empty
+    conversation and runs on its own message, exactly as a subagent with no
+    history would.
+    """
+    backend = FakeBackend(text_turn("the fork's"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "one", subagent="researcher")
+
+    assert prompts_seen(backend, 0) == ["user:one"]
+
+
+@pytest.mark.asyncio
+async def test_a_fork_writes_nothing_down(context, hub) -> None:
+    """Its turns are not recorded — not under its own key, and not under its maker's.
+
+    The maker's conversation is what a fork is *made of*, so writing the fork's
+    turns there would file one agent's work as another's history; and writing
+    them under the fork's own key would put a copy of a conversation nobody had
+    into a store whose whole job is to be that conversation's memory — and then
+    hand it back, on the next start, as the context to continue from.
+    """
+    backend = FakeBackend(text_turn("the maker's"), text_turn("the fork's"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "two", subagent="researcher")
+
+    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
+    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1, (
+        "the maker's own turn, and nothing the fork said"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> None:
+    """The maker moves on without it, and that is true in both directions.
+
+    A copy rather than the same list, and both halves matter: what the maker says
+    after the fork was made is not something the fork has read, and the fork's
+    own turns are not in the maker's conversation either.  Reading "share
+    everything with the agent that made you" as *one* conversation with two
+    readers is the reading this rejects, and it is rejected on what a fork is
+    for: its job is to answer *about* a conversation, which it cannot do from
+    inside it.
+    """
+    backend = FakeBackend(
+        text_turn("one"),
+        text_turn("forked"),
+        text_turn("three"),
+        text_turn("again"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "two", subagent="researcher")
+    await send(server, "three")
+    await send(server, "four", subagent="researcher")
+
+    assert prompts_seen(backend, 3) == [
+        "user:one",
+        "assistant:one",
+        "user:two",
+        "assistant:forked",
+        "user:four",
+    ], "the fork's copy, then its own turns, and nothing the maker said since"
+    assert prompts_seen(backend, 2) == [
+        "user:one",
+        "assistant:one",
+        "user:three",
+    ], "and the maker never saw what the fork said"
+
+
+@pytest.mark.asyncio
+async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> None:
+    """The copy ends at the last exchange that finished, and it has to.
+
+    A maker calls `subagent_set` *as* a tool call, so the conversation it is in
+    the middle of ends with an assistant message whose call has no result yet —
+    the one history every provider refuses (`trim_tools` records the same thing
+    about the same pair).  A copy taken then is a conversation nobody can be
+    sent, so what a fork is handed is the conversation up to the point its maker
+    can still be read from: the message it is answering (`two`) is in the copy,
+    and the half-finished exchange is not.
+
+    **The maker is parked on `_approve` rather than merely slow**, so that *when*
+    the fork is made is a fact this test knows instead of a race it hopes goes
+    one way — a race would leave the assertion below passing for the wrong
+    reason, since a maker that had not appended its call yet produces the same
+    expected list.
+    """
+    from slife2.libs.turn.events import ToolApprovalRequested
+
+    backend = FakeBackend(
+        text_turn("one"),
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(
+                    ToolCall(id="c1", name="skill_list", arguments={"_approve": True}),
+                ),
+                stop_reason="tool_calls",
+            ),
+            chunks=[Chunk(text="checking")],
+        ),
+        text_turn("the fork's"),
+        text_turn("done"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    await send(server, "one")
+
+    parked = asyncio.Event()
+
+    async def on_progress(_progress, _total, message):
+        if isinstance(decode(message or ""), ToolApprovalRequested):
+            parked.set()
+
+    async def maker():
+        async with Client(server) as client:
+            return await client.call_tool(
+                "send_message",
+                {"agent": DEFAULT_AGENT, "prompt": "two", "watched": True},
+                progress_handler=on_progress,
+            )
+
+    turn = asyncio.create_task(maker())
+    await asyncio.wait_for(parked.wait(), timeout=10)
+
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "three", subagent="researcher")
+
+    assert prompts_seen(backend, 2) == [
+        "user:one",
+        "assistant:one",
+        "user:two",
+        "user:three",
+    ], "the maker's half-finished exchange is not a history a model can be sent"
+
+    # And the maker's own turn is untouched by any of it: it was waiting for an
+    # answer to a question, and it gets one.
+    async with Client(server) as client:
+        await client.call_tool(
+            "answer_approval",
+            {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
+        )
+    assert (await turn).data["text"] == "done"
+
+
+def test_an_unfinished_exchange_is_what_a_copy_leaves_off() -> None:
+    """`settled_messages` directly, because it is a rule about message lists.
+
+    A turn in flight ends wherever it has got to, and a copy of a conversation is
+    a *request* — so the rule is stated over the shapes a list can have and not
+    over one path through the server.  What it must not do is cut into a finished
+    exchange: a tool round the model has already been told about is context, and
+    losing it would be a copy that knows less than the agent it was made from.
+    """
+    from slife2.libs.turn.messages import Message
+    from slife2.plugins.agent.server import settled_messages
+
+    head = Message(role="system", content="you are")
+    asked = Message(role="user", content="one")
+    called = Message(
+        role="assistant", content=None, tool_calls=[ToolCall(id="c1", name="t")]
+    )
+    answered = Message(role="tool", content="result", tool_call_id="c1")
+    spoke = Message(role="assistant", content="two")
+    both = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="c1", name="t"), ToolCall(id="c2", name="t")],
+    )
+
+    assert settled_messages([]) == []
+    assert settled_messages([head, asked]) == [head, asked]
+
+    # The two shapes a turn in flight leaves: a call nobody has answered, and a
+    # batch that answered only the first of two.
+    assert settled_messages([head, asked, called]) == [head, asked]
+    assert settled_messages([head, asked, both, answered]) == [head, asked]
+
+    # And the shapes that are histories, all of which stay whole: an answer, a
+    # finished exchange, and the same exchange with the model still to speak.
+    whole = [head, asked, called, answered, spoke]
+    assert settled_messages(whole) == whole
+    assert settled_messages([head, asked, called, answered]) == [
+        head,
+        asked,
+        called,
+        answered,
+    ]
+    assert settled_messages(whole + [called]) == whole
