@@ -229,6 +229,15 @@ processes of its own. Everything below follows from one arrangement: a capabilit
 is reached the same way whether it is in this process or another one, and the way
 is MCP over Streamable HTTP on loopback.
 
+**Two facts about a model are what the arrangement is built around** (the
+Prologue, *The limits*): it is a stateless machine — what looks like memory is
+the conversation sent to it again — and the window that conversation travels in
+is a hard bound, which a few turns of tool output exhaust. So a model's
+**knowledge arrives as tools**, because a model released is already out of date
+about something and a schema is the whole of what it is taught about what it may
+call; and its **memory is decided and written down**, because the window cannot
+hold it and nothing outside the turn is remembered by the model at all.
+
 ### 1.1 The four layers
 
 The tree says what each module *is*, and the rule is a fact about what it holds
@@ -331,6 +340,35 @@ ceiling (`libs/plugin/protocol.py`) — the peer is a process this system starte
 and the largest message it can produce is bounded by the model's context — while
 the gateway that dials somebody else's server keeps the SDK's ceiling, because
 there a peer *is* a peer (`DESIGN §1`).
+
+### 1.5 What the position chose
+
+The three trade-offs behind this design, and the caution the Prologue ends on,
+are argued there. Where each landed *here* is worth naming, because in this
+document each is a rule rather than a preference.
+
+- **Design high, so the harness is as small as it can be.** What the harness
+  puts into a conversation is a marked address and nothing of its own (§4.2), and
+  a tool is described by its schema rather than by copy written around it (§6.5).
+  **The one place it is answered the other way is who may call what** (§2.3):
+  the model's tool set is opted in rather than assumed, and the failure that
+  decides it is the silent one — a harness left out fails loudly, a mark left off
+  does not.
+- **Context engineering, as three answers rather than one policy.** What a turn
+  runs on (§4.5), how much of one result reaches it (§4.2, §6.5), and what stays
+  outside the window to be read back from (§7) are decided separately, because
+  they bound different things. It is also an **economic** question — most billing
+  counts tokens — which is why the bound on a result and the size of a page are
+  numbers with a measurement behind them rather than preferences.
+- **A person's work and a machine's work, kept apart.** The conversation is
+  where the model is trusted to work the way it works, and work that must come
+  out the same way twice is code instead: the timing of a fire is an expression
+  the clock reads (§8.4), and a description goes to a loop of its own (§8.3)
+  rather than to a paragraph of instructions about how to proceed.
+- **The caution the Prologue ends on is a mechanism, not a hope.** What a model
+  may do that is dangerous is a tool that has to say who may call it (§2.3), and
+  a tool a plugin marks as dangerous parks the turn until a person answers it
+  (§9.3).
 
 ---
 
