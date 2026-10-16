@@ -69,7 +69,11 @@ from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
 from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
-from slife2.libs.turn.tokens import clip_to_tokens, estimate_text_tokens
+from slife2.libs.turn.tokens import (
+    clip_to_tokens,
+    estimate_lines_tokens,
+    estimate_text_tokens,
+)
 from slife2.plugins.cabinet.store import (
     DIARY,
     DUMP,
@@ -1100,7 +1104,7 @@ def _window_of(
                 full = True
                 break
             kept.append((number, lines[number - 1]))
-            if _spent(kept) > budget:
+            if estimate_lines_tokens(kept) > budget:
                 kept.pop()
                 full = True
                 break
@@ -1143,11 +1147,6 @@ def _runs(hits: list[int], context: int, total: int) -> list[tuple[int, int]]:
         else:
             runs.append([first, last])
     return [(first, last) for first, last in runs]
-
-
-def _spent(kept: list[tuple[int, str]]) -> int:
-    """What the lines held so far cost, by the one estimator."""
-    return estimate_text_tokens("\n".join(text for _, text in kept))
 
 
 def _render_window(

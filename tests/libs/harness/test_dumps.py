@@ -11,7 +11,7 @@ import pytest
 
 from slife2.libs.harness import dumps
 from slife2.libs.host.config import DEFAULT_TOOL_RESULT_TOKENS
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.turn.tokens import estimate_lines_tokens, estimate_text_tokens
 
 #: The window the shipped config states, used here as the one a conversation
 #: would really be bounded by.
@@ -129,7 +129,7 @@ def test_a_selection_over_the_window_is_trimmed_from_its_end() -> None:
 
     assert kept, "something is always kept when a line fits"
     assert kept[0][0] == 1, "the first is the one the model wanted most"
-    assert estimate_text_tokens("\n".join(text for _n, text in kept)) <= BUDGET
+    assert estimate_lines_tokens(kept) <= BUDGET
     assert kept[-1][0] < 3000
 
 

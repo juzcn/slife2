@@ -44,7 +44,11 @@ from typing import Any
 
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.prompt import render
-from slife2.libs.turn.tokens import clip_to_tokens, estimate_text_tokens
+from slife2.libs.turn.tokens import (
+    clip_to_tokens,
+    estimate_lines_tokens,
+    estimate_text_tokens,
+)
 
 #: How the harness is asked to fit one tool result into a conversation: the call
 #: it came from, the text the tool answered with, and **the conversation in hand
@@ -226,7 +230,7 @@ def cut(lines: Sequence[str], decision: Decision, budget: int) -> list[tuple[int
                 continue
             seen.add(number)
             kept.append((number, lines[number - 1]))
-            if _spent(kept) > budget:
+            if estimate_lines_tokens(kept) > budget:
                 kept.pop()
                 return kept
     return kept
@@ -332,10 +336,6 @@ def _ranges(kept: Sequence[tuple[int, str]]) -> list[str]:
         else:
             runs.append([number, number])
     return [str(first) if first == last else f"{first}-{last}" for first, last in runs]
-
-
-def _spent(kept: Sequence[tuple[int, str]]) -> int:
-    return estimate_text_tokens("\n".join(text for _number, text in kept))
 
 
 def instruction(

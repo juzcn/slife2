@@ -177,6 +177,19 @@ def estimate_text_tokens(text: str) -> int:
     return _by_script(text)
 
 
+def estimate_lines_tokens(lines: Sequence[tuple[int, str]]) -> int:
+    """What a numbered window costs — the lines, and not the marks around them.
+
+    `(number, text)` is how a shortened tool result is carried: the harness
+    renders one (`slife2.libs.harness.dumps.numbered_lines`) and `dump_read`
+    renders another, and both fill it **against this one budget** — so both have
+    to be able to measure it the same way, which is why this is here rather than
+    written out at each end.  A reader free to differ from the shortening is a
+    loop the arrangement exists to prevent.
+    """
+    return estimate_text_tokens("\n".join(text for _number, text in lines))
+
+
 def _content_tokens(content: Any) -> int:
     """One message's content, whether it is text or content parts."""
     if isinstance(content, str):
