@@ -1699,10 +1699,12 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   **remote** agents (peers that may be on another machine, on a broker somebody
   else runs) and the agent↔its-subagents network is a network of **local** ones
   (directories under the maker's own). So `subagent:` is a second section — its
-  own broker address, which may be the same one by default and may be a
-  different one, and its own `org`/`unit` — and the plugin that carries it is a
-  second instance of the a2a module rather than a second namespace inside the
-  first.
+  own broker address, which is the one the file has to state and the one a remote
+  mesh falls back to when it names none (two addresses are allowed and this is
+  where that is said; one is what a machine has, so the second is a default
+  rather than a thing to write twice) — and its own `org`/`unit` — and the plugin
+  that carries it is a second instance of the a2a module rather than a second
+  namespace inside the first.
 
   **Its names carry no `a2a`**, which is the difference between a technical fact
   and a meaning: the protocol is what this build happens to reach a local agent
@@ -1837,9 +1839,17 @@ bound, the prompt's own name for a subagent — **done**; **(3) the second netwo
 — `Net`, a second instance of the module (`slife2.plugins.a2a.local_server`), its
 own section and port, the four tool names *and descriptions* per network — **done
 and seen running**: one `slife2` brings up both, `slife2-subagent` on 8041
-serving `subagent_*`; **(4) the road** — the four things above, and the display
-half of it is **done** (`subagent:<name>` → `Subagent(<name>)> `).  What is still
-unstated is whose window runs a turn two levels down (sdd §12); and **(5) what one
+serving `subagent_*`; **(4) the road** — the three things above — **done**: the
+local plugin holds a member's place (`place_for`, from the same look at
+`subagent_dirs` that membership always was), an inbound message is a
+`send_message` on the agent server in the member's own conversation
+(`run_turn`), and the send path gives the receiver its place *before* it
+publishes, which is what every `subagent_send_message` before it was missing.  The
+display half is **done** for a member's *answer* (`subagent:<name>` →
+`Subagent(<name>)> `) and deliberately not for its coming and going: a subagent's
+presence is not drawn anywhere yet, so `on_agent_change` draws nothing on this
+network rather than inventing a line.  What is still unstated is who holds a
+place two levels in (sdd §12); and **(5) what one
 subagent is** — `role`, `fork`, and the subagent's own file that holds them —
 **done**, which is the second pass above.  What is still open there is a per-role
 prompt template.

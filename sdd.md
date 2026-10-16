@@ -671,7 +671,11 @@ distinguish it, each of them about *status* rather than about ability:
   on another machine, on a broker somebody else runs — and the agent↔its-
   subagents one is a network of **local** ones, which are directories here. Each
   is a section of its own (`a2a:` and `subagent:`, §3.1), each names its own
-  broker and its own `org`/`unit`, and the second is where a subagent is a peer.
+  `org`/`unit`, and the second is where a subagent is a peer — while the *broker*
+  is the machine's: `subagent:` is where it is said, and an `a2a:` that names none
+  means the same address, because a machine meets both networks through one broker
+  by default and a second `host:port` in the file is a second thing to keep in
+  step.
   It is the same protocol and the same four tools throughout, presented under
   `subagent_*` names — **a technical fact and not a meaning**: nothing a person
   or a model reads on the local network says `a2a` anywhere.
@@ -728,12 +732,14 @@ subagent is found by looking rather than by being listed anywhere
     maker that restores while the fork waits is not restored twice.
 
 **The only entry is a message.** A subagent has no window, so the road every
-channel delivers along (§8) is held for it by its maker: the maker's window
-carries the subagent's place on the net and runs its turns, and what the subagent
-answers is drawn on the maker's terminal as `Subagent(<name>)> ` — a channel,
-like `AsyncTask(<name>)> `, and not a marker. On the wire, a message between
-agents carries `[PeerAgent:{…}]` and one on the subagent network carries its own
-envelope (`DESIGN §1.10`).
+channel delivers along (§8) is not open to it: the **local network's own process**
+holds the subagent's place on the net and runs its turns — a message to it becomes
+a turn in the subagent's own conversation, because a window has no part in a local
+network at all (`DESIGN §1.10`, "the road"). What the subagent answers is drawn on
+the maker's terminal as `Subagent(<name>)> ` — a channel, like `AsyncTask(<name>)> `,
+and not a marker: the answer reaches the maker as a message in its own
+conversation. On the wire, a message between agents carries `[PeerAgent:{…}]` and
+one on the subagent network carries its own envelope (`DESIGN §1.10`).
 
 **Two verbs are not A2A's.** A2A coordinates peers that already exist: it has
 `join`, which is one of them taking its place, and nothing that makes one exist.
@@ -1722,11 +1728,14 @@ code against its own docstrings. What would settle each is named with it.
    a failure, and stating it once.
 8. **A subagent that makes a subagent.** A subagent has every capability its
    maker has (§3.5), so it may name one of its own, and the directory says who
-   made whom one level further in — but the road does not: a subagent's turns are
-   run by *its maker's window*, and a subagent has none. Either the road belongs
-   to the topmost window of a tree, or a conversation with no window of its own
-   gets a road that is not a window at all. *Settled by:* saying whose window
-   runs a turn two levels down, and what happens when that window closes.
+   made whom one level further in — but the road does not reach it. The second of
+   the two answers offered here is the one taken (`DESIGN §1.10`, "the road"): a
+   conversation with no window of its own gets a road that is not a window at
+   all, and that is why a subagent is reachable today. What is still open is the
+   level below: the local network holds a place for a maker's own subagents and
+   no further in, so *who* holds a place two levels in is unstated.
+   *Settled by:* naming the holder of a place two levels in, and what happens to
+   it when that holder stops.
 
 ---
 
