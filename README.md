@@ -1160,7 +1160,8 @@ slife2/
 ├─ libs/              # a library: imported, never reached over a socket
 │  ├─ host/           # the machine — the config file and its one writer, which
 │  │                  #   home a call is served from, the daemon records and
-│  │                  #   locks, and the launcher that brings the servers up
+│  │                  #   locks, the launcher that brings the servers up, and
+│  │                  #   the state file a plugin keeps beside an agent
 │  ├─ plugin/         # the contract every plugin sits on: `protocol` (what it
 │  │                  #   takes to be one of our servers), `audience` (who may
 │  │                  #   call a tool), `family` (the shared half of a family)
@@ -1178,7 +1179,8 @@ slife2/
 │  ├─ toolclient.py   # the hub: its listing, its calls, the trim
 │  ├─ embedder.py     # the embeddings endpoint, shared by the two indexes
 │  └─ gateway.py      # a server somebody else runs
-├─ helpers/           # small and stateless: the clock, time grammar, timeouts
+├─ helpers/           # small and stateless: the clock, time grammar, timeouts,
+│                     #   and the hop that takes a blocking call off the loop
 ├─ plugins/           # a process each: one directory, `server.py` inside it
 │  ├─ agent/          # slife2-agent — the loop, and the conversations it owns
 │  ├─ context/        # slife2-context — the turn log and the decision about it

@@ -944,8 +944,8 @@ server，所以就只该有一份关于它们的记录。它是*可重建的* �
 slife2/
 ├─ libs/              # library：被 import，从不经由 socket 够到
 │  ├─ host/           # 这台机器 —— 配置文件及它唯一的写入者、一次调用由哪个
-│  │                  #   home 服务、守护进程的记录和锁，以及把 server
-│  │                  #   拉起来的 launcher
+│  │                  #   home 服务、守护进程的记录和锁、把 server 拉起来的
+│  │                  #   launcher，以及 plugin 养在 agent 旁边的那份状态文件
 │  ├─ plugin/         # 每个 plugin 都坐在上面的契约：`protocol`（要成为我们的
 │  │                  #   server 需要什么）、`audience`（谁可以调用一个工具）、
 │  │                  #   `family`（一个 family 共享的那一半）
@@ -960,7 +960,8 @@ slife2/
 │  ├─ toolclient.py   # hub：它的清单、它的调用、那次裁剪
 │  ├─ embedder.py     # embeddings 端点，两个索引共用
 │  └─ gateway.py      # 别人在跑的一个 server
-├─ helpers/           # 小而无可状态：时钟、时间语法、超时
+├─ helpers/           # 小而无可状态：时钟、时间语法、超时，
+│                     #   以及把阻塞调用挪出事件循环的那一跳
 ├─ plugins/           # 每个一个进程：一个目录，里面有 `server.py`
 │  ├─ agent/          # slife2-agent —— 循环，以及它拥有的那些对话
 │  ├─ context/        # slife2-context —— 轮次日志和关于它的那个决定

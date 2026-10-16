@@ -973,6 +973,14 @@ exists to keep:
 - **A list the caller sized is bound in chunks** (`index.chunks`), because a
   statement with more values than SQLite accepts raises `OperationalError`, and
   the corpus it raises on is the one nobody tests at that size.
+- **One request carries a batch, and an answer shorter than the request is a
+  refusal** (`index.embed_rows`, `index.checked_vectors`). A batch is one call
+  because a first run has thousands of rows to embed; the count is checked
+  because a row is written with its vectors in the same transaction, so a short
+  answer is not a partial index that a later pass catches up — it is a hole
+  nothing outside can see, with every status still reporting the index ready.
+  The check is one function with the corpus named in its sentence, so the one
+  path that used to write what it was handed cannot come back.
 
 ### 7.3 The cabinet
 

@@ -300,6 +300,87 @@ of" — were spelled in the modules that produce them, including one defined in 
 *client* of the agent server.  They are `libs/plugin`'s now, which is where the
 rest of the contract is.
 
+**The same question asked again, one layer down: the machinery, and the copies
+whose own docstrings had already admitted it.**  A later pass for the same
+question — *how many places state this* — found five more, and four of them said
+so on the page: `ToolStore._embed` and `TurnStore._embed_turns` were the same
+twelve lines with the corpus noun changed, and the second one's docstring read
+"The catalogue's `_embed` with turns in it"; `plugins/a2a`'s plain YAML writer was
+"set up the way `plugins/wechat`'s is"; a comment in the turn store's save path
+enumerated the sibling paths that refuse a short embedding answer — while being
+the one that did not.  The thread hop that keeps a blocking SQLite call off the
+loop every server answers from had four bodies in four modules, three of them
+untyped, so `helpers.threads.off_loop`'s `ParamSpec` is the first time those
+forty-seven call sites were checked at all.  And the cabinet served five kinds
+through ten tool bodies that differed only in the kind and in the sentence a miss
+answers with.
+
+**What decided each merge was whether the difference was the point.**  The
+cabinet's sentences are model-facing text — "There is no note about {subject!r}"
+against "There is no report called {title!r}" — so `page_of`, `row_of` and
+`remove_of` take them as arguments and each tool stays the kind it serves.  The
+embedding count check is one rule with one consequence, so it is one function
+(`index.checked_vectors`) with the corpus noun passed in for the sentence, and
+the batch it wraps is one call because a first run has thousands of rows.  A
+numbered window is measured against the *harness's* budget from both ends — the
+shortening that fills it and `dump_read`, which fills one back — so the
+measurement is `tokens.estimate_lines_tokens` rather than two expressions that
+happen to agree today.  And the two `_yaml` writers were not only the same three
+lines: the atomic swap around them was the same five, differing in which one
+cleaned up its temporary file, so `libs/host/statefile.py` keeps the mechanics
+(one `mkstemp`, one `fsync`, one `os.replace`, one unlink on failure) and both
+plugins keep their own *policy* — a corrupt login is a cache miss that is logged
+and ignored, a corrupt ledger is a refusal to start from nothing — by catching
+what `write` raises.
+
+**Read, and left as they are.**  This is the half that keeps the next pass from
+re-finding them, so each says why:
+
+- **`where_clause` and `filter_clause`** (`libs/store/index.py`) differ by one
+  word, `AND` against `WHERE`, and both are used at six and eight sites.  A
+  `_clauses(clauses, lead)` behind them would be a third name for two, and the
+  load-bearing half of both is the empty-string guard, which is already shared.
+- **The search legs** (`_keyword_hits`, `_nearest`, `_meaning_of`,
+  `_matched_in_line`, `_semantic_lists`) are per store, and `index.py`'s module
+  docstring already says why: they differ in their join, their ranking and the
+  alias they answer under, and "a helper that took a callback for each of them
+  would hide the one part the tests pin".
+- **`_place` and `_place_vectors`** are four lines over the shared
+  `place_vectors`, whose only difference is the key's type.  Merging them means
+  passing the per-row writer in, which is more machinery than the loop it
+  removes.
+- **`_ensure_schema` in `db.py` and `catalogue.py`** are not copies: the
+  catalogue *drops and rebuilds* a file that is not this build's, and the turn
+  store only reports one.  Same three-word shape, opposite behaviour.
+- **`runtime._write_json_atomic` beside `statefile.write`** is JSON rather than
+  YAML, does not fsync, and its failure is a registered degrade that logs and
+  carries on where `statefile.write` raises for its caller to catch.  Which of
+  those one helper should do is a design decision, not a duplication.
+- **The file tunnel's `_find_binary` and `_missing_binary_error`** are one line
+  each per provider, and the message *is* the whole of what the second one adds —
+  "ssh client not found … on Linux/macOS install openssh-client" is not a
+  sentence to parameterise.
+- **The five management tools `mcp_tools` and `restapi` share** are one line
+  each, already routed through `family.list_entries`/`remove_entry`/
+  `switch_entry`/`list_entry_tools`; what is left of each is its decorator name
+  and its docstring, which *are* the model-facing schema.
+- **The ten plugin `main`s** are `serve_plugin`/`serve_backend` calls differing by
+  `build=`, `note=` and `api=`, which is the table `PLUGINS` above.
+- **The four `channel_for`s** are one expression each over a different prefix
+  (`async-tool`, `schedule`, `agent-task`, `a2a`/`subagent`), and those prefixes
+  are the vocabulary `tui/widgets.channel_prefix` branches on.  What was a
+  duplication — `agent_task`'s own `task_id` and two hand-built `f"{CHANNEL}:…"`
+  strings beside it — is one spelling now.
+- **`media`'s three `NotImplementedError` stubs** (`generate_video`,
+  `text_to_speech`, `transcribe_audio`) differ only in a word, and the *method
+  name* is the capability contract: folding them behind one parameterised method
+  would delete the interface.
+- **The mirror pairs** in `tui/widgets.py` (scroll and page, up and down) and
+  `schedule.expressions.next_run`/`previous_run` are each two calls with the same
+  shape and the opposite direction — `get_next`/`get_prev` is croniter's own API,
+  and the "strictly after"/"strictly before" rule each docstring carries is the
+  reason they exist.
+
 ### 1.2 The plugin that is not a family
 
 **`slife2-wechat` is the first plugin here that holds no section and declares no
@@ -3719,7 +3800,7 @@ config entry and the family holds the connection, and what writes the *catalogue
 is `refresh_declared`, at the next ask — and asking is what a search does. So
 adding a server is cheap and the model's **next search** is what pays: the whole
 of that server's tool list is merged then, one row each, and embedded in one
-request. Nothing splits that request — `ToolStore._embed` chunks *documents* by
+request. Nothing splits that request — `index.embed_rows` chunks *documents* by
 `max_chars` and not requests by size — so a published server with four figures of
 tools makes a single search the expensive one, and the count is the only warning
 anybody can give: `mcp_set` says so when it is over `TOOL_LIST_LIMIT`. A batch
