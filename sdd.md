@@ -365,9 +365,16 @@ distinguish it, each of them about *status* rather than about ability:
   kind: the agent↔agent one is a network of **remote** agents — peers that may be
   on another machine, on a broker somebody else runs — and the agent↔its-
   subagents one is a network of **local** ones, which are directories here. Each
-  is a section of its own (`a2a:` and `a2a-subagent:`, §3.1), each names its own
+  is a section of its own (`a2a:` and `subagent:`, §3.1), each names its own
   broker and its own `org`/`unit`, and the second is where a subagent is a peer.
-  It is the same A2A vocabulary throughout, presented under `subagent_*` names.
+  It is the same protocol and the same four tools throughout, presented under
+  `subagent_*` names — **a technical fact and not a meaning**: nothing a person
+  or a model reads on the local network says `a2a` anywhere.
+  - **The local network's namespace is per maker.** Its `unit` is the section's
+    with the maker's name after it, so two agents may each have a `researcher`:
+    one namespace would make those two one MQTT identity, and a broker settles a
+    duplicate identity by disconnecting the older one — a kick loop rather than
+    an error.
 
 **Its directory is inside its maker's.** `agents/jack/researcher/` holds
 everything the subagent owns — its conversation, its cabinet, its ledger, its

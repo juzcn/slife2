@@ -247,6 +247,150 @@ SCHEDULE_SERVER_NAME = "slife2-schedule"
 #: it serves rather than one for the machine.
 A2A_SERVER_NAME = "slife2-a2a"
 
+#: The *local* network's server — the other half of §3.5's two.  A name of its
+#: own because identity is what a probe checks
+#: (`slife2.libs.plugin.protocol.identifies`): one machine runs both, and a
+#: `status` that could not tell them apart would be the same as no name at all.
+#:
+#: **Not `slife2-a2a-something`.**  That an agent talks to its own subagents over
+#: the same protocol is a technical fact about this build rather than a meaning
+#: the name should carry: remotely it is A2A — a peer on another machine, on a
+#: broker somebody else runs, is what the protocol is *for* — while locally it is
+#: an agent and the agents it made, which is not a federation of anything.
+SUBAGENT_SERVER_NAME = "slife2-subagent"
+
+#: The topic namespace a local network gets when its section names none.  Its
+#: own rather than `default`, because the two networks can meet on one broker and
+#: `{org}/{unit}` is what tells them apart — see `SubagentSettings.network`.
+SUBAGENT_UNIT = "local"
+
+
+@dataclass(frozen=True)
+class Net:
+    """One of the two networks — everything about it that a *name* decides.
+
+    sdd §3.5's two are different in kind: the agent↔agent one carries an agent's
+    **remote** peers, the agent↔its-subagents one carries its **local** ones.  A
+    record rather than prose, because each field is a name that crosses a process
+    boundary and two of them have to agree: the section the plugin reads, the
+    name it answers as, the tool names the model is handed, the channel a turn
+    says it arrived on, and the envelope its messages open with.
+
+    **Here rather than in the plugin**, because that is where names that cross
+    boundaries already live (`A2A_SERVER_NAME`, `TUI_SERVER_NAME`): the launcher
+    builds its probe out of `tool()`, the plugin builds its four tools out of the
+    same call, and one spelling is what keeps a probe looking for a tool the
+    server actually serves.
+    """
+
+    #: The section, and the key in `servers:` — the launcher's address for this
+    #: network and the plugin's settings for it are one word.
+    key: str
+    #: Where this network's settings are on `Config`, as the attributes to walk:
+    #: the remote one *is* its section, and the local one is the network half of
+    #: a section that also holds what a subagent costs (`SubagentSettings`).
+    settings: tuple[str, ...]
+    #: The MCP name this instance answers as.  Different for the two, because
+    #: one machine runs both and a probe has to be able to tell them apart.
+    server_name: str
+    #: The four model tools are this plus a verb (`a2a_send_message`).
+    prefix: str
+    #: What a turn that arrived over this network says it came in on.
+    channel: str
+    #: What an inbound message's stored envelope opens with.
+    marker: str
+    #: What the window calls a line from this network's sender.
+    bubble: str
+    #: Whether every member of this network shares one topic namespace.
+    #: True for the remote network, and false for the local one — see
+    #: `unit_for`, which is where that is used and argued.
+    shared_unit: bool = True
+
+    def tool(self, verb: str) -> str:
+        """One of this network's tools, named: `tool("list_agents")`."""
+        return f"{self.prefix}{verb}"
+
+    def unit_for(self, unit: str, member: str) -> str:
+        """The topic namespace *member* belongs in on this network.
+
+        **The remote network is the machine's one namespace; the local one is per
+        maker.**  A member of the local network is named by the agent that made
+        it, and two agents may each have a `researcher`: one namespace would make
+        those two one MQTT identity (`{org}/{unit}/{agent_id}`), which a broker
+        settles by disconnecting the older one — a kick loop rather than an
+        error.  So the maker is in the unit on that network, and the subagents of
+        two agents are as separate as their directories are.
+        """
+        return unit if self.shared_unit else f"{unit}-{member}"
+
+
+#: The remote network: an agent's peers, which may be on another machine and on
+#: somebody else's broker.  v1's mesh, unchanged.
+REMOTE = Net(
+    key="a2a",
+    settings=("a2a",),
+    server_name="slife2-a2a",
+    prefix="a2a_",
+    channel="a2a",
+    marker="[PeerAgent:",
+    bubble="PeerAgent",
+)
+
+#: The local network: an agent and the subagents it made, which are directories
+#: under its own — so its broker is this machine's and its members never leave.
+#:
+#: **Its envelope says `SubagentPeer`, and the window says `Subagent(name)>`** —
+#: two words because they have two readers, and only one of them can be the
+#: sender's role.  The window's line is read by the agent that made the subagent,
+#: so naming the relationship is right there; the envelope is read by whoever the
+#: turn runs for, and on this network that is a subagent as often as its maker —
+#: where `Subagent` would name the *receiver*.  `Peer` is the word that cannot be
+#: read as the reader, which is why the remote envelope is `[PeerAgent:` and this
+#: one is `[SubagentPeer:`: the pair names the two networks, and neither can be
+#: mistaken for the agent reading it (`slife2.plugins.a2a.server`'s marker).
+LOCAL = Net(
+    key="subagent",
+    settings=("subagent", "network"),
+    server_name=SUBAGENT_SERVER_NAME,
+    prefix="subagent_",
+    channel="subagent",
+    marker="[SubagentPeer:",
+    bubble="Subagent",
+    shared_unit=False,
+)
+
+#: Both, in the order they are described in — the remote one first, because it is
+#: the one a machine is on before it has any subagents.
+NETS = (REMOTE, LOCAL)
+
+#: The four tools a network offers the model, by verb.  **Here rather than in the
+#: plugin that serves them**, because one of them is also what the launcher
+#: probes with (`expected_tool`) and a probe looking for a name the server does
+#: not serve is a server that never starts.  `Net.tool` is the other half:
+#: `a2a_send_message` and `subagent_send_message` are one verb and two networks.
+SEND_MESSAGE = "send_message"
+CANCEL_TASK = "cancel_task"
+LIST_AGENTS = "list_agents"
+BROADCAST = "broadcast"
+
+#: The remote network's section key, which is also its key in `servers:`.
+A2A_KEY = REMOTE.key
+
+
+def net_settings(config: Config, net: Net) -> A2ASettings:
+    """Where one network's settings are: its section, or the network half of one.
+
+    A walk rather than a branch, because which of the two shapes a network's
+    settings have is `Net.settings`' own fact and a second place to spell it is a
+    second place to get it wrong.
+    """
+    found: Any = config
+    for part in net.settings:
+        found = getattr(found, part)
+    assert isinstance(found, A2ASettings)
+    return found
+
+
 #: Where `--a2a-broker` puts the address it was given, for the servers that have
 #: to read it.  An environment variable rather than an argument, which is
 #: `slife2.libs.host.paths.apply_data_dir`'s mechanism and its reason: the process
@@ -320,6 +464,9 @@ LOCAL_SERVERS = (
     "agent-task",
     "schedule",
     "a2a",
+    # The **local** network, beside the remote one: two instances of one module,
+    # two sections, and a machine may be on either or both (`Net`).
+    "subagent",
 )
 
 
@@ -680,6 +827,22 @@ class SubagentSettings:
 
     What is left is the number only this feature has an opinion about.
     """
+
+    #: Where a subagent's network is, from the same section — `broker`, `org`
+    #: and `unit`, parsed by `_a2a` because a section holding a network should
+    #: not spell its keys a second way.  **`configured` here is this section's
+    #: presence**, which is what makes a machine with no `subagent:` a machine
+    #: whose subagents are not reachable — the same shape `a2a:` has, one level
+    #: down.
+    #:
+    #: The default unit is its own rather than `default`, and that is not
+    #: decoration: the two networks can share one broker, and a namespace is
+    #: `{org}/{unit}` — a local network left at the remote one's default would be
+    #: the *same* network, with the machine's own subagents visible to its remote
+    #: peers.
+    network: A2ASettings = field(
+        default_factory=lambda: A2ASettings(unit=SUBAGENT_UNIT)
+    )
 
     #: How many subagents one agent may have — a cap, not a target.
     #:
@@ -1361,6 +1524,9 @@ class Config:
     #: Where the A2A mesh's broker is, from `a2a:`.  Read by `slife2-a2a`, which
     #: holds the connections — and the one section whose *presence* is a
     #: setting, since a machine with no section is a machine not on the mesh.
+    #: Where the **remote** network's broker is, from `a2a:`.  A network of
+    #: agents that may be on other machines — which is what makes the protocol
+    #: the point here (`Net`).
     a2a: A2ASettings = field(default_factory=A2ASettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
@@ -1561,6 +1727,13 @@ def default_config() -> Config:
             # writes one, which is the same argument the `wechat` section is
             # absent by.
             "a2a": ServerSettings(port=8040),
+            # The **local** network: the same module, one port over, and the
+            # other half of sdd §3.5's pair.  It is here rather than absent for
+            # `a2a`'s reason read the other way round: a machine reaches its own
+            # subagents, and `subagent_*` is a feature the config can turn on by
+            # writing the section — while the *port* is nobody's decision, so it
+            # is written down with every other one.
+            "subagent": ServerSettings(port=8041),
             # One port per wire protocol, not per provider: a process speaks one
             # format, and `stream_chat(provider=...)` picks whose credentials.
             "openai-completions": ServerSettings(port=8001),
@@ -1877,13 +2050,32 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
         media=_media(raw.get("media"), base.media),
         file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
-        a2a=_a2a(raw.get("a2a"), base.a2a),
+        a2a=_a2a(
+            raw.get(A2A_KEY), base.a2a, section=A2A_KEY, override=A2A_BROKER_ENV_VAR
+        ),
         default=str(raw.get("default") or _first_reference(providers)),
     )
 
 
-def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
-    """The `a2a:` section, defaulted — and the one place `configured` is set.
+def _a2a(
+    raw: Any,
+    base: A2ASettings,
+    *,
+    section: str = A2A_KEY,
+    override: str = "",
+) -> A2ASettings:
+    """One `a2a:`-shaped section, defaulted — and the one place `configured` is set.
+
+    **`section` because there are two of them** (§3.5): the remote network's
+    `a2a:` and the local one's `a2a-subagent:`, parsed by the same rules and told
+    apart by the name every refusal is written with — a `provider:` mistake in
+    the local one must not be reported against a key the file does not have.
+
+    **`override` names an environment variable only the remote one is given.**
+    The local network's broker is this machine's own and is the file's to say
+    (`--a2a-broker` names somebody else's, and a subagent has no business on
+    one); passing it for the remote network and not for the local one is the
+    whole of that rule.
 
     **Absent means off**, so the built-in answer comes back with
     `configured=False` and the plugin opens no mesh.  The shape is v1's —
@@ -1915,26 +2107,26 @@ def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
         )
     if raw is None:
         return base
-    section = _mapping(raw, "a2a")
+    found = _mapping(raw, section)
 
-    provider = str(section.get("provider") or base.provider).strip()
+    provider = str(found.get("provider") or base.provider).strip()
     if provider != base.provider:
         raise ConfigError(
-            f"a2a.provider: {provider!r} is not a broker this build speaks to "
-            f"(the only one is {base.provider!r}); leave the key out for "
+            f"{section}.provider: {provider!r} is not a broker this build speaks "
+            f"to (the only one is {base.provider!r}); leave the key out for "
             f"{base.provider!r}, or leave the section out to stay off the mesh"
         )
 
     # `broker:` is a mapping or nothing.  A `broker: localhost:1883` written as a
     # scalar is the mistake the nesting invites, and it deserves the section's
     # name rather than a `str` object's `get` failing somewhere further down.
-    broker = section.get("broker")
+    broker = found.get("broker")
     if broker is None:
         broker = {}
-    broker = _mapping(broker, "a2a.broker")
+    broker = _mapping(broker, f"{section}.broker")
 
     host = str(broker.get("host") or base.broker_host)
-    port = _int_or(broker.get("port"), base.broker_port, "a2a.broker.port")
+    port = _int_or(broker.get("port"), base.broker_port, f"{section}.broker.port")
     if override:
         host, port = broker_address(override)
 
@@ -1943,8 +2135,8 @@ def _a2a(raw: Any, base: A2ASettings) -> A2ASettings:
         configured=True,
         broker_host=host,
         broker_port=port,
-        org=str(section.get("org") or base.org),
-        unit=str(section.get("unit") or base.unit),
+        org=str(found.get("org") or base.org),
+        unit=str(found.get("unit") or base.unit),
         overridden=bool(override),
     )
 
@@ -1973,10 +2165,17 @@ def _agent_task(raw: Any, base: AgentTaskSettings) -> AgentTaskSettings:
 
 
 def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
-    """The `subagent:` section, defaulted — one number, and it has to be real.
+    """The `subagent:` section, defaulted — a cap and a network.
 
     Zero is refused, and `_agent_task` says why in the words this borrows: a cap
     of zero is a tool the model can see, can call, and can never be answered by.
+
+    **The network comes from the same mapping, through `_a2a`.**  A section
+    holding a network parses its `broker`/`org`/`unit` the one way those keys are
+    parsed anywhere, so a `subagent:` that names a broker means what an `a2a:`
+    naming one means — and the two readers this section has (the agent server for
+    the cap, the local network's plugin for the address) are `AgentTaskSettings`'
+    arrangement one section over, which is where that exception is argued.
     """
     if raw is None:
         return base
@@ -1990,7 +2189,10 @@ def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
             f"the model names — set at least 1, or leave the section out for "
             f"{base.max_running}"
         )
-    return SubagentSettings(max_running=max_running)
+    return SubagentSettings(
+        max_running=max_running,
+        network=_a2a(raw, base.network, section="subagent"),
+    )
 
 
 def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:

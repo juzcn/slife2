@@ -38,7 +38,16 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.config import A2ASettings, default_config
+from slife2.libs.host.config import (
+    BROADCAST,
+    CANCEL_TASK,
+    LIST_AGENTS,
+    LOCAL,
+    REMOTE,
+    SEND_MESSAGE,
+    A2ASettings,
+    default_config,
+)
 from slife2.libs.host.paths import a2a_inbound_path, a2a_inbound_paths
 from slife2.libs.host.runtime import read_record
 from slife2.libs.plugin.audience import client_meta, for_the_model
@@ -124,12 +133,14 @@ def test_the_marker_carries_from_and_not_agent_name() -> None:
     sender for itself — which the `from` key prevents inside the payload and the
     prefix must not undo in front of it.
     """
-    assert marker(PEER) == '[PeerAgent:{"from": "jill", "type": "task_request"}] '
-    assert marker(PEER, TASK) == (
+    assert (
+        marker(REMOTE, PEER) == '[PeerAgent:{"from": "jill", "type": "task_request"}] '
+    )
+    assert marker(REMOTE, PEER, TASK) == (
         f'[PeerAgent:{{"from": "jill", "type": "task_request", "task_id": "{TASK}"}}] '
     )
     assert (
-        marker(PEER, None, "message")
+        marker(REMOTE, PEER, None, "message")
         == '[PeerAgent:{"from": "jill", "type": "message"}] '
     )
 
@@ -137,7 +148,7 @@ def test_the_marker_carries_from_and_not_agent_name() -> None:
 def test_the_marker_reads_its_own_type_back() -> None:
     """The writer and the reader are one pair, so the vocabulary stays one list."""
     for kind in A2A_TYPES:
-        assert a2a_message_type(marker(PEER, TASK, kind)) == kind
+        assert a2a_message_type(marker(REMOTE, PEER, TASK, kind)) == kind
 
 
 def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
@@ -154,8 +165,26 @@ def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
 
 def test_the_channel_names_the_peer() -> None:
     """The window draws a bubble from the channel alone, so the peer is in it."""
-    assert channel_for(PEER) == "a2a:jill"
+    assert channel_for(REMOTE, PEER) == "a2a:jill"
     assert CHANNEL == "a2a"
+
+
+def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
+    """A vocabulary each, and the one word that differs on purpose.
+
+    The remote network's envelope says `PeerAgent` and the local one's says
+    `SubagentPeer`: both keep `Peer`, which is the word that cannot be read as
+    the reader — the window's `Subagent(name)>` is the other half of that pair,
+    and it *is* a role word, rightly, because the window belongs to the agent
+    that made the subagent.
+    """
+    assert channel_for(LOCAL, PEER) == "subagent:jill"
+    assert (
+        marker(LOCAL, PEER)
+        == '[SubagentPeer:{"from": "jill", "type": "task_request"}] '
+    )
+    assert LOCAL.tool("send_message") == "subagent_send_message"
+    assert REMOTE.tool("send_message") == "a2a_send_message"
 
 
 # ── the scrubber, on values that come off the wire ──────────────────────────
@@ -865,7 +894,9 @@ def wired(window: Window | None = None) -> Session:
     """
     from slife2.plugins.a2a.mesh import A2AMesh
 
-    session = Session(agent=AGENT, mesh=A2AMesh(default_config().a2a, AGENT))
+    session = Session(
+        agent=AGENT, net=REMOTE, mesh=A2AMesh(default_config().a2a, AGENT)
+    )
     _wire(session)
     return session
 
@@ -913,7 +944,7 @@ async def test_an_inbound_task_arrives_marked_and_on_the_peers_channel(
     handed = window.handed[-1]
     assert handed["agent"] == AGENT
     assert handed["channel"] == f"a2a:{PEER}"
-    assert handed["text"] == f"{marker(PEER, TASK)}write me a poem"
+    assert handed["text"] == f"{marker(REMOTE, PEER, TASK)}write me a poem"
     # The type is readable back off it, which is what a receiver needs to know
     # whether it owes a completion.
     assert a2a_message_type(handed["text"]) == "task_request"
@@ -1354,7 +1385,7 @@ async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> 
     text, peer, what, retries, note = session.queue.get_nowait()
     assert session.queue.empty(), "one notice, and nothing else on the queue"
     assert peer == ORPHAN_PEER
-    assert channel_for(peer) == f"{CHANNEL}:{ORPHAN_PEER}"
+    assert channel_for(REMOTE, peer) == f"{CHANNEL}:{ORPHAN_PEER}"
     assert what == "1 orphaned inbound task(s)"
     assert TASK in text and PEER in text
     # It is a message for the model to act on, not a line for a window to draw.
@@ -1475,7 +1506,7 @@ async def test_the_queue_is_bounded_so_a_peer_cannot_grow_this_process() -> None
     assert session.queue.qsize() == MAX_QUEUED
     # The oldest went, which is the one whose moment has most likely passed.
     first = session.queue.get_nowait()
-    assert first[0] != f"{marker(PEER, None, 'message')}message 0"
+    assert first[0] != f"{marker(REMOTE, PEER, None, 'message')}message 0"
 
 
 # ── the start, and what it must not leak ────────────────────────────────────
@@ -1567,6 +1598,40 @@ async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         A2A_SEND_MESSAGE,
     ]
     assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
+
+
+@pytest.mark.asyncio
+async def test_the_local_instance_serves_the_local_network() -> None:
+    """One module, two networks, and the second one's vocabulary is its own.
+
+    **This is the whole of what "two instances" means**, and the tool names are
+    where it is visible: a model that has a maker's four `a2a_*` tools in front of
+    it must be handed `subagent_*` for the network its own subagents are on, or
+    the names it leans on to tell the two apart are the same names.
+
+    The *descriptions* move with them, which is the half that is easy to leave
+    behind: a tool called `subagent_send_message` that says it sends to "a peer
+    on the A2A mesh" teaches a model the opposite of what its name says.
+    """
+    tools = await build_server(
+        default_config(), net=LOCAL, connecting=False
+    ).list_tools()
+    by_name = {t.name: t for t in tools}
+
+    assert sorted(by_name) == [
+        JOIN,
+        LOCAL.tool(BROADCAST),
+        LOCAL.tool(CANCEL_TASK),
+        LOCAL.tool(LIST_AGENTS),
+        LOCAL.tool(SEND_MESSAGE),
+    ]
+    assert A2A_SEND_MESSAGE not in by_name, "and not the remote network's names"
+
+    send = by_name[LOCAL.tool(SEND_MESSAGE)]
+    assert send.description.startswith("Send a message to one of your subagents.")
+    assert LOCAL.marker in send.description, "its own envelope, in its own text"
+    assert REMOTE.marker not in send.description
+    assert LOCAL.tool(SEND_MESSAGE) in by_name[LOCAL.tool(BROADCAST)].description
 
 
 @pytest.mark.asyncio
@@ -1918,6 +1983,7 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     """
     session = Session(
         agent=AGENT,
+        net=REMOTE,
         mesh=A2AMesh(default_config().a2a, AGENT),  # opens the ledger
     )
 

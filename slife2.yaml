@@ -128,6 +128,11 @@ servers:
   # handed to the conversation (`hand_over`), and its section is `a2a:`
   # (DESIGN.md §1.8).
   a2a: {port: 8040}
+  # The **local** network: the same module one section over, serving an agent and
+  # the subagents it made.  Two networks rather than one namespace because they
+  # are different in kind — remote peers against local ones — and a machine may
+  # be on either or both (`subagent:` above).
+  subagent: {port: 8041}
   # Generation: images, video, speech and transcripts, from the `media:`
   # section.  One process for every provider, because which vendor draws a
   # picture is a fact about a *model* and not about a process — the same
@@ -327,6 +332,38 @@ agent-task:
   # and its step count come out of `agent:` above, because a task is the agent
   # working.
   max_running: 4
+
+# ── Subagents ─────────────────────────────────────────────────────────────────
+# The agents one agent makes: `subagent_set` names one, `subagent_remove` takes
+# it and everything it wrote away, and between those two it is an agent of the
+# maker's own — the same tools, the same prompt, its own conversation and its own
+# directory under the maker's (`agents/<agent>/<subagent>/`).
+#
+# **A section is two things, and that is the one place this build has two
+# readers of one key.**  The cap below is the agent server's, and the network
+# underneath is what carries a subagent's messages; the two are one section
+# because they are one feature, and because a subagent nothing can reach is a
+# directory rather than an agent.
+subagent:
+  # How many subagents one agent may have.  A cap rather than a target, and the
+  # only bound this feature has: the tool set is the one catalogue and nothing
+  # filters it, so a subagent may make a subagent — without this a model can grow
+  # a tree of them without limit.  What it costs per member is small (a subagent
+  # is a conversation in the shared agent server, not a process), so the number
+  # is about a runaway rather than about the machine.
+  max_running: 32
+  # Where a maker and its subagents meet.  The same shape as `a2a:` below and
+  # deliberately not the same *namespace*: `unit` is the second half of the topic
+  # path, so a local network left at the remote one's default would be the same
+  # network — this machine's own subagents visible to its remote peers.
+  #
+  # The broker may be the same one, and by default is: a local network on this
+  # machine's own broker costs nothing extra.  Pointing it somewhere else is
+  # supported rather than encouraged — a subagent is local, so its traffic has no
+  # reason to leave the machine.
+  # broker: {host: localhost, port: 1883}
+  org: default
+  unit: local
 
 # ── Embeddings (semantic memory search) ───────────────────────────────────────
 # Where the db's vectors come from.  **A section of its own, holding only

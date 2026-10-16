@@ -85,6 +85,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "agent-task",
         "schedule",
         "a2a",
+        "subagent",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
     assert modules == {
@@ -104,6 +105,7 @@ def test_there_is_one_plugin_per_job() -> None:
         "slife2.plugins.tui.server",
         "slife2.plugins.toolhub.server",
         "slife2.plugins.agent.server",
+        "slife2.plugins.a2a.local_server",
         "slife2.plugins.agent_task.server",
         "slife2.plugins.schedule.server",
         "slife2.plugins.a2a.server",
@@ -350,6 +352,7 @@ def test_one_server_per_wire_protocol() -> None:
         "agent-task",
         "schedule",
         "a2a",
+        "subagent",
     ]
 
 
@@ -409,6 +412,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "agent-task",
         "schedule",
         "a2a",
+        "subagent",
     ]
 
 
@@ -429,7 +433,7 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     for a release after the delivery became the window's (DESIGN.md §1.2).
     """
     names = [spec.name for spec in launcher.specs(default_config())]
-    assert names[-4:] == ["agent", "agent-task", "schedule", "a2a"]
+    assert names[-5:] == ["agent", "agent-task", "schedule", "a2a", "subagent"]
     # WeChat delivers to the window and to nothing else: the terminal is the peer
     # that has to be there, and the agent server is not one it speaks to at all.
     assert set(launcher.NEEDS["wechat"]) == {"tui"}
@@ -445,8 +449,12 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     # (DESIGN.md §1.8): what arrives from a peer is a message handed to a
     # conversation, wherever the conversation can be reached.
     assert set(launcher.NEEDS["a2a"]) == {"tui", "agent"}
+    # And the local network is the same pair: it is the same module serving
+    # subagents rather than peers, and what it hands over is handed over the
+    # same way.
+    assert set(launcher.NEEDS["subagent"]) == {"tui", "agent"}
     # Everything else is a dependency of one of them, whatever kind it is.
-    assert set(names[:-4]) == {
+    assert set(names[:-5]) == {
         "llm:openai-completions",
         "embeddings",
         "context",

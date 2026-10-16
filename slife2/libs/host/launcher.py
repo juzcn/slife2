@@ -45,12 +45,16 @@ from slife2.libs.host.config import (
     CONTEXT_SERVER_NAME,
     EMBEDDINGS_SERVER_NAME,
     FILE_TUNNEL_SERVER_NAME,
+    LIST_AGENTS,
+    LOCAL,
     LOCAL_SERVERS,
     MCP_TOOLS_SERVER_NAME,
     MEDIA_SERVER_NAME,
+    REMOTE,
     RESTAPI_TOOLS_SERVER_NAME,
     SCHEDULE_SERVER_NAME,
     SKILLS_SERVER_NAME,
+    SUBAGENT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     TUI_SERVER_NAME,
     WECHAT_SERVER_NAME,
@@ -181,7 +185,18 @@ SCHEDULE_SERVER = (
 A2A_SERVER = (
     "slife2.plugins.a2a.server",
     A2A_SERVER_NAME,
-    "a2a_list_agents",
+    REMOTE.tool(LIST_AGENTS),
+)
+#: The **local** network: the same machine, the same module, one section over.
+#: A second entry rather than a second module because it is the same protocol
+#: and the same mesh — what a subagent's traffic needs is a namespace and a
+#: broker of its own, not a second implementation (`slife2.libs.host.config.Net`).
+#: It identifies itself by *its* list tool, which is the probe's whole test: the
+#: two instances are one machine apart and a `status` line has to say which.
+LOCAL_SERVER = (
+    "slife2.plugins.a2a.local_server",
+    SUBAGENT_SERVER_NAME,
+    LOCAL.tool(LIST_AGENTS),
 )
 
 SERVER_MODULES: dict[str, tuple[str, str, str]] = {
@@ -201,6 +216,7 @@ SERVER_MODULES: dict[str, tuple[str, str, str]] = {
     "agent-task": AGENT_TASK_SERVER,
     "schedule": SCHEDULE_SERVER,
     "a2a": A2A_SERVER,
+    LOCAL.key: LOCAL_SERVER,
 }
 
 #: The tool every model server answers to, and how they are named.  One tool
@@ -781,6 +797,12 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # handed over is logged and dropped, which looks like the mesh not working
     # rather than like a daemon that was still starting.
     "a2a": ("tui", "agent"),
+    # The local network, for the line above's reason: it hands a member's answer
+    # to the conversation the same way, and its start resumes the ledgers it
+    # finds.  The two networks are one module, so the edge is one edge — and it
+    # is written twice because a *server* is what the launcher orders, and these
+    # are two of them.
+    LOCAL.key: ("tui", "agent"),
     # The rule and not a list: see `_AFTER_THE_HUB` for the three that cannot be
     # in here.  The model backends are asked too and are deliberately absent —
     # nothing waits on a backend and a backend waits on nothing, so it is in the

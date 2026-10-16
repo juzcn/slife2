@@ -1508,11 +1508,22 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   makes them different in kind: the agent↔agent network is a network of
   **remote** agents (peers that may be on another machine, on a broker somebody
   else runs) and the agent↔its-subagents network is a network of **local** ones
-  (directories under the maker's own). So `a2a-subagent:` is a second section —
-  its own broker address, which may be the same one by default and may be a
+  (directories under the maker's own). So `subagent:` is a second section — its
+  own broker address, which may be the same one by default and may be a
   different one, and its own `org`/`unit` — and the plugin that carries it is a
   second instance of the a2a module rather than a second namespace inside the
-  first. What that buys over one process with two namespaces: a swarm's several
+  first.
+
+  **Its names carry no `a2a`**, which is the difference between a technical fact
+  and a meaning: the protocol is what this build happens to reach a local agent
+  with, while what the thing *is* is an agent and the agents it made. So the
+  section is `subagent:`, the server answers as `slife2-subagent`, the four tools
+  are `subagent_*`, the channel is `subagent:<name>` — and the one word that
+  differs between the two envelopes is the one a reader could get wrong
+  (`[PeerAgent:` against `[SubagentPeer:`; the window says `Subagent(name)>`
+  either way, because there the reader *is* the maker). Its unit is per maker
+  for the same reason the names are separate: two makers may each name a
+  `researcher`, and one namespace would make those two one MQTT identity. What that buys over one process with two namespaces: a swarm's several
   hundred MQTT sessions and their tasks are not the machine's agent mesh's
   process, so neither can wedge or cap the other, and a machine can reach its
   peers through a team broker while its own subagents stay on the broker it

@@ -70,7 +70,7 @@ import json
 import logging
 import sys
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
@@ -78,7 +78,19 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import DeliveryFailed, hand_over, note_to_window
-from slife2.libs.host.config import A2A_SERVER_NAME, Config, load_cached
+from slife2.libs.host.config import (
+    BROADCAST,
+    CANCEL_TASK,
+    LIST_AGENTS,
+    LOCAL,
+    REMOTE,
+    SEND_MESSAGE,
+    A2ASettings,
+    Config,
+    Net,
+    load_cached,
+    net_settings,
+)
 from slife2.libs.host.paths import a2a_inbound_paths
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
@@ -95,22 +107,22 @@ from slife2.plugins.a2a.mesh import (
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = A2A_SERVER_NAME
+SERVER_NAME = REMOTE.server_name
 
 #: This server's key in the config's `servers:` table — and the name of the
 #: section it reads, which is the one section here whose *presence* is a
 #: setting: a machine with no `a2a:` is a machine that is not on the mesh
 #: (`slife2.libs.host.config.A2ASettings`).
-CONFIG_KEY = "a2a"
+CONFIG_KEY = REMOTE.key
 
 #: The four tools the model gets — v1's four, under v1's names.  A
 #: `task_response` is not a fifth: it is `a2a_send_message` with `message_type`
 #: said, because on the wire it *is* the same operation and a second name for it
 #: would be a second thing for a model to learn.
-A2A_SEND_MESSAGE = "a2a_send_message"
-A2A_CANCEL_TASK = "a2a_cancel_task"
-A2A_LIST_AGENTS = "a2a_list_agents"
-A2A_BROADCAST = "a2a_broadcast"
+A2A_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
+A2A_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
+A2A_LIST_AGENTS = REMOTE.tool(LIST_AGENTS)
+A2A_BROADCAST = REMOTE.tool(BROADCAST)
 
 #: The tool that puts an agent *on* the mesh — and it is not the model's.  A
 #: window calls it and holds it open; see `join` for why the mesh's membership
@@ -132,7 +144,7 @@ WINDOW = "window"
 #: (`slife2.tui.widgets.channel_prefix`), so the peer has to be *in* it for a
 #: person to see who spoke — and what it draws is `PeerAgent(jill)> `, the same
 #: word the marker below opens with.
-CHANNEL = "a2a"
+CHANNEL = REMOTE.channel
 
 #: What the marker opens with.  A constant because the marker is *read* as well
 #: as written: stored text carries it into a transcript, and the window takes it
@@ -155,7 +167,7 @@ CHANNEL = "a2a"
 #: that ambiguity on the line where the model is told who spoke.  `Peer` is what
 #: settles it, and it is the word the window's bubble uses too
 #: (`slife2.tui.widgets.channel_prefix`).
-MARKER_PREFIX = "[PeerAgent:"
+MARKER_PREFIX = REMOTE.marker
 
 #: The `type` values an inbound message can carry — the vocabulary the marker's
 #: `type` field is drawn from, and v1's list unchanged.  `task_request` (answer
@@ -202,7 +214,10 @@ ORPHAN_RETRIES = 30
 
 
 def marker(
-    agent_name: str, task_id: str | None = None, type: str = "task_request"
+    net: Net,
+    agent_name: str,
+    task_id: str | None = None,
+    type: str = "task_request",
 ) -> str:
     """Content prefix for ANY inbound A2A message — one envelope, a type field.
 
@@ -228,7 +243,7 @@ def marker(
     payload: dict[str, str] = {"from": agent_name, "type": type}
     if task_id is not None:
         payload["task_id"] = task_id
-    return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}] "
+    return f"{net.marker}{json.dumps(payload, ensure_ascii=False)}] "
 
 
 def a2a_message_type(text: str) -> str | None:
@@ -266,9 +281,9 @@ def a2a_message_type(text: str) -> str | None:
     return mtype if mtype in A2A_TYPES else None
 
 
-def channel_for(peer: str) -> str:
-    """The channel an inbound message from *peer* arrives on: `a2a:<peer>`."""
-    return f"{CHANNEL}:{peer}"
+def channel_for(net: Net, peer: str) -> str:
+    """The channel an inbound message from *peer* arrives on: `<net>:<peer>`."""
+    return f"{net.channel}:{peer}"
 
 
 # ── one agent's mesh, and what is waiting to be handed over ──────────────────
@@ -286,6 +301,11 @@ class Session:
     """
 
     agent: str
+    #: Which network this member is on.  On the Session rather than passed to
+    #: every function, because everything a member says or is told is in *its*
+    #: network's vocabulary — the four tool names, the channel a turn arrived
+    #: on, the envelope a message opens with (`Net`).
+    net: Net
     mesh: A2AMesh
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
@@ -393,7 +413,7 @@ def _wire(session: Session) -> None:
         marker_id = (task_id or None) if kind == "task" else None
         marker_type = "message" if kind != "task" else "task_request"
         session.post(
-            f"{marker(source, marker_id, type=marker_type)}{content}",
+            f"{marker(session.net, source, marker_id, type=marker_type)}{content}",
             source,
             f"an inbound {marker_type} from {source}",
         )
@@ -431,13 +451,13 @@ def _wire(session: Session) -> None:
             # terminal reply's, so the line lands where the task was discussed.
             if kind == "message":
                 text = (
-                    f"{marker(peer, type='message')}"
+                    f"{marker(session.net, peer, type='message')}"
                     f"**{peer}** was never reached, so nothing will answer your "
                     f"message:\n\n{result}"
                 )
             else:
                 text = (
-                    f"{marker(peer, corr_id or None, type='task_response')}"
+                    f"{marker(session.net, peer, corr_id or None, type='task_response')}"
                     f"**{peer}** was never reached, so no result will arrive for "
                     f"this task (ID: `{corr_id}`):\n\n{result}"
                 )
@@ -445,7 +465,7 @@ def _wire(session: Session) -> None:
             # A MESSAGE conversation was answered: a bare message reply, no
             # task involved.
             text = (
-                f"{marker(peer, type='message')}"
+                f"{marker(session.net, peer, type='message')}"
                 f"Peer **{peer}** replied to your message:\n\n{result}"
             )
         else:
@@ -453,7 +473,7 @@ def _wire(session: Session) -> None:
             # `cancelled` or `failed`, in the peer's own word.  All three are a
             # verdict it had, which is what separates them from `UNREACHABLE`.
             text = (
-                f"{marker(peer, corr_id or None, type='task_response')}"
+                f"{marker(session.net, peer, corr_id or None, type='task_response')}"
                 f"Peer **{peer}** {outcome} async task "
                 f"(ID: `{corr_id}`):\n\n{result}"
             )
@@ -490,7 +510,7 @@ def _wire(session: Session) -> None:
         the task, so a `task_response` for it is refused.
         """
         session.post(
-            f"{marker(peer, task_id, type='cancel_task')}"
+            f"{marker(session.net, peer, task_id, type='cancel_task')}"
             f"The sender withdrew this task — stop working on it.",
             peer,
             f"a withdrawal from {peer}",
@@ -498,7 +518,7 @@ def _wire(session: Session) -> None:
 
     def on_broadcast_event(sender: str, text: str) -> None:
         session.post(
-            f"{marker(sender, type='broadcast')}{text}",
+            f"{marker(session.net, sender, type='broadcast')}{text}",
             sender,
             f"a broadcast from {sender}",
         )
@@ -572,7 +592,7 @@ async def _drain(
                     config,
                     session.agent,
                     text,
-                    channel_for(peer),
+                    channel_for(session.net, peer),
                     what=what,
                     window_client=window_client,
                 )
@@ -653,6 +673,7 @@ def announce_orphans(session: Session) -> None:
 def build_server(
     config: Config,
     *,
+    net: Net = REMOTE,
     window_client: Client | None = None,
     source: Callable[[], Config] | None = None,
     connecting: bool = True,
@@ -673,6 +694,28 @@ def build_server(
     live: Callable[[], Config] = source or load_cached
     sessions: dict[str, Session] = {}
 
+    def mesh_settings() -> A2ASettings:
+        """This network's settings, as the config has them *now*.
+
+        Read per use rather than once at build, which is `current`'s rule for
+        the model config and for the same reason: the section is a file an
+        operator edits, and a mesh that kept the address it started with would
+        be the one thing in this process that could not be corrected.
+        """
+        return net_settings(live(), net)
+
+    def mesh_for(member: str) -> A2AMesh:
+        """A member's mesh, on this network and in the namespace it belongs to.
+
+        `Net.unit_for` is the whole of the difference between the two networks
+        here: the remote one is the machine's one namespace, and the local one
+        is **per maker**, because two agents may each name a subagent
+        `researcher` and one namespace would make those two one MQTT identity
+        — which a broker settles by kicking the older one offline.
+        """
+        found = mesh_settings()
+        return A2AMesh(replace(found, unit=net.unit_for(found.unit, member)), member)
+
     def session_of(agent: str) -> Session:
         """This agent's mesh, built on first use and kept.
 
@@ -685,7 +728,7 @@ def build_server(
         """
         found = sessions.get(agent)
         if found is None:
-            found = Session(agent=agent, mesh=A2AMesh(live().a2a, agent))
+            found = Session(agent=agent, net=net, mesh=mesh_for(agent))
             _wire(found)
             found.writer = asyncio.create_task(_drain(found, live(), window_client))
             sessions[agent] = found
@@ -708,7 +751,7 @@ def build_server(
         caller: a `join` that inherited a tool's reason would keep the agent
         online after the window it was joining for had gone.
         """
-        settings = live().a2a
+        settings = mesh_settings()
         if not settings.configured:
             raise ToolError(
                 "this machine is not on the A2A mesh — there is no `a2a:` "
@@ -819,7 +862,7 @@ def build_server(
         session exists rather than after the last one succeeded.
         """
         try:
-            if connecting and live().a2a.configured:
+            if connecting and mesh_settings().configured:
                 await announce_ledgers(live())
             yield {}
         finally:
@@ -844,7 +887,7 @@ def build_server(
     #  No `instructions`: each tool's own description says what a model cannot
     #  work out for itself — `house_server` says the same thing about the spec's
     #  own advice, and the other plugins here make the same choice.
-    mcp: FastMCP = house_server(SERVER_NAME, lifespan=lifespan)
+    mcp: FastMCP = house_server(net.server_name, lifespan=lifespan)
 
     @mcp.tool
     async def join(agent: str, ctx: Context) -> None:
@@ -909,7 +952,11 @@ def build_server(
     # 'task_response' completes an inbound task; 'message' is a bare
     # conversation.  No waiting, no timeout parameter.
 
-    @mcp.tool(name=A2A_SEND_MESSAGE, meta=FOR_THE_MODEL)
+    @mcp.tool(
+        name=net.tool(SEND_MESSAGE),
+        description=describe_tool(net, SEND_MESSAGE),
+        meta=FOR_THE_MODEL,
+    )
     async def a2a_send_message(
         ctx: Context,
         agent: str,
@@ -968,7 +1015,11 @@ def build_server(
             "note": "The result will arrive in this conversation.",
         }
 
-    @mcp.tool(name=A2A_CANCEL_TASK, meta=FOR_THE_MODEL)
+    @mcp.tool(
+        name=net.tool(CANCEL_TASK),
+        description=describe_tool(net, CANCEL_TASK),
+        meta=FOR_THE_MODEL,
+    )
     async def a2a_cancel_task(ctx: Context, agent: str, task_id: str) -> dict[str, Any]:
         """Withdraw a task you sent to another agent.
 
@@ -982,7 +1033,11 @@ def build_server(
         status = await session.mesh.cancel_task(agent, task_id)
         return {"peer": agent, "task_id": task_id, "status": status}
 
-    @mcp.tool(name=A2A_LIST_AGENTS, meta=FOR_THE_MODEL)
+    @mcp.tool(
+        name=net.tool(LIST_AGENTS),
+        description=describe_tool(net, LIST_AGENTS),
+        meta=FOR_THE_MODEL,
+    )
     async def a2a_list_agents(ctx: Context) -> dict[str, Any]:
         """List the agents on the A2A mesh — you first, then each peer by name.
 
@@ -996,7 +1051,7 @@ def build_server(
         cannot tell apart.
         """
         who = agent_of(ctx)
-        settings = live().a2a
+        settings = mesh_settings()
         if not settings.configured:
             return {
                 "agent_name": who,
@@ -1026,7 +1081,11 @@ def build_server(
             "error": error,
         }
 
-    @mcp.tool(name=A2A_BROADCAST, meta=FOR_THE_MODEL)
+    @mcp.tool(
+        name=net.tool(BROADCAST),
+        description=describe_tool(net, BROADCAST),
+        meta=FOR_THE_MODEL,
+    )
     async def a2a_broadcast(ctx: Context, event: str) -> dict[str, Any]:
         """Publish a fire-and-forget event to every agent on the mesh.
 
@@ -1066,19 +1125,122 @@ def _ensure_windows_selector_loop() -> None:
             pass
 
 
-def main(argv: list[str] | None = None) -> int:
+#: What the four tools say, **with the words that differ per network left as
+#: holes**.  One text per verb and two word-sets (`_NET_WORDS`), because a second
+#: copy of this reasoning is a second copy to keep in step — and because the
+#: thing that must differ between the networks is the *vocabulary* a model is
+#: taught, which is what the holes are: who it is talking to, and what an
+#: envelope looks like.
+_TOOL_TEXTS: dict[str, str] = {
+    SEND_MESSAGE: (
+        "Send a message to {them}.\n"
+        "\n"
+        "`message_type` decides what it is. 'task_request' (the default) asks for\n"
+        "work and returns an id straight away — the answer arrives later, on its\n"
+        "own, as a `{marker}…` of type 'task_response'. Never wait for it and\n"
+        "never poll: there is nothing to poll. 'task_response' completes a task\n"
+        "somebody sent you, and needs the `task_id` from that task's `{marker}…`\n"
+        "marker. 'message' is a plain conversation — no task, no completion, and\n"
+        "the reply arrives as a message."
+    ),
+    CANCEL_TASK: (
+        "Withdraw a task you sent to {them}.\n"
+        "\n"
+        "`status` is the answer: 'cancelled' when the withdrawal went out,\n"
+        "'completed'/'failed'/'cancelled' when the task had already ended (a\n"
+        "finished result is never lost by asking), or 'not_found' for an id this\n"
+        "process never sent."
+    ),
+    LIST_AGENTS: (
+        "List {roster}.\n"
+        "\n"
+        'Every card is `{{"agent_name": …, "status": "online"|"offline"}}`, and\n'
+        "`status` on the first one is your own state on this network. Offline\n"
+        "entries are the ones whose card is still retained on the broker but\n"
+        "which have said they are leaving, so they are listed rather than hidden.\n"
+        "\n"
+        "`error` says why the list is short when it is."
+    ),
+    BROADCAST: (
+        "Publish a fire-and-forget event to {everyone}.\n"
+        "\n"
+        "Nobody answers one and it is delivered at most once, so it is for\n"
+        "information somebody may act on and not for anything you need a reply\n"
+        "to — use `{send}` for that. It arrives as a `{marker}…` of type\n"
+        "'broadcast', with no task and no completion."
+    ),
+}
+
+#: The holes, per network.  `roster` is the one that says what a model is
+#: looking at rather than who it is talking to — "you first, then each peer" is
+#: true of the remote network and false of the local one, where the reader is the
+#: agent that made them.
+_NET_WORDS: dict[str, dict[str, str]] = {
+    REMOTE.key: {
+        "them": "another agent on the A2A mesh",
+        "everyone": "every agent on the mesh",
+        "roster": "the agents on the A2A mesh — you first, then each peer by name",
+    },
+    LOCAL.key: {
+        "them": "one of your subagents",
+        "everyone": "every subagent you have",
+        "roster": "your subagents — you first, then each by name",
+    },
+}
+
+
+def describe_tool(net: Net, verb: str) -> str:
+    """What one of this network's tools says to a model.
+
+    **The schema is where the confusion the two names exist to prevent would
+    happen.**  The names separate the networks; if the text did not, a model
+    would be told it is sending to "a peer" by a tool called `subagent_send_message`
+    — the same sentence for two different things, which is what two vocabularies
+    were meant to avoid.  So the words a model reads are this network's, and the
+    reasoning behind them is written once above.
+    """
+    words = _NET_WORDS[net.key]
+    return _TOOL_TEXTS[verb].format(
+        send=net.tool(SEND_MESSAGE),
+        marker=net.marker,
+        **words,
+    )
+
+
+def server_note(config: Config, net: Net) -> str:
+    """What one instance says about itself at start: which network, and where.
+
+    Two texts because they are two different things to a reader — a machine off
+    the mesh has no peers, and one with no subagent network has no local agents
+    — and `serve_plugin`'s note is a callable for exactly this: which config it
+    describes is only known in there.
+    """
+    settings = net_settings(config, net)
+    if not settings.configured:
+        return (
+            "off the mesh (no `a2a:` section)"
+            if net is REMOTE
+            else "no subagent network (no `subagent:` section)"
+        )
+    return f"{net.bubble} network on {settings.address}, broker started if absent"
+
+
+def main(argv: list[str] | None = None, *, net: Net = REMOTE) -> int:
+    """Serve one of the two networks — the remote one unless told otherwise.
+
+    **`net` is a parameter rather than a second `main`**, because everything
+    below it is the same call with different names in it: the thin entry point
+    `slife2.plugins.a2a.local_server` is what the launcher starts for the local
+    one, and it is three lines because this function already knew how.
+    """
     _ensure_windows_selector_loop()
     return serve_plugin(
         argv,
-        server_name=SERVER_NAME,
-        config_key=CONFIG_KEY,
-        build=build_server,
+        server_name=net.server_name,
+        config_key=net.key,
+        build=lambda config: build_server(config, net=net),
         logger=logger,
-        note=lambda config: (
-            f"mesh on {config.a2a.address}, broker started if absent"
-            if config.a2a.configured
-            else "off the mesh (no `a2a:` section)"
-        ),
+        note=lambda config: server_note(config, net),
     )
 
 
