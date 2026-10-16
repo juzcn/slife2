@@ -47,15 +47,16 @@ from slife2.libs.store.index import (
     NO_SIMILARITY,
     SYNC_BATCH,
     Embedder,
-    _chunk_documents,
     _marks,
     _rowid,
     _table_ddl,
     as_similarity,
     begin_rebuild,
+    checked_vectors,
     chunks,
     clear_vectors,
     connect_to,
+    embed_rows,
     filter_clause,
     fuse_ranked,
     index_meta,
@@ -587,7 +588,7 @@ class ToolStore:
         # width, and only the embedder knows the width.  One read of `meta` once
         # it is there.
         await asyncio.to_thread(self.ensure_index, embedder)
-        vectors = await self._embed(plan["documents"], embedder)
+        vectors = await embed_rows(plan["documents"], embedder, noun="tool")
         applied = await asyncio.to_thread(self._apply, plan, vectors)
         logger.info(
             "%s: %d tool(s) — %d added, %d changed, %d deleted, %d unchanged",
@@ -743,27 +744,6 @@ class ToolStore:
             "documents": documents,
             "skipped": skipped,
         }
-
-    async def _embed(
-        self, documents: Sequence[tuple[str, str]], embedder: Embedder
-    ) -> dict[str, list[list[float]]]:
-        """One request for every chunk of every row that needs a vector.
-
-        The count is checked: a short answer would otherwise read as "these
-        tools had nothing worth embedding", and the rows would keep no vector at
-        all — a hole in the index that nothing outside could see.
-        """
-        chunks, spans = _chunk_documents(documents, embedder.max_chars)
-        if not chunks:
-            return {}
-        vectors = await embedder.embed(chunks)
-        if len(vectors) != len(chunks):
-            raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for "
-                f"{len(chunks)} chunks, so {len(spans)} tool(s) would be "
-                f"searchable only by keyword"
-            )
-        return {name: vectors[start : start + count] for name, start, count in spans}
 
     def _apply(
         self, plan: Mapping[str, Any], vectors: Mapping[str, list[list[float]]]
@@ -1631,13 +1611,12 @@ class ToolStore:
         wanted = [sentence for sentence in sentences if sentence.strip()]
         if not wanted:
             return [], []
-        vectors = await embedder.embed(wanted)
-        if len(vectors) != len(wanted):
-            raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for "
-                f"{len(wanted)} sentences, so this search cannot say what a "
-                f"tool is about"
-            )
+        vectors = await checked_vectors(
+            embedder,
+            wanted,
+            unit="sentences",
+            so="this search cannot say what a tool is about",
+        )
         return vectors, [
             await asyncio.to_thread(
                 self._nearest, sqlite_vec.serialize_float32(vector), k
@@ -1740,7 +1719,7 @@ class ToolStore:
         # It terminates because `_place` writes a chunk row for every tool it
         # was handed, and every tool has at least a name to be a chunk of
         # (`tool_document`) — so a row that was selected is a row that is no
-        # longer missing.  An empty answer is not the other way out: `_embed`
+        # longer missing.  An empty answer is not the other way out: `embed_rows`
         # refuses an answer shorter than the batch, so the loop ends either with
         # every tool placed or with the failure named.
         placed = 0
@@ -1748,7 +1727,7 @@ class ToolStore:
             missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
             if not missing:
                 break
-            vectors = await self._embed(missing, embedder)
+            vectors = await embed_rows(missing, embedder, noun="tool")
             await asyncio.to_thread(self._place, vectors)
             placed += len(vectors)
         return {

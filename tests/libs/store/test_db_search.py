@@ -626,7 +626,7 @@ async def test_a_model_that_answers_nothing_is_not_a_finished_index(tmp_path) ->
     this batch" as "the index is as complete as it will get" and stopped: the
     turns that were owed a vector stayed owed, `index_status` counted the
     missing ones, and the loop that was supposed to place them had already
-    returned as though it were done.  `_embed_turns` refuses a short answer, so
+    returned as though it were done.  `embed_rows` refuses a short answer, so
     that arm was unreachable — and what it *said* was the one thing an empty
     answer does not mean.
     """
@@ -650,7 +650,7 @@ async def test_a_partial_embedding_is_refused_before_the_turn_is_written(
 ) -> None:
     """**A short answer at the save path is a hole `sync_indexes` cannot see.**
 
-    `_embed_turns` refuses an answer with fewer vectors than it asked for, and so
+    `embed_rows` refuses an answer with fewer vectors than it asked for, and so
     does every other embedding path — but `save_turn` wrote whatever it was
     handed.  A *partial* answer is the shape that matters: the turn gets
     `turn_chunk` rows for some of its chunks, and `_turns_without_vectors`

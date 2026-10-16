@@ -94,12 +94,13 @@ from slife2.libs.store.index import (
     MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
-    _chunk_documents,
     _marks,
     _rowid,
     as_similarity,
+    checked_vectors,
     connect_to,
     embed_chunks,
+    embed_rows,
     filter_clause,
     fuse_ranked,
     index_meta,
@@ -689,24 +690,26 @@ class TurnStore:
         # Awaited on the loop, because it is a call to a model and not a call to
         # a disk: the one thing that must not happen here is a synchronous
         # request blocking every other call this server is answering.
-        vectors = await embedder.embed(chunks) if chunks else []
+        #
         # **The count is checked, as every other embedding path checks it.**  A
         # short answer used to be written as-is, and a *partial* one is the worst
         # shape it can take: the turn gets `turn_chunk` rows for some of its
         # chunks, and `_turns_without_vectors` selects turns with *no* chunk row
         # at all — so `sync_indexes` can never see this one again and
         # `index_status` reports `ready: True` over an index that is missing
-        # vectors.  That is the exact hole `_embed_turns`' check names, and the
-        # sibling paths (`_embed_turns`, the catalogue's `_embed`,
-        # `RemoteEmbedder.embed`) all refuse it; the save path was the one that
-        # did not.  Raised before the transaction opens, so a refused save is a
-        # save that stored nothing.
-        if len(vectors) != len(chunks):
-            raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for "
-                f"{len(chunks)} chunks, so this turn would be searchable only "
-                f"by keyword"
+        # vectors.  The save path was the one of them that did not refuse it;
+        # `checked_vectors` is the one seat that check has now.  Raised before the
+        # transaction opens, so a refused save is a save that stored nothing.
+        vectors = (
+            await checked_vectors(
+                embedder,
+                chunks,
+                unit="chunks",
+                so="this turn would be searchable only by keyword",
             )
+            if chunks
+            else []
+        )
         # The writes are the other way round — blocking, and off the loop.
         await self._off_loop(self.ensure_indexes, embedder)
         return await self._off_loop(self._write_turn, record, vectors)
@@ -1041,7 +1044,7 @@ class TurnStore:
         It terminates because every turn selected here is one `_place_vectors`
         then writes a chunk row for — `_turns_without_vectors` selects rows with
         none, and a turn with nothing to embed is not selected at all.  A model
-        that answers with nothing is *not* the other way out: `_embed_turns`
+        that answers with nothing is *not* the other way out: `embed_rows`
         refuses an answer shorter than the batch it was asked for, so this ends
         either with every turn placed or with the failure named.  (An arm here
         used to read an empty answer as "the index is as complete as it will
@@ -1053,33 +1056,8 @@ class TurnStore:
             missing = await self._off_loop(self._turns_without_vectors, SYNC_BATCH)
             if not missing:
                 break
-            vectors = await self._embed_turns(missing, embedder)
+            vectors = await embed_rows(missing, embedder, noun="turn")
             await self._off_loop(self._place_vectors, vectors)
-
-    async def _embed_turns(
-        self, turns: Sequence[tuple[int, str]], embedder: Embedder
-    ) -> dict[int, list[list[float]]]:
-        """One request for every chunk of every turn that owes a vector.
-
-        The catalogue's `_embed` with turns in it, and for the same reasons: a
-        round trip per row is the cost this exists to avoid, and a short answer
-        is checked rather than tolerated — an answer with fewer vectors than it
-        was asked for would leave a turn with a *partial* index and nothing
-        anywhere able to see it.
-        """
-        chunks, spans = _chunk_documents(turns, embedder.max_chars)
-        if not chunks:
-            return {}
-        vectors = await embedder.embed(chunks)
-        if len(vectors) != len(chunks):
-            raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for "
-                f"{len(chunks)} chunks, so {len(spans)} turn(s) would be "
-                f"searchable only by keyword"
-            )
-        return {
-            turn_id: vectors[start : start + count] for turn_id, start, count in spans
-        }
 
     def _place_vectors(self, vectors: Mapping[int, list[list[float]]]) -> None:
         """Write a batch of vectors, in one transaction."""

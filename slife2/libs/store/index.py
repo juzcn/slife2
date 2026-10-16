@@ -764,6 +764,59 @@ class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
+async def checked_vectors(
+    embedder: Embedder, texts: Sequence[str], *, unit: str, so: str
+) -> list[list[float]]:
+    """The model's answer to one request, refused unless it answers all of it.
+
+    **A short answer is the one shape of answer a caller cannot recover from**,
+    which is why it is the one thing every embedding path checks.  Fewer vectors
+    than texts means the rows behind the missing ones keep *no* vector at all:
+    they are not in the index, and a save over them still reports the index
+    ready.  That hole is invisible from outside — nothing reads a corpus looking
+    for the rows that are absent from it — so it is refused where it is made.
+
+    The two halves of the sentence are the caller's, because the sentence names
+    which corpus is short (`unit`) and what that costs whoever asked (`so`): a
+    turn store and a tool catalogue lose different things, and the person reading
+    the traceback is looking at the row that lost its vector.
+    """
+    vectors = await embedder.embed(list(texts))
+    if len(vectors) != len(texts):
+        raise RuntimeError(
+            f"the embedding model answered {len(vectors)} vectors for "
+            f"{len(texts)} {unit}, so {so}"
+        )
+    return vectors
+
+
+async def embed_rows(
+    rows: Sequence[tuple[Any, str]], embedder: Embedder, *, noun: str
+) -> dict[Any, list[list[float]]]:
+    """One request for every chunk of every row that needs a vector.
+
+    The batch is the point: a call per row is a round trip per row, and a first
+    run has every tool of every server — or every turn of a log — to embed.  So
+    `_chunk_documents` cuts them all, one request carries the lot, and the answer
+    is dealt back out to the rows it came from.
+
+    The count is checked, by `checked_vectors` above and for its reasons.  `noun`
+    is that refusal's word for the row — a tool, a turn — because the two stores
+    that call this index different corpora and the sentence is read by whoever is
+    looking at the one that lost its vector.
+    """
+    chunks, spans = _chunk_documents(rows, embedder.max_chars)
+    if not chunks:
+        return {}
+    vectors = await checked_vectors(
+        embedder,
+        chunks,
+        unit="chunks",
+        so=f"{len(spans)} {noun}(s) would be searchable only by keyword",
+    )
+    return {key: vectors[start : start + count] for key, start, count in spans}
+
+
 def as_similarity(distance: float) -> float:
     """A `vec0` distance as the *similarity* everything above this reads.
 
