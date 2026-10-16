@@ -252,6 +252,13 @@ class Pacing:
     #: The media plugin's poll of an asynchronous provider job.  The providers'
     #: own examples use fifteen seconds.
     media_poll: float = 15.0
+    #: Re-checking a file another process still holds open, while something waits
+    #: for it to let go (`slife2.plugins.agent.server._remove_tree`, where a
+    #: subagent's directory is deleted).  Short, because the holder is a write
+    #: that has been committed and not yet flushed — milliseconds — and the wait
+    #: around this is `storage.sqlite_busy`, which is the budget for a file
+    #: somebody else has.
+    file_release: float = 0.2
     #: The a2a mesh's own poll and its retry delay, and the broker's startup
     #: poll.
     broker_poll: float = 0.1

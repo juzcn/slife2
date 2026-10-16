@@ -360,9 +360,16 @@ subagent:
   # is about a runaway rather than about the machine.
   max_running: 32
   # Where a maker and its subagents meet.  The same shape as `a2a:` below and
-  # deliberately not the same *namespace*: `unit` is the second half of the topic
-  # path, so a local network left at the remote one's default would be the same
-  # network — this machine's own subagents visible to its remote peers.
+  # deliberately not the same *mesh*: a mesh is `{org}/{unit}`, and on this side
+  # the unit is **the agent's own name** — the code sets it, so an agent and its
+  # subagents are one mesh and two agents are two (`slife2` meets its subagents
+  # in `subagent/slife2/*`, `jack` in `subagent/jack/*`).
+  #
+  # So there is no `unit:` here, and writing one is refused rather than ignored:
+  # a unit that was not the agent's name would put two agents' subagents in one
+  # MQTT identity.  `org:` is optional — it is this network's own word by
+  # default (`subagent`), which is what keeps these meshes from being the remote
+  # network's on a shared broker.
   #
   # **This is the section that names the broker**, and `a2a:` below left out means
   # this address: a machine meets its subagents somewhere, and a remote mesh that
@@ -374,8 +381,6 @@ subagent:
   broker:
     host: localhost
     port: 1883
-  org: default
-  unit: local
 
 # ── Embeddings (semantic memory search) ───────────────────────────────────────
 # Where the db's vectors come from.  **A section of its own, holding only

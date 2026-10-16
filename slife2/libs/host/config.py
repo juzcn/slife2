@@ -112,7 +112,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.paths import home
+from slife2.libs.host.paths import SUBAGENTS_DIR, home
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -168,10 +168,14 @@ DEFAULT_CONFIG_NAME = "slife2.yaml"
 #: apart, which is exactly why both say so here.
 DEFAULT_AGENT = "slife2"
 
-#: The topic namespace a local network gets when its section names none.  Its
-#: own rather than `default`, because the two networks can meet on one broker and
-#: `{org}/{unit}` is what tells them apart — see `SubagentSettings.network`.
-SUBAGENT_UNIT = "local"
+#: The org a subagent network's meshes are published under — **its own word
+#: rather than `default`, because the two networks can meet on one broker and
+#: `{org}/{unit}` is what tells them apart.**  A mesh *is* that pair
+#: (`Net.namespace`), so the remote network's org — a room name, `default` in
+#: every config that does not bother — would make the two one mesh the moment an
+#: agent's name matched a peer's unit.  `SubagentSettings.network` reads an `org:`
+#: only to override this.
+SUBAGENT_ORG = "subagent"
 
 
 @dataclass(frozen=True)
@@ -210,13 +214,18 @@ class Net:
     marker: str
     #: What the window calls a line from this network's sender.
     bubble: str
-    #: **The inbound ledger this network's process owns**, under an agent's own
-    #: directory (`slife2.libs.host.paths.a2a_inbound_path`).  One file per
-    #: network, and a name rather than a shared one because the file records
-    #: something process-local: the completion bridges *this* mesh is holding.
-    #: Both networks are served by one module and both are started on a machine
-    #: that configures both, so one file between them meant each process reading
-    #: the other's live pending tasks as a dead predecessor's orphans and
+    #: **The inbound ledger this network's process owns**, as a path under an
+    #: agent's own directory (`slife2.libs.host.paths.a2a_inbound_path`).  One
+    #: file per network — a *path* rather than a bare name because a network says
+    #: where its files live, and the two sides of this system differ there: the
+    #: remote network's is beside `turns.db`, and a subagent network's is inside
+    #: `subagents/`, the directory that network *is*.
+    #:
+    #: One file per network at all, rather than a shared one, because the file
+    #: records something process-local: the completion bridges *this* mesh is
+    #: holding.  Both networks are served by one module and both are started on a
+    #: machine that configures both, so one file between them meant each process
+    #: reading the other's live pending tasks as a dead predecessor's orphans and
     #: rewriting the whole file from its own memory — a task announced as
     #: unanswerable while its bridge was answering, and a task added by one
     #: process erased by the other's next save, which is the one fact the file
@@ -224,10 +233,11 @@ class Net:
     #: had**, so a home that already has one is not made to forget the peers it
     #: owes an answer to.
     ledger: str
-    #: Whether every member of this network shares one topic namespace.
-    #: True for the remote network, and false for the local one — see
-    #: `unit_for`, which is where that is used and argued.
-    shared_unit: bool = True
+    #: Whether every agent of this network meets its peers in one namespace.
+    #: True for the remote network — a room somebody shares — and false for a
+    #: subagent network, where the mesh is the agent's (`namespace`, which is
+    #: where the rule and its argument are).
+    shared_namespace: bool = True
 
     @property
     def server_name(self) -> str:
@@ -246,18 +256,36 @@ class Net:
         """One of this network's tools, named: `tool("list_agents")`."""
         return f"{self.prefix}{verb}"
 
-    def unit_for(self, unit: str, member: str) -> str:
-        """The topic namespace *member* belongs in on this network.
+    def namespace(self, settings: A2ASettings, agent: str) -> tuple[str, str]:
+        """The `(org, unit)` one agent meets its peers in — **which is one mesh**.
 
-        **The remote network is the machine's one namespace; the local one is per
-        maker.**  A member of the local network is named by the agent that made
-        it, and two agents may each have a `researcher`: one namespace would make
-        those two one MQTT identity (`{org}/{unit}/{agent_id}`), which a broker
-        settles by disconnecting the older one — a kick loop rather than an
-        error.  So the maker is in the unit on that network, and the subagents of
-        two agents are as separate as their directories are.
+        *agent* is the client id's first half, and it is the whole of what this
+        needs to know: on either network a mesh holds that agent and the peers it
+        is addressed by, so naming the mesh names the agent.
+
+        **The remote network is the file's `{org}/{unit}`, for every agent of
+        it.**  It is a room somebody shares — a team's, a machine's — so both
+        segments are the operator's, and a peer finds this machine by writing the
+        same two words.
+
+        **A subagent network is one mesh per agent**, and that is what the two
+        segments say here: the unit is *the agent* (which is what makes two
+        agents' `researcher`s two identities rather than one MQTT client id the
+        broker settles by kicking the older one), and the org is this network's
+        own word.  The org is where that word lives because a **mesh is what
+        `{org}/{unit}` picks out**: the two networks may meet on one broker, and
+        the remote one's segments are a room name — `default`, usually — so a
+        word of its own is what keeps the two meshes from being one.
+
+        Neither segment is configured on that side.  There is nothing for a file
+        to get right: the unit cannot be anything but the agent's name without
+        merging two agents' subagents, and the org is the network's, so
+        `SubagentSettings.network` refuses a `unit:` and takes an `org:` only to
+        override the default.
         """
-        return unit if self.shared_unit else f"{unit}-{member}"
+        if self.shared_namespace:
+            return settings.org, settings.unit
+        return SUBAGENT_ORG, agent
 
 
 #: The remote network: an agent's peers, which may be on another machine and on
@@ -275,6 +303,10 @@ REMOTE = Net(
 #: The local network: an agent and the subagents it made, which are directories
 #: under its own — so its broker is this machine's and its members never leave.
 #:
+#: **One mesh per agent**, which is `Net.namespace`'s rule for this side and the
+#: reason its two segments are not the file's: the unit is the agent's name, and
+#: the org is `SUBAGENT_ORG`.
+#:
 #: **Its envelope says `SubagentPeer`, and the window says `Subagent(name)>`** —
 #: two words because they have two readers, and only one of them can be the
 #: sender's role.  The window's line is read by the agent that made the subagent,
@@ -291,9 +323,13 @@ LOCAL = Net(
     channel="subagent",
     marker="[SubagentPeer:",
     bubble="Subagent",
-    # Beside the remote network's rather than the same file: see `Net.ledger`.
-    ledger="a2a-subagent.yaml",
-    shared_unit=False,
+    # Inside the container rather than beside the remote network's file, and that
+    # is the network's own statement about itself: `subagents/` holds everything
+    # this network has — the maker's own ledger, and one directory per subagent
+    # (see `Net.ledger`).
+    ledger=f"{SUBAGENTS_DIR}/a2a-subagent.yaml",
+    # One mesh per agent: see `Net.namespace`.
+    shared_namespace=False,
 )
 
 #: The four tools a network offers the model, by verb.  **Here rather than in the
@@ -1129,21 +1165,22 @@ class SubagentSettings:
     What is left is what the *machine* has an opinion about.
     """
 
-    #: Where a subagent's network is, from the same section — `broker`, `org`
-    #: and `unit`, parsed by `_a2a` because a section holding a network should
-    #: not spell its keys a second way.  **`configured` here is this section's
-    #: presence**, which is what makes a machine with no `subagent:` a machine
-    #: whose subagents are not reachable — the same shape `a2a:` has, one level
-    #: down.
+    #: Where a subagent's network is, from the same section — the broker, and an
+    #: `org` to override the default one, parsed by `_a2a` because a section
+    #: holding a network should not spell its keys a second way.  **`configured`
+    #: here is this section's presence**, which is what makes a machine with no
+    #: `subagent:` a machine whose subagents are not reachable — the same shape
+    #: `a2a:` has, one level down.
     #:
-    #: The default unit is its own rather than `default`, and that is not
-    #: decoration: the two networks can share one broker, and a namespace is
-    #: `{org}/{unit}` — a local network left at the remote one's default would be
-    #: the *same* network, with the machine's own subagents visible to its remote
-    #: peers.
-    network: A2ASettings = field(
-        default_factory=lambda: A2ASettings(unit=SUBAGENT_UNIT)
-    )
+    #: **Its `unit:` is refused and its `org:` defaults to `SUBAGENT_ORG`**, and
+    #: both halves follow from one fact: a namespace *is* a mesh (`Net.namespace`),
+    #: and this network's meshes are one per agent.  So the unit can only be the
+    #: agent's name — a file that set it would merge two agents' subagents into one
+    #: MQTT identity — and the org is what keeps this network's meshes from being
+    #: the remote network's, whose org is a room name (`default`, usually).  An
+    #: operator may write an `org:` to group meshes; there is nothing a `unit:`
+    #: could be right about.
+    network: A2ASettings = field(default_factory=lambda: A2ASettings(org=SUBAGENT_ORG))
 
     #: How many subagents one agent may have — a cap, not a target.
     #:
@@ -2470,15 +2507,28 @@ def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
     of zero is a tool the model can see, can call, and can never be answered by.
 
     **The network comes from the same mapping, through `_a2a`.**  A section
-    holding a network parses its `broker`/`org`/`unit` the one way those keys are
-    parsed anywhere, so a `subagent:` that names a broker means what an `a2a:`
-    naming one means — and the two readers this section has (the agent server for
-    the cap, the local network's plugin for the address) are `AgentTaskSettings`'
+    holding a network parses its `broker`/`org` the one way those keys are parsed
+    anywhere, so a `subagent:` that names a broker means what an `a2a:` naming one
+    means — and the two readers this section has (the agent server for the cap,
+    the local network's plugin for the address) are `AgentTaskSettings`'
     arrangement one section over, which is where that exception is argued.
+
+    **A `unit:` is refused rather than ignored**, and that is the one key this
+    section takes differently — `SubagentSettings.network` says why there is
+    nothing it could mean: the unit is the agent's own name.  Read as an override
+    it would be a knob that cannot be right, and read as nothing at all it would
+    be a key an operator wrote and nobody told them about, which is the failure
+    `slife2.libs.host.config` refuses everywhere.
     """
     if raw is None:
         return base
     section = _mapping(raw, "subagent")
+    if "unit" in section:
+        raise ConfigError(
+            f"subagent.unit: {section['unit']!r} is not a setting — a subagent "
+            f"network is one mesh per agent, so its unit is the agent's own name "
+            f"(the org is this network's, and may be written to group meshes)"
+        )
     max_running = _int_or(
         section.get("max_running"), base.max_running, "subagent.max_running"
     )

@@ -977,22 +977,30 @@ def build_server(
         return net_settings(live(), net)
 
     def mesh_for(maker: str, subagent: str = "") -> A2AMesh:
-        """A member's mesh, on this network and in the namespace it belongs to.
+        """A member's mesh, on this network and in the mesh it belongs to.
 
-        `Net.unit_for` is the whole of the difference between the two networks
-        here: the remote one is the machine's one namespace, and the local one
-        is **per maker**, because two agents may each name a subagent
-        `researcher` and one namespace would make those two one MQTT identity
-        — which a broker settles by kicking the older one offline.
+        `Net.namespace` is the whole of the difference between the two networks
+        here: the remote one is the file's `{org}/{unit}`, which is a room
+        somebody shares, and a subagent network is **one mesh per agent** — the
+        unit is the agent's name, so two agents that each named a subagent
+        `researcher` get two meshes rather than one MQTT identity a broker
+        settles by kicking the older one offline.
 
-        **The unit is the maker's and the identity is the member's**, which is
-        why both are arguments here and neither is derivable from the other: on
-        the local network a subagent shares its maker's namespace and is
-        addressed by its own name inside it.
+        **The mesh is the maker's and the identity is the member's**, which is
+        why both are arguments here and neither is derivable from the other: a
+        subagent meets its peers in its maker's mesh and is addressed by its own
+        name inside it — and the maker is a peer of that same mesh, which is what
+        lets a subagent answer it by name.
+
+        **Nothing dials from here.**  A mesh is built rather than connected
+        (`session_of`), and the mesh's own `connect` is what joins — so building
+        one for a name that never joins is a ledger file and a card, not a
+        connection.
         """
         found = mesh_settings()
+        org, unit = net.namespace(found, maker)
         return A2AMesh(
-            replace(found, unit=net.unit_for(found.unit, maker)),
+            replace(found, org=org, unit=unit),
             maker,
             net.ledger,
             subagent=subagent,
@@ -1503,9 +1511,11 @@ def build_server(
         or another agent holding your name — the two states a bare "offline"
         cannot tell apart.
 
-        `org` and `unit` are the namespace the mesh is *in*, which on the local
-        network is the maker's rather than the section's (`Net.unit_for`): the
-        section says `local`, and this mesh publishes in `local-<maker>`.
+        `org` and `unit` are the mesh this is the roster *of* (`Net.namespace`),
+        and on a subagent network they are what the mesh is: the org is this
+        network's own word and the unit is the agent's name — so the same two
+        fields say which network and whose mesh, and a model reading them is
+        told both without the file being consulted.
         """
         agent, mine = speaker(ctx)
         settings = mesh_settings()

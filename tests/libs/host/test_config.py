@@ -17,13 +17,16 @@ from slife2.libs.host.config import (
     A2A_BROKER_ENV_VAR,
     API_BACKENDS,
     DEFAULT_TOOL_RESULT_TOKENS,
+    LOCAL,
     MIN_TOOL_RESULT_TOKENS,
     PLUGINS,
+    REMOTE,
     ConfigError,
     default_config,
     find_config_path,
     load,
     load_cached,
+    net_settings,
     resolve_secret,
 )
 from slife2.libs.host.paths import DATA_ENV_VAR
@@ -1472,7 +1475,6 @@ subagent:
     host: localhost
     port: 1884
   org: a-local-org
-  unit: a-local-unit
 """
 )
 
@@ -1542,6 +1544,61 @@ def test_a_remote_mesh_with_no_broker_meets_where_the_subagent_network_does(
     assert config.subagent.network.address == "10.0.0.5:2883"
     assert config.a2a.address == "10.0.0.5:2883"
     assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
+
+
+def test_a_subagent_network_is_one_mesh_per_agent(tmp_path, monkeypatch) -> None:
+    """**A mesh is `{org}/{unit}`, and on this side that pair is the agent's.**
+
+    The unit is the agent's own name and the org is this network's word
+    (`SUBAGENT_ORG`), so an agent and its subagents are one mesh and two agents
+    are two — which is what the file cannot be trusted to say: a unit that was
+    anything but the agent's name would put two agents' subagents in one MQTT
+    identity, and an org left at the remote network's would put the two networks
+    in one mesh.
+    """
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+    config = load(write(tmp_path, A_MESH_AND_LOCAL))
+
+    local = net_settings(config, LOCAL)
+    assert LOCAL.namespace(local, "jack") == ("subagent", "jack")
+    assert LOCAL.namespace(local, "jill") == ("subagent", "jill")
+    # The org may be overridden to group meshes; the unit is the agent's, so what
+    # an operator wrote there is refused rather than ignored.
+    assert local.org == "a-local-org"
+    with pytest.raises(ConfigError, match="not a setting"):
+        load(write(tmp_path, A_MESH_AND_LOCAL + "  unit: mine\n"))
+    # The remote network still reads both, from its own section.
+    remote = net_settings(config, REMOTE)
+    assert REMOTE.namespace(remote, "jack") == ("an-org", "a-unit")
+
+
+def test_the_default_org_says_which_network_it_is(tmp_path, monkeypatch) -> None:
+    """Left out, the org is `subagent` and not `default`.
+
+    `default` is what the remote section says when a file does not bother, so a
+    subagent network left at it would be the *same* mesh the moment an agent's
+    name matched a peer's unit — the two networks are allowed to share one
+    broker, and this word is the whole of what keeps their meshes apart.
+    """
+    monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
+    config = load(
+        write(
+            tmp_path,
+            A_PROVIDER
+            + """
+subagent:
+  broker:
+    host: localhost
+    port: 1884
+""",
+        )
+    )
+
+    assert net_settings(config, LOCAL).org == "subagent"
+    assert LOCAL.namespace(net_settings(config, LOCAL), "jack") == (
+        "subagent",
+        "jack",
+    )
 
 
 def test_a_broker_the_remote_section_names_is_its_own(tmp_path, monkeypatch) -> None:

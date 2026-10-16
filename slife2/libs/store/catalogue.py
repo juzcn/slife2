@@ -30,10 +30,11 @@ and this is a set of rows the servers can be asked again.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -468,8 +469,24 @@ class ToolStore:
         if self.known is not None:
             self.reset()
 
-    def _connect(self) -> sqlite3.Connection:
-        return connect_to(self.path)
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection for this call, closed on the way out.
+
+        The same correction `slife2.libs.store.db.TurnStore._connect` carries, and
+        for the same reason: `with sqlite3.connect(...)` commits and *leaves the
+        connection open*, so the close this file's call sites assume was the
+        collector's to make — late, and on Windows late enough that the file
+        cannot be deleted in the meantime.  A catalogue is never deleted, so
+        nothing here has met that; the lifetime is stated once for both stores so
+        that "a connection per call" means the same thing in both.
+        """
+        connection = connect_to(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     # --- the file -------------------------------------------------------------
 

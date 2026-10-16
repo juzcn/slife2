@@ -521,7 +521,9 @@ def test_each_network_keeps_its_own_ledger() -> None:
     assert TASK in ours["pending"], "the other network's task survived"
 
     assert REMOTE.ledger != LOCAL.ledger
-    assert {one.path.name for one in a2a_inbound_paths(LOCAL.ledger)} == {LOCAL.ledger}
+    assert {one.path.name for one in a2a_inbound_paths(LOCAL.ledger)} == {
+        Path(LOCAL.ledger).name
+    }
     assert {one.path.name for one in a2a_inbound_paths(REMOTE.ledger)} == {
         REMOTE.ledger
     }
@@ -2742,12 +2744,13 @@ def local_member(
     only the connection is left out.
     """
     member = net_settings(default_config(), LOCAL)
+    org, unit = LOCAL.namespace(member, maker)
     with in_home(home_root):
         session = Session(
             agent=maker,
             net=LOCAL,
             mesh=A2AMesh(
-                replace(member, unit=LOCAL.unit_for(member.unit, maker)),
+                replace(member, org=org, unit=unit),
                 maker,
                 LOCAL.ledger,
                 subagent=subagent,
@@ -2804,7 +2807,9 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
     assert window.handed == [], "a subagent's message is not a window's"
     # And it is filed where the member lives: the bridges this mesh holds are the
     # member's, so its ledger is inside its own directory (`a2a_inbound_path`).
-    assert (tmp_path / "agents" / AGENT / "tester" / LOCAL.ledger).exists()
+    assert (
+        tmp_path / "agents" / AGENT / "subagents" / "tester" / "a2a-subagent.yaml"
+    ).exists()
 
 
 @pytest.mark.asyncio
@@ -3011,7 +3016,7 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
     """
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
-        server = local_build(configured=True, unit="local")
+        server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
                 LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT)
@@ -3022,10 +3027,11 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
         {"agent_name": AGENT, "status": "offline"},
         {"agent_name": "tester", "status": "offline"},
     ]
-    # **The namespace the mesh is in, not the section's.**  The section says
-    # `local` and this mesh publishes in `local-jack` (`Net.unit_for`), so the
-    # answer used to name a namespace nobody was in.
-    assert data["unit"] == "local-jack"
+    # **The mesh, which on this network is whose it is.**  The section says
+    # nothing of the sort — the code makes the unit the agent's name and the org
+    # this network's word (`Net.namespace`) — so the answer names the mesh
+    # *and* which network it is on, where the section's pair named neither.
+    assert (data["org"], data["unit"]) == ("subagent", AGENT)
 
 
 @pytest.mark.asyncio
@@ -3087,7 +3093,7 @@ async def test_a_members_own_roster_lists_it_once(tmp_path: Path) -> None:
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
         write_subagent(AGENT, "tester2")
-        server = local_build(configured=True, unit="local")
+        server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
                 LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT, "tester")

@@ -288,8 +288,8 @@ async def test_a_subagents_store_is_its_own_directory(tmp_path, monkeypatch) -> 
     """One directory in, under the agent that made it, and nobody else's.
 
     The nesting is what makes a subagent removable in one operation: everything
-    it writes is underneath `agents/<agent>/<subagent>/`, so removing it is
-    removing a directory rather than a list of files somebody has to keep
+    it writes is underneath `agents/<agent>/subagents/<subagent>/`, so removing it
+    is removing a directory rather than a list of files somebody has to keep
     complete.  And it is *its own* conversation — a subagent that shared its
     parent's file would be a second writer on the one thing the layout keeps
     apart.
@@ -655,3 +655,44 @@ def test_a_catalogue_that_is_told_forgets_what_the_config_dropped(tmp_path) -> N
     with sqlite3.connect(path) as connection:
         names = [row[0] for row in connection.execute("SELECT name FROM tool")]
     assert names == ["arxiv__search"]
+
+
+def test_a_store_closes_its_connection_when_the_call_ends(tmp_path, monkeypatch):
+    """**`with sqlite3.connect(...)` commits; it does not close.**
+
+    Which is how a conversation's file came to stay open for as long as the
+    collector took to notice — minutes, in a daemon — and on Windows an open
+    handle is a file nobody else can delete: `subagent_remove` failed with
+    `[WinError 32] … turns.db` on a subagent whose last turn had been answered
+    long before.  The fix is `TurnStore._connect` yielding inside a `finally` that
+    closes, so the assertion here is that the close happens at all — the file's
+    deletability is what a Windows-only test would have to say, and this is the
+    fact underneath it.
+    """
+    closed: list[str] = []
+
+    class Connection:
+        """A connection that records the one thing this test is about."""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def executescript(self, script):
+            return self
+
+        def execute(self, *args, **kwargs):
+            return self
+
+        def fetchone(self):
+            return (0,)
+
+        def close(self):
+            closed.append("closed")
+
+    monkeypatch.setattr("slife2.libs.store.db.connect_to", lambda path: Connection())
+    TurnStore(tmp_path / "turns.db")
+
+    assert closed == ["closed"], "the connection outlived the call"

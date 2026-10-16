@@ -35,7 +35,7 @@ came from is still named in the prompt (`strip_images`).
 **Agents are isolated by file.**  `agents/<agent>/turns.db` — there is no agent
 column and no query that can reach another agent's turns, because there is no
 other agent's turns in the file.  `who_helped` records the name for display.
-**A subagent's is one directory further in** (`agents/<agent>/<subagent>/
+**A subagent's is one directory further in** (`agents/<agent>/subagents/<subagent>/
 turns.db`), which is the same isolation rather than a weaker one: what a
 subagent is, is an agent that belongs to whoever made it, so its conversation is
 its own file inside its own directory — the directory that removing it takes
@@ -73,12 +73,13 @@ degraded would store turns nothing could ever find.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import re
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -182,7 +183,7 @@ def database_path(agent: str, subagent: str = "") -> Path:
     beats isolation as a `WHERE` clause somebody can forget to write — the same
     argument DESIGN.md §5 makes for agents, applied one level down.
 
-    **A subagent's store is its own directory**, `agents/<agent>/<subagent>/`,
+    **A subagent's store is its own directory**, `agents/<agent>/subagents/<subagent>/`,
     because a subagent owns more than a conversation: it is an agent that
     belongs to whoever made it rather than a means to an end inside one of that
     agent's turns, so what it writes — this file, and the cabinet and the rest
@@ -579,16 +580,39 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
 class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
-    A connection per call rather than one held open — see `_connect`, which is
-    the one place that is decided for both stores in this module.
+    A connection per call rather than one held open, **and closed when the call
+    ends** — see `_connect`, which is the one place that is decided.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        return connect_to(self.path)
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection for this call, and **it is closed on the way out**.
+
+        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
+        and leaves the connection *open*.  What closed these was the garbage
+        collector — and a connection that has survived one young collection waits
+        for a full one, which in a daemon serving turns can be minutes away.
+        Nothing sees that until something wants the file: on Windows an open
+        handle is a file nobody else can delete, and `subagent_remove` met
+        exactly that — `[WinError 32] … tester/turns.db`, with the subagent's own
+        last turn long since answered and its directory undeletable.
+        (`slife2.plugins.agent.server.subagent_remove`.)
+
+        So the lifetime is stated where the connection is made.  Every call site
+        keeps the `with` it already had and gets the close as well as the commit;
+        the commit is what `with connection:` here is for, and the `finally` is
+        the half that was missing.
+        """
+        connection = connect_to(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:

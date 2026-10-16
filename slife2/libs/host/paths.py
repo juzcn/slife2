@@ -27,10 +27,13 @@ root of its own rather than a copy per home.
                                   the index over them (`.index.db`) inside
                       media/      what this agent generated
                       wechat.yaml this agent's WeChat login
-                      <subagent>/ the same shape again, one level in — what an
-                                  agent made with `subagent_set` owns: it
-                                  belongs to its parent by being underneath it,
-                                  and removing it is removing this directory
+                      subagents/  what this agent made, one directory each —
+                                  everything below is the same shape again for a
+                                  subagent: its conversation, its cabinet, its
+                                  ledgers, its work
+                        <subagent>/  and it belongs to its parent by being
+                                  underneath it, so removing the directory is
+                                  removing the subagent
 
     <runtime>/                  the machine's daemons
       servers/      a record per running server: its pid, its url, its config
@@ -304,12 +307,22 @@ def agents_dir() -> Path:
 def agent_dir(agent: str, subagent: str = "") -> Path:
     """One agent's directory: its conversation, its cabinet, its logins, its work.
 
-    **A subagent's lives inside its parent's** — `agents/jack/researcher/` — and
-    the nesting *is* the relationship: an agent's everything is one directory, so
-    a subagent belongs to whoever made it by being underneath it, removing a
-    subagent is removing a directory, and removing an agent takes its subagents
-    with it.  That is `agents_dir`'s argument one level down, and the reason
-    nothing has to hold a second record of who made whom.
+    **A subagent's lives inside its parent's, in a directory that says so** —
+    `agents/jack/subagents/researcher/`.  The nesting *is* the relationship: an
+    agent's everything is one directory, so a subagent belongs to whoever made it
+    by being underneath it, removing a subagent is removing a directory, and
+    removing an agent takes its subagents with it.  That is `agents_dir`'s
+    argument one level down, and the reason nothing has to hold a second record
+    of who made whom.
+
+    **`subagents/` rather than one more directory beside the agent's own**, and
+    the container is the whole of what that buys: `agents/jack/` also holds
+    `cabinet/`, `media/` and every fixed name this build has, so a subagent
+    called `cabinet` used to be *that directory* — a name check in `subagent_set`
+    (`slife2.plugins.agent.server`) is what stopped it, and a check is a
+    convention somebody can go around.  One segment makes the collision
+    impossible to express: a subagent's name is a name *inside* `subagents/`, and
+    nothing else in this system writes there.
 
     It takes **both halves of the client id** because it is the one place that
     knows the layout: every per-agent path in this system is this function plus a
@@ -323,16 +336,40 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
     module — a local import is what keeps one implementation of "a name fit to
     be a file", instead of a second copy in the leaf that cannot reach the first.
     It is also what keeps a subagent *inside* its parent: the sanitiser refuses a
-    name that reduces to `.` or `..`, so the second segment cannot climb out of
-    the first.
+    name that reduces to `.` or `..`, so the last segment cannot climb out of the
+    ones above it.
     """
     from slife2.libs.store.db import safe_agent_name
 
-    path = agents_dir() / safe_agent_name(agent)
-    if subagent:
-        path = path / safe_agent_name(subagent)
+    path = (
+        subagent_path(agent, subagent)
+        if subagent
+        else agents_dir() / safe_agent_name(agent)
+    )
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def subagent_path(agent: str, subagent: str) -> Path:
+    """Where one subagent's directory is — **without making one**.
+
+    `agent_dir`'s subagent branch is this plus the `mkdir`, and the difference is
+    load-bearing for the one caller that *asks* about a name before using it:
+    `subagent_set` refuses a name that is already a directory, and a path builder
+    that made the directory would answer its own question.
+
+    `agents_dir(agent)` is in here rather than in each caller for the reason the
+    layout is written down at all: a second place that spells `subagents/` is a
+    second place to move a subagent with.
+    """
+    from slife2.libs.store.db import safe_agent_name
+
+    return (
+        agents_dir()
+        / safe_agent_name(agent)
+        / SUBAGENTS_DIR
+        / safe_agent_name(subagent)
+    )
 
 
 def catalogue_db() -> Path:
@@ -493,12 +530,13 @@ def turn_dbs() -> list[Path]:
     for.  A suffix `*.db` means "a database"; what is wanted here is "a
     conversation", and only the middle of the name says which.
 
-    **Two levels, and they are the ones `agent_dir` lays down**: the agent's
-    conversation, then a subagent's one directory in (`agents/jack/turns.db`,
-    `agents/jack/researcher/turns.db`).  Enumerated rather than globbed
+    **Two places, and they are the ones `agent_dir` lays down**: the agent's
+    conversation, then each subagent's own (`agents/jack/turns.db`,
+    `agents/jack/subagents/researcher/turns.db`).  Enumerated rather than globbed
     recursively, because a recursion is a walk of *everything* under an agent —
     a cabinet's index, whatever a tool saved — and what is being looked for here
-    is the one file whose name is `turns.db` at either depth.
+    is the one file whose name is `turns.db`, at the agent's own level or under
+    `subagents/`.
 
     **Every home, not this process's** (`known_homes`), because the store
     reading these is shared: a context daemon serving two homes has to have
@@ -513,7 +551,7 @@ def turn_dbs() -> list[Path]:
             if not directory.is_dir():
                 continue
             found.extend(sorted(directory.glob(TURNS_DB)))
-            found.extend(sorted(directory.glob(f"*/{TURNS_DB}")))
+            found.extend(sorted(directory.glob(f"{SUBAGENTS_DIR}/*/{TURNS_DB}")))
     return found
 
 
@@ -620,7 +658,7 @@ def a2a_inbound_paths(ledger: str) -> list[Ledger]:
 
 def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
     """One conversation's ledger for one network: `<agent>/<ledger>`, or
-    `<agent>/<subagent>/<ledger>`.
+    `<agent>/subagents/<subagent>/<ledger>`.
 
     What it holds is the inbound tasks *this mesh* is holding a completion
     bridge for, which is what lets a *restart* tell its orphans from ids it has
@@ -631,7 +669,11 @@ def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
 
     `ledger` is `Net.ledger`, and it is required rather than defaulted because
     the default would be a second spelling of one network's name in a module
-    that has no business knowing which network is calling.
+    that has no business knowing which network is calling.  **It is a path
+    relative to the agent's own directory**, which is how a network says where
+    its files live: the remote one is a name (`a2a.yaml`, beside `turns.db`), and
+    the subagent one is inside `subagents/` — the directory that network *is*,
+    so the same word names the network's file and the members it holds.
 
     **The second half is the client id's, and it is the layout rather than a
     label**: a subagent is a peer on the local network, so it has a mesh of its
@@ -639,10 +681,23 @@ def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
     mesh's bridges are what its ledger records.  Both halves go to `agent_dir`,
     which is where the nesting is written down once — so a member's ledger is
     inside the member's own directory, and removing the subagent takes the file
-    that only its mesh could read.
+    that only its mesh could read.  **A member takes the ledger's file name and
+    not its path**: it is already inside `subagents/`, which is where the path
+    was pointing.
     """
-    return agent_dir(agent, subagent) / ledger
+    if subagent:
+        return agent_dir(agent, subagent) / Path(ledger).name
+    return agent_dir(agent) / ledger
 
+
+#: The directory an agent's subagents live in, under the agent's own — spelt once
+#: because two functions lay paths down with it (`agent_dir`, `turn_dbs`) and one
+#: walks them (`subagent_dirs`).  **The name is the relationship and the reason
+#: the layout is safe**: everything else under `agents/<agent>/` is a fixed name
+#: this build writes (`cabinet/`, `media/`, `turns.db`), so a subagent called
+#: `cabinet` used to be *that* directory — and one segment makes that
+#: unexpressible rather than something a name check has to catch.
+SUBAGENTS_DIR = "subagents"
 
 #: The file that makes a directory a subagent's.  Spelt once for the reason
 #: `_SCHEDULE_DB` is: one function writes it and one walk finds them by it.
@@ -650,17 +705,20 @@ _SUBAGENT_YAML = "subagent.yaml"
 
 
 def subagent_file(agent: str, subagent: str) -> Path:
-    """The record that makes `<agent>/<subagent>/` a subagent: a file inside it.
+    """The record that makes `<agent>/subagents/<subagent>/` a subagent: a file
+    inside it.
 
     **The file is the record and the directory is the membership.**  There is no
     registry of subagents for the reason there is none of agents
-    (`schedule_dbs`): an agent's subagents *are* the directories underneath it,
-    and what says which directories those are is a file in each — the way
-    `wechat.yaml` says a login and `a2a.yaml` says an answer is owed.  A
-    directory without this file is not a subagent's, and that is what makes
-    `subagent_remove`'s blast radius provable: the cabinet lives in a directory
-    under the same parent as the subagents do, and what keeps a removal off it is
-    the absence of this file rather than a list of names to avoid.
+    (`schedule_dbs`): an agent's subagents *are* the directories under
+    `subagents/`, and what says which of them are subagents is a file in each —
+    the way `wechat.yaml` says a login and `a2a.yaml` says an answer is owed.
+
+    **And the container is what the blast radius rests on.**  A directory without
+    this file is not a subagent's, which used to be the only thing keeping
+    `subagent_remove` away from the agent's *own* directories — and those live
+    one level up, beside nothing a subagent could be named, now that a subagent's
+    name is a name inside `subagents/` (`agent_dir`).
 
     What it holds is the whole of what the subagent *is* — the model it runs on,
     the role it was made for, whether it was made as a fork, and when it was made
@@ -676,8 +734,8 @@ def subagent_file(agent: str, subagent: str) -> Path:
 def subagent_dirs(agent: str) -> list[Path]:
     """One agent's subagents, as the directories that are theirs.
 
-    A walk of `<agent>/*/` for the file `subagent_file` writes, which is
-    `schedule_dbs`' shape and its reason: what belongs to an agent is found by
+    A walk of `<agent>/subagents/*/` for the file `subagent_file` writes, which
+    is `schedule_dbs`' shape and its reason: what belongs to an agent is found by
     looking, because nothing keeps a list of it.  Sorted, so a caller that
     answers a model with this — the count against `subagent.max_running`, a
     roster — says the same thing twice running.
@@ -687,10 +745,13 @@ def subagent_dirs(agent: str) -> list[Path]:
     Every other walk here spans every home (`known_homes`) because a shared
     daemon serves them all; this one is answering a call that already named an
     agent, and an agent belongs to one home.
+
+    **A missing `subagents/` is no subagents**, and the glob is what says so: a
+    path is not a directory until somebody makes one, and an agent that has never
+    named a subagent has nothing to find.
     """
-    return [
-        path.parent for path in sorted(agent_dir(agent).glob(f"*/{_SUBAGENT_YAML}"))
-    ]
+    found = agent_dir(agent) / SUBAGENTS_DIR
+    return [path.parent for path in sorted(found.glob(f"*/{_SUBAGENT_YAML}"))]
 
 
 def skills_dir() -> Path:

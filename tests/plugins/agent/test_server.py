@@ -59,6 +59,7 @@ from slife2.plugins.agent.server import (
     SUBAGENT_SET,
     Pending,
     ProgressObserver,
+    _remove_tree,
     build_server,
 )
 
@@ -2475,8 +2476,13 @@ async def remove_subagent(server: FastMCP, name: str, *, agent: str = DEFAULT_AG
 
 
 def subagent_of(agent: str, name: str) -> Path:
-    """Where a subagent's directory is, without asking the code under test."""
-    return agents_dir() / agent / name
+    """Where a subagent's directory is, without asking the code under test.
+
+    Spelt the long way on purpose: what the tests around this one are *for* is
+    that a subagent is a directory in a named container and nothing else is, so a
+    helper that asked `agent_dir` where it lives would agree with any layout.
+    """
+    return agents_dir() / agent / "subagents" / name
 
 
 @pytest.mark.asyncio
@@ -3113,3 +3119,66 @@ def test_an_unfinished_exchange_is_what_a_copy_leaves_off() -> None:
         answered,
     ]
     assert settled_messages(whole + [called]) == whole
+
+
+def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Windows will not delete a file that is open, and a model cannot read `WinError 32`.**
+
+    What met the model instead was the OS's own sentence, in the OS's own
+    language — `[WinError 32] 另一个程序正在使用此文件，进程无法访问。:
+    …\\tester\\turns.db` — which names neither what happened nor what to do.  The
+    holder is the subagent's own conversation store, and the honest answer is to
+    wait out a write that is still landing (milliseconds) and then, if it is
+    still held, to say the file is open in another process and to ask again.
+
+    Refused as a whole rather than half-done: a removal that deleted most of a
+    subagent would leave something that is neither one nor a directory anybody
+    can finish removing.
+    """
+    import shutil
+
+    real_rmtree = shutil.rmtree
+    directory = tmp_path / "subagents" / "researcher"
+    directory.mkdir(parents=True)
+    busy = directory / "turns.db"
+    busy.write_bytes(b"")
+
+    def busy_error() -> PermissionError:
+        return PermissionError(32, "The process cannot access the file", str(busy))
+
+    attempts: list[int] = []
+
+    def always_held(path, *args, **kwargs):
+        attempts.append(1)
+        raise busy_error()
+
+    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", always_held)
+    monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 0.05)
+    with pytest.raises(ToolError) as refused:
+        _remove_tree(directory)
+
+    assert len(attempts) > 1, "it did not wait for the holder at all"
+    said = str(refused.value)
+    assert str(busy) in said, "the refusal does not name the file that is held"
+    assert "another process" in said and "Ask again" in said
+    assert "WinError" not in said, "the OS's own words are not an answer"
+    assert directory.exists(), "a refused removal leaves the directory alone"
+
+    # A holder that lets go inside the budget is waited out rather than reported:
+    # the first attempt finds the file busy, the second finds it free.
+    monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 5.0)
+    calls: list[int] = []
+
+    def goes_quiet(path, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise busy_error()
+        real_rmtree(path)
+
+    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", goes_quiet)
+    _remove_tree(directory)
+
+    assert len(calls) == 2, "a holder that let go was not waited out"
+    assert not directory.exists()

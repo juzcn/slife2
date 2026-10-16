@@ -580,7 +580,8 @@ useful case is somebody else's broker — a team's, a machine's, one already
 running — and joining one for a session should not mean editing a file every
 session reads. It travels the way `--data-dir` does (into the environment, so a
 server this process starts reads the same address), it overrides the *address*
-and nothing else — which network this is is `org`/`unit` and stays the file's —
+and nothing else — which network this is is that section's `org`/`unit` and
+stays the file's —
 and it cannot switch a mesh on: an absent `a2a:` section is still what "not on
 the mesh" means, so the flag is refused there rather than answered with a mesh
 nobody described.
@@ -670,25 +671,32 @@ distinguish it, each of them about *status* rather than about ability:
   kind: the agent↔agent one is a network of **remote** agents — peers that may be
   on another machine, on a broker somebody else runs — and the agent↔its-
   subagents one is a network of **local** ones, which are directories here. Each
-  is a section of its own (`a2a:` and `subagent:`, §3.1), each names its own
-  `org`/`unit`, and the second is where a subagent is a peer — while the *broker*
-  is the machine's: `subagent:` is where it is said, and an `a2a:` that names none
-  means the same address, because a machine meets both networks through one broker
-  by default and a second `host:port` in the file is a second thing to keep in
-  step.
+  is a section of its own (`a2a:` and `subagent:`, §3.1), and the second is where
+  a subagent is a peer — while the *broker* is the machine's: `subagent:` is where
+  it is said, and an `a2a:` that names none means the same address, because a
+  machine meets both networks through one broker by default and a second
+  `host:port` in the file is a second thing to keep in step.
   It is the same protocol and the same four tools throughout, presented under
   `subagent_*` names — **a technical fact and not a meaning**: nothing a person
   or a model reads on the local network says `a2a` anywhere.
-  - **The local network's namespace is per maker.** Its `unit` is the section's
-    with the maker's name after it, so two agents may each have a `researcher`:
-    one namespace would make those two one MQTT identity, and a broker settles a
-    duplicate identity by disconnecting the older one — a kick loop rather than
-    an error.
+  - **The local network is one mesh per agent**, and that is what its namespace
+    says: `{org}/{unit}` *is* a mesh, so the unit is the agent's own name and the
+    org is this network's word (`subagent`). Two agents may each have a
+    `researcher` and they are two peers in two meshes, where one namespace would
+    make them one MQTT identity that a broker settles by disconnecting the older
+    one — a kick loop rather than an error. **Neither segment is configured**:
+    a unit that was anything but the agent's name would merge two agents'
+    subagents, so `subagent.unit` is refused rather than read, and the org has a
+    default (`SubagentSettings.network`) an operator may override to group meshes.
 
-**Its directory is inside its maker's.** `agents/jack/researcher/` holds
-everything the subagent owns — its conversation, its cabinet, its ledger, its
-login, what it generated — because a directory is what an agent *is* here (§7),
-one level in. So removing a subagent is removing one directory, and removing the
+**Its directory is inside its maker's, in one that says what it is.** Every
+subagent of `jack` lives under `agents/jack/subagents/`, and one directory in —
+`agents/jack/subagents/researcher/` — holds everything the subagent owns: its
+conversation, its cabinet, its ledger, its login, what it generated.  Because a
+directory is what an agent *is* here (§7), one level in, and **the container is
+what keeps that level from being a name the agent might also want**: `cabinet`,
+`media` and `turns.db` are `jack`'s own, and a subagent called `cabinet` would
+have been that directory. So removing a subagent is removing one directory, and removing the
 agent takes its subagents with it; there is no second record of who made whom,
 because where a name's files are says it. What a subagent shares with its maker
 is the **home** — `slife2.yaml`, `agents/tools.db`, `skills/` — which is exactly

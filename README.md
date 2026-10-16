@@ -1092,8 +1092,13 @@ and a home is what `--data-dir` names:
       wechat.yaml                  its WeChat login (~24h, written on a scan)
       a2a.yaml                     its A2A ledger: the inbound tasks whose
                                    completion bridge this process holds
-      a2a-subagent.yaml            the same for the local network, which is a
-                                   second process and therefore a second file
+      subagents/                   what this agent made with `subagent_set`,
+                                   one directory each
+        a2a-subagent.yaml          the same ledger for the subagent network —
+                                   which is a second process and a second file,
+                                   and the directory that network *is*
+        <name>/                    the subagent: its own conversation, cabinet,
+                                   media, ledgers and record
 ```
 
 **Nothing inside an agent's directory repeats its name** — the directory says

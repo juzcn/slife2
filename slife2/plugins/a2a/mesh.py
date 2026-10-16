@@ -685,13 +685,13 @@ class A2AMesh:
     def namespace(self) -> tuple[str, str]:
         """The `(org, unit)` this mesh actually publishes and subscribes in.
 
-        **Not the section's, and on the local network they differ.**  A unit is
-        the topic path's second segment, and the local network's is per maker
-        (`Net.unit_for`, which is what keeps two agents' `researcher` from being
-        one MQTT identity) — so a caller reporting the section's unit would name
-        a namespace nobody is in, and a model reading it would have no way to
-        tell.  The `default` folds are this object's own too: a section that
-        named neither would otherwise report an empty segment.
+        **The pair is the mesh** — a caller that reported the *section's* pair
+        would name a namespace nobody is in, and on a subagent network the two
+        are not the section's at all: `Net.namespace` makes the unit the agent's
+        name and the org this network's word, so the answer here is also which
+        network this is and whose mesh it is.  The `default` folds are this
+        object's own too: a section that named neither would otherwise report an
+        empty segment.
         """
         return self._topics.org, self._topics.unit
 

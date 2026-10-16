@@ -79,6 +79,7 @@ from collections.abc import (
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
@@ -113,7 +114,12 @@ from slife2.libs.host.config import (
     for_the_call,
     load_cached,
 )
-from slife2.libs.host.paths import agent_dir, subagent_dirs, subagent_file
+from slife2.libs.host.paths import (
+    agent_dir,
+    subagent_dirs,
+    subagent_file,
+    subagent_path,
+)
 from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import (
@@ -133,7 +139,6 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
-from slife2.libs.store.db import safe_agent_name
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import turn_note, with_note
 from slife2.libs.turn.events import (
@@ -3143,9 +3148,10 @@ def build_server(
         """Make a subagent: an agent of your own, named, with its own memory.
 
         A subagent is an agent that belongs to you — the same tools, the same way
-        of working, its own conversation, and its own directory underneath yours
-        (`agents/<you>/<name>/`).  It has no window and no process: it runs when
-        something sends it a message, and from then on you address it by name.  It
+        of working, its own conversation, and its own directory underneath
+        yours (`agents/<you>/subagents/<name>/`).  It has no window and no
+        process: it runs when something sends it a message, and from then on you
+        address it by name.  It
         is *made* here and *unmade* by `subagent_remove`; everything else it does,
         it does with the tools you have.
 
@@ -3189,7 +3195,8 @@ def build_server(
             # The tree, and it stops at one level — not because a second level is
             # unthinkable, but because nothing would hold a place for it: the
             # local network's membership is the maker's *own* subagents
-            # (`subagent_dirs`, one level in), and a place is what makes a member
+            # (`subagent_dirs`, under the agent's own `subagents/`), and a place is
+            # what makes a member
             # reachable at all (`slife2.plugins.a2a.server.place_for`).  sdd §12.8
             # holds the rule this depends on.
             raise ToolError(
@@ -3199,13 +3206,14 @@ def build_server(
                 "it. Ask your own maker for what you need."
             )
         held = subagent_dirs(maker)
-        directory = agent_dir(maker) / safe_agent_name(name)
+        directory = subagent_path(maker, name)
         created = directory not in held
         if created and directory.exists():
             raise ToolError(
-                f"{directory.name!r} is already something of yours that is not a "
-                f"subagent — a subagent's name is a directory of its own inside "
-                f"yours, so pick a name that is free."
+                f"{directory.name!r} is already a directory inside your "
+                f"`subagents/` that is not a subagent — a half-removed one, or one "
+                f"made by hand. Pick a name that is free, or remove that "
+                f"directory yourself."
             )
         limit = current().subagent.max_running
         if created and len(held) >= limit:
@@ -3261,11 +3269,14 @@ def build_server(
         is a directory, so this is one operation rather than a list somebody has
         to keep complete.
 
-        **Nothing else can be removed by it.**  What makes a directory a
-        subagent's is the record inside it, and a name that has no such record is
-        not one: asking for the agent's own cabinet is refused rather than
-        emptied.  A name that is not there at all is not an error — the caller
-        wanted it gone and it is gone.
+        **Nothing outside `subagents/` can be removed by it, and that is the
+        layout rather than a check.**  The name is a name inside the container
+        (`subagent_path`), so the agent's own `cabinet/`, `media/` and `turns.db`
+        are not reachable from here at all — and inside it, what makes a directory
+        a subagent's is the record the directory carries (`subagent.yaml`).  A
+        directory there without the record is refused rather than emptied; a name
+        that is not there at all is not an error, because the caller wanted it
+        gone and it is gone.
 
         Args:
             name: Which of your subagents.  The same name you made it with.
@@ -3282,7 +3293,7 @@ def build_server(
                 f"a subagent cannot remove a subagent: {describe(who)} owns no "
                 f"subagents — its maker does. Ask your own maker to remove it."
             )
-        directory = agent_dir(maker) / safe_agent_name(name)
+        directory = subagent_path(maker, name)
         if directory not in subagent_dirs(maker):
             if directory.exists():
                 raise ToolError(
@@ -3302,11 +3313,52 @@ def build_server(
         # that does not exist *creates* it, and the handle that created it can
         # hold the file against the `rmtree` that follows.
         loops.pop(client_key(maker, directory.name), None)
-        shutil.rmtree(directory)
+        _remove_tree(directory)
         logger.info("subagent %s removed", describe((maker, directory.name)))
         return {"name": directory.name, "removed": True}
 
     return mcp
+
+
+def _remove_tree(directory: Path) -> None:
+    """Take a subagent's whole directory away, waiting out a file still in use.
+
+    **Windows will not delete a file that is open**, and the one thing in there
+    that can be is the subagent's own conversation store: `remember_turn` detaches
+    the record of a turn, so a write can outlive the answer that produced it, and
+    until `slife2.libs.store.db._connect` closed its connections the store also
+    held the file from *any* earlier turn until the collector ran.  That last one
+    is fixed; this is the belt for the braces, because a write genuinely in flight
+    is not something the caller can wait for — it belongs to a turn that has
+    already been answered, in another process.
+
+    The wait is `storage.sqlite_busy`, which is the registry's number for exactly
+    this ("how long a writer waits for the writer holding the database"): a
+    holder that is a write in flight lets go in milliseconds, and one that
+    outlasts this is not a write.
+
+    Raises:
+        ToolError: With the file named and nothing else.  A `WinError 32` — which
+            is what this used to raise, in the OS's own words and in the OS's own
+            *language* — is not an answer a model can act on; "it is open, try
+            again" is.  Refused rather than half-done: the directory is one
+            subagent, and a removal that deleted most of it would leave something
+            that is neither a subagent nor a directory anybody can finish
+            removing.
+    """
+    deadline = time.monotonic() + _T.timeouts.storage.sqlite_busy
+    while True:
+        try:
+            shutil.rmtree(directory)
+            return
+        except PermissionError as e:
+            if time.monotonic() >= deadline:
+                raise ToolError(
+                    f"{directory.name!r} could not be removed: {e.filename} is "
+                    f"open in another process — its conversation may still be "
+                    f"being written. Ask again in a moment."
+                ) from e
+            time.sleep(_T.timeouts.pacing.file_release)
 
 
 @dataclass(frozen=True)
@@ -3346,7 +3398,7 @@ def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
     conversation is not one (`slife2.libs.host.paths.subagent_file`).  So `""`
     answers the defaults rather than being looked up, which keeps
     `agent_dir(agent, "")` — the agent's own directory — out of a question about
-    a file that lives one level in.
+    a file that lives under the subagent's own directory.
     """
     if not subagent:
         return SubagentSpec()

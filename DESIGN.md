@@ -1671,7 +1671,7 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   parent recorded beside it. That needs new state (who made whom) and a new
   lookup; the client id needs neither, and it is what the hub, the context store,
   the cabinet and the model backend all key by already. The nesting is the
-  *consequence*, not the mechanism: `agents/jack/researcher/` says who made whom
+  *consequence*, not the mechanism: `agents/jack/subagents/researcher/` says who made whom
   because it is inside it.
 - **`Loop.records` reverses.** It was `not self.subagent`, and its reason was
   written down: *"a subagent is a means to an end inside one of that agent's
@@ -1702,9 +1702,12 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   own broker address, which is the one the file has to state and the one a remote
   mesh falls back to when it names none (two addresses are allowed and this is
   where that is said; one is what a machine has, so the second is a default
-  rather than a thing to write twice) — and its own `org`/`unit` — and the plugin
-  that carries it is a second instance of the a2a module rather than a second
-  namespace inside the first.
+  rather than a thing to write twice) — and **its own namespace, of which the file
+  may set the `org` and not the `unit`**: a mesh is `{org}/{unit}`, this network's
+  meshes are one per agent, so the unit is the agent's name by construction
+  (`Net.namespace`) and the org is the word that keeps these meshes from being the
+  remote network's. The plugin that carries it is a second instance of the a2a
+  module rather than a second namespace inside the first.
 
   **Its names carry no `a2a`**, which is the difference between a technical fact
   and a meaning: the protocol is what this build happens to reach a local agent
@@ -1713,14 +1716,16 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   are `subagent_*`, the channel is `subagent:<name>` — and the one word that
   differs between the two envelopes is the one a reader could get wrong
   (`[PeerAgent:` against `[SubagentPeer:`; the window says `Subagent(name)>`
-  either way, because there the reader *is* the maker). Its unit is per maker
-  for the same reason the names are separate: two makers may each name a
+  either way, because there the reader *is* the maker). Its unit is the agent's
+  own name for the same reason the names are separate: two makers may each name a
   `researcher`, and one namespace would make those two one MQTT identity. What that buys over one process with two namespaces: a swarm's several
   hundred MQTT sessions and their tasks are not the machine's agent mesh's
   process, so neither can wedge or cap the other, and a machine can reach its
   peers through a team broker while its own subagents stay on the broker it
-  runs. `unit` is still what keeps two makers' `researcher` from colliding and
-  the fan-out per network small, but it is now a property of the *section*.
+  runs. The unit is what keeps two makers' `researcher` from colliding and the
+  fan-out per network small, and on this side it is now derived rather than
+  configured (`Net.namespace`) — a property of the *section*, and one an operator
+  cannot get wrong.
 
 **What it deliberately does not add.**  No `spawn`: nothing here starts a
 process, and `--headless` is a different thing (an instance with no terminal). No
@@ -1739,7 +1744,7 @@ grew two parameters and the record grew two keys, and both are answers to one
 question — *where does one subagent's setting live?*
 
 - **In the subagent, and nowhere else.**  The model, the role and whether it is a
-  fork are in `agents/<maker>/<name>/subagent.yaml`, beside a conversation and a
+  fork are in `agents/<maker>/subagents/<name>/subagent.yaml`, beside a conversation and a
   cabinet that are already per-subagent, and that file is deleted with the
   directory.  A key in `slife2.yaml` was the alternative and it loses on what this
   thing is: a subagent is made today and removed tomorrow, so a config key would

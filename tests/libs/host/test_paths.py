@@ -196,15 +196,22 @@ def test_a_subagents_directory_is_inside_its_parents(
     by being *underneath* it, so nothing has to keep a second record of who made
     whom — the directory says it, removing a subagent is removing a directory,
     and removing an agent takes its subagents with it.
+
+    **And it is one container in, not one name in**: `subagents/` is where a
+    subagent lives, so a subagent called `cabinet` is `subagents/cabinet` rather
+    than the agent's own cabinet.  That is the layout's job and the reason the
+    name needs no check against the names the agent already uses.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
     jack = agent_dir("jack")
     researcher = agent_dir("jack", "researcher")
 
-    assert researcher == jack / "researcher"
+    assert researcher == jack / "subagents" / "researcher"
     assert researcher.is_dir(), "made on demand, like an agent's own"
     assert agent_dir("jack") == jack, "and the agent's own does not move"
+    # The one name that would have collided: an agent's own cabinet.
+    assert agent_dir("jack", "cabinet") != jack / "cabinet"
 
 
 def test_a_subagent_stays_inside_its_parent(
@@ -214,8 +221,10 @@ def test_a_subagent_stays_inside_its_parent(
 
     The second half comes out of a model's tool call rather than off a command
     line, and it decides a *path*: what is asserted is the invariant rather than
-    a spelling — whatever the name reduces to, it lands inside the parent that
-    made it, or it is refused for reducing to nothing.
+    a spelling — whatever the name reduces to, it lands inside `subagents/`, or it
+    is refused for reducing to nothing.  The container is what makes that
+    invariant cheap to hold: the name is the *last* segment of a path whose other
+    segments are this build's, so a name cannot reach anything of the agent's own.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     jack = agent_dir("jack")
@@ -225,7 +234,7 @@ def test_a_subagent_stays_inside_its_parent(
             made = agent_dir("jack", name)
         except ValueError:
             continue  # a name with nothing left in it is refused
-        assert made.parent == jack, f"{name!r} landed outside its parent"
+        assert made.parent == jack / "subagents", f"{name!r} landed outside its parent"
 
     for name in ("..", ".", "/"):
         with pytest.raises(ValueError):
@@ -361,11 +370,11 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
     on one SQLite file, against the one-writer rule the layout exists to keep.
     What is wanted is "a conversation", and only the middle of the name says so.
 
-    **Two levels, and no further.**  A subagent's conversation is one directory
-    in (`agents/jack/researcher/turns.db`) and is found; a `turns.db` deeper than
-    that — inside a subagent's cabinet, say — is not, because the walk enumerates
-    the depths the layout has rather than recursing into everything an agent
-    keeps.
+    **The two places the layout has, and no further.**  A subagent's
+    conversation is inside the container (`agents/jack/subagents/researcher/`)
+    and is found; a `turns.db` deeper than that — inside a subagent's cabinet,
+    say — is not, because the walk enumerates the places the layout has rather
+    than recursing into everything an agent keeps.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     jack = agents_dir() / "jack"
@@ -373,7 +382,7 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
     for name in ("turns.db", "schedule.db"):
         (jack / name).write_bytes(b"")
     (jack / "wechat.yaml").write_text("token: x\n", encoding="utf-8")
-    researcher = jack / "researcher"
+    researcher = jack / "subagents" / "researcher"
     (researcher / "cabinet").mkdir(parents=True)
     (researcher / "turns.db").write_bytes(b"")
     (researcher / "schedule.db").write_bytes(b"")
@@ -381,6 +390,11 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
 
     found = {path.relative_to(agents_dir()).as_posix() for path in turn_dbs()}
 
-    assert found == {"jack/turns.db", "jack/researcher/turns.db"}
+    assert found == {
+        "jack/turns.db",
+        "jack/subagents/researcher/turns.db",
+    }
     assert "jack/schedule.db" not in found, "a ledger is not a conversation"
-    assert "jack/researcher/cabinet/turns.db" not in found, "and neither is a name"
+    assert "jack/subagents/researcher/cabinet/turns.db" not in found, (
+        "and neither is a name"
+    )
