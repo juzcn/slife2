@@ -4064,6 +4064,23 @@ which is where every other line it shows comes from.
   keeps at most `RETIRED` finished tasks plus the running ones, so the answer
   cannot outgrow the budget. A listing that cannot grow is not given paging
   arguments it would never use.
+* **A verdict about a name is an answer, not a failure.**  `func_tool_load`
+  answers `{loaded, failed: [{name, reason}]}` — including when *nothing*
+  loaded — and `_func_tool_unload` answers its five lists, because the call was
+  made and what it has to say is per name; `agent_task_status` and
+  `attach_image` answer the same way (`unknown`, a `refused` list).  What
+  *raises* is a call that could not be made at all — no names, too many names, a
+  tool_search with nothing to look for — and the line between the two is worth
+  keeping the next time somebody tidies this: making a verdict a failure would
+  take the reason away from the model that has to act on it.
+* **Two descriptions were left long on purpose.**  `subagent_set`'s is ~385
+  words and `dump_read`'s ~310, and both are dense rather than padded: the first
+  defines what a subagent *is* and what `fork` and an empty `model` do, and the
+  second is the reader's whole grammar.  Cutting them would be cutting facts a
+  model has nowhere else to read.
+* **`cabinet/server.py`'s module docstring still says "four kinds, one corpus"**
+  although the dump made it five.  Pre-existing, and not this rule's to fix —
+  named here because a reader of the cabinet next will meet it.
 
 ## 9. Deferred
 
