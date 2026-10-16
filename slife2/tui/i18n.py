@@ -104,11 +104,6 @@ def set_language(lang: str) -> None:
     _LANGUAGE = lang
 
 
-def get_language() -> str:
-    """Which language this process is answering in."""
-    return _LANGUAGE
-
-
 #: key → {lang: text}.  Every user-facing string of the window lives here.
 #:
 #: **The glyphs are not in these strings.**  `slife2.tui.theme.GLYPHS`' marks

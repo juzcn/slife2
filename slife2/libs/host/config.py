@@ -234,7 +234,7 @@ class Net:
         """The MCP name this instance answers as — `PLUGINS`', not a second copy.
 
         **A property rather than a field**, and the two networks are why:
-        `A2A_SERVER_NAME` and `SUBAGENT_SERVER_NAME` are the same facts as these,
+        `A2A_SERVER_NAME` is the same fact as this one for the remote network,
         and a field here plus a constant there is the pair of literals that
         drifts.  Different for the two networks because one machine runs both and
         a probe has to be able to tell them apart — which is a fact about their
@@ -700,7 +700,6 @@ FILE_TUNNEL_SERVER_NAME = plugin("file-tunnel").name
 AGENT_TASK_SERVER_NAME = plugin("agent-task").name
 SCHEDULE_SERVER_NAME = plugin("schedule").name
 A2A_SERVER_NAME = plugin(REMOTE.key).name
-SUBAGENT_SERVER_NAME = plugin(LOCAL.key).name
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in
