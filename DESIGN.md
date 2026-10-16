@@ -54,7 +54,7 @@ because a chapter is a subject and not a decision.
    - [8.6 Names, and the links the hub holds](#86-names-and-the-links-the-hub-holds)
    - [8.7 Editing the config](#87-editing-the-config)
    - [8.8 The three meta-parameters](#88-the-three-meta-parameters)
-9. [Deferred](#9-deferred) — named so they are decisions rather than oversights: what is missing, where it would go, and what the current answer costs
+9. [Deferred](#9-deferred) — named so they are decisions rather than oversights: what is missing, where it would go, and what the current answer costs — and, first, the two of v1's features this build dropped rather than deferred
 10. [Fallbacks](#10-fallbacks) — the one kind of behaviour that is invisible when it is wrong
    - [10.1 The four deformations](#101-the-four-deformations)
    - [10.2 The register](#102-the-register)
@@ -3752,6 +3752,34 @@ have told a reader the tool ran.
 Named so they are decisions rather than oversights. Each entry says what is
 missing, where it would go, and what the current answer costs — a bullet that
 cannot say all three is a wish rather than a decision.
+
+**Two things v1 had are in here in the other sense: not deferred but dropped**,
+and they are named first because that is the answer a reader arriving from v1 is
+looking for. They are the same shape of decision — said out loud, with what
+stands in their place and what that costs — but a reader who took them for
+deferred work would be waiting for something nobody is building.
+
+- **Jobs — the deterministic, code-defined call.** v1 kept plain `.py` files in
+  `~/.slife/jobs/`, one public function to one `job-<fn>` tool, registered and
+  reloaded live by `job-list` / `job-write` / `job-remove` / `job-run`, for work
+  that is well specified and repeatable — translate, extract, classify — where a
+  job that needed a model made **one** narrow `llm.chat` on a model configured
+  apart from the conversation's, so it never touched the agent's prompt cache and
+  no loop ever ran. **Dropped, and not coming back.** What stands in its place is
+  an agent task or a scheduled run: the same work, done by a model that has the
+  conversation, the tools and the prompt around it. What that costs is the thing
+  jobs existed for — a loop where a job was one call, a system prompt and a
+  context where a job had neither, and a temperature of the conversation's
+  choosing rather than the job author's.
+- **The autonomous heartbeat.** v1 could take a periodic turn while idle
+  (`agent.heartbeat_interval`, off in the shipped config since it spends tokens
+  on its own), skipped whenever the inbox was busy, rendered as `⚡ 自主` — the
+  precondition, in its own words, for behaviour the agent starts by itself.
+  **Dropped, and not coming back.** What stands in its place is the clock: a
+  scheduled task is a *named* thing with a description, a ledger and a way to see
+  what each run did, where a beat was an unnamed turn whose only output was a
+  line in a window. What that costs is the one property a beat had and a schedule
+  cannot have — it fires when nothing asked it to.
 
 - **The listing tool.** "What is installed" is a page of rows with no ranking —
   every tool, one category, one server's, or the ones switched off — and it is
