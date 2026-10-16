@@ -4093,6 +4093,41 @@ deferred work would be waiting for something nobody is building.
   `OperationalError`, the store would report it as one caller's bad data, and
   every turn after the upgrade would run perfectly and never be recorded. Add it
   with the reader that needs it.
+- **The window's wire is defined inside the window's server.** `Handover`, its
+  codec, `ATTACH`/`SUBMIT`/`NOTE`, `NO_WINDOW` and the `refused` predicate are a
+  vocabulary two processes agree on — a channel writes one, the terminal reads
+  it, and the terminal answers — and they live in
+  `plugins/tui/server.py`, which is one of the two ends. This system's rule is
+  the other way round and it is stated twice in the tree: `libs/turn/events.py`
+  keeps both halves of the turn-event wire together "so the format has one
+  definition and one round-trip test", and `libs/model/wire.py` does the same for
+  a chunk. It costs something concrete today: `libs/harness/handover.py` imports
+  `plugins.tui.server` **at module level**, so every process that hands a message
+  to a window drags a FastMCP *server* in — which is the rule `libs/host/config.py`
+  states about `openai_server` ("importing a server drags a server into a process
+  that must not have one"). It is the only module-level `libs → plugins` edge in
+  the tree. Where it would go: `libs/harness/window.py`, next to `handover.py`,
+  which is the module that already knows what a hand-over is; the plugin keeps
+  the tool bodies and imports the words, the client and the app import the words,
+  and `handover` stops importing a plugin at all. What the current answer costs:
+  the wire has no test of its own — a round-trip test of `encode`/`decode` is the
+  obvious thing to want and there is nowhere to put it that is not the server
+  module — and the layering rule is broken in exactly one place, which is the
+  place a reader will find when they go looking for whether it is a rule at all.
+- **Two readers of the config file, with three wordings between them.**
+  `config.load`, `configfile._read` and `configfile._document` each read a YAML
+  mapping and each refuse a file that is not one, in their own words ("cannot
+  read {path}", "is not YAML", "expected a mapping at the top level", "is not a
+  mapping, so it has no sections"). All four are accurate and the difference is
+  editorial, which is why this is deferred rather than fixed: the wording is
+  asserted (`tests/libs/host/test_config.py` matches "cannot read") and the three
+  readers differ for real reasons — one takes a path because it is the file
+  `find_config_path` chose, the others take text because they round-trip the
+  document they are about to write back. Where it would go: one `read_mapping`
+  in `configfile`, called by `load`, with one pair of sentences. What the current
+  answer costs: a reader who has seen one of these messages does not recognise
+  the next as the same problem, which is the cost every duplicated sentence in
+  this system carries.
 ---
 
 ## 10. Fallbacks

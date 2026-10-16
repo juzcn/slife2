@@ -46,6 +46,17 @@ English.
 
 from __future__ import annotations
 
+#: **The version, and it is the first thing this module defines.**  `slife2`'s own
+#: package root is imported by everything under it, so a name here that something
+#: deeper wants is an edge back into this file — and `slife2.libs.plugin.protocol`
+#: wants exactly one: `serve` writes it into the record that says which build a
+#: daemon is.  Defined after the imports below, that read only worked because
+#: nothing imported while this module's body ran ever reached `protocol.py` —
+#: break that (add one import here, above this line) and the daemon start-up dies
+#: with "cannot import name `__version__`", in a file nobody was editing.
+#: Defined first, there is no order to get wrong.
+__version__ = "0.1.0"
+
 import argparse
 import sys
 import time
