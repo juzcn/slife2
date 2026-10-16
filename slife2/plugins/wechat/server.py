@@ -67,8 +67,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
@@ -76,10 +74,10 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Context, FastMCP
-from ruamel.yaml import YAML
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
+from slife2.libs.host import statefile
 from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
 from slife2.libs.host.paths import agent_dir, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
@@ -331,12 +329,6 @@ class Session:
 # credential store.
 
 
-def _yaml() -> YAML:
-    yaml = YAML()
-    yaml.default_flow_style = False
-    return yaml
-
-
 def session_path(agent: str) -> Path:
     """One agent's login: `agents/<agent>/wechat.yaml`.
 
@@ -378,7 +370,7 @@ def _read_session(path: Path) -> tuple[dict[str, Any], str]:
     and what went wrong with it.
     """
     try:
-        raw = _yaml().load(path.read_text(encoding="utf-8"))
+        raw = statefile.reader().load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}, ""
     except Exception as e:  # noqa: BLE001 — a corrupt cache is a cache miss
@@ -390,10 +382,9 @@ def _read_session(path: Path) -> tuple[dict[str, Any], str]:
 def save_session(agent: str, session: Mapping[str, Any]) -> Path:
     """Write a login down, atomically.
 
-    A temp file in the same directory and `os.replace`, so a reader sees the old
-    file or the new one and never half of either — the same guarantee
-    `slife2.libs.host.runtime` gives its records, for the same reason: the poll loop
-    rewrites this file every time the cursor moves.
+    The atomicity is `slife2.libs.host.statefile.write`'s, and it matters here for
+    the reason it gives: the poll loop rewrites this file every time the cursor
+    moves, so a reader is always a moment away from catching it.
 
     **The agent is stamped here**, beside the token, and the one writer is why
     every file this build writes can say whose login it is — see :data:`AGENT_KEY`
@@ -401,18 +392,7 @@ def save_session(agent: str, session: Mapping[str, Any]) -> Path:
     because there are two callers already and a third would be the one to forget.
     """
     path = session_path(agent)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as opened:
-            _yaml().dump({**session, AGENT_KEY: agent}, opened)
-            opened.flush()
-            os.fsync(opened.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    statefile.write(path, {**session, AGENT_KEY: agent})
     return path
 
 

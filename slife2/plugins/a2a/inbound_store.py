@@ -36,14 +36,13 @@ each read the other's in-flight tasks as its own orphans.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from slife2.libs.host import statefile
 from slife2.libs.host.paths import a2a_inbound_path
 
 logger = logging.getLogger(__name__)
@@ -51,17 +50,6 @@ logger = logging.getLogger(__name__)
 #: Bound each section — a peer that never answers must not grow the file
 #: without limit.  A2A task arrivals are far below this in any sane session.
 _MAX_ENTRIES = 200
-
-
-def _yaml() -> YAML:
-    """The writer and reader for this file, set up the way `slife2.plugins.wechat.server`'s is.
-
-    Block style, so the file reads as the document it is meant to be — an entry
-    in it is a peer still owed a reply, and that is a thing a person may open.
-    """
-    yaml = YAML()
-    yaml.default_flow_style = False
-    return yaml
 
 
 def _iso_now() -> str:
@@ -166,7 +154,7 @@ class InboundStore:
         refusal is also what makes the overwrite impossible.
         """
         try:
-            raw = _yaml().load(self._path.read_text(encoding="utf-8"))
+            raw = statefile.reader().load(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return
         except (OSError, ValueError, YAMLError) as e:
@@ -255,14 +243,8 @@ class InboundStore:
             "pending": {k: v.as_dict() for k, v in self._pending.items()},
             "stale": {k: v.as_dict() for k, v in self._stale.items()},
         }
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as opened:
-                _yaml().dump(payload, opened)
-                opened.flush()
-                os.fsync(opened.fileno())
-            os.replace(tmp, self._path)
+            statefile.write(self._path, payload)
         except OSError as e:
             logger.error(
                 "a2a_inbound_state_write_failed path=%s err=%s — what this "

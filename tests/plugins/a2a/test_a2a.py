@@ -56,6 +56,7 @@ from slife2.libs.host.paths import (
     register_home,
 )
 from slife2.libs.host.runtime import read_record
+from slife2.libs.host.statefile import reader as read_state_yaml
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.a2a import broker
 from slife2.plugins.a2a import server as a2a_server
@@ -540,9 +541,8 @@ def test_the_ledger_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _read_yaml(path: Path) -> dict:
-    from slife2.plugins.a2a.inbound_store import _yaml
-
-    return _yaml().load(path.read_text(encoding="utf-8"))
+    """The ledger as it is on disk, read the way the plugin reads it."""
+    return read_state_yaml().load(path.read_text(encoding="utf-8"))
 
 
 def test_a_damaged_ledger_is_refused_rather_than_read_as_empty() -> None:
