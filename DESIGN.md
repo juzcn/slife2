@@ -1782,9 +1782,11 @@ question — *where does one subagent's setting live?*
   is made of*.
 - **A subagent's prompt is its own, and one template serves every role.**
   `subagent.j2` ships beside `system.j2`: the operator's `agent.system_prompt` is
-  a prompt for the agent they are running, and it cannot say the two things a
-  subagent needs to be told — what it is, and that nobody is watching.  `role`
-  reaches that template as a word ("You are scout, a code reviewer") and not yet
+  a prompt for the agent they are running, and it cannot say the things a
+  subagent needs to be told — what it is, whose subagent it is, and that nobody
+  is watching.  `role`
+  reaches that template as a word ("You are scout, one of jill's subagents — a
+  code reviewer") and not yet
   as a choice of *file*.  **The per-role template is the step left open**, and it
   is left open rather than guessed at: `role: reviewer` wanting `reviewer.j2`
   needs an answer for a role with no file, and whether that answer is a refusal or
@@ -1817,7 +1819,11 @@ Three things, and they are one change:
   is the shape `agent-task` already has.  **And the subagent's reply is a tool
   call of its own** (`subagent_send_message`, or `subagent_broadcast` for all its
   maker's subagents), so nothing has to relay a turn's return value: every reply
-  is simply the next inbound message, and the rule above handles it.
+  is simply the next inbound message, and the rule above handles it.  **And the
+  tool's description says so** — the one fact a conversation cannot state about
+  itself is that ending a turn delivers nothing, so the send tool's description
+  says a reply is that call.  A prompt that repeated the arguments would be a
+  second schema kept in step by hand.
   A broadcast is the same rule once per member, since every member's responder
   receives it.
 - **So the send path has to ensure the receiver's mesh exists.**  A message

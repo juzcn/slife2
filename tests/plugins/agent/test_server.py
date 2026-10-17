@@ -2705,10 +2705,11 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
 async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
     context, hub
 ) -> None:
-    """Its prompt says who it is, and that there is no window.
+    """Its prompt says who it is, whose it is, and that there is no window.
 
-    The maker's name would be a model told it is somebody else, and the maker's
-    *claim* would say somebody is watching whenever the maker's window is open —
+    The agent's name alone would be a model told it is somebody else — told
+    *whose* subagent it is, it can address its answer — and the agent's
+    *claim* would say somebody is watching whenever the agent's window is open —
     which is the one way to get this wrong that looks like it works.
     """
     backend = FakeBackend(text_turn("hello"), text_turn("hello"))
@@ -2722,11 +2723,36 @@ async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
     subagent_prompt = backend.calls[0][0][0].content
     maker_prompt = backend.calls[1][0][0].content
     assert subagent_prompt.startswith("You are researcher,")
+    assert f"one of {DEFAULT_AGENT}'s subagents" in subagent_prompt, (
+        "it is told whose it is, which is also the member it answers"
+    )
     assert "Nobody is watching" in subagent_prompt
     assert maker_prompt.startswith(f"You are {DEFAULT_AGENT},")
     assert f"You are {DEFAULT_AGENT}," not in subagent_prompt, (
         "its maker's name would be a model told it is somebody else"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_prompt_does_not_teach_the_send_tool(context, hub) -> None:
+    """**Schema over prompt**: the reply rule lives on the tool, not in the text.
+
+    The prompt says what the conversation is — whose subagent it is, that it is
+    a fork, that nobody is watching.  What a reply is belongs to the send tool's
+    description, where the model already reads the arguments; repeating it here
+    would be a second schema kept in step by hand.
+    """
+    backend = FakeBackend(text_turn("hello"))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one", subagent="researcher")
+
+    prompt = backend.calls[0][0][0].content
+    assert "subagent_send_message" not in prompt
+    assert "task_response" not in prompt
+    assert "message_type" not in prompt
 
 
 def a_second_model():
@@ -2805,7 +2831,9 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
     await send(server, "one")
 
     named = backend.calls[0][0][0].content
-    assert named.startswith("You are researcher, a code reviewer.")
+    assert named.startswith(
+        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a code reviewer."
+    )
     assert "Nobody is watching" in named
     assert backend.calls[1][0][0].content == "be terse", "the operator's, for its maker"
     record = YAML(typ="safe").load(
@@ -2840,8 +2868,10 @@ async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
         "user:two",
     ]
     head = backend.calls[1][0][0].content
-    assert head.startswith("You are researcher, a subagent.")
-    assert "copy of the one that made you" in head, (
+    assert head.startswith(
+        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a subagent."
+    )
+    assert "copy of your agent's conversation" in head, (
         "the one thing a fork cannot work out for itself: what it is handed "
         "looks exactly like a conversation of its own"
     )

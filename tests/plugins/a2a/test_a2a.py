@@ -2133,6 +2133,10 @@ async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     assert not for_the_model(by_name[FORGET].meta), (
         "and a removal's is the agent server's"
     )
+    # **Schema over prompt**: the prompt says what the conversation is; the one
+    # thing no conversation can state about itself is that ending a turn sends
+    # nothing, so the tool that *is* the reply says so.
+    assert "A reply is this call" in by_name[PEER_SEND_MESSAGE].description
 
 
 @pytest.mark.asyncio
@@ -2175,6 +2179,9 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     send = by_name[LOCAL.tool(SEND_MESSAGE)]
     assert send.description.startswith(
         "Send a message to another member of your subagent network —"
+    )
+    assert "A reply is this call" in send.description, (
+        "the fact a subagent cannot learn from its prompt: a turn's text is not sent"
     )
     # The addressee is named for both readers, because both of them send: the
     # maker's subagents, and — for a subagent — the agent that made it.

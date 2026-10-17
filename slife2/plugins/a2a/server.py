@@ -1772,7 +1772,8 @@ def _ensure_windows_selector_loop() -> None:
 #: and the holes below are where each of them says which thing it is.
 _TOOL_TEXTS: dict[str, str] = {
     SEND_MESSAGE: (
-        "Send a message to {them}.\n"
+        "Send a message to {them}. **A reply is this call**: ending a turn\n"
+        "sends nothing to the other side.\n"
         "\n"
         "`message_type` decides what it is. 'task_request' (the default) asks for\n"
         "work and returns an id straight away — the answer arrives later, on its\n"

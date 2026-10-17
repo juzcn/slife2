@@ -1203,8 +1203,8 @@ class SubagentSettings:
     removed tomorrow, so its settings go where its directory goes rather than
     into a file an operator has to keep in step with it.  Its *prompt* is not
     `agent.system_prompt` either — it is the shipped `subagent.j2`, because what a
-    subagent has to be told is what it is, and a prompt written for the agent
-    somebody is running cannot say that.
+    subagent has to be told is what it is and whose it is, and a prompt written
+    for the agent somebody is running cannot say that.
 
     What is left is what the *machine* has an opinion about.
     """
