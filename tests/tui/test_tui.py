@@ -2755,9 +2755,7 @@ async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
         if prompt == "alpha":
             started.set()
             await cut_in.wait()
-            on_event(
-                MessageCutIn(text="beta", channel="subagent:gamma", receipt="2")
-            )
+            on_event(MessageCutIn(text="beta", channel="subagent:gamma", receipt="2"))
             on_event(TextDelta("answer to both"))
             return TurnReply("answer to both")
         cut_in.set()
