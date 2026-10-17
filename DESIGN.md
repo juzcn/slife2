@@ -700,8 +700,10 @@ runs. A caller that can answer declares `watched=true`.
 ### 5.1 Turn store
 
 **Decision.** One SQLite file per conversation (client id): the agent's own at
-`agents/<agent>/turns.db`, a subagent's at
-`agents/<agent>/subagents/<name>/turns.db`.
+`agents/<agent>/turns.db`, a non-fork subagent's at
+`agents/<agent>/subagents/<name>/turns.db`. A fork has no file of its own: it is
+a copy held in memory, and its context reads the maker's turn log. It writes
+nothing there.
 
 The file holds:
 
@@ -1106,9 +1108,11 @@ A subagent:
 - has its own system prompt (`subagent.j2`), because the operator’s prompt for
   their own agent cannot say what a subagent is, whose it is, or where its work
   comes from;
-- has its own conversation and its own `subagent.yaml`;
-- owns its cabinet and media directory if it is not a fork; a fork shares the
-  maker’s, because it is a temporary copy of the maker’s conversation;
+- has its own `subagent.yaml`; a non-fork subagent also has its own stored
+  conversation, cabinet, and media directory; a fork stores no turns, reads the
+  maker’s turn log for context without writing it, and shares the maker’s
+  cabinet and media, because it is a temporary copy of the maker’s
+  conversation;
 - has no independent external identity: no WeChat login and no peer-agent
   membership; it is reached only on the local subagent network;
 - shares the maker’s schedule ledger, because scheduling stays with the agent;

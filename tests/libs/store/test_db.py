@@ -17,10 +17,11 @@ import pytest
 
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import InvalidTimeBound
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     TurnStore,
+    database_path,
     message_text,
     safe_agent_name,
     store_for,
@@ -37,6 +38,28 @@ pytestmark = pytest.mark.unit
 #: all save through the same stub.  It is deterministic, which is what lets a
 #: semantic assertion mean something; see `tests.fakes.StubEmbedder`.
 EMBEDDER = StubEmbedder()
+
+
+def test_a_fork_has_no_turn_database_of_its_own(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork is a copy held in memory; its context is the maker's log.
+
+    A non-fork subagent has its own `turns.db` under its directory. A fork
+    stores nothing, so its path is the maker's database — what `turn_list` and
+    `turn_read` read. A fork never rebuilds.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    record = subagent_file("jack", "researcher")
+
+    record.write_text("fork: false\n", encoding="utf-8")
+    assert (
+        database_path("jack", "researcher")
+        == agent_dir("jack", "researcher") / "turns.db"
+    )
+
+    record.write_text("fork: true\n", encoding="utf-8")
+    assert database_path("jack", "researcher") == agent_dir("jack") / "turns.db"
 
 
 def test_the_table_is_v1s_schema(tmp_path) -> None:

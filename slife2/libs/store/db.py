@@ -88,7 +88,7 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.paths import TURNS_DB, agent_dir
+from slife2.libs.host.paths import TURNS_DB, work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -183,17 +183,21 @@ def database_path(agent: str, subagent: str = "") -> Path:
     beats isolation as a `WHERE` clause somebody can forget to write — the same
     argument DESIGN.md §5 makes for agents, applied one level down.
 
-    **A subagent's store is its own directory**, `agents/<agent>/subagents/<subagent>/`,
-    because a subagent is an agent that belongs to whoever made it rather than a
-    means to an end inside one of that agent's turns. Its conversation and its
-    `subagent.yaml` record are its own, and a non-fork subagent's cabinet and
-    media live beside them; a fork shares the maker's cabinet and media. A
-    subagent has no external identity: the schedule ledger and WeChat login stay
-    with the maker. Who lays the directory out is
+    **A non-fork subagent's store is its own directory**,
+    `agents/<agent>/subagents/<subagent>/`, because a subagent is an agent that
+    belongs to whoever made it rather than a means to an end inside one of that
+    agent's turns. Its conversation, its `subagent.yaml` record, its cabinet and
+    its media are its own.
+
+    **A fork has no store of its own.** It is a temporary copy of its maker's
+    conversation, held in memory and never written down, so its context reads
+    the maker's turn log and its cabinet and media are the maker's. Reads go
+    there; writes never do. `work_dir` is what resolves the two cases; who lays
+    the directory out is
     `slife2.libs.host.paths.agent_dir`, and this function is one line because of
     it: the layout belongs in one place, and the file name in another.
     """
-    return agent_dir(agent, subagent) / TURNS_DB
+    return work_dir(agent, subagent) / TURNS_DB
 
 
 @dataclass(frozen=True)
@@ -599,8 +603,9 @@ class TurnStore:
         for a full one, which in a daemon serving turns can be minutes away.
         Nothing sees that until something wants the file: on Windows an open
         handle is a file nobody else can delete, and `subagent_remove` met
-        exactly that — `[WinError 32] … tester/turns.db`, with the subagent's own
-        last turn long since answered and its directory undeletable.
+        exactly that — `[WinError 32] … tester/turns.db`, with a non-fork
+        subagent's own last turn long since answered and its directory
+        undeletable.
         (`slife2.plugins.agent.server.subagent_remove`.)
 
         So the lifetime is stated where the connection is made.  Every call site

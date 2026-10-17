@@ -534,9 +534,11 @@ A subagent:
 
 - has the maker's tool set, with one exception: `subagent_set` and
   `subagent_remove` refuse a subagent caller (see §4.5.3);
-- has its own role-specific system prompt (`subagent.j2`), its own conversation,
-  and its own `subagent.yaml`; a non-fork subagent also owns its cabinet and
-  media directory, while a fork shares the maker's;
+- has its own role-specific system prompt (`subagent.j2`) and its own
+  `subagent.yaml`; a non-fork subagent also has its own stored conversation,
+  cabinet, and media directory, while a fork stores no turns, reads the maker's
+  turn log for context without writing it, and shares the maker's cabinet and
+  media;
 - has no process, no window, and no claim on an agent name;
 - has no independent external identity: no WeChat login and no peer-agent
   membership; it is reached only on the local subagent network;
@@ -550,12 +552,13 @@ operations as a peer agent, under `subagent_*` names.
 
 #### 4.5.1 Directory and record
 
-Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. That
-directory contains the subagent's conversation (`turns.db`) and its record
-(`subagent.yaml`). A non-fork subagent also has its own `cabinet/` and `media/`
-there; a fork uses the maker's cabinet and media. A subagent has no external
-identity of its own: WeChat and the peer-agent network belong to the agent, and
-scheduling stays with the agent too.
+Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. A non-fork
+subagent has its conversation (`turns.db`), its record (`subagent.yaml`), and its
+own `cabinet/` and `media/` there. A fork has only the record: it is a copy of
+its maker's conversation held in memory, so it stores no turns, reads the
+maker's turn log for context without writing it, and shares the maker's cabinet
+and media. A subagent has no external identity of its own: WeChat and the
+peer-agent network belong to the agent, and scheduling stays with the agent too.
 
 The container level is deliberate. `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker. A subagent named `cabinet` would
@@ -1164,7 +1167,9 @@ The loop reads these parameters off the call and strips them before dispatch.
 
 `libs/store/db.py` implements one SQLite file per conversation (client id):
 `agents/<agent>/turns.db` for the agent's own conversation, and
-`agents/<agent>/subagents/<name>/turns.db` for a subagent's. The store holds:
+`agents/<agent>/subagents/<name>/turns.db` for a non-fork subagent's. A fork has
+no file of its own; it reads the maker's turn log and never writes it. The
+store holds:
 
 - the turn log;
 - the live-context list;

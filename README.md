@@ -855,15 +855,15 @@ operations as a peer agent, under `subagent_*` names: `subagent_send_message`,
 | `role` | A word included in the subagent's prompt. |
 | `fork` | Copy the maker's current conversation as the subagent's starting point. A fork's turns are not stored. |
 
-A subagent lives in `agents/<maker>/subagents/<name>/`, with its own `turns.db`
-and `subagent.yaml`. The record holds its model, role, fork status, and creation
-time. A non-fork subagent also owns its cabinet and media directory, under its
-own directory. A fork shares the maker's cabinet and media, because it is a
-temporary copy of the maker's conversation. WeChat and the peer-agent network
-belong to the agent, not the subagent; scheduling also stays with the agent. The
-tree stops at one level: a subagent cannot create or
-remove a subagent, because the local network holds a place for the maker's own
-subagents and nothing holds a place for a level below them.
+A non-fork subagent lives in `agents/<maker>/subagents/<name>/` with its own
+`turns.db`, `subagent.yaml`, cabinet, and media directory. A fork has only the
+`subagent.yaml` record there: it stores no turns, keeps its conversation in
+memory as a copy of the maker's, and reads the maker's turn log for context. It
+writes nothing there, and it also shares the maker's cabinet and media. WeChat
+and the peer-agent network belong to the agent, not the subagent; scheduling
+also stays with the agent. The tree stops at one level: a subagent cannot create
+or remove a subagent, because the local network holds a place for the maker's
+own subagents and nothing holds a place for a level below them.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be
@@ -898,8 +898,8 @@ A data directory (a **home**) contains:
       media/                   generated images, video, and audio
       wechat.yaml              this agent's WeChat login
       subagents/
-        <name>/                a subagent's conversation and record; a non-fork
-                               subagent also has cabinet/ and media/
+        <name>/                a non-fork subagent's turns.db, subagent.yaml,
+                               cabinet/ and media/; a fork has only the record
 ```
 
 The tool catalogue sits beside the agent directories because it belongs to the

@@ -118,10 +118,11 @@ agent-task:
 
 subagent:
   # Subagents per agent. The tree stops at one level: a subagent cannot create
-  # or remove a subagent. A non-fork subagent owns its cabinet and media under
-  # its own directory; a fork shares the maker's. A subagent has no external
-  # identity: no WeChat login and no peer_agent presence. Schedule stays with
-  # the agent.
+  # or remove a subagent. A non-fork subagent owns its turns.db, cabinet and
+  # media under its own directory; a fork stores no turns and only reads the
+  # maker's turn log, and shares the maker's cabinet and media. A subagent has
+  # no external identity: no WeChat login and no peer_agent presence. Schedule
+  # stays with the agent.
   max_running: 32
   # The local network. The unit is always the agent's name, so writing `unit:`
   # is refused; `org` may be set to group meshes. This is also the broker
