@@ -75,6 +75,9 @@ slife2 围绕四条规则构建。
 
 slife2 在 Windows、macOS 和 Linux 上测试。
 
+安装脚本还会安装当前 `slife2.yaml` 所需的所有外部程序，升级已有版本，并验证
+结果。手动安装使用 Python 3.13 和 uv。
+
 ### SQLite 扩展支持
 
 向量索引是一个 SQLite 扩展（`sqlite-vec`），因此 Python 解释器必须能够加载
@@ -96,19 +99,80 @@ uv sync
 this Python's sqlite3 cannot load extensions
 ```
 
-### 可选外部程序
+### 外部程序（配置中出现的程序均为必需）
 
-| 程序 | 用途 |
-|---|---|
-| `mosquitto` | peer agent 或 subagent 网络的本地 MQTT broker。当配置的 broker 在本机且不存在时，slife2 会启动一个。 |
-| `cloudflared` | `cloudflare` 文件隧道 provider（随附配置中选择的 provider）。 |
-| `ssh` | `localhost.run` 文件隧道 provider。Windows 10 及更新版本自带 OpenSSH 客户端。 |
-| `npx` | 使用 `command: npx` 配置的 `mcp:` 条目。 |
-| `uvx` | `rest-api:` 条目，会展开为 `uvx mcp-openapi-proxy`。 |
+当前配置中点名的每个程序都是必需的。安装器以普通用户身份提供这些程序；当某个
+程序不可用时，安装会停止，并指出要求它的配置条目。
+
+| 程序 | 由什么配置点名 | 安装器如何提供 |
+|---|---|---|
+| `mosquitto` | `peer_agent:` / `subagent:` broker | `127.0.0.1:1883` 上已有 broker 时直接使用。Debian/Ubuntu 的包解到 `~/.local`；macOS 用 Homebrew；Windows 使用已有 broker，或打印手动安装命令。 |
+| `cloudflared` | `file-tunnel.providers.cloudflare` | 官方二进制放到 `~/.local/bin`（Windows 为 `%LOCALAPPDATA%\slife2\tools`）；macOS 用 Homebrew |
+| `ssh` | `file-tunnel.providers.localhost.run` | 使用系统自带的 OpenSSH 客户端（Windows 10+、macOS 和 Linux 均自带） |
+| `npx` | `command: npx` 的 `mcp:` 条目 | 官方 Node.js LTS 压缩包解到 `~/.local/lib/nodejs`（Windows 为 `%LOCALAPPDATA%\slife2\tools\node`）；它要拉的包在首次使用时下载 |
+| `uvx` | `command: uvx` 的 `mcp:` 条目和 `rest-api:` 条目 | uv |
+| `yt-dlp` | `cli:yt-dlp` | `uv tool install yt-dlp` |
+| `browser-harness` | `cli:browser-harness` | `uv tool install --python 3.12 browser-harness` |
+
+skill 也可以在头部通过 `requires.bins` 声明所需的程序，这些程序同样属于必需项。
+例如随附的 `baidu-search` 声明了 `python3`。安装器只负责让 `npx` 和 `uvx`
+启动器可用；它们首次运行时才下载各自的第三方包。
 
 ## 安装
 
-从代码检出安装：
+### 一键安装
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.sh | bash
+```
+
+Windows 10/11（PowerShell）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1 | iex"
+```
+
+这条命令会下载最新的 `main`，把 slife2 安装到独立环境，并安装当前配置所需的
+全部外部程序。数据和配置保存在 `~/.slife2`，二进制和库位于 `~/.local`（Windows
+为 `%LOCALAPPDATA%\slife2`）。再次运行同一条命令即可升级。
+
+从源码开发时，在该目录运行：
+
+```bash
+./scripts/install.sh
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+`scripts\install.cmd` 也可以启动安装。源码目录使用自己的 `slife2.yaml`、
+`.venv` 和 `.install-state.tsv`。
+
+| 选项 | 含义 |
+|---|---|
+| `--dry-run` | 报告计划执行的操作。 |
+| `--no-upgrade` | 仅安装缺失的依赖。 |
+| `--yes` | 跳过确认提示。 |
+| `--help` | 显示用法、选项和退出码。 |
+
+卸载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.sh | bash -s -- uninstall
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1))) uninstall"
+```
+
+`uninstall` 会移除安装器添加的组件，已有组件保持原样。
+
+### 手动安装
+
+从源码手动安装：
 
 ```bash
 git clone https://github.com/juzcn/slife2.git
@@ -125,10 +189,19 @@ uv run credstore set DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY=...
 ```
 
-不需要配置文件。没有 `slife2.yaml` 时，slife2 使用内置默认值，其中包括一个
-OpenAI 兼容 provider。
+`slife2.yaml` 是可选的：配置文件尚未创建时，slife2 使用内置默认值，其中包括
+一个 OpenAI 兼容 provider。
 
 ## 快速开始
+
+使用一键安装后，依赖已经同步，剩下的是 key 和窗口：
+
+```bash
+uv run credstore set DEEPSEEK_API_KEY
+uv run slife2
+```
+
+手动安装则从同步开始：
 
 ```bash
 uv sync
@@ -273,6 +346,9 @@ subagent 网络由同一个模块在 8041 端口提供，通过
 
 缺少配置文件不是错误：会使用内置默认值。文件存在但无法加载时，启动会以一行
 错误停止，并点名文件和错误原因。
+
+安装器可能会在已有配置旁边写入 `slife2-default.yaml` 作为参考。slife2 只读取
+`slife2.yaml`；参考文件供人比较和合并。
 
 配置文件可以安全地纳入版本控制。它不应包含秘密；每个凭证都是运行时解析的
 `${VAR}` 或 `keyring:` 引用。
@@ -924,12 +1000,13 @@ uv run pyright
 
 CI 在 Ubuntu、macOS 和 Windows 上使用 Python 3.13 运行：
 
-1. 构建 wheel；
-2. 断言解释器可以加载 SQLite 扩展；
-3. `ruff check` 与 `ruff format --check`；
-4. `pyright`；
-5. 默认测试车道；
-6. 端到端车道。
+1. 在每个操作系统上执行只读的 `install --dry-run`；
+2. 构建 wheel；
+3. 断言解释器可以加载 SQLite 扩展；
+4. `ruff check` 与 `ruff format --check`；
+5. `pyright`；
+6. 默认测试车道；
+7. 端到端车道。
 
 ## 已知限制
 

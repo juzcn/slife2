@@ -19,6 +19,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Read-only on purpose: no uv, no venv, no package installation.  It
+      # exercises platform detection and argument parsing on every OS and proves
+      # the installer can answer "what would you do" without changing anything.
+      - name: Installer dry run (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/install.sh --dry-run
+
+      - name: Installer dry run (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -DryRun
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:

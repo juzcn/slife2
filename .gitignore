@@ -215,3 +215,12 @@ agents/
 # citations keep working for whoever has the file, and the history keeps the
 # copies already published, so nothing is lost by untracking it.
 designer_notes.md
+
+# Installer artifacts in a development checkout.
+#
+# The ownership record is per home, and a checkout's home is the checkout, so a
+# development install keeps its record here rather than in ~/.slife2.  The
+# reference copy is written only when a live slife2.yaml already exists; in a
+# checkout the repository's own file is live, so this is normally absent.
+.install-state.tsv
+slife2-default.yaml

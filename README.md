@@ -80,6 +80,10 @@ slife2 is built around four rules.
 
 slife2 is tested on Windows, macOS, and Linux.
 
+The installation script below installs every external program required by the
+current `slife2.yaml`, upgrades existing ones, and verifies the result. A manual
+installation uses Python 3.13 and uv alone.
+
 ### SQLite extension support
 
 The vector index is a SQLite extension (`sqlite-vec`). The Python interpreter
@@ -102,19 +106,85 @@ the first command fails with:
 this Python's sqlite3 cannot load extensions
 ```
 
-### Optional external programs
+### External programs (required when configured)
 
-| Program | Needed for |
-|---|---|
-| `mosquitto` | A local MQTT broker for the peer-agent or subagent network. slife2 starts one when the configured broker is local and absent. |
-| `cloudflared` | The `cloudflare` file-tunnel provider (the provider selected in the shipped configuration). |
-| `ssh` | The `localhost.run` file-tunnel provider. Windows 10 and newer ship an OpenSSH client. |
-| `npx` | `mcp:` entries configured with `command: npx`. |
-| `uvx` | `rest-api:` entries, which are expanded into `uvx mcp-openapi-proxy`. |
+Every program named by the current configuration is required. The installer
+provides each one at the user level and stops with the configuration entry named
+when a program is unavailable.
+
+| Program | Named by | Provided by the installer |
+|---|---|---|
+| `mosquitto` | `peer_agent:` / `subagent:` broker | A running broker on `127.0.0.1:1883` is used directly. Debian/Ubuntu packages unpack under `~/.local`; macOS uses Homebrew; Windows uses a running broker or prints the manual install command. |
+| `cloudflared` | `file-tunnel.providers.cloudflare` | The official binary in `~/.local/bin` (or `%LOCALAPPDATA%\slife2\tools`); Homebrew on macOS |
+| `ssh` | `file-tunnel.providers.localhost.run` | The system OpenSSH client, included with Windows 10+, macOS, and Linux |
+| `npx` | `mcp:` entries with `command: npx` | The official Node.js LTS archive under `~/.local/lib/nodejs` (or `%LOCALAPPDATA%\slife2\tools\node`); its packages download on first use |
+| `uvx` | `mcp:` entries with `command: uvx`, and `rest-api:` entries | uv |
+| `yt-dlp` | `cli:yt-dlp` | `uv tool install yt-dlp` |
+| `browser-harness` | `cli:browser-harness` | `uv tool install --python 3.12 browser-harness` |
+
+Skills may also declare required programs in their headers (`requires.bins`);
+those programs are required as well. The included `baidu-search` skill, for
+example, declares `python3`. The installer ensures the `npx` and `uvx` launchers
+exist; the packages those launchers fetch are downloaded on first use.
 
 ## Installation
 
-Install from a checkout:
+### One-click installation
+
+macOS or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.sh | bash
+```
+
+Windows 10/11 (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1 | iex"
+```
+
+The command downloads the latest `main`, installs slife2 into an isolated
+environment, and installs the external programs required by the current
+configuration. Data and configuration live in `~/.slife2`; binaries and
+libraries live in `~/.local` (`%LOCALAPPDATA%\slife2` on Windows). Run the same
+command again to upgrade.
+
+From a source checkout, run the installer in that directory:
+
+```bash
+./scripts/install.sh
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+`scripts\install.cmd` also starts the installer. A source directory uses its own
+`slife2.yaml`, `.venv`, and `.install-state.tsv`.
+
+| Option | Meaning |
+|---|---|
+| `--dry-run` | Report the planned actions. |
+| `--no-upgrade` | Install missing dependencies only. |
+| `--yes` | Skip the confirmation prompt. |
+| `--help` | Show usage, options, and exit codes. |
+
+To uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.sh | bash -s -- uninstall
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1))) uninstall"
+```
+
+`uninstall` removes the components the installer added; components that were
+present before the installation stay in place.
+
+### Manual installation
+
+To install from source manually:
 
 ```bash
 git clone https://github.com/juzcn/slife2.git
@@ -131,10 +201,20 @@ uv run credstore set DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY=...
 ```
 
-No configuration file is required. Without `slife2.yaml`, slife2 uses built-in
-defaults, including a single OpenAI-compatible provider.
+`slife2.yaml` is optional: before the file exists, slife2 uses built-in defaults,
+including a single OpenAI-compatible provider.
 
 ## Quick start
+
+After the one-click installer, the dependencies are already synced; the
+remaining steps are the key and the window:
+
+```bash
+uv run credstore set DEEPSEEK_API_KEY
+uv run slife2
+```
+
+A manual installation starts one step earlier:
 
 ```bash
 uv sync
@@ -295,6 +375,10 @@ directory is the checkout when running from a checkout, otherwise
 A missing configuration file is not an error: built-in defaults are used. A file
 that exists but cannot be loaded stops the start with a one-line error naming
 the file and the mistake.
+
+The installer may write `slife2-default.yaml` beside an existing configuration
+as a reference. slife2 reads only `slife2.yaml`; the reference is for a person
+to compare and merge by hand.
 
 The file is safe to check in. It should contain no secrets; every credential is
 a `${VAR}` or `keyring:` reference resolved at runtime.
@@ -1025,12 +1109,13 @@ window and mesh clients, and factories used by more than one test module.
 
 CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
 
-1. a wheel build;
-2. an assertion that the interpreter can load SQLite extensions;
-3. `ruff check` and `ruff format --check`;
-4. `pyright`;
-5. the default test lane;
-6. the end-to-end lane.
+1. a read-only `install --dry-run` on every operating system;
+2. a wheel build;
+3. an assertion that the interpreter can load SQLite extensions;
+4. `ruff check` and `ruff format --check`;
+5. `pyright`;
+6. the default test lane;
+7. the end-to-end lane.
 
 ## Known limitations
 

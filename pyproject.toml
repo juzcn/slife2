@@ -168,6 +168,7 @@ packages = ["slife2"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/slife2",
+    "/scripts",
     "/tests",
     "/README.md",
     "/sdd.md",

@@ -1,0 +1,34 @@
+# The installer's one table of external programs.
+#
+# Everything here is installed for the current user — no sudo, no administrator,
+# no system package manager.  The `installer` column says which user-level route
+# provides it:
+#
+#   uv          the official uv installer (it also provides uvx)
+#   uv-python   uv-managed Python 3.13 (macOS uses Homebrew's python@3.13)
+#   provided    another installed tool supplies this executable
+#   mqtt        a broker already listening is enough; otherwise mosquitto is
+#               unpacked into ~/.local (Debian/Ubuntu) or installed with
+#               Homebrew (macOS), or reported with instructions
+#   download    an official release binary in ~/.local/bin
+#   node        the official Node.js LTS archive in ~/.local/lib/nodejs
+#   system      must already be present (an OpenSSH client)
+#   uv-tool     `uv tool install <tool>`
+#
+# Besides the programs, the installer always ensures uv and Python 3.13, and
+# installs slife2 itself as a uv tool (standalone) or into the project venv
+# (checkout).  `install_helper.py require` supplies the names the effective
+# configuration actually uses; a name with no row here and no executable on
+# PATH is a hard failure, never a silent skip.
+# executable	tool	installer	verify
+uv	uv	uv	--version
+uvx	uv	provided	--version
+python	python	uv-python	--version
+python3	python	provided	--version
+mosquitto	mosquitto	mqtt	-h
+cloudflared	cloudflared	download	--version
+npx	node	node	--version
+node	node	node	--version
+ssh	ssh	system	-V
+yt-dlp	yt-dlp	uv-tool	--version
+browser-harness	browser-harness	uv-tool	--version
