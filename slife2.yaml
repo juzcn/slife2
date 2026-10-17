@@ -283,7 +283,7 @@ default: deepseek/deepseek-flash
 # How the agent server above runs one turn.  **The one section in this file with
 # two readers**: `slife2-agent` reads it, and so does `slife2-agent-task`, whose
 # tasks are the agent working with none of the asking conversation's history —
-# a prompt or a step count that meant something different there would be two
+# a prompt or a iteration count that meant something different there would be two
 # agents wearing one name.
 agent:
   # Model calls allowed in one turn before it is cut off.  A model that keeps
@@ -292,9 +292,9 @@ agent:
   #
   # 0 is no cap at all, and so is leaving the key out — the turn ends when the
   # model stops asking for tools, which is the arrangement this file ships
-  # with.  Replace the 0 with a count to bound a turn: `max_steps: 16` is one
-  # model call per step, sixteen steps and no more.
-  max_steps: 0
+  # with.  Replace the 0 with a count to bound a turn: `max_iterations: 16` is
+  # sixteen model calls and no more.
+  max_iterations: 0
   # The system prompt is a Jinja2 template, rendered per turn with the agent
   # name — `run_turn(..., agent="jack")` reaches it — because the server is
   # shared and stateless, so two instances on one server are two names asking
@@ -331,7 +331,7 @@ agent-task:
   # still missing.
   #
   # It is also the only key a task owns, and that is the design: a task's prompt
-  # and its step count come out of `agent:` above, because a task is the agent
+  # and its iteration count come out of `agent:` above, because a task is the agent
   # working.
   max_running: 4
 

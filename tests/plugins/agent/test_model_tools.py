@@ -410,7 +410,7 @@ async def send(
 
 
 def calling(name: str, arguments: dict, *, delay: float = 0.0) -> ScriptedTurn:
-    """A scripted turn where the model calls one tool — here, a step boundary."""
+    """A scripted turn where the model calls one tool — here, a iteration boundary."""
     return ScriptedTurn(
         result=StreamChatResult(
             text="checking",
@@ -544,7 +544,7 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
         first = asyncio.create_task(send(server, "one"))
         await wait_for_streams(backend)
         second = asyncio.create_task(send(server, "two"))
-        # The message must be waiting before the step boundary, which is where
+        # The message must be waiting before the iteration boundary, which is where
         # the running turn folds it in (a `delay` of half a second above).
         await asyncio.sleep(0.05)
         # ...and the switch must land while the absorbing turn is still in flight.

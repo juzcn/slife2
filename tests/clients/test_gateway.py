@@ -160,7 +160,7 @@ async def test_a_listing_that_has_aged_is_read_again(
 async def test_a_listing_that_is_fresh_is_not_read_again() -> None:
     """And it is the age that decides, not the ask.
 
-    Every step of every turn asks for the tool list, so re-reading per ask would
+    Every iteration of every turn asks for the tool list, so re-reading per ask would
     put one `tools/list` per source inside each of them for an answer that did
     not change — which is the cost the bound exists to refuse.
     """

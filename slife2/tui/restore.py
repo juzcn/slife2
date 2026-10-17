@@ -11,10 +11,10 @@ turns that context was built from and drives the transcript with them.
 `add_tool_end` are what a turn calls as it happens, and calling them in the same
 order makes a restored conversation and a live one the same thing rather than
 two renderings that happen to agree today: the signature that is painted only
-over text, and the fold that a step ending in a tool call gets, both come along
-without being restated here.  v1 drew its rebuild from a rendering plan for the
-same reason; the plan is gone and what replaced it is the transcript's own
-vocabulary.
+over text, and the fold that an iteration ending in a tool call gets, both come
+along without being restated here.  v1 drew its rebuild from a rendering plan
+for the same reason; the plan is gone and what replaced it is the transcript's
+own vocabulary.
 
 **A tool's failure is the one thing a rebuild cannot show.**  It is a fact the
 loop knows only while it is running (`ToolCallFinished.ok`); what a turn stores
@@ -25,8 +25,9 @@ rather than guessed at from the text.
 
 Reasoning *is* stored, which is the other half of that point.  It rides the
 message (`Message.thinking`) because the turn log stores messages, and each
-provider adapter decides at its own edge what to do with it — so a restored step
-has the reasoning block a live one had, expanded or folded by the same rule.
+provider adapter decides at its own edge what to do with it — so a restored
+iteration has the reasoning block a live one had, expanded or folded by the same
+rule.
 """
 
 from __future__ import annotations
@@ -120,7 +121,8 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # looking like the live transcript is the rule that settles it.
     #
     # Passed through as stored, an empty or damaged value included: `or None`
-    # here turned one into "now" at the last step, which is the stamp `_timestamp`
+    # here turned one into "now" at the last iteration, which is the stamp
+    # `_timestamp`
     # refuses to invent (DESIGN.md §5.1).  A row that says nothing about when it
     # ran draws no moment at all.
     asked = turn.get("created_at") or ""
@@ -175,15 +177,18 @@ def _draw_answer(
     answer = _text(message.get("content"))
     thinking = _text(message.get("thinking"))
 
-    # Opened only when there is something to open it *for*.  A step that says
+    # Opened only when there is something to open it *for*.  An iteration that
+    # says
     # nothing and thought nothing is a message the live transcript could not have
     # shown either: nothing streamed into it, so no block was ever opened — and
     # opening one here would leave a row holding a lone `…`.
     #
     # The order is the live turn's, and that is what carries the fold: a tool
     # call collapses the reasoning of the block it closes, so
-    # `add_tool_start` below folds this step's thinking by itself, and the last
-    # step's stays open because no call follows it.  Nothing restates that rule.
+    # `add_tool_start` below folds this iteration's thinking by itself, and the
+    # last
+    # iteration's stays open because no call follows it.  Nothing restates that
+    # rule.
     if thinking or answer:
         chat.begin_assistant()
         if thinking:
@@ -205,10 +210,10 @@ def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
     through unshaped would make a restored panel the one place a tool's entire
     output is rendered — and make it unlike the same call seen live.
     """
-    # No step: the turn log keeps no such column, and a live panel's counter
-    # comes from the event.  Zero is the widget's "nobody said", which leaves
-    # the counter off rather than claiming `(0)` — the same rule the duration
-    # below follows.
+    # No iteration: the turn log keeps no such column, and a live panel's
+    # counter comes from the event.  Zero is the widget's "nobody said", which
+    # leaves the counter off rather than claiming `(0)` — the same rule the
+    # duration below follows.
     chat.add_tool_start(call.id, call.name, call.arguments)
     chat.add_tool_end(
         call.id,

@@ -390,16 +390,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "{n} queued",
         "zh": "{n} 个排队中",
     },
-    # How many steps into its cap the turn is.  English inflects the noun, so it
-    # is the two keys above in miniature; the caller knows the count.
-    "status_step": {
-        "en": "{n} step",
-        "zh": "{n} 步",
-    },
-    "status_steps": {
-        "en": "{n} steps",
-        "zh": "{n} 步",
-    },
     # The one dim row's key hint.  **The key caps stay English** — `Esc`, `Ctrl+S`
     # — because they are what is printed on the keyboard and a translated one
     # breaks the key-to-action scan; the words after them are the words.

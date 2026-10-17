@@ -803,8 +803,8 @@ as an argument:
   without the conversation noticing, which is what makes streaming over MCP safe
   to build on.
 
-**The step cap is enforced where the count is known**, and a cap nobody wrote is
-not a cap: `agent.max_steps` is read per turn from the config as it is now
+**The iteration cap is enforced where the count is known**, and a cap nobody wrote is
+not a cap: `agent.max_iterations` is read per turn from the config as it is now
 (§4.5). A turn that reaches it ends with a stated reason rather than a silent
 stop.
 
@@ -968,7 +968,7 @@ and a line about it would be a line about a turn that had not happened yet.
 
 The agent server owns the loops (`Loop`), keyed by client id and created on first
 use. It reads the config **per turn** for everything a conversation can see — the
-system prompt, the model, the step cap — so an edit to `slife2.yaml` reaches the
+system prompt, the model, the iteration cap — so an edit to `slife2.yaml` reaches the
 next turn rather than the next restart.
 
 Before each turn, one question is answered: **what is this turn going to run

@@ -683,7 +683,7 @@ def build_server(
         loop = AgentLoop(
             await model_for(task),
             await registry(task),
-            max_steps=current.agent.max_steps,
+            max_iterations=current.agent.max_iterations,
             # Asked again before every model call, as the agent server asks it:
             # a tool loaded mid-task is in the next call's list rather than
             # nowhere.
@@ -1003,7 +1003,7 @@ def build_server(
         # `(home, agent, name)` key — so the number it is compared against has to
         # be this home's too, or a second home is bounded by a limit an operator
         # wrote in somebody else's file.  `live()` is the same read the model is
-        # taken with (`model_for`) and the step cap with (`run_loop`), and
+        # taken with (`model_for`) and the iteration cap with (`run_loop`), and
         # `AgentTaskSettings.max_running` is written for it: the section this key
         # lives in is read by the plugin that enforces it, because the value is a
         # property of the home the caller is in and of the file as it is now —

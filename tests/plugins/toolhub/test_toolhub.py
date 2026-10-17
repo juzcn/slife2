@@ -2646,7 +2646,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
         loaded = await call(client, "func_tool_load", {"names": ["spawned__greet"]})
         assert loaded["ok"] is True
 
-        # One step later, without a new turn: the list is rebuilt before every
+        # One iteration later, without a new turn: the list is rebuilt before every
         # model call, so loading takes effect inside the same turn.
         again = await client.call_tool("list_tools", {})
         assert "spawned__greet" in names(again.data)

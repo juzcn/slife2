@@ -664,10 +664,10 @@ PLUGINS: tuple[Plugin, ...] = (
     # reaches three peers rather than being reached by them: the hub for a tool
     # list, a model server for the loop, and either the terminal or the agent
     # server to hand the answer over.  It reads one section of its own,
-    # `agent-task:`, and only for its cap; a task's prompt and step count are the
-    # agent's.  It identifies itself by `agent_task_list`, the one tool it serves
-    # that takes no argument and needs nothing running, which is the state it
-    # starts in.
+    # `agent-task:`, and only for its cap; a task's prompt and iteration count
+    # are the agent's.  It identifies itself by `agent_task_list`, the one tool
+    # it serves that takes no argument and needs nothing running, which is the
+    # state it starts in.
     Plugin(
         key="agent-task",
         module="slife2.plugins.agent_task.server",
@@ -1143,7 +1143,7 @@ class AgentSettings:
     #: one, and inventing a number for it is how a turn comes to be cut off at a
     #: bound nobody chose.  `AgentLoop` reads the same rule off the number it is
     #: handed, so "is there a cap" is decided in exactly one place.
-    max_steps: int = 0
+    max_iterations: int = 0
     #: A Jinja2 template for the system prompt — an absolute path by the time
     #: this is built, or "" for the one the distribution ships.  A template
     #: rather than a string because the prompt has a hole in it where the agent
@@ -1156,11 +1156,12 @@ class AgentTaskSettings:
     """The `agent-task:` section, and the one number an agent task costs.
 
     **`agent:`, read by two plugins.**  Everything else a task's turn is made of
-    — the system prompt and `max_steps` — is the agent's own and comes out of
-    that section, because a task *is* the agent working: a prompt or a step count
-    that meant something different for a task would be two agents wearing one
-    name.  So the rule that the section a key lives in is the plugin that reads
-    it has exactly one exception, and this is where it is stated.
+    — the system prompt and `max_iterations` — is the agent's own and comes out
+    of that section, because a task *is* the agent working: a prompt or an
+    iteration count that meant something different for a task would be two
+    agents wearing one name.  So the rule that the section a key lives in is the
+    plugin that reads it has exactly one exception, and this is where it is
+    stated.
 
     What is left is the number only this plugin has an opinion about.
     """
@@ -1191,8 +1192,8 @@ class SubagentSettings:
 
     Everything else about a subagent is an agent's and comes out of `agent:`, for
     `AgentTaskSettings`' reason one class up: a subagent is an agent that belongs
-    to another one, so a step count that meant something different for it would
-    be two agents wearing one name.
+    to another one, so an iteration count that meant something different for it
+    would be two agents wearing one name.
 
     **What is not here, and not in any config, is anything about *one*
     subagent.**  The model it runs on, the role it was made for and whether it
@@ -1912,8 +1913,8 @@ class Config:
     agent: AgentSettings = field(default_factory=AgentSettings)
     #: How many background tasks one agent may run at once, from `agent-task:`.
     #: Read by `slife2-agent-task`, which owns that section — and the *only*
-    #: thing it owns, since a task's prompt and step count are the agent's and
-    #: come out of `agent:` above (see `AgentTaskSettings`).
+    #: thing it owns, since a task's prompt and iteration count are the agent's
+    #: and come out of `agent:` above (see `AgentTaskSettings`).
     agent_task: AgentTaskSettings = field(default_factory=AgentTaskSettings)
     #: How many subagents one agent may have, from `subagent:`.  Read by
     #: `slife2-agent`, which owns the two tools that make and unmake one — there
@@ -2332,22 +2333,24 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         }
 
     agent_raw = _mapping(raw.get("agent"), "agent")
-    max_steps = _int_or(
-        agent_raw.get("max_steps"), base.agent.max_steps, "agent.max_steps"
+    max_iterations = _int_or(
+        agent_raw.get("max_iterations"),
+        base.agent.max_iterations,
+        "agent.max_iterations",
     )
-    if max_steps < 0:
+    if max_iterations < 0:
         # Refused rather than read, and refused for the reason `port: 0` is: a
         # negative count is not a number of anything.  Nothing this value could
         # be read as is the answer to a typo — and the one direction it would be
         # read in, "no cap", is the setting that never stops, so a config that
         # missed a keystroke would get the most expensive meaning of the three.
         raise ConfigError(
-            f"agent.max_steps: {max_steps} is not a step count; leave the key "
-            f"out or write 0 for no cap"
+            f"agent.max_iterations: {max_iterations} is not an iteration count; "
+            f"leave the key out or write 0 for no cap"
         )
     agent = AgentSettings(
         server=servers["agent"],
-        max_steps=max_steps,
+        max_iterations=max_iterations,
         system_prompt=_template_path(
             agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
         ),
@@ -3389,14 +3392,14 @@ def _int_or(value: Any, default: int, where: str) -> int:
     given", so `tool_load.threshold: 0` — the value the guard below exists to
     refuse — was silently replaced by the default, and so was `port: 0` (the
     kernel's "pick one for me", which is not something a server of ours should
-    be handed by accident).  `max_steps: 0` was the third example and is now
+    be handed by accident).  `max_iterations: 0` was the third example and is now
     the one this reader exists to *keep*: a written zero is the config's "no
     cap", and it means the same thing as leaving the key out
-    (`slife2.libs.host.config.AgentSettings.max_steps`).
+    (`slife2.libs.host.config.AgentSettings.max_iterations`).
 
     `where` names the field, because a value that is not a number is the
     caller's typo and has to be reported like every other one.  A bare `int()`
-    raises `ValueError`, which nothing above this catches: `max_steps: many`
+    raises `ValueError`, which nothing above this catches: `max_iterations: many`
     reached the user as a traceback out of the `slife2` console script rather
     than as the one line every other bad value produces.
     """

@@ -84,8 +84,8 @@ def harness_call(name: str) -> ToolCall:
 
     **One builder, because there are two writers of these pairs and an id is a
     detail they would otherwise each invent.**  `trim_tools` writes the trim's
-    pair at a turn boundary and the loop writes the cut-in's at a step boundary;
-    two id formats would be two conventions for one thing, and two
+    pair at a turn boundary and the loop writes the cut-in's at an iteration
+    boundary; two id formats would be two conventions for one thing, and two
     `time_ns`-suffixed ids built in two places are two chances to collide.
 
     The `_harness_` prefix with the tool's own mark stripped is v1's, and it is
@@ -115,7 +115,7 @@ class TurnResult:
 
     text: str
     usage: Usage
-    steps: int
+    iterations: int
     stop_reason: str
     #: The **last** model call's own usage: the conversation as that call saw
     #: it, which is the size the next request re-sends.  Not derivable from
@@ -123,14 +123,14 @@ class TurnResult:
     #: them was.  Last, and with no default, so a four-argument construction
     #: fails loudly rather than binding something else.
     #:
-    #: A turn cut off at the step limit is the one place this is not quite the
-    #: next request's size: the final batch of tool results was appended after
-    #: that call, so those tokens are not in it.
+    #: A turn cut off at the iteration limit is the one place this is not quite
+    #: the next request's size: the final batch of tool results was appended
+    #: after that call, so those tokens are not in it.
     last_usage: Usage
 
     @property
-    def hit_step_limit(self) -> bool:
-        return self.stop_reason == "max_steps"
+    def hit_iteration_limit(self) -> bool:
+        return self.stop_reason == "max_iterations"
 
 
 class AgentLoop:
@@ -141,7 +141,7 @@ class AgentLoop:
         backend: LLMBackend,
         tools: ToolRegistry,
         *,
-        max_steps: int = 0,
+        max_iterations: int = 0,
         refresh: Callable[[], Awaitable[ToolRegistry]] | None = None,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
@@ -152,11 +152,11 @@ class AgentLoop:
         #: Where the tool list comes from, asked again before every model call.
         #:
         #: Once per turn is the arrangement this replaced, and the difference
-        #: shows up in a turn that takes several steps: a tool a server grew, or
-        #: a server that finished starting, is in the *next* call's list rather
-        #: than the next turn's.  The loop still does not know what a tool server
-        #: is — this is a coroutine that returns a registry, and it is the server
-        #: that hands one over.
+        #: shows up in a turn that takes several iterations: a tool a server
+        #: grew, or a server that finished starting, is in the *next* call's
+        #: list rather than the next turn's.  The loop still does not know what a
+        #: tool server is — this is a coroutine that returns a registry, and it
+        #: is the server that hands one over.
         self._refresh = refresh
         #: How the harness is asked to confirm one call, or None when nobody can
         #: be.  **The loop does not know whether anyone is watching** (the module
@@ -187,23 +187,23 @@ class AgentLoop:
         self._compress = compress
         #: Model calls allowed in one turn before it is cut off, or **0 for no
         #: cap at all**.  Zero is the config's spelling for "nobody asked for
-        #: one" (`slife2.libs.host.config.AgentSettings.max_steps`, where an absent key is
-        #: the same 0), and it is the default here for the same reason: a cap is
-        #: something somebody asks for, and a turn that runs until the model
-        #: stops asking for tools is what a loop is when nobody has said
-        #: otherwise.  So there is one rule rather than two — a cap exists when
-        #: the number is positive — and where one exists it produces an ordinary
-        #: result, not an exception.
-        self._max_steps = max_steps
+        #: one" (`slife2.libs.host.config.AgentSettings.max_iterations`, where
+        #: an absent key is the same 0), and it is the default here for the same
+        #: reason: a cap is something somebody asks for, and a turn that runs
+        #: until the model stops asking for tools is what a loop is when nobody
+        #: has said otherwise.  So there is one rule rather than two — a cap
+        #: exists when the number is positive — and where one exists it produces
+        #: an ordinary result, not an exception.
+        self._max_iterations = max_iterations
 
     async def _retool(self) -> None:
         """Ask where the tools come from, before a model call.
 
         A refresh that fails is deliberately *not* swallowed: the tool list is
-        what the call is made with, and calling a model with last step's list
-        because the hub is unreachable would be a silently wrong request rather
-        than a failed turn.  `slife2.libs.plugin.protocol.open_server` is where that rule
-        is argued.
+        what the call is made with, and calling a model with the last
+        iteration's list because the hub is unreachable would be a silently
+        wrong request rather than a failed turn.
+        `slife2.libs.plugin.protocol.open_server` is where that rule is argued.
         """
         if self._refresh is not None:
             self._tools = await self._refresh()
@@ -229,10 +229,11 @@ class AgentLoop:
         is what owns the shape of a turn, and a caller that appended its own user
         message would be a second place that knows it.
 
-        **The auto-invoke.**  `auto` is asked at the top of every step for the
-        name of a tool the *harness* wants called — v1's cut-in — and the call is
-        then made the way the model's own calls are made: through `self._tools`,
-        the registry whose `specs` went out with the last request.  So the name
+        **The auto-invoke.**  `auto` is asked at the top of every iteration for
+        the name of a tool the *harness* wants called — v1's cut-in — and the
+        call is then made the way the model's own calls are made: through
+        `self._tools`, the registry whose `specs` went out with the last
+        request.  So the name
         routes the same way, the caller's identity rides the same way, and the
         text written into the pair is **the tool's own answer** rather than
         something written beside it.  `trim_tools` is the other half of this and
@@ -281,10 +282,12 @@ class AgentLoop:
         last_usage = Usage()
 
         # The iterator is the whole of what "no cap" changes here: a positive
-        # number bounds the steps, and zero counts forever — the turn still
+        # number bounds the iterations, and zero counts forever — the turn still
         # ends the way it always did, when the model stops asking for tools.
-        steps = range(1, self._max_steps + 1) if self._max_steps > 0 else count(1)
-        for step in steps:
+        iterations = (
+            range(1, self._max_iterations + 1) if self._max_iterations > 0 else count(1)
+        )
+        for iteration in iterations:
             # **The call is made before either half is written**, because the
             # pair's text *is* the tool's answer — there is nothing to write
             # until it has answered.  Putting the one `await` in front of both
@@ -310,7 +313,8 @@ class AgentLoop:
                     Message(role="tool", content=text, tool_call_id=call.id)
                 )
             # The tool list goes with the call, so it is asked for with the
-            # call.  `specs` is read after this and never cached across steps.
+            # call.  `specs` is read after this and never cached across
+            # iterations.
             await self._retool()
             stream = self._backend.stream(messages, self._tools.specs)
 
@@ -344,7 +348,7 @@ class AgentLoop:
                         text=result.text,
                         usage=total_usage,
                         last_usage=last_usage,
-                        steps=step,
+                        iterations=iteration,
                         stop_reason=result.stop_reason or "stop",
                     ),
                 )
@@ -352,7 +356,7 @@ class AgentLoop:
                     text=result.text,
                     usage=total_usage,
                     last_usage=last_usage,
-                    steps=step,
+                    iterations=iteration,
                     stop_reason=result.stop_reason or "stop",
                 )
 
@@ -365,17 +369,19 @@ class AgentLoop:
             # calls are only partly answered is the one history state every
             # provider rejects, and appending the message before fitting its
             # results left exactly that whenever a fit raised: `_fit` is the
-            # caller's own callback, so it is the step that can fail (a cabinet
+            # caller's own callback, so it is the iteration that can fail (a
+            # cabinet
             # that will not open, a discriminator that stalled), and nothing
             # downstream repairs a failure — a failed turn keeps its messages,
             # so the conversation failed every later turn until it was rebuilt.
             #
             # What `_fit` is handed is therefore the conversation *before* this
-            # step's answer, which is also the honest list to judge a result
+            # iteration's answer, which is also the honest list to judge a
+            # result
             # against: it no longer contains a half-written batch.
             answers: list[Message] = []
             for call in result.tool_calls:
-                text, _ok = await self._one(call, observer, step, messages)
+                text, _ok = await self._one(call, observer, iteration, messages)
                 answers.append(
                     Message(
                         role="tool",
@@ -388,30 +394,30 @@ class AgentLoop:
 
         # Only a capped turn ever gets here: with no cap the iterator does not
         # end, so the only way out of the loop is the return above.
-        logger.warning("turn hit the %d-step limit", self._max_steps)
+        logger.warning("turn hit the %d-iteration limit", self._max_iterations)
         await self._emit(
             observer,
             TurnFinished(
                 text=last_text,
                 usage=total_usage,
                 last_usage=last_usage,
-                steps=self._max_steps,
-                stop_reason="max_steps",
+                iterations=self._max_iterations,
+                stop_reason="max_iterations",
             ),
         )
         return TurnResult(
             text=last_text,
             usage=total_usage,
             last_usage=last_usage,
-            steps=self._max_steps,
-            stop_reason="max_steps",
+            iterations=self._max_iterations,
+            stop_reason="max_iterations",
         )
 
     async def _one(
         self,
         call: ToolCall,
         observer: TurnObserver,
-        step: int,
+        iteration: int,
         messages: Sequence[Message],
     ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
@@ -420,10 +426,10 @@ class AgentLoop:
         two events — because each of those is a fact about *this* call and the
         order between them is the thing that is easy to get wrong:
 
-        `step` is the loop's own counter, and it is here for the same reason:
-        the event that opens the call carries it so the panel can say which
-        step of the turn this is (v1's `(3/30)`), and this is the only place
-        that knows both the call and the step it was made in.
+        `iteration` is the loop's own counter, and it is here for the same
+        reason: the event that opens the call carries it so the panel can say
+        which iteration of the turn this is (v1's `(3/30)`), and this is the
+        only place that knows both the call and the iteration it was made in.
 
         `messages` travels no further than a background call needs it, and it
         is passed rather than read off an attribute because the loop does not
@@ -474,11 +480,11 @@ class AgentLoop:
                 call.id,
                 call.name,
                 call.arguments,
-                step=step,
+                iteration=iteration,
                 # A whole number for a turn that has a cap, and 0 for one that
                 # does not — the panel's two spellings of the counter come from
                 # this, so it is sent rather than left for the reader to guess.
-                max_steps=self._max_steps,
+                max_iterations=self._max_iterations,
             ),
         )
         # Timed here because this is the only place that knows when the call ran:
@@ -515,7 +521,7 @@ class AgentLoop:
         None-means-nobody-said rule `approve` and `deliver` follow, and the cost
         of it is a turn whose size is whatever the tool returned.
 
-        **Two callers, and one window.**  The ordinary one is the step loop
+        **Two callers, and one window.**  The ordinary one is the iteration loop
         below, where the fit happens after the call is announced and before the
         result is appended — the one moment that is both, so the panel's account
         of the call is the tool's own answer (`ToolCallFinished` carries its
@@ -523,7 +529,8 @@ class AgentLoop:
         will read back later.  The other is a **background** call's hand-back
         (`_background`), which is the same result arriving by a different road:
         it becomes a message in a later turn rather than a tool message in this
-        one, and it used to skip this step entirely for exactly that reason.
+        one, and it used to skip this iteration entirely for exactly that
+        reason.
         """
         if self._compress is None:
             return text
@@ -570,7 +577,8 @@ class AgentLoop:
 
         **The window reaches this road too.**  A background call's result arrives
         as a *message* — a turn of its own, several turns later — which is the
-        one road a tool result takes that the step loop's fit does not cover, so
+        one road a tool result takes that the iteration loop's fit does not
+        cover, so
         the whole output used to enter the conversation and its turn log and be
         carried by every later request: one call's answer was bounded or
         unbounded depending only on whether the background delivery landed.
@@ -593,7 +601,8 @@ class AgentLoop:
 
         # **The call's own id and name go with it**, because nothing else can
         # supply them later: `check_async` is given a task id and nothing else —
-        # a call the model makes a step or a turn afterwards is carrying none of
+        # a call the model makes an iteration or a turn afterwards is carrying
+        # none of
         # this — and a result that cannot say which call it answers is one the
         # model has to match up from memory.
         task_id = schedule(

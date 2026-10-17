@@ -95,11 +95,11 @@ def asks_for_a_tool(
     *,
     delay: float = 0.0,  # timeouts: the value this test is built around, not a budget
 ) -> ScriptedTurn:  # timeouts: the value this test is built around, not a budget
-    """The step that calls a tool — and so gives the turn a second boundary.
+    """The iteration that calls a tool — and so gives the turn a second boundary.
 
-    A turn that answers in one step has no boundary after its first, which is
+    A turn that answers in one iteration has no boundary after its first, which is
     why the cut-in needs this shape to be exercised at all.  The delay is what
-    keeps the arrival *inside* the first step instead of racing the second: a
+    keeps the arrival *inside* the first iteration instead of racing the second: a
     test that submits while the stream is still coming is testing the boundary
     the feature is about.
     """
@@ -614,7 +614,7 @@ async def test_a_turn_reports_its_shape(context, hub) -> None:
     )
     result = await send(server, "what is 6*7?")
 
-    assert result.data["steps"] == 2
+    assert result.data["iterations"] == 2
     assert result.data["stop_reason"] == "stop"
     assert "usage" in result.data
     assert "new_messages" not in result.data
@@ -810,11 +810,11 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
     away; here it waits, runs in its turn, and both answers come back.
 
     **This is the turn with nothing to cut into**, and it is the reason both
-    halves are needed.  The first turn here is one step: the model answered and
+    halves are needed.  The first turn here is one iteration: the model answered and
     asked for no tools, so the loop made one call and returned, and there was no
     later boundary for the arrival to be delivered at.  It keeps its place and
     its own turn.  `test_a_message_sent_to_a_busy_loop_is_folded_into_the_turn`
-    is the other half, on a turn that does take a second step.
+    is the other half, on a turn that does take a second iteration.
 
     What the second assertion still catches is the mistake the pairing exists to
     prevent: the arrival must not reach the model as *this turn's* input.  A
@@ -899,14 +899,14 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
 ) -> None:
     """v1's cut-in: the arrival is handed to the turn that is already running.
 
-    The first turn here takes two steps — the model asks for `skill_list` and is told
+    The first turn here takes two iterations — the model asks for `skill_list` and is told
     — so there *is* a boundary after the message arrives, and at it the message
     is delivered as a call to `_check_new_input` and answered with its own words.
     The model reads it as something that arrived mid-turn, which is what it is.
 
     Its sender is answered by that turn rather than by one of its own, which is
     the half v1 had no need of: there, a sender was a channel that could give up,
-    and here it is a call parked on the lock expecting `{text, usage, steps}`.
+    and here it is a call parked on the lock expecting `{text, usage, iterations}`.
     It gets the answer the message was actually given, and `injected` says so —
     without which a caller could not tell this from a turn of its own that
     happened to say the same thing.
@@ -2096,7 +2096,7 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_max_steps_comes_from_the_config(context, hub) -> None:
+async def test_max_iterations_comes_from_the_config(context, hub) -> None:
     backend = FakeBackend(
         *[
             ScriptedTurn(
@@ -2109,12 +2109,15 @@ async def test_max_steps_comes_from_the_config(context, hub) -> None:
         ]
     )
     server = build_server(
-        config(max_steps=2), context_client=context, hub_client=hub, backend=backend
+        config(max_iterations=2),
+        context_client=context,
+        hub_client=hub,
+        backend=backend,
     )
     result = await send(server, "loop forever")
 
     assert len(backend.calls) == 2
-    assert result.data["stop_reason"] == "max_steps"
+    assert result.data["stop_reason"] == "max_iterations"
 
 
 # --- the streaming contract --------------------------------------------------
@@ -2158,7 +2161,7 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
 
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]
-    assert finished.steps == 2  # type: ignore[union-attr]
+    assert finished.iterations == 2  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

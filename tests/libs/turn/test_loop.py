@@ -106,7 +106,7 @@ async def test_text_only_turn() -> None:
     result = await AgentLoop(backend, registry()).run_turn(messages, "hi", observer)
 
     assert result.text == "hello there"
-    assert result.steps == 1
+    assert result.iterations == 1
     assert result.stop_reason == "stop"
     assert observer.kinds() == ["TextDelta", "TextDelta", "TurnFinished"]
     assert [m.role for m in messages] == ["user", "assistant"]
@@ -170,7 +170,7 @@ async def test_tool_call_runs_and_feeds_back() -> None:
     result = await AgentLoop(backend, registry()).run_turn(messages, "2+2?", observer)
 
     assert result.text == "It is 4."
-    assert result.steps == 2
+    assert result.iterations == 2
     # The structure, not the chunking: how the answer is split into deltas is
     # the provider's business and asserting on it would make this test break
     # for a reason that is not a regression.
@@ -214,7 +214,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
 
     def auto() -> str | None:
-        """Asked at the top of *every* step; delivers once, on the second.
+        """Asked at the top of *every* iteration; delivers once, on the second.
 
         The gate is the caller's, and it is the cheap half of v1's split: whether
         anything arrived is answerable without a call, and which tool answers it
@@ -339,29 +339,29 @@ async def test_tool_result_preview_is_truncated_but_the_model_gets_it_all() -> N
 # --- limits and failure ------------------------------------------------------
 
 
-async def test_max_steps_cuts_off_a_runaway_loop() -> None:
+async def test_max_iterations_cuts_off_a_runaway_loop() -> None:
     """A model that keeps calling tools produces a result, not a hang."""
     backend = FakeBackend(
         *[tool_turn(ToolCall(id=f"c{i}", name="now", arguments={})) for i in range(3)]
     )
     observer = ListObserver()
 
-    result = await AgentLoop(backend, registry(), max_steps=3).run_turn(
+    result = await AgentLoop(backend, registry(), max_iterations=3).run_turn(
         [], "go", observer
     )
 
-    assert result.hit_step_limit is True
-    assert result.steps == 3
+    assert result.hit_iteration_limit is True
+    assert result.iterations == 3
     assert len(backend.calls) == 3
     final = observer.events[-1]
     assert isinstance(final, TurnFinished)
-    assert final.stop_reason == "max_steps"
+    assert final.stop_reason == "max_iterations"
 
 
 async def test_the_step_travels_with_the_call() -> None:
     """The panel's counter is built from the event, so the loop has to send it.
 
-    Two tool calls in two steps, the second of which ends the turn: the pair of
+    Two tool calls in two iterations, the second of which ends the turn: the pair of
     numbers v1 showed beside a running tool (`(3/30)`) is these two fields, and
     the loop is the only thing that knows both.
     """
@@ -372,17 +372,17 @@ async def test_the_step_travels_with_the_call() -> None:
     )
     observer = ListObserver()
 
-    await AgentLoop(backend, registry(), max_steps=3).run_turn([], "go", observer)
+    await AgentLoop(backend, registry(), max_iterations=3).run_turn([], "go", observer)
 
     started = [e for e in observer.events if isinstance(e, ToolCallStarted)]
-    assert [(e.call_id, e.step, e.max_steps) for e in started] == [
+    assert [(e.call_id, e.iteration, e.max_iterations) for e in started] == [
         ("c1", 1, 3),
         ("c2", 2, 3),
     ]
 
 
 async def test_no_cap_runs_until_the_model_stops() -> None:
-    """**`max_steps` of 0 is no cap**, and it is the loop's default too.
+    """**`max_iterations` of 0 is no cap**, and it is the loop's default too.
 
     Twenty tool calls is past the sixteen an unset cap used to produce, which
     is what makes this the test of the change: a loop that still stopped at a
@@ -392,10 +392,10 @@ async def test_no_cap_runs_until_the_model_stops() -> None:
     says who ended the turn, not that anything had to end it.
 
     Both spellings are run: the parameter's own default, and the config's
-    written zero (`slife2.libs.host.config.AgentSettings.max_steps` reads an absent key
+    written zero (`slife2.libs.host.config.AgentSettings.max_iterations` reads an absent key
     as the same 0).
     """
-    for kwargs in ({}, {"max_steps": 0}):
+    for kwargs in ({}, {"max_iterations": 0}):
         backend = FakeBackend(
             *[
                 tool_turn(ToolCall(id=f"c{i}", name="now", arguments={}))
@@ -408,7 +408,7 @@ async def test_no_cap_runs_until_the_model_stops() -> None:
 
         assert result.stop_reason == "stop"
         assert result.text == "done"
-        assert result.steps == 21
+        assert result.iterations == 21
         assert len(backend.calls) == 21
 
 
@@ -498,7 +498,7 @@ async def test_tool_specs_are_advertised_to_the_model() -> None:
 async def test_the_tool_list_is_asked_for_before_every_model_call() -> None:
     """Not once per turn — once per call, so a change lands mid-turn.
 
-    A turn that takes several steps makes several requests to the model, and
+    A turn that takes several iterations makes several requests to the model, and
     each carries its own tool list.  Asking once per turn would leave the
     second call advertising a tool the first call's answer had just removed.
     """
@@ -540,7 +540,7 @@ async def test_the_seed_list_is_the_loops_own_until_it_is_refreshed() -> None:
 async def test_a_refresh_that_fails_ends_the_turn() -> None:
     """Deliberately not swallowed.
 
-    A model called with the previous step's tool list is a silently wrong
+    A model called with the previous iteration's tool list is a silently wrong
     request; a turn that fails is a visible one.  See
     `slife2.libs.plugin.protocol.open_server`.
     """

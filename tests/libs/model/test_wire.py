@@ -42,11 +42,16 @@ EVENTS = [
     ContextChosen(kept=12, recalled=3),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
-    # The step counter, and the two keys that are omitted at zero: the first
-    # entry round trips a capped step, the second one that arrived without a
-    # step at all — a rebuilt transcript, or a server from before these keys.
+    # The iteration counter, and the two keys that are omitted at zero: the first
+    # entry round trips a capped iteration, the second one that arrived without
+    # an iteration at all — a rebuilt transcript, or a server from before these
+    # keys.
     ToolCallStarted(
-        call_id="c1", name="calc", arguments={"e": "6*7"}, step=2, max_steps=30
+        call_id="c1",
+        name="calc",
+        arguments={"e": "6*7"},
+        iteration=2,
+        max_iterations=30,
     ),
     ToolCallStarted(call_id="c2", name="now"),
     ToolCallFinished(
@@ -72,7 +77,7 @@ EVENTS = [
         text="done",
         usage=Usage(10, 20),
         last_usage=Usage(7, 3),
-        steps=2,
+        iterations=2,
         stop_reason="stop",
     ),
 ]

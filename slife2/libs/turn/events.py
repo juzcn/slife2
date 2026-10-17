@@ -94,17 +94,19 @@ class ToolCallStarted:
     #: sentence; "calc" is a word.
     arguments: dict[str, Any] = field(default_factory=dict)
     #: Which model call of this turn asked for it (1-based), and the cap that
-    #: turn is running under — `0` for no cap, the same spelling `max_steps`
-    #: uses everywhere else.  v1's `iteration`/`max_iterations`, carried on the
-    #: call rather than on an event of its own for the reason v1 carried them
-    #: here: a tool call is the only thing that marks a step, so this is where
-    #: somebody watching a long turn sees it advancing.
+    #: turn is running under — `0` for no cap, the same spelling
+    #: `max_iterations` uses everywhere else.  v1's `iteration`/
+    #: `max_iterations`, carried on the call rather than on an event of its own
+    #: for the reason v1 carried them here: a tool call is the only thing that
+    #: marks an iteration, so this is where somebody watching a long turn sees
+    #: it advancing.
     #:
-    #: `step` of 0 is **"nobody said" rather than a step**: a rebuilt transcript
-    #: has no step numbers to draw, and neither has a server from before these
-    #: keys — so the counter is left off rather than drawn as `(0)`.
-    step: int = 0
-    max_steps: int = 0
+    #: `iteration` of 0 is **"nobody said" rather than an iteration**: a rebuilt
+    #: transcript has no iteration numbers to draw, and neither has a server
+    #: from before these keys — so the counter is left off rather than drawn as
+    #: `(0)`.
+    iteration: int = 0
+    max_iterations: int = 0
 
 
 @dataclass(frozen=True)
@@ -165,10 +167,10 @@ class TurnFinished:
     #: The last call's own usage: how large the conversation had become, which
     #: is what a "how full is the context" display is asking about.  Carried
     #: separately because `usage` cannot answer it — on a turn that took three
-    #: steps, `usage` is the sum of three calls and reads as a context nearly
-    #: three times its real size.
+    #: iterations, `usage` is the sum of three calls and reads as a context
+    #: nearly three times its real size.
     last_usage: Usage
-    steps: int
+    iterations: int
     stop_reason: str
 
 
@@ -240,13 +242,18 @@ def encode(event: TurnEvent) -> str:
                 # display sense, and a notification is not the place for an
                 # empty object on every single tool.
                 **({"args": arguments} if arguments else {}),
-                # The step and the turn's cap, omitted at zero for the reason
-                # above: "nobody said" is not a number, and a written `0` would
-                # have to be read back as one.  `cap: 0` is no cap, so a turn
-                # that has one shows `(3/30)` and a turn that does not shows a
-                # bare `(3)` — both keys absent hides the counter entirely.
-                **({"step": event.step} if event.step else {}),
-                **({"cap": event.max_steps} if event.max_steps else {}),
+                # The iteration and the turn's cap, omitted at zero for the
+                # reason above: "nobody said" is not a number, and a written `0`
+                # would have to be read back as one.  `max_iterations: 0` is no
+                # cap, so a turn that has one shows `(3/30)` and a turn that does
+                # not shows a bare `(3)` — both keys absent hides the counter
+                # entirely.
+                **({"iteration": event.iteration} if event.iteration else {}),
+                **(
+                    {"max_iterations": event.max_iterations}
+                    if event.max_iterations
+                    else {}
+                ),
             }
         case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
             payload = {
@@ -267,11 +274,11 @@ def encode(event: TurnEvent) -> str:
                 "n": result_chars,
                 "ms": elapsed_ms,
             }
-        case TurnFinished(text, usage, last_usage, steps, stop_reason):
+        case TurnFinished(text, usage, last_usage, iterations, stop_reason):
             payload = {
                 "t": "done",
                 "d": text,
-                "steps": steps,
+                "iterations": iterations,
                 "stop": stop_reason,
                 "usage": usage.to_wire(),
                 # One per turn, not one per token, so the extra key costs
@@ -325,8 +332,8 @@ def decode(message: str) -> TurnEvent | None:
                 arguments=arguments if isinstance(arguments, dict) else {},
                 # Absent reads as 0, which is the counter's "nobody said" — the
                 # honest answer for a server that predates these keys.
-                step=int(payload.get("step") or 0),
-                max_steps=int(payload.get("cap") or 0),
+                iteration=int(payload.get("iteration") or 0),
+                max_iterations=int(payload.get("max_iterations") or 0),
             )
         case "tool_approval" if isinstance(payload.get("name"), str):
             arguments = payload.get("args")
@@ -352,7 +359,7 @@ def decode(message: str) -> TurnEvent | None:
                 # "how full is the context" when nobody said — and is what a
                 # server from before this key existed sends.
                 last_usage=Usage.from_wire(payload.get("last")),
-                steps=int(payload.get("steps") or 0),
+                iterations=int(payload.get("iterations") or 0),
                 stop_reason=str(payload.get("stop") or ""),
             )
         case _:

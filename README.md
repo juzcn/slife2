@@ -222,7 +222,8 @@ answers, the same tool calls with the results they returned, each line stamped
 with the moment it was sent rather than with the moment the window opened. What
 is put back is the conversation's *context*, restored by the agent server the
 moment it builds the loop; the window asks for the turns that context was made of
-and draws them, reasoning and all — a step that thought before it answered comes
+and draws them, reasoning and all — an iteration that thought before it answered
+comes
 back with its thinking folded away exactly where a live one had it.
 
 **The window also says what the context is doing.** A restored conversation shows
@@ -454,7 +455,7 @@ it is the one group whose being always-loaded is worth a second look. Everything
 server with ninety tools costs nothing until one of them is wanted.
 `tool_search` searches the whole catalogue by keyword *and* by meaning, one
 hybrid search; `func_tool_load` puts one or several names in the list, and they
-are there from the next step of the same turn. The catalogue is
+are there from the next iteration of the same turn. The catalogue is
 `<data>/agents/tools.db`, one file for the data directory rather than one per
 agent: a tool loaded in one conversation is loaded for the next, and still loaded
 after a restart.
@@ -530,7 +531,7 @@ that is no longer there. Nothing is written when nothing was taken. Being
 evicted costs a search and a load, not a capability.
 
 **A message that arrives while a turn is running is handed to that turn.** At
-the next step boundary the harness calls `_check_new_input` and writes the call
+the next iteration boundary the harness calls `_check_new_input` and writes the call
 and the message's own words into the running turn — v1's *cut-in*, always on — so
 what you say while the agent is working reaches it inside the turn it arrived in
 rather than one turn later. Like the trim, it is a tool pair: it is in the record
@@ -589,7 +590,8 @@ entry — which is what lets `tool_search` answer "what can I do about a browser
 without the model already knowing to ask for `browser-harness` by name: the
 playbook's whole document is what the search indexes, and "drive a browser"
 reaching it is the entire point. The row is not a tool: it has no load state,
-it never enters the model's list, and calling it answers with the step that does
+it never enters the model's list, and calling it answers with the iteration that
+does
 reach the thing (`skill_use`) rather than a refusal. The name is namespaced
 because `browser-harness` is a command *and* the skill documenting it, and one
 name is one row.

@@ -589,8 +589,8 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
 
     **Three calls, and the first is not the turn's.**  The context store's
     discriminator decides what a turn runs on before it runs, and it is a model
-    call of its own; the second is the turn's first step, which asks for the
-    tool; the third is the step after the tool has answered.
+    call of its own; the second is the turn's first iteration, which asks for the
+    tool; the third is the iteration after the tool has answered.
     """
     provider = stack["provider"]
     provider.script = [

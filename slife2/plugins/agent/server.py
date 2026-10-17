@@ -42,7 +42,7 @@ because they are the price of the state:
   takes it; a second caller waits, and that wait *is* the inbox.  Distinct keys
   hold distinct locks, so two agents' conversations run at the same time.
 * **Cut-in**, which is what waiting *for* means.  A message that arrives while a
-  turn runs is handed to that turn at its next step boundary — as a call to
+  turn runs is handed to that turn at its next iteration boundary — as a call to
   `_check_new_input` and a result carrying the message's own words — so the model
   addresses it inside the turn it arrived in rather than one turn later.  v1's
   mode, always on, and the one place this server writes a message into a
@@ -403,7 +403,7 @@ class Pending:
     It is held here, and *not* appended to the loop's messages as a user message,
     until its turn begins.  What may happen to it in between is the running
     turn **folding it in** (`inject`): the message goes to the model at that
-    turn's next step boundary as a harness tool pair, and this entry's `result`
+    turn's next iteration boundary as a harness tool pair, and this entry's `result`
     is set to that turn's answer.  It is never appended as a user message
     mid-turn, which is what would be steering nobody asked for — the model reads
     a folded message as something that arrived, which is what it is.
@@ -497,13 +497,13 @@ class Loop:
     agent: str
     subagent: str
     model: str
-    #: **The step cap this conversation started on**, read where the model is
+    #: **The iteration cap this conversation started on**, read where the model is
     #: read — at the start, from the config as it was then — and not per turn.
     #: `make_loop` runs on every turn, so taking it from the live config would
     #: let an operator's edit change the terms of a turn already in flight; the
     #: boot config was the other half of the same mistake, keeping a cap the
     #: conversation that *should* have read the edit never saw.
-    max_steps: int
+    max_iterations: int
     messages: list[Message]
     lock: asyncio.Lock
     last_used: float
@@ -644,9 +644,10 @@ def build_server(
     once per removed subagent, not once per turn.
 
     Otherwise a connection is opened **per model server, on first use, and kept
-    for the process**.  Not per turn — that would pay a handshake for every step
-    of every turn — and not once at startup either, because which model is
-    wanted is a property of the *loop*: a caller names one when it opens one, and
+    for the process**.  Not per turn — that would pay a handshake for every
+    iteration of every turn — and not once at startup either, because which model
+    is wanted is a property of the *loop*: a caller names one when it opens one,
+    and
     this server serves every caller.  A model nobody asks for is a connection
     nobody opens.
 
@@ -1082,7 +1083,7 @@ def build_server(
     async def make_loop(
         active: LLMBackend,
         client_id: ClientId,
-        max_steps: int,
+        max_iterations: int,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compressor: Compressor | None = None,
@@ -1091,10 +1092,10 @@ def build_server(
             active,
             await registry(client_id),
             # The conversation's own, taken from the config it started on
-            # (`Loop.max_steps`): a step cap somebody raises *because* a turn
-            # ran into it reaches the next conversation, which is the rule the
-            # model follows too.
-            max_steps=max_steps,
+            # (`Loop.max_iterations`): an iteration cap somebody raises
+            # *because* a turn ran into it reaches the next conversation, which
+            # is the rule the model follows too.
+            max_iterations=max_iterations,
             # Handed to the loop so the list is re-read before each model call;
             # see `turn_tools`.  Bound to the key for the same reason the first
             # call is: every refresh has to hand back tools for *this*
@@ -1138,7 +1139,7 @@ def build_server(
         """
         if backend is not None:
             return await make_loop(
-                backend, client_id, loop.max_steps, approve, deliver, compressor
+                backend, client_id, loop.max_iterations, approve, deliver, compressor
             )
 
         reference = loop.model
@@ -1169,7 +1170,7 @@ def build_server(
         return await make_loop(
             model_backends[reference].with_key(*client_id),
             client_id,
-            loop.max_steps,
+            loop.max_iterations,
             approve,
             deliver,
             compressor,
@@ -1293,7 +1294,7 @@ def build_server(
                 api=provider.api,
                 model_id=settings.model,
                 accepts_images=settings.accepts_images,
-                max_steps=live.agent.max_steps,
+                max_iterations=live.agent.max_iterations,
                 messages=messages,
                 lock=asyncio.Lock(),
                 last_used=time.monotonic(),
@@ -1745,7 +1746,7 @@ def build_server(
         this one.  So the same function serves both, and what makes that
         acceptable is that the model calling it is the boundary's own move made
         early rather than something new — the message would have arrived at the
-        next step regardless.  A tool that could not say that could not be a
+        next iteration regardless.  A tool that could not say that could not be a
         harness tool at all (`slife2.libs.turn.tools`).
 
         **The entry is claimed before it is returned**, into `loop.injected`, so
@@ -1840,7 +1841,7 @@ def build_server(
         """
 
         def auto_invoke() -> str | None:
-            """The tool to call at this step boundary, or `None` — v1's cut-in.
+            """The tool to call at this iteration boundary, or `None` — v1's cut-in.
 
             **Cheap, and it decides only *whether*.**  The name it returns is
             handed to the loop, which makes the call through the same registry
@@ -2259,7 +2260,7 @@ def build_server(
     async def check_new_input(ctx: Context) -> str:
         """The message that arrived while the turn was running, verbatim.
 
-        The harness calls this at a turn's next step boundary and writes the
+        The harness calls this at a turn's next iteration boundary and writes the
         call and its result into the conversation, so a message that arrives
         mid-turn reaches the turn it arrived in. It hands over the first message
         waiting for this conversation.
@@ -2805,11 +2806,12 @@ def build_server(
         still gets the whole thing.
 
         **A message sent to a busy conversation waits rather than displacing
-        anything** — and what it waits *for* is the running turn's next step
-        boundary, where it is folded in (see `inject`).  Turns on one key run one
-        at a time, in the order they were submitted; a message the running turn
-        did not reach before it ended becomes a turn of its own when its place
-        comes up.  Nothing is dropped and nothing is cancelled — up to a bound,
+        anything** — and what it waits *for* is the running turn's next
+        iteration boundary, where it is folded in (see `inject`).  Turns on one
+        key run one at a time, in the order they were submitted; a message the
+        running turn did not reach before it ended becomes a turn of its own
+        when its place comes up.  Nothing is dropped and nothing is cancelled —
+        up to a bound,
         because a client's call timeout does not know it is waiting.  Different
         keys do not wait for each other at all.
 
@@ -2860,7 +2862,7 @@ def build_server(
                 that has not been taught to draw a prompt.
 
         Returns:
-            `text` (the final answer), `usage`, `steps`, `stop_reason`, the
+            `text` (the final answer), `usage`, `iterations`, `stop_reason`, the
             `model` that answered — which a bare provider or an empty reference
             does not otherwise reveal — `injected`, true when this message was
             folded into a turn that was already running rather than run as its
@@ -2895,7 +2897,8 @@ def build_server(
         try:
             async with loop.lock:
                 # **The turn that just released the lock may have taken this
-                # message with it**, folding it in at one of its step boundaries
+                # message with it**, folding it in at one of its iteration
+                # boundaries
                 # (`inject`).  Then there is no turn here to run: the model was
                 # handed this message inside that one and its answer is the
                 # answer to this, so the caller is given exactly what that turn's
@@ -2907,7 +2910,7 @@ def build_server(
                     return _injected_reply(item)
                 # **Ours, and its turn is starting now.**  A message waiting in
                 # the inbox is *not* in `messages`: `AgentLoop.run_turn`
-                # re-reads the list every step, so an early append would be
+                # re-reads the list every iteration, so an early append would be
                 # seen by the running turn as steering nobody asked for.
                 with contextlib.suppress(ValueError):
                     loop.inbox.remove(item)
@@ -3540,8 +3543,8 @@ def settled_messages(messages: list[Message]) -> list[Message]:
     turn is `[head, user, assistant(calls), results, assistant, …]`, and a list
     caught mid-turn ends on one of two shapes that cannot be sent: an assistant
     message whose calls have no results yet, or a batch of results that does not
-    answer every call above it — a step runs its calls in order, so a turn parked
-    on the second of two has answered the first.  Every other ending is a
+    answer every call above it — an iteration runs its calls in order, so a turn
+    parked on the second of two has answered the first.  Every other ending is a
     history, and is left exactly as it is: a user message, an answer the model
     gave, an exchange that finished.  Cutting those would be the copy losing
     things its maker knows, which is the one thing a fork is for.
@@ -3635,7 +3638,7 @@ def _reply(
     return {
         "text": result.text,
         "usage": result.usage.to_wire(),
-        "steps": result.steps,
+        "iterations": result.iterations,
         "stop_reason": result.stop_reason,
         "model": model,
         "injected": injected,
@@ -3653,7 +3656,8 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
     loop's reference here instead would let a `model_switch` during that turn
     answer this caller as a model that never saw the message.
 
-    `usage` and `steps` are that whole turn's, deliberately — they describe the
+    `usage` and `iterations` are that whole turn's, deliberately — they describe
+    the
     work that answered this message, which is that turn's work and nothing else.
     `injected` is the one thing added, and it is not decoration: without it a
     caller cannot tell "my message rode in another turn" from "my turn happened

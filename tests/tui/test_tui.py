@@ -81,7 +81,7 @@ def answering(text: str, *, tokens: int = 0, context: int | None = None):
                 last_usage=Usage(
                     completion_tokens=tokens if context is None else context
                 ),
-                steps=1,
+                iterations=1,
                 stop_reason="stop",
             )
         )
@@ -268,19 +268,19 @@ async def test_a_turn_with_nothing_to_say_leaves_nothing_behind() -> None:
                     text="hello",
                     usage=Usage(completion_tokens=3),
                     last_usage=Usage(completion_tokens=3),
-                    steps=1,
+                    iterations=1,
                     stop_reason="stop",
                 )
             )
             return "hello"
-        # A turn that hit the step cap having said nothing: no deltas, no text.
+        # A turn that hit the iteration cap having said nothing: no deltas, no text.
         on_event(
             TurnFinished(
                 text="",
                 usage=Usage(completion_tokens=99),
                 last_usage=Usage(completion_tokens=99),
-                steps=8,
-                stop_reason="max_steps",
+                iterations=8,
+                stop_reason="max_iterations",
             )
         )
         return ""
@@ -313,7 +313,7 @@ def reasoning_turn():
                 text="the answer",
                 usage=Usage(),
                 last_usage=Usage(),
-                steps=1,
+                iterations=1,
                 stop_reason="stop",
             )
         )
@@ -327,7 +327,7 @@ async def test_reasoning_on_the_answer_is_shown() -> None:
 
     It is the interesting case — it is how you tell whether the model understood
     the question — so it is the one that stays open.  Collapsing is the
-    *intermediate* step's treatment, not the default.
+    *intermediate* iteration's treatment, not the default.
     """
     app = make_app(reasoning_turn())
     async with app.run_test(size=SIZE) as pilot:
@@ -359,7 +359,7 @@ async def test_reasoning_can_be_folded_away() -> None:
 
 
 async def test_an_intermediate_step_folds_its_reasoning() -> None:
-    """A step that ends in a tool call is machinery, and reads better as a line.
+    """An iteration that ends in a tool call is machinery, and reads better as a line.
 
     The distinction is only knowable here: a tool call following a block is what
     makes that block intermediate, so it is the tool call that folds it.
@@ -370,17 +370,17 @@ async def test_an_intermediate_step_folds_its_reasoning() -> None:
         blocks = list(app.query(AssistantMessage))
 
     assert len(blocks) == 2
-    assert blocks[0].thinking_expanded is False, "the pre-tool step should fold"
+    assert blocks[0].thinking_expanded is False, "the pre-tool iteration should fold"
     assert blocks[1].thinking_expanded is True, "the answer should not"
 
 
 async def test_a_block_with_only_reasoning_is_not_signed() -> None:
-    """The signature signs an *answer*, so a reasoning-only step has none.
+    """The signature signs an *answer*, so a reasoning-only iteration has none.
 
     A block is opened by whatever has something to put in it — the first delta,
     a resumed stream after a tool panel, the final answer — so a signature
     painted at construction left a bare `jack>` row in the transcript for every
-    step that had only reasoning to show.  On a reasoning model that
+    iteration that had only reasoning to show.  On a reasoning model that
     is one per tool call, and it reads as the prompt being printed over and over
     down the conversation.
     """
@@ -545,15 +545,17 @@ async def test_a_tool_panel_says_which_step_of_the_turn_it_is() -> None:
 
     Three spellings, and each is a different answer to "how far into this turn
     are we": `(2/30)` while the turn is capped — which is the number v1 wrote —
-    a bare `(3)` when it is not (`max_steps` of 0 means no cap, so there is no
+    a bare `(3)` when it is not (`max_iterations` of 0 means no cap, so there is no
     denominator to write), and nothing at all for a call that arrived without a
-    step: a rebuilt transcript keeps no such column, and `(0)` would be a step
+    iteration: a rebuilt transcript keeps no such column, and `(0)` would be an iteration
     the turn never had.
     """
 
     def respond(prompt: str, on_event):
-        on_event(ToolCallStarted("c1", "calc", {"e": "1"}, step=2, max_steps=30))
-        on_event(ToolCallStarted("c2", "calc", {"e": "1"}, step=3))
+        on_event(
+            ToolCallStarted("c1", "calc", {"e": "1"}, iteration=2, max_iterations=30)
+        )
+        on_event(ToolCallStarted("c2", "calc", {"e": "1"}, iteration=3))
         on_event(ToolCallStarted("c3", "calc", {"e": "1"}))
         return ""
 
@@ -1063,7 +1065,7 @@ def context_of(kept: int, recalled: int):
                 text="ok",
                 usage=Usage(),
                 last_usage=Usage(),
-                steps=1,
+                iterations=1,
                 stop_reason="stop",
             )
         )
@@ -1435,7 +1437,7 @@ async def test_a_restored_step_shows_the_reasoning_it_had() -> None:
 async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -> None:
     """And the rule is not restated here: the tool call is what folds it.
 
-    A step on the way somewhere is machinery and reads better as one line; the
+    An iteration on the way somewhere is machinery and reads better as one line; the
     answer keeps its own reasoning open.  Restore drives the transcript with the
     live calls, so `add_tool_start` does that by itself — a rebuild that set the
     fold explicitly would be a second place that knows the rule.
@@ -1459,7 +1461,7 @@ async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -
         blocks = list(app.query(AssistantMessage))
 
     assert len(blocks) == 2
-    assert blocks[0].thinking_expanded is False, "the pre-tool step should fold"
+    assert blocks[0].thinking_expanded is False, "the pre-tool iteration should fold"
     assert blocks[1].thinking_expanded is True, "the answer should not"
 
 

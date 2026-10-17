@@ -210,7 +210,7 @@ async def test_the_agent_loop_runs_over_mcp() -> None:
         result = await loop.run_turn(messages, "what is 6*7?")
 
     assert result.text == "It is 42."
-    assert result.steps == 2
+    assert result.iterations == 2
     assert [m.role for m in messages] == ["user", "assistant", "tool", "assistant"]
     assert messages[2].content == "42"
     assert calls["n"] == 2

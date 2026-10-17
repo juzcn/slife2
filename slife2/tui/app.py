@@ -335,7 +335,6 @@ class SlifeApp(App[None]):
         #: Which turn's events the transcript is currently accepting.
         self._ticket = 0
         self._context_tokens = 0
-        self._steps = 0
 
     def compose(self) -> ComposeResult:
         # The transcript signs its messages with the agent name, so a
@@ -707,7 +706,6 @@ class SlifeApp(App[None]):
                 # written, markers and all — and the picture arrives by way of
                 # `attach_image`, whose answer names it.
                 self._transcript.begin_assistant()
-                self._steps = 0
                 # **The task before the refresh, so the bar can see it.**  The
                 # bar's "working" comes from `_turn` being set, and a refresh
                 # that ran first would find it `None` and draw an idle bar — for
@@ -818,11 +816,15 @@ class SlifeApp(App[None]):
                 call_id=call_id,
                 name=name,
                 arguments=arguments,
-                step=step,
-                max_steps=max_steps,
+                iteration=iteration,
+                max_iterations=max_iterations,
             ):
                 self._transcript.add_tool_start(
-                    call_id, name, arguments, step=step, max_steps=max_steps
+                    call_id,
+                    name,
+                    arguments,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
                 )
             case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
                 # **The turn is parked on this**, so it is answered off the
@@ -836,7 +838,7 @@ class SlifeApp(App[None]):
                 elapsed_ms=elapsed,
             ):
                 self._transcript.add_tool_end(call_id, ok, preview_text, chars, elapsed)
-            case TurnFinished(usage=usage, last_usage=last_usage, steps=steps):
+            case TurnFinished(usage=usage, last_usage=last_usage):
                 # Two numbers, two questions.  `last_usage` is how large the
                 # conversation had become by the end — the only thing a context
                 # percentage can be a percentage of.  `usage` is the turn's bill
@@ -845,7 +847,6 @@ class SlifeApp(App[None]):
                 # context two or three times fuller than it is on any turn that
                 # called a tool, and it was what this did.
                 self._context_tokens = last_usage.total_tokens
-                self._steps = steps
                 self._transcript.set_usage(usage.total_tokens)
                 self._refresh_status()
 
@@ -1079,5 +1080,4 @@ class SlifeApp(App[None]):
             context_window=self._context_window,
             thinking=self._thinking,
             vision=self._vision,
-            steps=self._steps,
         )

@@ -617,7 +617,7 @@ opening         render("agent_task.j2", name=…, description=…)
 restore         the agent's own context, under the agent's own key
 rebuild         once — keep ∪ recall, this conversation's turns included
 tools           remote_tools(hub, client_id)          the hub's list, unfiltered
-loop            AgentLoop(backend, tools, max_steps=…, refresh=…)
+loop            AgentLoop(backend, tools, max_iterations=…, refresh=…)
 answer          loop.run_turn(messages, opening)      `opening` beside the list
 trim            _func_tool_unload, at the turn boundary the agent server uses
 ```
@@ -700,7 +700,8 @@ Everything else a task needs is in the agent's own prompt, and what is in this
 file and *not* there is exactly the difference between being an agent and being a
 task.  That is why it is a file, and why it is short.
 
-**The step machine is a library, and this is the sentence §1.1 was written for.**
+**The iteration machine is a library, and this is the sentence §1.1 was written
+for.**
 `slife2.libs.turn.loop` is a pure function over a message list: it owns no conversation,
 knows no provider, and does not know whether anyone is watching (§7).  It is not
 "the main agent's loop" — it is *the* loop, and the agent server is one of its
@@ -714,7 +715,7 @@ to be called**, and the distance between those two is the whole of "clean" here.
 **The boundary that keeps it that way**: a behaviour the task's turn needs and
 `AgentLoop` does not have is added to `AgentLoop` behind a parameter that
 defaults off, or the task does not get it.  It is never added to a copy.  Phase A
-strictly before Phase B, every tool failure becoming a message, and `max_steps`
+strictly before Phase B, every tool failure becoming a message, and `max_iterations`
 ending a turn normally are three decisions §7 names as load-bearing, and a second
 implementation of them is a second answer waiting to drift.
 
@@ -804,7 +805,7 @@ mid-call is not a rollback, in a task exactly as in a turn.
 conversation becomes a turn in it — WeChat is its first client
 (`wechat._to_window`) — and a finished task is its second.  The words go into the
 same queue a person's own typing goes into, so a parent that is mid-turn takes
-them at a step boundary as the `_check_new_input` pair it already knows how to
+them at a iteration boundary as the `_check_new_input` pair it already knows how to
 fold in, and a parent that is idle runs them as its next turn, on screen.  That
 is the whole of "pushed back into the agent's inbox": the inbox already decides
 what an arriving message is, and nothing here has to.
@@ -863,11 +864,11 @@ somebody is that turn's business, not this plugin's.
 **`agent-task:` owns one number, and `agent:` gains a second reader.**  The
 section holds `max_running`, because a task is the one loop source that can grow
 without bound and §9 has owed a cap on loops since before this section existed.
-Everything else a task's turn is made of — `system_prompt`, `max_steps` — comes
+Everything else a task's turn is made of — `system_prompt`, `max_iterations` — comes
 out of `agent:`, which gives that section two readers and §8's rule (*the section
 a key lives in is the plugin that reads it*) an exception.  It is the right one:
 those keys are not the agent *server's*, they are **the agent's**, and a task is
-the agent working.  A prompt or a step count that meant something different for a
+the agent working.  A prompt or a iteration count that meant something different for a
 task would be two agents wearing one name.
 
 **The name says what the thing is, and this system already had the other word.**
@@ -1769,7 +1770,8 @@ question — *where does one subagent's setting live?*
   So the copy is cut back to the last exchange that finished
   (`slife2.plugins.agent.server.settled_messages`), which keeps a tool round the
   model has already been told about and drops the one still in motion.  The
-  partial batch is in the rule because it is reachable: `_one` runs a step's calls
+  partial batch is in the rule because it is reachable: `_one` runs an
+  iteration's calls
   in order, so a turn parked on the second of two has answered the first.
 - **All three of a fork's omissions come off one flag.**  No restore (nothing is
   stored to restore from), no rebuild (no log to go back to, and a discriminator
@@ -2023,7 +2025,8 @@ can still continue one. (A subagent is that caller — see §9.)
 So a conversation is an object, and the surface is three tools:
 
 ```
-send_message(agent, subagent, prompt) → {text, usage, steps, stop_reason, model,
+send_message(agent, subagent, prompt) → {text, usage, iterations, stop_reason,
+model,
                                          refused}
 reset(agent, subagent)
 transcript(agent, subagent)           → {turns}   the conversation, for a screen
@@ -2069,12 +2072,13 @@ avoided:
 - **A per-conversation lock**, because two turns can now race over one list.
 - **An inbox**, which is that lock seen from the other side: a `send_message` for
   a busy loop *waits*, in arrival order. Nothing is dropped and nothing is
-  cancelled, and what it waits for is the running turn's next **step boundary** —
+  cancelled, and what it waits for is the running turn's next **iteration boundary** —
   v1's *cut-in*, ported. What it is handed at that boundary is a **harness tool
   pair**: the message becomes a call to `_check_new_input` and a result carrying
   the message's own words, written into the running turn's message list. It is
   deliberately not appended as a *user* message on arrival — the loop re-reads
-  the list at every step, so that would be read as the turn's own input, arriving
+  the list at every iteration, so that would be read as the turn's own input,
+  arriving
   silently, and in the middle of an unanswered tool exchange it is a 400 from
   several providers. The model reads the pair as what it is: something that
   arrived while it was working.
@@ -2083,7 +2087,8 @@ avoided:
   v1's senders were channels that could give up — its own words are "sender-side
   timeout+degrade is the backstop" — so a message folded into a running turn
   simply never got its own reply. Here every inbox entry has a caller parked on
-  the lock expecting `{text, usage, steps}`. So the absorbing turn *answers for
+  the lock expecting `{text, usage, iterations}`. So the absorbing turn *answers
+  for
   it*: `Pending.result` is set from that turn's result, and the waiter returns
   what the turn's own caller got, with `injected` true. A turn that produced no
   result — cancelled or failed — writes nothing, and the message then runs its
@@ -3030,29 +3035,29 @@ The server owns the conversation and the loop still does not, and that is not a
 contradiction worth smoothing over: **the state is the server's, the algorithm
 is the loop's.** `AgentLoop.run_turn` is handed a list it mutates in place, which
 is exactly what it did when the caller owned that list. The inbox is a lock in
-the server rather than a queue inside the loop, so nothing about the step
+the server rather than a queue inside the loop, so nothing about the iteration
 machinery below changed when the state moved in.
 
 ```
 append the user message
-for step in 1..max_steps:                     ← 0 = no cap: until the model stops
+for iteration in 1..max_iterations:               ← 0 = no cap: until the model stops
     Phase A: exhaust the model stream, forwarding deltas       ← no tool runs here
     if no tool calls: append the assistant message, done
     Phase B: run each call, and fit its result                 ← the fit can raise
     append the message and every one of its results at once    ← no await inside
 ```
 
-**The step cap is opt-in.** `max_steps: 0` — and an absent key, which the config
+**The iteration cap is opt-in.** `max_iterations: 0` — and an absent key, which the config
 reads as the same 0 — is no cap at all: the turn ends when the model stops
 asking for tools, and a turn that never stops is a turn the operator asked for
 by running an agent with nobody watching the bill. A number nobody wrote is a
 bound nobody chose, and inventing one is how a turn comes to be cut off at
 sixteen for no reason anybody can point at. Where a cap does exist it produces
-an ordinary result (`stop_reason: "max_steps"`), not an exception.
+an ordinary result (`stop_reason: "max_iterations"`), not an exception.
 
-**And a turn says which step it is on, on the screen.** Each tool panel carries
-v1's counter — `(3/30)` while the turn has a cap, a bare `(3)` while it does
-not, and nothing at all when the step is unknown — which is why
+**And a turn says which iteration it is on, on the screen.** Each tool panel
+carries v1's counter — `(3/30)` while the turn has a cap, a bare `(3)` while it
+does not, and nothing at all when the iteration is unknown — which is why
 `ToolCallStarted` carries both numbers: a closed model API answers in one round
 trip and a long turn is the only reason to care, so the panel is where somebody
 watching sees it advancing rather than a spinner that says nothing. A rebuild
@@ -3101,7 +3106,8 @@ Three load-bearing details:
   model, which can read it and correct itself. The error path is a feedback
   channel, not a failure mode.
 - **A batch is written at once, and only once it has all been answered.** The
-  assistant message carries *every* call of the step, and a provider rejects a
+  assistant message carries *every* call of the iteration, and a provider rejects
+  a
   history in which one of them is unanswered — so the message and its results
   are appended together, with no `await` between them. This was written the
   other way round first, on the argument that nothing in Phase B can raise; the
@@ -3111,7 +3117,7 @@ Three load-bearing details:
   stalled — and appending the message before the fitting left exactly the
   rejected history behind. Nothing repaired it afterwards: a failed turn keeps
   its messages, so that conversation failed every later turn until it was
-  rebuilt. Fitting against the list *before* the step's answer is also the
+  rebuilt. Fitting against the list *before* the iteration's answer is also the
   honest list to judge a result by, since it no longer holds a half-written
   batch. `sdd §12.5` is where this arrived from.
 - **The observer is one method on a tagged union**, not v1's eight-method
@@ -3560,7 +3566,8 @@ asked from inside it.
 **The model's list is the tools it has loaded, and the rest are on demand.** This
 is the change that a catalogue buys, and it is v1's mechanism restored with one
 difference that matters: because the list is re-read before every *model call*,
-a load takes effect one step later **inside the same turn** — v1 needed a turn
+a load takes effect one iteration later **inside the same turn** — v1 needed a
+turn
 boundary for that. `tool_search` is the way in and `func_tool_load` is the way
 through — and **what the way in takes has been narrowed twice**, which is what
 this paragraph is the record of.
@@ -4316,7 +4323,7 @@ deferred work would be waiting for something nobody is building.
   registry with no way back has no business handing out task ids). Where it would
   go: the task's turn wants what the agent server's turn already has — a queue
   and a harness tool the pair can name — so that a result arriving mid-turn
-  reaches that turn at its next step boundary. What the current answer costs: a
+  reaches that turn at its next iteration boundary. What the current answer costs: a
   tool that takes minutes cannot be started and forgotten inside a task, and a
   *nested* task (a task starting a task) is the same limitation seen from the
   other side — allowed today, bounded by `agent-task: max_running` rather than by
@@ -4657,7 +4664,7 @@ provider. *Failure goes:* the resolved path is reported in the provider's
 
 **A progress line that cannot be read is dropped, and a missing count is
 zero.** `events.decode` answers `None` for anything it does not recognise, and
-defaults every number it does parse (`int(payload.get("steps") or 0)`). The
+defaults every number it does parse (`int(payload.get("iterations") or 0)`). The
 stream is display only and one bad frame must not end a turn. *Gives up:* the
 frame, and the difference between "not measured" and "zero" in what the window
 draws. *Does not cover:* the terminal event, whose fields are the ones the

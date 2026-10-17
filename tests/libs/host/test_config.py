@@ -320,7 +320,7 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     Two settings fail visibly when that happens: a threshold of zero is the
     configuration the guard exists to refuse, and was silently replaced by the
     default instead; and `port: 0` is a server bound somewhere the launcher
-    will never look for it.  `max_steps: 0` used to fail too — it was read as
+    will never look for it.  `max_iterations: 0` used to fail too — it was read as
     sixteen — and is the one that changed sides: a written zero is now the
     config's "no cap", so this reader keeping it is what makes the setting mean
     what it says.
@@ -333,8 +333,8 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
     with pytest.raises(ConfigError, match="would evict every tool"):
         load(path)
 
-    path = write(tmp_path, "agent:\n  max_steps: 0\n")
-    assert load(path).agent.max_steps == 0, "a written zero is a written zero"
+    path = write(tmp_path, "agent:\n  max_iterations: 0\n")
+    assert load(path).agent.max_iterations == 0, "a written zero is a written zero"
 
     path = write(tmp_path, "servers:\n  context:\n    port: 0\n")
     with pytest.raises(ConfigError, match="is not a port"):
@@ -346,16 +346,18 @@ def test_no_cap_is_spelt_zero_or_not_at_all(tmp_path) -> None:
     does not have one: an absent key and a written `0` are one statement, and
     the loop is handed the same 0 either way.
 
-    A negative is the other side of that.  It is not a number of steps, and the
+    A negative is the other side of that.  It is not a number of iterations, and the
     one direction it could be read in — "no cap" — is the setting that never
     stops, so a config that missed a keystroke would get the most expensive of
     the three meanings rather than the one line every other bad value produces.
     """
-    assert load(write(tmp_path, "agent: {}\n")).agent.max_steps == 0
-    assert load(write(tmp_path, "agent:\n  max_steps: 0\n")).agent.max_steps == 0
+    assert load(write(tmp_path, "agent: {}\n")).agent.max_iterations == 0
+    assert (
+        load(write(tmp_path, "agent:\n  max_iterations: 0\n")).agent.max_iterations == 0
+    )
 
-    with pytest.raises(ConfigError, match="is not a step count"):
-        load(write(tmp_path, "agent:\n  max_steps: -1\n"))
+    with pytest.raises(ConfigError, match="is not an iteration count"):
+        load(write(tmp_path, "agent:\n  max_iterations: -1\n"))
 
 
 def test_a_server_path_that_is_not_a_path_is_refused(tmp_path) -> None:
@@ -405,14 +407,14 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     """**A typo has to read like every other typo.**
 
-    The numeric readers were a bare `int()`/`float()`, so `max_steps: many`
+    The numeric readers were a bare `int()`/`float()`, so `max_iterations: many`
     raised `ValueError` — which nothing above catches, since the whole load path
     reports `ConfigError` and the CLI's one handler is for that.  The user got a
     traceback out of the `slife2` console script instead of the one line naming
     the field.
     """
     for text, expected in [
-        ("agent:\n  max_steps: many\n", "agent.max_steps"),
+        ("agent:\n  max_iterations: many\n", "agent.max_iterations"),
         ("tool_load:\n  threshold: lots\n", "tool_load.threshold"),
         ("tool_result:\n  tokens: lots\n", "tool_result.tokens"),
         ("context:\n  ceiling: high\n", "context.ceiling"),
@@ -544,8 +546,8 @@ def test_the_defaults_are_one_object_while_there_is_no_file(
     assert load_cached() is load_cached()
 
     # And a file appearing is still picked up rather than cached past.
-    write(tmp_path, "agent:\n  max_steps: 7\n")
-    assert load_cached().agent.max_steps == 7
+    write(tmp_path, "agent:\n  max_iterations: 7\n")
+    assert load_cached().agent.max_iterations == 7
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:
@@ -682,8 +684,8 @@ def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
 
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
     """A file that sets one thing must not blank everything else."""
-    config = load(write(tmp_path, "agent:\n  max_steps: 5\n"))
-    assert config.agent.max_steps == 5
+    config = load(write(tmp_path, "agent:\n  max_iterations: 5\n"))
+    assert config.agent.max_iterations == 5
     assert config.providers  # the provider table survived
     assert config.agent.server.port == default_config().agent.server.port
 

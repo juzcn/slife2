@@ -48,7 +48,7 @@ def answering(text: str):
                 text=text,
                 usage=Usage(),
                 last_usage=Usage(),
-                steps=1,
+                iterations=1,
                 stop_reason="stop",
             )
         )

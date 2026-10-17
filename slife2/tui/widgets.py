@@ -30,8 +30,9 @@ height that is already out of date by the time it lands.
 **The agent's `name>` is painted only where there is text under it.**  A block
 is opened by whatever has something to put in it — the first delta, a resumed
 stream after a tool panel, the final answer — so a signature painted
-unconditionally leaves a bare `slife2>` row in the transcript for every step
-that has only reasoning to show.  slife v1 signs the message, not the widget.
+unconditionally leaves a bare `slife2>` row in the transcript for every
+iteration that has only reasoning to show.  slife v1 signs the message, not the
+widget.
 """
 
 from __future__ import annotations
@@ -694,7 +695,7 @@ class ChatView(VerticalScroll):
         is what stops the fallback this used to have — `_last_assistant`, the
         *previous* turn's block — from printing this turn's bill under the last
         answer on the screen: a turn that ended with nothing to say (a
-        `max_steps` stop) reported its own tokens beneath somebody else's words.
+        `max_iterations` stop) reported its own tokens beneath somebody else's words.
         :meth:`finish_assistant` places what was held.
         """
         self._pending_usage = tokens
@@ -708,14 +709,14 @@ class ChatView(VerticalScroll):
         call_id: str,
         name: str,
         arguments: dict | None = None,
-        step: int = 0,
-        max_steps: int = 0,
+        iteration: int = 0,
+        max_iterations: int = 0,
     ) -> None:
         # Closes the current text block but not the turn: text may resume after.
         #
-        # The block it closes was a step on the way somewhere rather than the
-        # answer, so its reasoning folds away — the final answer keeps its own
-        # open.  This is the only place that distinction is known.
+        # The block it closes was an iteration on the way somewhere rather than
+        # the answer, so its reasoning folds away — the final answer keeps its
+        # own open.  This is the only place that distinction is known.
         if self._streaming is not None:
             self._streaming.collapse_thinking()
         self._close_block()
@@ -723,8 +724,8 @@ class ChatView(VerticalScroll):
             call_id=call_id,
             name=name,
             arguments=arguments or {},
-            step=step,
-            max_steps=max_steps,
+            iteration=iteration,
+            max_iterations=max_iterations,
         )
         self._tools[call_id] = widget
         self.mount(widget)
@@ -822,13 +823,14 @@ class AssistantMessage(Static):
         self._agent = agent
         self._text = ""
         self._thinking = ""
-        #: Shown by default, folded away only for a step that is not the answer.
+        #: Shown by default, folded away only for an iteration that is not the
+        #: answer.
         #:
         #: Reasoning on the *final* answer is the interesting case — it is how
         #: you tell whether the model understood the question — so it is shown.
-        #: A step that ended in a tool call is machinery on the way somewhere,
-        #: and reads better as one line; `collapse_thinking` is what a tool call
-        #: does to the block it closes.
+        #: An iteration that ended in a tool call is machinery on the way
+        #: somewhere, and reads better as one line; `collapse_thinking` is what
+        #: a tool call does to the block it closes.
         self._thinking_open = True
         self._tokens = 0
         # Painted once at construction, so the block is there before the first
@@ -836,7 +838,7 @@ class AssistantMessage(Static):
         # "working", which is the only affordance a model that has not said
         # anything yet can offer.  The *signature* is not painted here — a block
         # is opened before anything is known about it, so signing at construction
-        # would leave a bare `jack>` row per step (see `_refresh`).
+        # would leave a bare `jack>` row per iteration (see `_refresh`).
         self._refresh()
 
     @property
@@ -857,7 +859,7 @@ class AssistantMessage(Static):
         self._refresh()
 
     def collapse_thinking(self) -> None:
-        """Fold the reasoning away, for a step that is not the answer."""
+        """Fold the reasoning away, for an iteration that is not the answer."""
         if self._thinking:
             self._thinking_open = False
             self._refresh()
@@ -920,9 +922,9 @@ class AssistantMessage(Static):
             # anything is known about it — at `begin_assistant`, and again after
             # each tool panel when reasoning or text resumes — so a signature
             # painted at construction leaves a bare `slife2>` row in the
-            # transcript for every step that has only reasoning to show: one per
-            # tool call, on a reasoning model.  slife v1 signs the message, not
-            # the widget.
+            # transcript for every iteration that has only reasoning to show:
+            # one per tool call, on a reasoning model.  slife v1 signs the
+            # message, not the widget.
             if self._agent:
                 line.append(f"{self._agent}> ", f"bold {PALETTE['amber-bold']}")
             line.append(self._text, PALETTE["text"])
@@ -957,18 +959,18 @@ class ToolCallWidget(VerticalScroll):
         call_id: str,
         name: str,
         arguments: dict,
-        step: int = 0,
-        max_steps: int = 0,
+        iteration: int = 0,
+        max_iterations: int = 0,
     ) -> None:
         super().__init__()
         self.call_id = call_id
         self.tool_name = name
         self.arguments = arguments
-        #: Which step of the turn asked for it (1-based) and the cap that turn
-        #: is running under, `0` for no cap — both from the event, and both 0
-        #: for a panel rebuilt from the turn log, which keeps no such column.
-        self._step = step
-        self._max_steps = max_steps
+        #: Which iteration of the turn asked for it (1-based) and the cap that
+        #: turn is running under, `0` for no cap — both from the event, and both
+        #: 0 for a panel rebuilt from the turn log, which keeps no such column.
+        self._iteration = iteration
+        self._max_iterations = max_iterations
         self._collapsed = True
         self._result = ""
         self._result_chars = 0
@@ -1037,17 +1039,17 @@ class ToolCallWidget(VerticalScroll):
             line.append(short, PALETTE["muted"])
         line.append("  ")
         line.append(word, colour)
-        if self._step > 0:
-            # Which step of the turn asked for this, in v1's two spellings: a
-            # bare `(3)` while `max_steps` is 0 — no cap, so there is no
-            # denominator to write — and `(3/30)` under one.  Either way a long
-            # turn is visibly advancing, which is the whole of what the counter
-            # is for; a panel with no step to report (a rebuilt one) draws
-            # nothing rather than `(0)`.
+        if self._iteration > 0:
+            # Which iteration of the turn asked for this, in v1's two
+            # spellings: a bare `(3)` while `max_iterations` is 0 — no cap, so
+            # there is no denominator to write — and `(3/30)` under one.  Either
+            # way a long turn is visibly advancing, which is the whole of what
+            # the counter is for; a panel with no iteration to report (a rebuilt
+            # one) draws nothing rather than `(0)`.
             counter = (
-                f"({self._step}/{self._max_steps})"
-                if self._max_steps > 0
-                else f"({self._step})"
+                f"({self._iteration}/{self._max_iterations})"
+                if self._max_iterations > 0
+                else f"({self._iteration})"
             )
             line.append(f" {counter}", PALETTE["dimmest"])
         if self._elapsed_ms:
@@ -1707,7 +1709,6 @@ class StatusBar(Static):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
-        steps: int = 0,
         connected: bool = True,
     ) -> None:
         parts: list[str] = []
@@ -1765,12 +1766,6 @@ class StatusBar(Static):
             parts.append(
                 f"[{PALETTE['dim']}]{GLYPHS['up']} {t('tokens', n=context_tokens)}[/]"
             )
-        if steps:
-            # The noun inflects in English and not in Chinese, so which of the
-            # two spellings is wanted is decided here — the count is here
-            # (`slife2.tui.i18n`).
-            key = "status_step" if steps == 1 else "status_steps"
-            parts.append(f"[{PALETTE['dim']}]{t(key, n=steps)}[/]")
         # Both spellings of the cancel, because they are not interchangeable:
         # the copy actions get first refusal on ctrl+c, and escape is the one
         # that stops the turn and cannot do anything else — nothing else claims
