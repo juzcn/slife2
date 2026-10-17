@@ -678,7 +678,10 @@ distinguish it, each of them about *status* rather than about ability:
   `host:port` in the file is a second thing to keep in step.
   It is the same protocol and the same four tools throughout, presented under
   `subagent_*` names — **a technical fact and not a meaning**: nothing a person
-  or a model reads on the local network says `a2a` anywhere.
+  or a model reads on the local network says `a2a` anywhere, and where the two
+  networks' members are different things the *tool* is named for what it lists:
+  `a2a_list_agents` against **`subagent_list`**, the one name that is not the
+  shared verb under the other prefix.
   - **The local network is one mesh per agent**, and that is what its namespace
     says: `{org}/{unit}` *is* a mesh, so the unit is the agent's own name and the
     org is this network's word (`subagent`). Two agents may each have a

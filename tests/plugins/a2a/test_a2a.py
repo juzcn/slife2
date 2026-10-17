@@ -190,18 +190,28 @@ def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
     """A vocabulary each, and the one word that differs on purpose.
 
     The remote network's envelope says `PeerAgent` and the local one's says
-    `SubagentPeer`: both keep `Peer`, which is the word that cannot be read as
-    the reader — the window's `Subagent(name)>` is the other half of that pair,
-    and it *is* a role word, rightly, because the window belongs to the agent
-    that made the subagent.
+    `Subagent`: one word each, and the window's `Subagent(name)>` is the same
+    word as the local envelope's, because the window belongs to the agent that
+    made the subagent and the envelope names the network the message came over.
+
+    **The roster is the one tool whose *name* is not just the prefix.**  Three
+    verbs are one word under two prefixes; what the fourth lists differs in kind
+    — agents out there, subagents of yours — so `list_agents` names the one thing
+    the local network's members are not, and `roster_tool` is what asks each
+    network for its own.  The remote network's row says nothing about it, because
+    the shared verb is what the field defaults to: v1's four names are unchanged.
     """
     assert channel_for(LOCAL, PEER) == "subagent:jill"
-    assert (
-        marker(LOCAL, PEER)
-        == '[SubagentPeer:{"from": "jill", "type": "task_request"}] '
-    )
+    assert marker(LOCAL, PEER) == '[Subagent:{"from": "jill", "type": "task_request"}] '
     assert LOCAL.tool("send_message") == "subagent_send_message"
     assert REMOTE.tool("send_message") == "a2a_send_message"
+    assert LOCAL.roster_tool == "subagent_list"
+    assert REMOTE.roster_tool == "a2a_list_agents"
+    assert REMOTE.roster_tool == REMOTE.tool(LIST_AGENTS)
+    # And the word the remote network lists under is not one the local network
+    # answers to: a probe asking for it there would be looking for a tool that
+    # network does not serve.
+    assert LOCAL.roster_tool != REMOTE.tool(LIST_AGENTS)
 
 
 # ── the scrubber, on values that come off the wire ──────────────────────────
@@ -2100,9 +2110,9 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     A subagent reads this description in the very turn a message is run for it —
     its answer to a task is a call to this tool — so "one of your subagents"
     would be false for half its readers: a subagent has none, and what it
-    addresses is its maker and its siblings.  Whose *network* it is is true for
-    every member of it, and the network is named `subagent`, which is this
-    project's word for it rather than the gloss the design talks about it with.
+    addresses is its maker and its siblings.  What is said is *member*, and the
+    network is named `subagent`, which is this project's word for it rather than
+    the gloss the design talks about it with.
     """
     tools = await build_server(
         default_config(), net=LOCAL, connecting=False
@@ -2114,19 +2124,34 @@ async def test_the_local_instance_serves_the_local_network() -> None:
         JOIN,
         LOCAL.tool(BROADCAST),
         LOCAL.tool(CANCEL_TASK),
-        LOCAL.tool(LIST_AGENTS),
+        LOCAL.roster_tool,
         LOCAL.tool(SEND_MESSAGE),
     ]
     assert A2A_SEND_MESSAGE not in by_name, "and not the remote network's names"
 
     send = by_name[LOCAL.tool(SEND_MESSAGE)]
     assert send.description.startswith(
-        "Send a message to another agent on your subagent network."
+        "Send a message to another member of your subagent network —"
     )
+    # The addressee is named for both readers, because both of them send: the
+    # maker's subagents, and — for a subagent — the agent that made it.
+    assert "your agent if you are one of them" in send.description
     assert LOCAL.marker in send.description, "its own envelope, in its own text"
     assert REMOTE.marker not in send.description
     assert "on the A2A mesh" not in send.description, "not the remote network's words"
+    assert "agent on your subagent" not in send.description, (
+        "nor the wrong word for them"
+    )
     assert LOCAL.tool(SEND_MESSAGE) in by_name[LOCAL.tool(BROADCAST)].description
+    # The other two say *member* for the same reason, and one of them is the
+    # question a model asks before it has a name to use at all.
+    roster = by_name[LOCAL.roster_tool]
+    assert roster.description.startswith("List the members of your subagent network")
+    assert "the agents on your" not in roster.description
+    assert (
+        "every member of your subagent network"
+        in by_name[LOCAL.tool(BROADCAST)].description
+    )
 
 
 @pytest.mark.asyncio
@@ -3012,7 +3037,7 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
 ) -> None:
     """**The roster is the membership, not the cache.**
 
-    `subagent_list_agents` answered with the broker's retained cards, so a
+    `subagent_list` answered with the broker's retained cards, so a
     subagent that had been made and not yet messaged was simply absent from the
     list of "your subagents" — the one question the tool is for.  A card is a
     *presence*, and the absence of one here means "nothing is listening yet",
@@ -3025,7 +3050,7 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT)
+                LOCAL.roster_tool, {}, meta=client_meta(AGENT)
             )
 
     data = answer.data
@@ -3102,7 +3127,7 @@ async def test_a_members_own_roster_lists_it_once(tmp_path: Path) -> None:
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT, "tester")
+                LOCAL.roster_tool, {}, meta=client_meta(AGENT, "tester")
             )
 
     names = [card["agent_name"] for card in answer.data["agents"]]
@@ -3153,9 +3178,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
                 {"agent": "tester", "message": "hello"},
                 meta=client_meta(AGENT),
             )
-        answer = await client.call_tool(
-            LOCAL.tool(LIST_AGENTS), {}, meta=client_meta(AGENT)
-        )
+        answer = await client.call_tool(LOCAL.roster_tool, {}, meta=client_meta(AGENT))
 
     said = str(refused.value)
     assert "`subagent:` section" in said, "the refusal names the wrong section"
@@ -3176,7 +3199,7 @@ async def test_a_reply_on_the_subagent_network_carries_no_remote_word(
     sentence has two possible readers (a maker reading about its subagent, a
     subagent reading about its maker or a sibling) and no relationship word is
     true for both, so the line names the far end by name and lets
-    `[SubagentPeer:…]` and the `Subagent(<name>)> ` bubble say what it is.
+    `[Subagent:…]` and the `Subagent(<name>)> ` bubble say what it is.
     """
     session = local_member(tmp_path, subagent="")
     session.mesh.on_task_completion(TASK, "done", COMPLETED, "tester", "task")

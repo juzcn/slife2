@@ -119,14 +119,13 @@ def test_a_background_calls_result_wears_the_tool_that_produced_it() -> None:
 
 
 def test_one_of_the_agents_own_subagents_is_drawn_as_a_subagent() -> None:
-    """`Subagent(name)> `, and the word is right here for the reason it is wrong
-    on the envelope.
+    """`Subagent(name)> ` — the word the window and the envelope both use.
 
     A bubble is read by the agent that made the subagent, so the relationship is
-    what a person needs; the envelope beside the same message says
-    `[SubagentPeer:` because it is read by whoever the turn runs for, and that can
-    be a subagent rather than its maker (`slife2.plugins.a2a.server.describe_tool`
-    is the other half of this pair).
+    what a person needs; and the envelope beside the same message says
+    `[Subagent:` because it names the network the message came over, which is the
+    same word for the same reason (`slife2.plugins.a2a.server.describe_tool` is
+    the other half of this pair).
     """
     from slife2.libs.host.config import LOCAL
 

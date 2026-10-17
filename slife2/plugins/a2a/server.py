@@ -138,6 +138,13 @@ CONFIG_KEY = REMOTE.key
 #: `task_response` is not a fifth: it is `a2a_send_message` with `message_type`
 #: said, because on the wire it *is* the same operation and a second name for it
 #: would be a second thing for a model to learn.
+#:
+#: **These are the remote network's**, and the roster is the one name that is not
+#: a constant here: this module serves both networks, so what a tool is
+#: *registered* under always comes from the network being served (`net.tool`,
+#: `net.roster_tool`), and the local one answers to `subagent_list`.  They are
+#: spelled out because the tests and a reader arriving here want the remote
+#: network's four names in one place.
 A2A_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
 A2A_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
 A2A_LIST_AGENTS = REMOTE.tool(LIST_AGENTS)
@@ -333,7 +340,7 @@ def peer_phrase(net: Net, peer: str) -> str:
     a sibling — and no relationship word is true for both: "your subagent" is
     false for a subagent reading about its maker, and so is plain `Subagent`.
     What the far end *is* is already on the line, in the word this project uses
-    for it: the `[SubagentPeer:…]` envelope, and the `Subagent(<name>)> ` bubble
+    for it: the `[Subagent:…]` envelope, and the `Subagent(<name>)> ` bubble
     the window draws from the channel.
     """
     return f"Peer **{peer}**" if net is REMOTE else f"**{peer}**"
@@ -810,7 +817,7 @@ async def _drain(
                     # **A note has no second road, and a subagent has no window.**
                     # Presence is what these lines are — a peer arriving, a peer
                     # going — and the roster a subagent can ask for is
-                    # `subagent_list_agents`, so drawing one for it would be a
+                    # `subagent_list`, so drawing one for it would be a
                     # turn spent on a fact nobody here has to act on; and it
                     # cannot be drawn in its maker's window either, which is
                     # where it would read as the harness telling somebody their
@@ -1572,7 +1579,7 @@ def build_server(
         return {"peer": agent, "task_id": task_id, "status": status}
 
     @mcp.tool(
-        name=net.tool(LIST_AGENTS),
+        name=net.roster_tool,
         description=describe_tool(net, LIST_AGENTS),
         meta=FOR_THE_MODEL,
     )
@@ -1706,6 +1713,11 @@ def _ensure_windows_selector_loop() -> None:
 #: thing that must differ between the networks is the *vocabulary* a model is
 #: taught, which is what the holes are: who it is talking to, and what an
 #: envelope looks like.
+#:
+#: **Keyed by the remote network's verb for the roster**, while the *name* the
+#: local instance serves it under is the local network's (`net.roster_tool`):
+#: the two networks are different things that happen to share an implementation,
+#: and the holes below are where each of them says which thing it is.
 _TOOL_TEXTS: dict[str, str] = {
     SEND_MESSAGE: (
         "Send a message to {them}.\n"
@@ -1767,13 +1779,14 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         ),
     },
     LOCAL.key: {
-        # **"your subagent network" and not "your subagents"**, because a
-        # subagent reads these too: it is a member of the same network, it
-        # addresses its maker and its siblings on it, and its own answer to a
-        # task is a call to this tool — so a description that said whose
-        # *subagents* were being addressed would be false in exactly the turn a
-        # subagent is most likely to be reading it.  What is said is whose
-        # *network* it is, which is true for every member of it.
+        # **The members are an agent and the subagents it made, and every one of
+        # them may address every other** — a message, a task or a broadcast goes
+        # any way round the group.  So no word here may name a relationship: "your
+        # subagents" is false for the subagent doing the addressing, and "your
+        # agent" is false for the maker — which is the same problem, and the same
+        # answer, as `peer_phrase`'s (`**jill**` and no `Peer`).  What every
+        # member can read is *member*, and each hole below says what a member is
+        # in the words of whoever is reading it.
         #
         # **And the network is named `subagent`, which is this project's word for
         # it** — the section, the tool prefix, the channel and the envelope are
@@ -1781,15 +1794,18 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         # the network itself (and the value `unit:` happens to carry); it is not
         # what anything here is called, and a model taught it would be reading a
         # word the rest of its tools do not use.
-        "them": "another agent on your subagent network",
-        "everyone": "every agent on your subagent network",
+        "them": (
+            "another member of your subagent network —\n"
+            "one of the subagents in it, or your agent if you are one of them"
+        ),
+        "everyone": "every member of your subagent network",
         "roster": (
-            "the agents on your subagent network — you first, then each by name"
+            "the members of your subagent network —\nyou first, then each by name"
         ),
         "name": "the subagent network",
         "section": "`subagent:`",
         "offline": (
-            "A subagent is listed whether or not it is awake: `offline` means\n"
+            "A member is listed whether or not it is awake: `offline` means\n"
             "nothing is listening for it at this moment, and a message to it\n"
             "wakes it."
         ),

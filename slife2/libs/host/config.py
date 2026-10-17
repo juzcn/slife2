@@ -177,6 +177,20 @@ DEFAULT_AGENT = "slife2"
 #: only to override this.
 SUBAGENT_ORG = "subagent"
 
+#: The four tools a network offers the model, by verb.  **Here rather than in the
+#: plugin that serves them**, because one of them is also what the launcher
+#: probes with (`expected_tool`) and a probe looking for a name the server does
+#: not serve is a server that never starts.  `Net.tool` is the other half:
+#: `a2a_send_message` and `subagent_send_message` are one verb and two networks.
+#:
+#: Above the two records rather than after them, because one of them is read
+#: while they are built: `Net.roster` defaults to `LIST_AGENTS`, which is how the
+#: remote network says nothing about a name that is already v1's.
+SEND_MESSAGE = "send_message"
+CANCEL_TASK = "cancel_task"
+LIST_AGENTS = "list_agents"
+BROADCAST = "broadcast"
+
 
 @dataclass(frozen=True)
 class Net:
@@ -238,6 +252,14 @@ class Net:
     #: subagent network, where the mesh is the agent's (`namespace`, which is
     #: where the rule and its argument are).
     shared_namespace: bool = True
+    #: **What this network calls its list tool**, when that is not the word the
+    #: other three verbs share.  The default *is* that word, so the remote
+    #: network is v1's four names unchanged — and the local one says what it
+    #: lists (`subagent_list`), because the members of that roster are subagents
+    #: and `list_agents` names the one thing they are not.  Read through
+    #: `roster_tool`; a defaulted field because the remote network's row must not
+    #: have to say what is already true of it.
+    roster: str = LIST_AGENTS
 
     @property
     def server_name(self) -> str:
@@ -252,8 +274,21 @@ class Net:
         """
         return plugin(self.key).name
 
+    @property
+    def roster_tool(self) -> str:
+        """The tool that lists this network's members, named — `a2a_list_agents`
+        on one side and `subagent_list` on the other (`Net.roster`).
+
+        **The one name `tool()` cannot answer**, because it is the one the two
+        networks do not share: the other three verbs are one word under two
+        prefixes, and what this tool lists differs in kind.  Everywhere a roster
+        is *registered* or *probed for* — the plugin's `name=`, `PLUGINS`'
+        `probe` — this is what is asked, so the name is composed in one place.
+        """
+        return f"{self.prefix}{self.roster}"
+
     def tool(self, verb: str) -> str:
-        """One of this network's tools, named: `tool("list_agents")`."""
+        """One of this network's tools, named: `tool("send_message")`."""
         return f"{self.prefix}{verb}"
 
     def namespace(self, settings: A2ASettings, agent: str) -> tuple[str, str]:
@@ -307,22 +342,27 @@ REMOTE = Net(
 #: reason its two segments are not the file's: the unit is the agent's name, and
 #: the org is `SUBAGENT_ORG`.
 #:
-#: **Its envelope says `SubagentPeer`, and the window says `Subagent(name)>`** —
-#: two words because they have two readers, and only one of them can be the
-#: sender's role.  The window's line is read by the agent that made the subagent,
-#: so naming the relationship is right there; the envelope is read by whoever the
-#: turn runs for, and on this network that is a subagent as often as its maker —
-#: where `Subagent` would name the *receiver*.  `Peer` is the word that cannot be
-#: read as the reader, which is why the remote envelope is `[PeerAgent:` and this
-#: one is `[SubagentPeer:`: the pair names the two networks, and neither can be
-#: mistaken for the agent reading it (`slife2.plugins.a2a.server`'s marker).
+#: **Its envelope and its window say the same word, `Subagent`** — `[Subagent:`
+#: and `Subagent(name)> ` — and the pairing with the remote network's
+#: `[PeerAgent:` is what names the two: one message and one family of messages
+#: are told apart by the first word inside the bracket, which is read at a glance
+#: by a person and by the screen that takes the marker off before drawing.  What
+#: the word names is the *network* the message came over, like every other marker
+#: here (`[Wechat:`, `[AsyncTaskResult:`); who sent it is the `from` inside.
+#:
+#: **And its list tool is `subagent_list`**, which is the one name here that is
+#: not the shared verb under this prefix (`Net.roster`): what that roster holds
+#: are subagents, so `list_agents` would name the one thing they are not — and
+#: every caller of it is one, since a member asks for the same roster its maker
+#: does.
 LOCAL = Net(
     key="subagent",
     settings=("subagent", "network"),
     prefix="subagent_",
     channel="subagent",
-    marker="[SubagentPeer:",
+    marker="[Subagent:",
     bubble="Subagent",
+    roster="list",
     # Inside the container rather than beside the remote network's file, and that
     # is the network's own statement about itself: `subagents/` holds everything
     # this network has — the maker's own ledger, and one directory per subagent
@@ -331,16 +371,6 @@ LOCAL = Net(
     # One mesh per agent: see `Net.namespace`.
     shared_namespace=False,
 )
-
-#: The four tools a network offers the model, by verb.  **Here rather than in the
-#: plugin that serves them**, because one of them is also what the launcher
-#: probes with (`expected_tool`) and a probe looking for a name the server does
-#: not serve is a server that never starts.  `Net.tool` is the other half:
-#: `a2a_send_message` and `subagent_send_message` are one verb and two networks.
-SEND_MESSAGE = "send_message"
-CANCEL_TASK = "cancel_task"
-LIST_AGENTS = "list_agents"
-BROADCAST = "broadcast"
 
 #: The remote network's section key, which is also its key in `servers:`.
 A2A_KEY = REMOTE.key
@@ -664,7 +694,7 @@ PLUGINS: tuple[Plugin, ...] = (
         key=REMOTE.key,
         module="slife2.plugins.a2a.server",
         name="slife2-a2a",
-        probe=REMOTE.tool(LIST_AGENTS),
+        probe=REMOTE.roster_tool,
         port=8040,
     ),
     # The **local** network: the same module, one port over, and the other half
@@ -683,7 +713,7 @@ PLUGINS: tuple[Plugin, ...] = (
         key=LOCAL.key,
         module="slife2.plugins.a2a.local_server",
         name="slife2-subagent",
-        probe=LOCAL.tool(LIST_AGENTS),
+        probe=LOCAL.roster_tool,
         port=8041,
     ),
 )

@@ -83,7 +83,7 @@ MARKERS: tuple[str, ...] = (
     A2A_MARKER,
     # **The local network's, which is a second envelope and not a second name
     # for the remote one.**  This list held the four the plugins export and
-    # missed the one the *config* owns (`LOCAL.marker`, `[SubagentPeer:`) — so a
+    # missed the one the *config* owns (`LOCAL.marker`, `[Subagent:`) — so a
     # subagent's handed-over answer was drawn with its raw envelope in front of
     # it, which is the exact failure the imports above exist to prevent:
     # `channel_prefix` already knows this channel and gives it `Subagent(jill)>`.
@@ -197,12 +197,12 @@ def channel_prefix(channel: str) -> str:
         # (`slife2.plugins.a2a.server.MARKER_PREFIX`).
         return f"PeerAgent({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{LOCAL.channel}:"):
-        # One of this agent's own subagents, and **the one place the word is a
-        # role rather than the envelope's**.  A bubble is read by the agent that
-        # made the subagent, so `Subagent(name)` says exactly what a person needs
-        # to know; the *envelope* on the same message says `[SubagentPeer:` for
-        # the opposite reason — it is read by whoever the turn runs for, and that
-        # can be a subagent rather than its maker (`slife2.libs.host.config.LOCAL`).
+        # One of this agent's own subagents, and **the word is the network's own
+        # on both sides**: the bubble says `Subagent(name)` because the window
+        # belongs to the agent that made the subagent, and the envelope says
+        # `[Subagent:` for the reason every marker here says what it says — it
+        # names the network the message came over, and nothing a subagent's turn
+        # reads names the protocol underneath it (`slife2.libs.host.config.LOCAL`).
         return f"{LOCAL.bubble}({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be

@@ -1715,7 +1715,7 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   section is `subagent:`, the server answers as `slife2-subagent`, the four tools
   are `subagent_*`, the channel is `subagent:<name>` — and the one word that
   differs between the two envelopes is the one a reader could get wrong
-  (`[PeerAgent:` against `[SubagentPeer:`; the window says `Subagent(name)>`
+  (`[PeerAgent:` against `[Subagent:`, and the window says `Subagent(name)>`
   either way, because there the reader *is* the maker). Its unit is the agent's
   own name for the same reason the names are separate: two makers may each name a
   `researcher`, and one namespace would make those two one MQTT identity. What that buys over one process with two namespaces: a swarm's several
