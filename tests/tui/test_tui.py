@@ -2737,6 +2737,53 @@ async def test_a_cut_in_is_drawn_inside_the_running_turn_and_answered_once() -> 
         assert "beta" not in status(app), "a folded message is not still queued"
 
 
+async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
+    """**Another channel's message is a cut-in like a typed one.**
+
+    The window's own input and a channel hand-over take the same `_submit` and
+    the same receipt, so the cut-in rule has one implementation.  This is the
+    half the typed-prompt test cannot prove: its channel is `tui`, and the
+    receipt and bubble of a hand-over are the ones that have to reach the
+    transcript.
+    """
+    started = asyncio.Event()
+    cut_in = asyncio.Event()
+
+    async def fold_handover(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
+        if prompt == "alpha":
+            started.set()
+            await cut_in.wait()
+            on_event(
+                MessageCutIn(text="beta", channel="subagent:gamma", receipt="2")
+            )
+            on_event(TextDelta("answer to both"))
+            return TurnReply("answer to both")
+        cut_in.set()
+        return TurnReply("answer to both", injected=True)
+
+    client = FakeAgentClient(answering("unused"))
+    client.run_turn = fold_handover  # type: ignore[method-assign]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "alpha")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        app.deliver("beta", "subagent:gamma")
+        await settle(pilot, app)
+
+        text = shown(app)
+        assert "Subagent(gamma)> beta" in text
+        assert text.index("You> alpha") < text.index("Subagent(gamma)> beta")
+        assert text.index("Subagent(gamma)> beta") < text.index("answer to both")
+        assert text.count("answer to both") == 1, "one turn answered both messages"
+        assert "beta" not in status(app), "a folded message is not still queued"
+
+
 async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
     """Ctrl+C stops one turn.  The messages behind it are still wanted."""
     started = asyncio.Event()
