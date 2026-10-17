@@ -27,7 +27,7 @@ from slife2.clients.gateway import (
     proxied_name,
     sanitise,
 )
-from slife2.libs.host.config import ToolServerSettings
+from slife2.libs.host.config import ToolServerSettings, defer_secret
 
 pytestmark = pytest.mark.unit
 
@@ -517,6 +517,36 @@ def test_an_entry_with_no_cwd_of_its_own_gets_the_one_it_was_given() -> None:
         ToolServerSettings(name="x", command="x", cwd="/somewhere"), cwd="/data"
     )
     assert own["mcpServers"]["x"]["cwd"] == "/somewhere"
+
+
+def test_a_reference_becomes_a_value_only_when_the_entry_is_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The config keeps `${VAR}`; the connection is where it is resolved.
+
+    `defer_secret` is what the loader writes into these mappings, and resolving
+    it here is the whole point: every server process loads the config, and only
+    the one that dials this upstream should pay the lookup.
+    """
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
+
+    stdio = mcp_config(
+        ToolServerSettings(
+            name="one", command="npx", env={"K": defer_secret("${SLIFE2_TEST_KEY}")}
+        ),
+        cwd="/data",
+    )
+    assert stdio["mcpServers"]["one"]["env"] == {"K": "resolved"}
+
+    http = mcp_config(
+        ToolServerSettings(
+            name="two",
+            url="https://x.test/mcp",
+            headers={"Authorization": defer_secret("Bearer ${SLIFE2_TEST_KEY}")},
+        ),
+        cwd="/data",
+    )
+    assert http["mcpServers"]["two"]["headers"] == {"Authorization": "Bearer resolved"}
 
 
 def test_the_gateway_holds_no_catalogue_and_no_database() -> None:

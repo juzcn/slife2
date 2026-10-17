@@ -159,8 +159,9 @@ def require(home: Path) -> int:
         "localhost.run": LocalhostRunTunnel.default_binary,
         "cloudflare": CloudflareQuickTunnel.default_binary,
     }
-    for name, options in config.file_tunnel.providers.items():
-        binary = str((options or {}).get("binary") or tunnel_binaries.get(name, ""))
+    for name in config.file_tunnel.providers:
+        options = config.file_tunnel.options_for(name)
+        binary = str(options.get("binary") or tunnel_binaries.get(name, ""))
         if binary:
             _add(needed, binary, f"file-tunnel.providers.{name}")
 

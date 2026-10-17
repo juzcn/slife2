@@ -94,7 +94,11 @@ Resolution never raises.  A missing secret degrades to its literal form
 (``"${DEEPSEEK_API_KEY}"``), which fails loudly at the API call where it is a
 readable error, rather than at startup where it is not.  It is also *lazy*: the
 provider keeps the raw reference and only touches credstore when `api_key` is
-read, so the TUI process never opens the OS keyring.
+read, so the TUI process never opens the OS keyring.  A tool server's `env:`
+and `headers:` and a tunnel provider's options are lazy the same way — a
+``${VAR}`` is kept as written and resolved where the child is started — because
+every server process loads this config, and a lookup at load would be paid once
+per process for a credential only one of them uses.
 """
 
 from __future__ import annotations
@@ -875,6 +879,57 @@ def resolve_secret(value: object) -> str:
     return _ENV_PATTERN.sub(_replace, value)
 
 
+class _Reference(str):
+    """A ``${VAR}`` value kept as it was written until something uses it.
+
+    A plain `str` subclass, so the settings classes that hold these stay
+    ordinary mappings and a reader that prints one shows the reference rather
+    than a secret.  Only :func:`resolve_deferred` turns one into a value, and
+    only where the value is about to be handed to a process — which is the
+    point: `load()` runs in every server of the stack, and resolving there
+    would make each of them pay a credential-store lookup for a key none of
+    them may use.
+    """
+
+
+def defer_secret(value: object) -> str:
+    """Resolve *value* now unless it is a ``${VAR}`` reference.
+
+    **A reference belongs to the process that consumes it**, not to the one that
+    read the file, so it is kept for :func:`resolve_deferred`.  A ``keyring:``
+    URI is *not* deferred: it names one credential that either exists or does
+    not, and the `ConfigError` for one that does not is an answer the load owes
+    the operator, not the first connection.
+    """
+    if not isinstance(value, str):
+        return str(value)
+
+    try:
+        from credstore import is_keyring_uri
+    except ImportError:
+        pass
+    else:
+        if is_keyring_uri(value):
+            return resolve_secret(value)
+
+    if _ENV_PATTERN.search(value):
+        return _Reference(value)
+    return resolve_secret(value)
+
+
+def resolve_deferred(value: object) -> str:
+    """What a reference kept by :func:`defer_secret` stands for.
+
+    Anything that was resolved eagerly (a literal, a ``keyring:`` URI) is
+    returned unchanged rather than run through :func:`resolve_secret` a second
+    time: a stored secret is allowed to contain the characters a reference is
+    spelled with, and resolving it twice would read it as one.
+    """
+    if isinstance(value, _Reference):
+        return resolve_secret(str(value))
+    return str(value)
+
+
 def unresolved_reference(value: object) -> str:
     """The reference a secret value **still is**, or `""` when it resolved.
 
@@ -1263,9 +1318,11 @@ class ToolServerSettings:
     resolved by a precedence rule nobody would remember.
 
     `env` and `headers` are where a secret lives, and both go through
-    :func:`resolve_secret`, so `${VAR}` resolves through the same chain as a
-    provider key.  Nothing else here is secret: a `command` is a program name
-    and an `args` list is on the command line of a process anyone can inspect.
+    :func:`defer_secret`: a ``keyring:`` URI resolves at load, while a
+    ``${VAR}`` is kept as written until :meth:`resolved_env` or
+    :meth:`resolved_headers` is called where the connection is made.  Nothing
+    else here is secret: a `command` is a program name and an `args` list is on
+    the command line of a process anyone can inspect.
 
     Not frozen-by-accident: this is read-only configuration, and the hub keeps
     its *state* — whether it is connected, what it last listed — in its own
@@ -1300,13 +1357,11 @@ class ToolServerSettings:
     command: str = ""
     args: tuple[str, ...] = ()
     #:
-    #: `repr=False` on this and `headers`, and it is the one place in this
-    #: module where a resolved secret is *held* rather than referenced: a
-    #: `ProviderSettings` keeps `api_key_ref` and resolves on access, while a
-    #: tool server's environment has to be materialised to be handed to a child
-    #: process.  Everything that prints a config — a log line, a traceback, a
-    #: REPL — goes through the generated `__repr__`, so this is what keeps a
-    #: live key out of all three.
+    #: `repr=False` on this and `headers`, because both can hold a secret that
+    #: was resolved eagerly (a ``keyring:`` URI); a ``${VAR}`` stays the
+    #: reference it was written as.  Everything that prints a config — a log
+    #: line, a traceback, a REPL — goes through the generated `__repr__`, so
+    #: this is what keeps a live key out of all three.
     env: dict[str, str] = field(default_factory=dict, repr=False)
     #: http: the endpoint, either transport.  A URL ending in `/sse` is the
     #: older SSE transport; anything else is Streamable HTTP.
@@ -1338,6 +1393,19 @@ class ToolServerSettings:
     def transport(self) -> str:
         """`"http"` or `"stdio"` — read off which field is set."""
         return "http" if self.url else "stdio"
+
+    def resolved_env(self) -> dict[str, str]:
+        """The environment to hand the child, ``${VAR}`` resolved now.
+
+        Called where the connection is made (`slife2.clients.gateway.mcp_config`),
+        never at load: every server in the stack loads this config, and only
+        the process that starts this child needs its environment.
+        """
+        return {key: resolve_deferred(value) for key, value in self.env.items()}
+
+    def resolved_headers(self) -> dict[str, str]:
+        """The headers to send, resolved for :meth:`resolved_env`'s reason."""
+        return {key: resolve_deferred(value) for key, value in self.headers.items()}
 
 
 #: How many function tools the model's list may hold before the least recently
@@ -1723,18 +1791,25 @@ class FileTunnelSettings:
     #: is the other end of this fact and `tests/test_config.py` pins the two
     #: together.
     active: str = "ngrok"
-    #: provider name -> its own options, resolved but otherwise untouched.
+    #: provider name -> its own options, kept as written; `options_for`
+    #: resolves the ``${VAR}`` references when a tunnel is about to start.
     providers: dict[str, dict] = field(default_factory=dict)
 
     def options_for(self, name: str) -> dict:
-        """*name*'s options — ``{}`` when it has no entry.
+        """*name*'s options, resolved — ``{}`` when it has no entry.
 
         Empty rather than an error, because every provider has to work from
         its own defaults: that is what makes ``ngrok: {}`` a complete entry,
         and an `active:` naming a provider nobody configured a working one.
+
+        **Resolution happens here** rather than in `_file_tunnel` so that the
+        credential-store lookups are paid by the process starting a tunnel, not
+        by every server process that loads the config (see `defer_secret`).
         """
         found = self.providers.get(name)
-        return dict(found) if isinstance(found, dict) else {}
+        if not isinstance(found, dict):
+            return {}
+        return {key: resolve_deferred(value) for key, value in found.items()}
 
 
 @dataclass(frozen=True)
@@ -2685,12 +2760,14 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
                 f"file-tunnel.providers.{name}: expected a mapping of that "
                 f"provider's own options (`{name}: {{}}` is a complete entry)"
             )
-        # Resolved but otherwise untouched: `${VAR}` here is a token or a
-        # binary path, and the provider that understands the option is the one
-        # that should see its value.  An unresolved reference is left verbatim
-        # by `resolve_secret` and reported by that provider.
+        # Kept as written and resolved by `options_for`, when the provider is
+        # about to be started: `${VAR}` here is a token or a binary path, and
+        # the process that understands the option is the one that should pay
+        # its lookup — not every server that loads this file.  An unresolved
+        # reference is left verbatim by `resolve_secret` and reported by that
+        # provider.
         providers[str(name)] = {
-            str(key): resolve_secret(value) for key, value in spec.items()
+            str(key): defer_secret(value) for key, value in spec.items()
         }
 
     active = str(section.get("active") or DEFAULT_PROVIDER).strip()
@@ -2989,9 +3066,9 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
         description=str(raw.get("description") or ""),
         command=command,
         args=_string_list(raw.get("args"), f"mcp.{name}.args"),
-        env=_secrets(raw.get("env"), f"mcp.{name}.env"),
+        env=_deferred_secrets(raw.get("env"), f"mcp.{name}.env"),
         url=url,
-        headers=_secrets(raw.get("headers"), f"mcp.{name}.headers"),
+        headers=_deferred_secrets(raw.get("headers"), f"mcp.{name}.headers"),
         cwd=str(raw.get("cwd") or ""),
         enabled=_enabled(raw, f"mcp.{name}"),
         autoload=raw.get("autoload") is True,
@@ -3022,7 +3099,7 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
             f"path) or an explicit `command`"
         )
 
-    env = _secrets(raw.get("env"), f"rest-api.{name}.env")
+    env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")
     if not command:
         command = OPENAPI_PROXY_COMMAND
         env = {OPENAPI_SPEC_URL: spec, **env}
@@ -3041,7 +3118,7 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     if base_url := str(raw.get("base_url") or ""):
         env[OPENAPI_SERVER_URL] = base_url
     if raw.get("api_key") is not None:
-        env[OPENAPI_API_KEY] = resolve_secret(raw.get("api_key"))
+        env[OPENAPI_API_KEY] = defer_secret(raw.get("api_key"))
 
     return ToolServerSettings(
         name=name,
@@ -3189,6 +3266,18 @@ def _secrets(raw: Any, where: str) -> dict[str, str]:
     """
     return {
         str(key): resolve_secret(value) for key, value in _mapping(raw, where).items()
+    }
+
+
+def _deferred_secrets(raw: Any, where: str) -> dict[str, str]:
+    """A tool server's mapping, with ``${VAR}`` kept for the connection.
+
+    The entries this reads are loaded by every server process but dialled by
+    one (`slife2.clients.gateway.mcp_config`), so resolving at load would make
+    the whole stack pay for credentials only that one uses.
+    """
+    return {
+        str(key): defer_secret(value) for key, value in _mapping(raw, where).items()
     }
 
 

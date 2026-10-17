@@ -200,14 +200,14 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
         entry["url"] = settings.url
         entry["transport"] = "http"
         if settings.headers:
-            entry["headers"] = dict(settings.headers)
+            entry["headers"] = settings.resolved_headers()
     else:
         entry["command"] = settings.command
         entry["args"] = list(settings.args)
         entry["transport"] = "stdio"
         entry["cwd"] = settings.cwd or cwd
         if settings.env:
-            entry["env"] = dict(settings.env)
+            entry["env"] = settings.resolved_env()
     return {"mcpServers": {settings.name: entry}}
 
 

@@ -899,10 +899,59 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
 ) -> None:
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
     config = load(write(tmp_path, MCP))
-    assert config.mcp["serper"].env["SERPER_API_KEY"] == "resolved"
-    assert config.mcp["arxiv"].headers["Authorization"] == "Bearer resolved", (
+    serper = config.mcp["serper"]
+    assert serper.env["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY:-unset}", (
+        "the load keeps the reference; the connection resolves it"
+    )
+    assert serper.resolved_env()["SERPER_API_KEY"] == "resolved"
+    assert config.mcp["arxiv"].resolved_headers()["Authorization"] == "Bearer resolved", (
         "a header is a credential too"
     )
+
+
+def test_a_tool_servers_reference_is_not_resolved_by_the_load(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every server loads this config; one makes the connection.
+
+    Resolving a ``${VAR}`` at load made each server process open the credential
+    store once per reference — on WSL that is a `powershell.exe` per lookup, and
+    the whole stack paid it for keys only the hub uses.
+    """
+    calls: list[str] = []
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(
+        slife2.libs.host.config, "_credstore_lookup", lambda key: calls.append(key)
+    )
+
+    config = load(write(tmp_path, MCP))
+
+    assert calls == []
+    assert config.mcp["serper"].resolved_env()["SERPER_API_KEY"] == "unset"
+    assert calls == ["SLIFE2_TEST_KEY"]
+
+
+def test_a_tunnel_option_is_not_resolved_by_the_load(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider that understands an option is the one that pays for it."""
+    calls: list[str] = []
+    monkeypatch.delenv("SLIFE2_TEST_BINARY", raising=False)
+    monkeypatch.setattr(
+        slife2.libs.host.config, "_credstore_lookup", lambda key: calls.append(key)
+    )
+
+    section = load(
+        write(
+            tmp_path,
+            "file-tunnel:\n  providers:\n    ssh:\n"
+            "      binary: ${SLIFE2_TEST_BINARY:-ssh}\n",
+        )
+    ).file_tunnel
+
+    assert calls == []
+    assert section.options_for("ssh")["binary"] == "ssh"
+    assert calls == ["SLIFE2_TEST_BINARY"]
 
 
 def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
@@ -916,9 +965,10 @@ def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
     assert server.kind == "rest"
     assert (server.transport, server.command) == ("stdio", "uvx")
     assert server.args == ("mcp-openapi-proxy",)
-    assert server.env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
-    assert server.env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
-    assert server.env["API_KEY"] == "unset"  # the ${VAR:-default} form
+    env = server.resolved_env()
+    assert env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
+    assert env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
+    assert env["API_KEY"] == "unset"  # the ${VAR:-default} form
 
 
 def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:

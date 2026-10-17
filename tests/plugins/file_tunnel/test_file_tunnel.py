@@ -797,10 +797,10 @@ def test_the_config_the_shipped_file_names_is_one_this_build_builds() -> None:
     """`slife2.yaml` is what every install seeds, so a provider it ships that
     this build cannot construct is a tunnel that fails on first run.
 
-    Reads the real file, which means resolving its `${VAR}` references and so
-    touching credstore — the same thing v1's equivalent test did, and the point
-    of it: a shipped config that only parses on the machine it was written on
-    is the bug this catches.
+    Reads the real file, whose `${VAR}` references stay unresolved until
+    `options_for` runs when a tunnel starts — the load no longer opens
+    credstore in every server process.  A shipped config that only parses on
+    the machine it was written on is the bug this catches.
     """
     root = REPO
     section = load(root / "slife2.yaml").file_tunnel
