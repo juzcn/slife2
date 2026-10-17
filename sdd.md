@@ -731,13 +731,13 @@ subagent is found by looking rather than by being listed anywhere
 - **`role` is what a subagent is for**, in the words its prompt uses. It is the
   one part of what a subagent is that its maker decides, and the prompt it
   reaches is the subagent's own shipped template (`subagent.j2`) rather than the
-  operator's `agent.system_prompt`: a subagent is told what it is and whose it
-  is, and a prompt written for the agent somebody is running
-  cannot say that. Which
+  operator's `agent.system_prompt`: a subagent is told what it is, whose it
+  is, and where its work comes from, and a prompt written for the agent somebody
+  is running cannot say that. Which
   template a *role* selects is a step still to come (DESIGN §1.10).
 - **`fork: true` makes a subagent out of its maker's conversation.** A fork is
   handed a copy of everything its maker had said and been told, as it stood when
-  the fork was made, and **nothing about it is written down**: its turns are not
+  its conversation starts, and **nothing about it is written down**: its turns are not
   recorded anywhere, it has no stored context to be restored from, and a start
   after a restart is a fresh copy rather than a continuation. The copy is cut
   back to the last exchange that finished, because a maker calls `subagent_set`

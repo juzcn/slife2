@@ -4,8 +4,8 @@ Three of them now, and one mechanism: the **system prompt**, which the config
 names and which is rendered when a conversation starts; the **recall
 instruction**, which `slife2.libs.turn.context` renders per turn; and the
 **subagent's prompt** (`subagent.j2`), which is shipped rather than configured
-because what a subagent has to be told — what it is, whose it is, and that nobody
-is watching — is not something an operator's prompt for their own agent says.  The last two
+because what a subagent has to be told — what it is, whose it is, and where its
+work comes from — is not something an operator's prompt for their own agent says.  The last two
 ship beside the default prompt in `slife2/libs/turn/templates/`.  They are all
 prompts with holes in them, so they are all templates here rather than one
 template and one f-string.

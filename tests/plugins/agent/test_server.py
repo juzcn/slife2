@@ -2702,15 +2702,14 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
+async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_from(
     context, hub
 ) -> None:
-    """Its prompt says who it is, whose it is, and that there is no window.
+    """Its prompt says who it is, whose it is, and where its work comes from.
 
-    The agent's name alone would be a model told it is somebody else — told
-    *whose* subagent it is, it can address its answer — and the agent's
-    *claim* would say somebody is watching whenever the agent's window is open —
-    which is the one way to get this wrong that looks like it works.
+    The agent's name alone would be a model told it is somebody else; told
+    *whose* subagent it is and that a task or message arrives from that agent or
+    a sibling, it can address its answer.
     """
     backend = FakeBackend(text_turn("hello"), text_turn("hello"))
     server = build_server(
@@ -2726,7 +2725,7 @@ async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
     assert f"one of {DEFAULT_AGENT}'s subagents" in subagent_prompt, (
         "it is told whose it is, which is also the member it answers"
     )
-    assert "Nobody is watching" in subagent_prompt
+    assert f"from {DEFAULT_AGENT} or another subagent" in subagent_prompt
     assert maker_prompt.startswith(f"You are {DEFAULT_AGENT},")
     assert f"You are {DEFAULT_AGENT}," not in subagent_prompt, (
         "its maker's name would be a model told it is somebody else"
@@ -2737,10 +2736,10 @@ async def test_a_subagent_is_told_its_own_name_and_that_nobody_is_watching(
 async def test_a_subagents_prompt_does_not_teach_the_send_tool(context, hub) -> None:
     """**Schema over prompt**: the reply rule lives on the tool, not in the text.
 
-    The prompt says what the conversation is — whose subagent it is, that it is
-    a fork, that nobody is watching.  What a reply is belongs to the send tool's
-    description, where the model already reads the arguments; repeating it here
-    would be a second schema kept in step by hand.
+    The prompt says what the conversation is — whose subagent it is, and where
+    its work comes from.  What a reply is belongs to the send
+    tool's description, where the model already reads the arguments; repeating it
+    here would be a second schema kept in step by hand.
     """
     backend = FakeBackend(text_turn("hello"))
     server = build_server(
@@ -2834,7 +2833,7 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
     assert named.startswith(
         f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a code reviewer."
     )
-    assert "Nobody is watching" in named
+    assert f"from {DEFAULT_AGENT} or another subagent" in named
     assert backend.calls[1][0][0].content == "be terse", "the operator's, for its maker"
     record = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "helper").read_text(encoding="utf-8")
@@ -2848,10 +2847,10 @@ async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
 ) -> None:
     """`fork: true` is a subagent made of somebody else's conversation.
 
-    What it is handed is the maker's context as it stood when the fork was made —
-    everything the maker had said and been told — and `prompts_seen` is the
-    request the fork's first turn actually sent, so the claim is about the model
-    call and not about a field somewhere.
+    What it is handed is the maker's context as it stood when the fork's
+    first turn started — everything the maker had said and been told — and
+    `prompts_seen` is the request the fork's first turn actually sent, so the
+    claim is about the model call and not about a field somewhere.
     """
     backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
     server = build_server(
@@ -2871,10 +2870,11 @@ async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
     assert head.startswith(
         f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a subagent."
     )
-    assert "copy of your agent's conversation" in head, (
-        "the one thing a fork cannot work out for itself: what it is handed "
-        "looks exactly like a conversation of its own"
-    )
+    # **A fork is not told that it is one** (the designer's call): the copy
+    # above is the whole of what makes it a fork, and explaining it earned less
+    # than it cost.
+    assert "fork" not in head.lower()
+    assert "copy" not in head.lower()
 
 
 @pytest.mark.asyncio

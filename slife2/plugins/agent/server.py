@@ -210,8 +210,8 @@ DEFAULT_ROLE = "subagent"
 #: The system prompt a subagent's conversation opens with, shipped and rendered
 #: per conversation (`slife2.libs.turn.prompt`).  **Not the template an agent's
 #: own conversation uses** (`agent.system_prompt`): the two have different things
-#: to say — this one says what a subagent is, whose it is, that it was made
-#: rather than started, and that nobody is watching it — and an operator's prompt
+#: to say — this one says what a subagent is, whose it is, and where its work
+#: comes from — and an operator's prompt
 #: for their own agent cannot say any of that.  A bare name, so it is looked up
 #: among the templates shipped beside `system.j2`.
 #:
@@ -1190,15 +1190,13 @@ def build_server(
         the config a conversation *starts* from, so a prompt edited since boot
         reaches the next one.
 
-        **A subagent is told its own name, its agent's, and that nobody is
-        watching.**  Each follows from what it is: the name in the prompt is the
-        one it answers to (its agent's alone would be a model told it is somebody
+        **A subagent is told its own name, its agent's, and where its work comes
+        from.**  Each follows from what it is: the name in the prompt is the one
+        it answers to (its agent's alone would be a model told it is somebody
         else), the agent's name is whose subagent it is — and with it the member
         it answers — and a subagent has no window at all, not a terminal and not
-        a headless one, so there is nobody to ask, which is the same answer
-        `headless` gives for an instance with no terminal.  Reading the *agent's*
-        claim here instead would be the one way to get that wrong: it would tell
-        a subagent that somebody is watching whenever its agent's window is open.
+        a headless one, so what reaches it comes from another member rather than
+        from a person at its own keyboard.
 
         **And it is not told how to answer, and that is the schema's half.**
         What a reply is — the send call, with the task's id for a
@@ -1208,11 +1206,11 @@ def build_server(
         is.
 
         **And it is told what it is, from its own file** (`subagent_spec`): the
-        `role` the agent named it with, and whether it was made as a fork — the
-        one thing about a fork a model cannot work out for itself, since what it
-        is handed looks exactly like a conversation it has been having.  Its
-        prompt is `subagent.j2` and not the config's (`SUBAGENT_PROMPT`), because
-        the two say different things.
+        `role` the agent named it with is the one thing from that file the prompt
+        uses.  A fork is not told that it is one — the sentence was longer than
+        the fact was worth (the designer's call, 2026-10-17).  Its prompt is
+        `subagent.j2` and not the config's (`SUBAGENT_PROMPT`), because the two
+        say different things.
 
         **And an agent's own prompt is rendered with whether anybody is
         watching**, read off the claim the client under that name wrote
@@ -1225,7 +1223,7 @@ def build_server(
         something of an agent nobody is running is told so rather than served
         (`slife2.libs.harness.handover`), and a turn that runs here anyway is
         unattended for the same reason.  A subagent is not one of those cases:
-        it is always unattended, which is why its prompt says so unconditionally.
+        it is always unattended, so its prompt has no claim to read.
         """
         if subagent:
             system = render_system_prompt(
@@ -1233,7 +1231,6 @@ def build_server(
                 agent_name=subagent,
                 agent=agent,
                 role=spec.role,
-                fork=spec.fork,
             )
         else:
             claim = read_claim(agent)
@@ -1536,12 +1533,11 @@ def build_server(
 
         **And the head is replaced rather than copied.**  The maker's system
         prompt names the maker and says whether anybody is watching; a fork is
-        told what it is instead — its own name, its role, and that it is a fork,
-        which is the thing it could not otherwise know, since what it is handed
-        is indistinguishable from a conversation of its own.  `opening_messages`
-        is where those words are, and this is why they have to be *words*: a
-        model reading somebody else's conversation under its own name with
-        nothing said is a model answering as somebody it is not.
+        told what it is instead — its own name, its role, and whose subagent it
+        is.  `opening_messages` is where those words are, and this is why they
+        have to be *words*: a model reading somebody else's conversation under
+        its own name with nothing said is a model answering as somebody it is
+        not.
 
         **The maker's list is read under the maker's lock when it still has to be
         restored**, which is the rule `Loop.restored` states and not a precaution.

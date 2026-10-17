@@ -1754,8 +1754,8 @@ question — *where does one subagent's setting live?*
   line between them is whose fact it is: *this subagent's* runs on this model in
   this role, and *the machine's* is the cap and where the network meets.
 - **`fork` is a copy, not a shared list.**  "Share everything with the agent that
-  made you" is answered with the context — copied at the moment the fork is made —
-  and the fork's own turns are written nowhere: not under its own key, because a
+  made you" is answered with the context — copied when the fork's conversation
+  starts — and the fork's own turns are written nowhere: not under its own key, because a
   store's job is to be *that* conversation's memory and this conversation is
   somebody else's, and not under its maker's, because that would file one agent's
   work as another's history.  What that costs is stated rather than hidden: a
@@ -1783,15 +1783,15 @@ question — *where does one subagent's setting live?*
 - **A subagent's prompt is its own, and one template serves every role.**
   `subagent.j2` ships beside `system.j2`: the operator's `agent.system_prompt` is
   a prompt for the agent they are running, and it cannot say the things a
-  subagent needs to be told — what it is, whose subagent it is, and that nobody
-  is watching.  `role`
-  reaches that template as a word ("You are scout, one of jill's subagents — a
-  code reviewer") and not yet
-  as a choice of *file*.  **The per-role template is the step left open**, and it
-  is left open rather than guessed at: `role: reviewer` wanting `reviewer.j2`
-  needs an answer for a role with no file, and whether that answer is a refusal or
-  a fall back to the shipped one is the designer's to give — a call-site fallback
-  would be a degrade nobody approved (§10.2).
+  subagent needs to be told — what it is, whose subagent it is, and where its
+  work comes from.  `role` reaches that template as a word ("You are scout, one of
+  jill's subagents — a code reviewer") and not yet as a choice of *file*.  **A
+  fork is not told that it is one**: the explanation was longer than the fact was
+  worth (the designer's call, 2026-10-17).  **The per-role template is the step
+  left open**, and it is left open rather than guessed at: `role: reviewer`
+  wanting `reviewer.j2` needs an answer for a role with no file, and whether that
+  answer is a refusal or a fall back to the shipped one is the designer's to give
+  — a call-site fallback would be a degrade nobody approved (§10.2).
 
 **The road: a subagent's turn is run by the network's own process, not by a
 window.**  The window is the only road this system has for "something outside the
