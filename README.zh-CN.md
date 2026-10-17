@@ -805,7 +805,10 @@ plugin 被写下的全部。一个任务的 `timezone` 是 IANA 名字，不写�
 | `a2a_send_message` | 发一个任务、完成别人发给你的一个，或者只是聊两句 —— 由 `message_type` 决定 |
 | `a2a_cancel_task` | 撤回一个你发出的任务 |
 | `a2a_list_agents` | 花名册：你排第一，然后是每一个同伴，按名字 |
+| `a2a_task_list` | 还开着的任务：在等回答的，和欠着回答的 |
 | `a2a_broadcast` | 给每一个同伴发一个发了就不管的事件 |
+
+`a2a_task_list` 回答的是另一件事：**还开着的有哪些** —— 你发出去还没回来的、别人发给你你还欠着的，以及上一个进程死时攥在手里的。所以对话被压缩过、或者进程重启过，正在等的 id 也不会丢。它跟"不要轮询"不矛盾：不发模型调用，只读本地那两张表。
 
 ```
 a2a_send_message(agent="jill", message="Summarise the release notes.")

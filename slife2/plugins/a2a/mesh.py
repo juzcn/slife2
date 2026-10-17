@@ -88,7 +88,7 @@ from a2a_over_mqtt.protocol import REPLY_ARTIFACT, REPLY_SUBMITTED, REPLY_TEXT
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings
-from slife2.plugins.a2a.inbound_store import InboundStore
+from slife2.plugins.a2a.inbound_store import InboundStore, iso_now
 from slife2.plugins.a2a.task_store import get_store
 from slife2.tui import notes
 
@@ -282,6 +282,7 @@ class _OutboundSend:
         "delivered",
         "loops",
         "record",
+        "sent_at",
     )
 
     def __init__(
@@ -309,6 +310,9 @@ class _OutboundSend:
         #: conversation (MESSAGE) — the reply is pushed as a completion or as a
         #: message accordingly.
         self.record = record
+        #: When it was sent, in the same shape an inbound task's `since` is
+        #: (`inbound_store.iso_now`), so one list reads as one list.
+        self.sent_at = iso_now()
 
 
 class _InboundWait:
@@ -1540,6 +1544,71 @@ class A2AMesh:
                 )
             )
         return cards
+
+    def open_tasks(self) -> list[dict]:
+        """**Everything this conversation still has open**, both ways, oldest first.
+
+        A task is open while this mesh is waiting for its answer (outbound) or
+        owes one (inbound) — which is the pair of tables this reads, and they
+        are the two the send and receive paths already maintain:
+        `_sends` loses a task the moment its terminal reply routes
+        (`_handle_reply`), and `_inbound` loses it when it leaves the responder.
+        So an answer that arrived is not here; it is in the conversation, where
+        the model already read it.
+
+        **Three statuses, and each is a different thing to do.**  `pending` is a
+        task still running.  `unreachable` is an outbound one whose requester
+        ladder ran out with no acknowledgement — a late answer can still arrive,
+        so re-sending without checking is the mistake (`_deliver`).  `stale` is
+        an inbound one a *previous* process died holding: it can never be
+        completed, and the only answer left is a plain message
+        (`InboundStore.stale`).
+
+        `member` rather than the marker's `from`: a sent task's counterpart is
+        the one it went to and a received one's is the one it came from, and
+        this is the one word true of both — which is also why it is not `peer`,
+        the remote network's word for the other end.  A bare message
+        (`send.record` false) is a conversation and not a task, so it is not
+        listed.
+
+        Pure state read: nothing here dials, and nothing writes a ledger.
+        """
+        rows: list[dict] = []
+        for task_id, send in self._sends.items():
+            if not send.record:
+                continue
+            rows.append(
+                {
+                    "task_id": task_id,
+                    "member": safe_name(send.agent),
+                    "direction": "sent",
+                    "status": (
+                        "unreachable" if send.attempts >= _MAX_ATTEMPTS else "pending"
+                    ),
+                    "since": send.sent_at,
+                }
+            )
+        for task in self._inbound.pending():
+            rows.append(
+                {
+                    "task_id": task.task_id,
+                    "member": safe_name(task.peer),
+                    "direction": "received",
+                    "status": "pending",
+                    "since": task.since,
+                }
+            )
+        for stale in self._inbound.stale():
+            rows.append(
+                {
+                    "task_id": stale.task_id,
+                    "member": safe_name(stale.peer),
+                    "direction": "received",
+                    "status": "stale",
+                    "since": stale.since,
+                }
+            )
+        return sorted(rows, key=lambda row: row["since"] or "")
 
     def complete_task(
         self,

@@ -96,6 +96,7 @@ from slife2.libs.host.config import (
     LOCAL,
     REMOTE,
     SEND_MESSAGE,
+    TASK_LIST,
     A2ASettings,
     Config,
     Net,
@@ -134,21 +135,25 @@ SERVER_NAME = REMOTE.server_name
 #: (`slife2.libs.host.config.A2ASettings`).
 CONFIG_KEY = REMOTE.key
 
-#: The four tools the model gets — v1's four, under v1's names.  A
-#: `task_response` is not a fifth: it is `a2a_send_message` with `message_type`
-#: said, because on the wire it *is* the same operation and a second name for it
-#: would be a second thing for a model to learn.
+#: The model's tools on this network — **v1's four under v1's names, and one
+#: that is not v1's**.  Two things that look like omissions are not: a
+#: `task_response` is not a tool, it is `a2a_send_message` with `message_type`
+#: said, because on the wire it *is* the same operation; and `A2A_TASK_LIST` is
+#: not a fifth *operation* either — it reads the two tables the others leave
+#: behind, and it is here because "what is still open" is the one question none
+#: of them can answer.
 #:
 #: **These are the remote network's**, and the roster is the one name that is not
 #: a constant here: this module serves both networks, so what a tool is
 #: *registered* under always comes from the network being served (`net.tool`,
 #: `net.roster_tool`), and the local one answers to `subagent_list`.  They are
 #: spelled out because the tests and a reader arriving here want the remote
-#: network's four names in one place.
+#: network's names in one place.
 A2A_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
 A2A_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
 A2A_LIST_AGENTS = REMOTE.tool(LIST_AGENTS)
 A2A_BROADCAST = REMOTE.tool(BROADCAST)
+A2A_TASK_LIST = REMOTE.tool(TASK_LIST)
 
 #: The tool that puts an agent *on* the mesh — and it is not the model's.  A
 #: window calls it and holds it open; see `join` for why the mesh's membership
@@ -1293,7 +1298,7 @@ def build_server(
         # **The broker, before any of it.**  One is started if it can be, and one
         # that will not serve raises out of the lifespan — which is this plugin
         # failing to start, which is `slife2` refusing to start rather than
-        # handing the model four tools attached to nothing
+        # handing the model five tools attached to nothing
         # (`slife2/plugins/a2a/broker.py`).
         logger.info("a2a_broker %s", ensure_broker(config_now.a2a))
 
@@ -1658,6 +1663,48 @@ def build_server(
         }
 
     @mcp.tool(
+        name=net.tool(TASK_LIST),
+        description=describe_tool(net, TASK_LIST),
+        meta=FOR_THE_MODEL,
+    )
+    async def a2a_task_list(ctx: Context) -> dict[str, Any]:
+        """List the tasks this conversation has open — both ways, oldest first.
+
+        **The send tool promises an answer will arrive on its own, and says not
+        to poll; this is not a poll.**  It answers a different question, and the
+        one the model cannot answer from memory: *what did I start and never
+        hear back about, and what was I asked and still owe?*  A conversation
+        that has been compacted, a process that restarted, an answer that
+        arrived as a message nobody matched to its id — each leaves a task open
+        that nothing else names.
+
+        It reads the two tables the send and receive paths already keep, so it
+        costs no model call and dials nothing (`A2AMesh.open_tasks`): `_sends`
+        is what has not terminaled, and the ledger is what is owed — pending
+        bridges, and a previous process's orphans as 'stale'.
+
+        `member` rather than `peer`, because one word is true of both directions
+        and this network's members are not the remote network's peers.
+
+        Args:
+            ctx: The call, whose client id is whose tasks these are.
+        """
+        agent, mine = speaker(ctx)
+        settings = mesh_settings()
+        if not settings.configured:
+            return {
+                "agent_name": member_name(agent, mine),
+                "tasks": [],
+                "error": switch_off(net),
+            }
+        session = session_of(agent, mine)
+        return {
+            "agent_name": safe_name(session.mesh.agent_name),
+            "tasks": session.mesh.open_tasks(),
+            "error": "",
+        }
+
+    @mcp.tool(
         name=net.tool(BROADCAST),
         description=describe_tool(net, BROADCAST),
         meta=FOR_THE_MODEL,
@@ -1707,7 +1754,7 @@ def _ensure_windows_selector_loop() -> None:
             pass
 
 
-#: What the four tools say, **with the words that differ per network left as
+#: What the five tools say, **with the words that differ per network left as
 #: holes**.  One text per verb and two word-sets (`_NET_WORDS`), because a second
 #: copy of this reasoning is a second copy to keep in step — and because the
 #: thing that must differ between the networks is the *vocabulary* a model is
@@ -1755,6 +1802,22 @@ _TOOL_TEXTS: dict[str, str] = {
         "information somebody may act on and not for anything you need a reply\n"
         "to — use `{send}` for that. It arrives as a `{marker}…` of type\n"
         "'broadcast', with no task and no completion."
+    ),
+    TASK_LIST: (
+        "List the tasks you have open on {name}.\n"
+        "\n"
+        "A task is open while it is waiting for an answer ('sent') or while an\n"
+        'answer is owed (\'received\'). Every row is `{{"task_id": …, "member": …,\n'
+        '"direction": "sent"|"received", "status": …, "since": …}}`, and `member`\n'
+        "is the name the task is with — what `{send}` and `{cancel}` address.\n"
+        "\n"
+        "`status` is 'pending' for a task still running, 'unreachable' for one you\n"
+        "sent that was never acknowledged — a late answer can still arrive, so\n"
+        "check before sending it again — and 'stale' for a task a previous process\n"
+        "died holding: it can never be completed, so answer that member with a\n"
+        "plain message.\n"
+        "\n"
+        "An answer that already arrived is not listed; it is in this conversation."
     ),
 }
 
@@ -1846,6 +1909,7 @@ def describe_tool(net: Net, verb: str) -> str:
     words = _NET_WORDS[net.key]
     return _TOOL_TEXTS[verb].format(
         send=net.tool(SEND_MESSAGE),
+        cancel=net.tool(CANCEL_TASK),
         marker=net.marker,
         **words,
     )

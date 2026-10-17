@@ -676,7 +676,7 @@ distinguish it, each of them about *status* rather than about ability:
   it is said, and an `a2a:` that names none means the same address, because a
   machine meets both networks through one broker by default and a second
   `host:port` in the file is a second thing to keep in step.
-  It is the same protocol and the same four tools throughout, presented under
+  It is the same protocol and the same five tools throughout, presented under
   `subagent_*` names — **a technical fact and not a meaning**: nothing a person
   or a model reads on the local network says `a2a` anywhere, and where the two
   networks' members are different things the *tool* is named for what it lists:

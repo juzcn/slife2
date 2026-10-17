@@ -938,8 +938,8 @@ file-tunnel:
 # `provider` is a hard constraint rather than a default: mosquitto is the only
 # broker this build speaks to, and anything else is refused when the config is
 # read, because the alternative is `a2a_*` tools offered to a model for a mesh
-# that was quietly switched off.  The model's four tools are `a2a_send_message`,
-# `a2a_cancel_task`, `a2a_list_agents` and `a2a_broadcast`.
+# that was quietly switched off.  The model's five tools are `a2a_send_message`,
+# `a2a_cancel_task`, `a2a_list_agents`, `a2a_task_list` and `a2a_broadcast`.
 a2a:
   provider: mosquitto
   # broker: {host: localhost, port: 1883}   # unset: `subagent.broker`'s address

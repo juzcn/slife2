@@ -45,6 +45,7 @@ from slife2.libs.host.config import (
     LOCAL,
     REMOTE,
     SEND_MESSAGE,
+    TASK_LIST,
     A2ASettings,
     default_config,
     net_settings,
@@ -85,6 +86,7 @@ from slife2.plugins.a2a.server import (
     A2A_CANCEL_TASK,
     A2A_LIST_AGENTS,
     A2A_SEND_MESSAGE,
+    A2A_TASK_LIST,
     A2A_TYPES,
     CHANNEL,
     FORGET,
@@ -461,6 +463,38 @@ def test_answering_a_peer_clears_what_that_peer_is_owed() -> None:
 
     store.clear_stale_peer(PEER)
     assert [t.task_id for t in store.stale()] == ["other"]
+
+
+def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) -> None:
+    """**The two questions no other tool can answer**, off the two tables that
+    already know: what this conversation started and never heard back about, and
+    what it owes an answer to.
+
+    A plain message is a conversation and not a task, so it is not listed; an
+    answer that arrived is in the conversation, so it is not listed either — the
+    send table drops a task the moment its terminal reply routes.
+    """
+    with in_home(tmp_path):
+        InboundStore.open(AGENT, LOCAL.ledger, "tester").add("stale-1", PEER)
+
+    session = local_member(tmp_path, subagent="tester")
+    mesh = session.mesh
+    mesh._sends["sent-1"] = _OutboundSend("sent-1", PEER, "session", "{}")
+    mesh._sends["message-1"] = _OutboundSend(
+        "message-1", PEER, "session", "{}", record=False
+    )
+    mesh._note_inbound("owed-1", PEER)
+
+    rows = mesh.open_tasks()
+
+    assert [(r["task_id"], r["direction"], r["status"]) for r in rows] == [
+        # A predecessor's — oldest, and the one status that can never finish.
+        ("stale-1", "received", "stale"),
+        ("sent-1", "sent", "pending"),
+        ("owed-1", "received", "pending"),
+    ]
+    assert {r["member"] for r in rows} == {PEER}
+    assert "message-1" not in {r["task_id"] for r in rows}, "a message is not a task"
 
 
 def test_completing_an_orphan_is_refused_with_the_reply_that_still_works() -> None:
@@ -2060,9 +2094,10 @@ def build(**overrides: Any) -> FastMCP:
 
 
 @pytest.mark.asyncio
-async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
-    """Four, which is v1's four.  `__check` has no port — v2 has no system_health
-    and what it reported is `a2a_list_agents`' answer.
+async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
+    """v1's four, plus the one that reads what they left behind.  `__check` has
+    no port — v2 has no system_health and what it reported is `a2a_list_agents`'
+    answer.
 
     `join` is here and is deliberately not one of them: it crosses a process
     boundary for a *window* (it is held open, and holding it is what keeps the
@@ -2076,6 +2111,7 @@ async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         A2A_CANCEL_TASK,
         A2A_LIST_AGENTS,
         A2A_SEND_MESSAGE,
+        A2A_TASK_LIST,
         FORGET,
         JOIN,
     ]
@@ -2086,6 +2122,7 @@ async def test_the_four_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         A2A_CANCEL_TASK,
         A2A_LIST_AGENTS,
         A2A_SEND_MESSAGE,
+        A2A_TASK_LIST,
     ]
     assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
     assert not for_the_model(by_name[FORGET].meta), (
@@ -2126,6 +2163,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
         LOCAL.tool(CANCEL_TASK),
         LOCAL.roster_tool,
         LOCAL.tool(SEND_MESSAGE),
+        LOCAL.tool(TASK_LIST),
     ]
     assert A2A_SEND_MESSAGE not in by_name, "and not the remote network's names"
 
@@ -3183,6 +3221,77 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
     said = str(refused.value)
     assert "`subagent:` section" in said, "the refusal names the wrong section"
     assert "a2a" not in said.lower()
+    assert "`subagent:` section" in answer.data["error"]
+    assert "a2a" not in answer.data["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_the_task_list_is_the_send_tools_own_bookkeeping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**`*_task_list` answers what the send tool started**, without a model call.
+
+    The promise `*_send_message` makes is that the answer arrives on its own and
+    there is nothing to poll; what is left unsaid is where the ids go when the
+    conversation has moved on.  They go to the mesh's send table, and this tool
+    is the read of it — no wire, no poll, no cost beyond the loopback.
+
+    A message and a task are both sends, and only the task has a row: the plain
+    conversation's reply arrives as a message, and asking what became of "a
+    message" is what its reply in the conversation already answers.
+    """
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def send(
+        self: Any, agent: str, message: str, *, message_type: str = "task_request"
+    ) -> str:
+        self._sends["task-1"] = _OutboundSend("task-1", agent, "session", "{}")
+        self._sends["message-1"] = _OutboundSend(
+            "message-1", agent, "session", "{}", record=False
+        )
+        return "task-1"
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send)
+
+    with in_home(tmp_path):
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": AGENT, "message": "hello"},
+                meta=client_meta(AGENT),
+            )
+            answer = await client.call_tool(
+                LOCAL.tool(TASK_LIST), {}, meta=client_meta(AGENT)
+            )
+
+    data = answer.data
+    assert data["agent_name"] == AGENT
+    assert data["error"] == ""
+    assert [
+        (row["task_id"], row["member"], row["direction"], row["status"])
+        for row in data["tasks"]
+    ] == [("task-1", AGENT, "sent", "pending")]
+
+
+@pytest.mark.asyncio
+async def test_a_task_list_on_a_switched_off_network_names_its_own_section() -> None:
+    """A machine with no `subagent:` section has no tasks, and is told why.
+
+    The same sentence the roster's `error` carries (`switch_off`), because both
+    answers are about one switch — and it must not name the other network's
+    section, which is a key this machine does not have.
+    """
+    server = build_server(default_config(), net=LOCAL, connecting=False)
+    async with Client(server) as client:
+        answer = await client.call_tool(
+            LOCAL.tool(TASK_LIST), {}, meta=client_meta(AGENT)
+        )
+
+    assert answer.data["tasks"] == []
     assert "`subagent:` section" in answer.data["error"]
     assert "a2a" not in answer.data["error"].lower()
 

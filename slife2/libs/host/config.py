@@ -177,7 +177,7 @@ DEFAULT_AGENT = "slife2"
 #: only to override this.
 SUBAGENT_ORG = "subagent"
 
-#: The four tools a network offers the model, by verb.  **Here rather than in the
+#: The five tools a network offers the model, by verb.  **Here rather than in the
 #: plugin that serves them**, because one of them is also what the launcher
 #: probes with (`expected_tool`) and a probe looking for a name the server does
 #: not serve is a server that never starts.  `Net.tool` is the other half:
@@ -190,6 +190,13 @@ SEND_MESSAGE = "send_message"
 CANCEL_TASK = "cancel_task"
 LIST_AGENTS = "list_agents"
 BROADCAST = "broadcast"
+#: **The fifth, and the one that is not v1's.**  A task is a thing this
+#: conversation is waiting on or owes an answer to, and after a restart — or
+#: after an answer that arrived as a message nobody connected to the id — the
+#: only way to ask what is still open was to remember.  Both networks get it
+#: under the same verb: what differs between them is what a task is *for*, and
+#: the roster's is the only name that had to split.
+TASK_LIST = "task_list"
 
 
 @dataclass(frozen=True)
@@ -205,7 +212,7 @@ class Net:
 
     **Here rather than in the plugin**, because that is where names that cross
     boundaries already live (`A2A_SERVER_NAME`, `TUI_SERVER_NAME`): the launcher
-    builds its probe out of `tool()`, the plugin builds its four tools out of the
+    builds its probe out of `tool()`, the plugin builds its tools out of the
     same call, and one spelling is what keeps a probe looking for a tool the
     server actually serves.
     """
@@ -220,7 +227,7 @@ class Net:
     #: the remote one *is* its section, and the local one is the network half of
     #: a section that also holds what a subagent costs (`SubagentSettings`).
     settings: tuple[str, ...]
-    #: The four model tools are this plus a verb (`a2a_send_message`).
+    #: The model's tools are this plus a verb (`a2a_send_message`).
     prefix: str
     #: What a turn that arrived over this network says it came in on.
     channel: str

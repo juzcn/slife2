@@ -1712,7 +1712,7 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
   **Its names carry no `a2a`**, which is the difference between a technical fact
   and a meaning: the protocol is what this build happens to reach a local agent
   with, while what the thing *is* is an agent and the agents it made. So the
-  section is `subagent:`, the server answers as `slife2-subagent`, the four tools
+  section is `subagent:`, the server answers as `slife2-subagent`, the five tools
   are `subagent_*`, the channel is `subagent:<name>` — and the one word that
   differs between the two envelopes is the one a reader could get wrong
   (`[PeerAgent:` against `[Subagent:`, and the window says `Subagent(name)>`
@@ -1730,7 +1730,7 @@ retained card on every join) stays inside a unit of tens rather than a thousand.
 **What it deliberately does not add.**  No `spawn`: nothing here starts a
 process, and `--headless` is a different thing (an instance with no terminal). No
 claim: a name is claimed by an instance, and a subagent is not one. No third tool
-vocabulary: the mesh's four tools are presented under `subagent_*` names, and the
+vocabulary: the mesh's tools are presented under `subagent_*` names, and the
 *only* verbs this adds are the two A2A has no equivalent of — membership and
 lifetime, `subagent_set` and `subagent_remove`. The schema is priced: the A2A
 family is 2,492 bytes ≈ 620 tokens, plugin tools are exempt from `tool_load`

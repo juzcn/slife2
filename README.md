@@ -997,6 +997,7 @@ around it. v1's mesh, ported.
 | `a2a_send_message` | Send a task, complete one you were sent, or just talk — `message_type` decides which |
 | `a2a_cancel_task` | Withdraw a task you sent |
 | `a2a_list_agents` | The roster: you first, then every peer, by name |
+| `a2a_task_list` | The tasks still open: waiting on an answer, or owing one |
 | `a2a_broadcast` | A fire-and-forget event to every peer |
 
 ```
@@ -1012,6 +1013,11 @@ completes a task *you* were sent, with the `task_id` from its own marker; the
 direction is in `from`, never `agent_name`, because that word is the agent's own
 identity. Incoming messages read as `PeerAgent(jill)> ` in the window, with the marker
 taken back off.
+
+**"Nothing to poll" is not "nothing to ask."** `a2a_task_list` answers what is
+still open — the tasks you sent that have not come back, the ones you were sent
+and still owe, and any a previous process died holding — so a compacted
+conversation or a restart does not lose the ids it was waiting on.
 
 **A peer may be on this machine or on another one**, and nothing tells them
 apart — a local agent is just one whose mesh this process holds, published to the
@@ -1049,7 +1055,7 @@ status` to see it). Only a broker *slife2 started* is ever stopped: the record
 its start wrote is the whole of the permission, so a system mosquitto or one you
 ran yourself is left alone. A broker that will not serve — or one named on
 another machine that is down — fails the startup, naming it and showing its log,
-rather than leaving you four tools attached to nothing. `provider: mosquitto` is
+rather than leaving you five tools attached to nothing. `provider: mosquitto` is
 the only value; anything else is a config error, not a silently disabled feature.
 
 ```yaml

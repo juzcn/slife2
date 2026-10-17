@@ -6,9 +6,9 @@ driver — the SDK's `Responder` for the inbound lifecycle, a persistent client 
 our own for the outbound half, presence, and the identity check that keeps two
 processes from taking one name over.  `inbound_store.py` is the per-agent ledger
 of tasks whose completion bridge this process holds.  `task_store.py` is the
-in-memory record of what we sent.  `server.py` is the plugin slife2 starts: the
-four tools, one mesh per agent, and the hand-over that puts an inbound message
-into a conversation.
+in-memory record of what we sent — and, with the ledger, what `task_list`
+reports.  `server.py` is the plugin slife2 starts: the five tools, one mesh per
+agent, and the hand-over that puts an inbound message into a conversation.
 
 Where the config section's types live is `slife2/libs/host/config.py` with every other
 section's (`A2ASettings`), which is the one thing v1's layout

@@ -52,8 +52,14 @@ logger = logging.getLogger(__name__)
 _MAX_ENTRIES = 200
 
 
-def _iso_now() -> str:
-    """Current UTC time as an ISO-8601 string (official A2A timestamps)."""
+def iso_now() -> str:
+    """Current UTC time as an ISO-8601 string (official A2A timestamps).
+
+    Public because it is a **shape** and not this store's clock: a task's row
+    says when it started wherever it is reported from, and two spellings of the
+    same timestamp in one answer would be the reader's problem to reconcile
+    (`slife2.plugins.a2a.mesh`'s outgoing sends stamp themselves with this too).
+    """
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -287,7 +293,7 @@ class InboundStore:
         if not task_id:
             return
         was_stale = self._stale.pop(task_id, None)
-        self._pending[task_id] = InboundTask(task_id, peer, _iso_now())
+        self._pending[task_id] = InboundTask(task_id, peer, iso_now())
         self._trim(self._pending)
         if was_stale is not None:
             logger.info("a2a_inbound_revived task=%s peer=%s", task_id, peer)
@@ -299,6 +305,18 @@ class InboundStore:
         if self._pending.pop(task_id, None) is None:
             return
         self._save()
+
+    # ── Read ──────────────────────────────────────────────────────────
+
+    def pending(self) -> list[InboundTask]:
+        """Tasks this process is holding a completion bridge for, oldest first.
+
+        **A bridge is a task still owed an answer**, which is what `task_list`
+        reports (`slife2.plugins.a2a.mesh.open_tasks`): the model that has lost
+        track of what it was going to answer has the file to ask, and the
+        `[Subagent:…]`/`[PeerAgent:…]` marker in its own turn is the id.
+        """
+        return sorted(self._pending.values(), key=lambda t: t.since or "")
 
     # ── Stale (restart-orphaned) tasks ────────────────────────────────
 

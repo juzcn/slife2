@@ -598,8 +598,8 @@ _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
 #:
 #: **The hub's entry is every plugin it asks, minus the three that reach it**,
 #: and it is a comprehension rather than thirteen names because the list did
-#: drift: `a2a` landed, the hub asks it for its four tools, and the tuple nobody
-#: had a reason to revisit said otherwise.  What the edge is for is not
+#: drift: `a2a` landed, the hub asks it for its tools, and the tuple nobody had a
+#: reason to revisit said otherwise.  What the edge is for is not
 #: politeness — `list_tools` *refuses* while any plugin is not answering
 #: (`slife2.plugins.toolhub.server`: a missing hub is a plugin gone and fails the turn), so a
 #: plugin that comes up after the hub is a first turn that cannot run.  The hub
