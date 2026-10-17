@@ -8,6 +8,8 @@ installs a package, elevates, or touches a real home.
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -117,6 +119,153 @@ def test_python_sync_keeps_user_packages() -> None:
     assert "uv sync --upgrade --inexact" in powershell
     assert "uv venv --clear" not in shell
     assert "uv venv --clear" not in powershell
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_mosquitto_install_downloads_the_libraries_it_links(tmp_path: Path) -> None:
+    """The dependency closure is downloaded one package at a time.
+
+    A virtual dependency names no candidate — `debconf-2.0` is provided by
+    `debconf` — and `apt-get download` answers one such name by downloading
+    nothing at all.  The first user-level install therefore extracted mosquitto
+    without `libwrap.so.0` and the broker died with exit 127.  The stubs below
+    reproduce that apt behaviour, and the stale symlink an older install left in
+    `~/.local/bin` (writing the wrapper through it would replace the binary
+    with the wrapper, which execs itself).
+    """
+    if sys.platform != "linux":
+        pytest.skip("the apt-based installer is Linux-only")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(
+        stub_bin / "apt-cache",
+        """\
+#!/bin/sh
+if [ "$1" = depends ]; then
+    cat <<'EOF'
+mosquitto
+  Depends: libc6
+  Depends: <libc-dev>
+  Depends: debconf-2.0
+  Depends: libwrap0
+EOF
+elif [ "$1" = madison ]; then
+    case "$2" in
+        libc6|libwrap0) printf '%s | 1.0 | test\\n' "$2" ;;
+    esac
+fi
+exit 0
+""",
+    )
+    _write_executable(
+        stub_bin / "dpkg",
+        """\
+#!/bin/sh
+case "$1" in
+    -s) [ "$2" = libc6 ] && exit 0; exit 1 ;;
+    -x)
+        name=$(basename "$2" .deb)
+        dest=$3
+        mkdir -p "$dest/usr/lib/x86_64-linux-gnu" "$dest/usr/sbin"
+        : > "$dest/usr/lib/x86_64-linux-gnu/$name.so.0"
+        if [ "$name" = mosquitto ]; then
+            printf '#!/bin/sh\\necho "mosquitto version 9.9.9"\\n' \
+                > "$dest/usr/sbin/mosquitto"
+            chmod +x "$dest/usr/sbin/mosquitto"
+        fi
+        exit 0 ;;
+esac
+exit 1
+""",
+    )
+    _write_executable(
+        stub_bin / "apt-get",
+        """\
+#!/bin/sh
+printf '%s\\n' "$*" >> "$APT_LOG"
+packages=""
+for arg in "$@"; do
+    case "$arg" in
+        # The real apt refuses the whole invocation when one name has no
+        # candidate, and downloads none of the others.
+        debconf-2.0|libc-dev) exit 100 ;;
+        -q|download) ;;
+        *) packages="$packages $arg" ;;
+    esac
+done
+for pkg in $packages; do
+    : > "$pkg.deb"
+done
+exit 0
+""",
+    )
+
+    match = re.search(
+        r"^install_mosquitto\(\) \{.*?^\}$",
+        SHELL.read_text(encoding="utf-8"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "install_mosquitto is missing from install.sh"
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+
+    home = tmp_path / "home"
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+say() { printf '%s\\n' "$*"; }
+refresh_path() {
+    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+    export PATH
+}
+. "$FUNCTION_FILE"
+export HOME="$TEST_HOME"
+export PATH="$STUB_BIN:$PATH"
+export APT_LOG="$TEST_HOME/apt.log"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/usr/sbin"
+printf '#!/bin/sh\\necho "mosquitto version 9.9.9"\\n' > "$HOME/.local/usr/sbin/mosquitto"
+chmod +x "$HOME/.local/usr/sbin/mosquitto"
+ln -s "$HOME/.local/usr/sbin/mosquitto" "$HOME/.local/bin/mosquitto"
+install_mosquitto
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "FUNCTION_FILE": str(function_file),
+            "TEST_HOME": str(home),
+            "STUB_BIN": str(stub_bin),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    log = (home / "apt.log").read_text(encoding="utf-8")
+    assert "download mosquitto" in log
+    assert "download libwrap0" in log
+    assert "debconf-2.0" not in log
+    assert "libc-dev" not in log
+    assert (home / ".local/usr/lib/x86_64-linux-gnu/libwrap0.so.0").is_file()
+
+    wrapper = home / ".local/bin/mosquitto"
+    assert not wrapper.is_symlink()
+    assert "LD_LIBRARY_PATH" in wrapper.read_text(encoding="utf-8")
+    # The extraction target is still the binary, not the wrapper written over it.
+    assert "mosquitto version 9.9.9" in (home / ".local/usr/sbin/mosquitto").read_text(
+        encoding="utf-8"
+    )
 
 
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:

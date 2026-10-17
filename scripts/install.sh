@@ -312,16 +312,31 @@ install_mosquitto() {
         | sed -n 's/^[ |]*Depends: //p' | sed 's/<//g; s/>//g' | awk '{print $1}' | sort -u)
     missing=""
     for pkg in $deps; do
-        dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+        dpkg -s "$pkg" >/dev/null 2>&1 && continue
+        # A virtual dependency (`debconf-2.0`, `libc-dev`) has a name but no
+        # candidate, and one such name makes `apt-get download` refuse the
+        # whole invocation — which is how mosquitto once ended up extracted
+        # without any of the libraries it links against.  `madison` is empty
+        # exactly for those names; skip them, and download the rest one by one.
+        [ -n "$(apt-cache madison "$pkg" 2>/dev/null)" ] || continue
+        missing="$missing $pkg"
     done
     say "  downloading mosquitto packages"
-    ( cd "$debs" && apt-get -q download mosquitto mosquitto-clients $missing ) || true
+    for pkg in mosquitto mosquitto-clients $missing; do
+        ( cd "$debs" && apt-get -q download "$pkg" >/dev/null ) \
+            || { rm -rf "$tmp"; return 1; }
+    done
     ls "$debs"/*.deb >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
     for deb in "$debs"/*.deb; do
         dpkg -x "$deb" "$HOME/.local" || { rm -rf "$tmp"; return 1; }
     done
     rm -rf "$tmp"
     mkdir -p "$HOME/.local/bin"
+    # The wrapper must be a regular file.  An install made before it existed
+    # left a symlink here to the binary in `usr/sbin`; a redirection through
+    # that symlink would replace the binary with this script, which then execs
+    # itself forever.
+    rm -f "$HOME/.local/bin/mosquitto"
     cat > "$HOME/.local/bin/mosquitto" <<'EOF'
 #!/bin/sh
 root="$HOME/.local"
