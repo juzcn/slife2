@@ -1554,6 +1554,12 @@ def build_server(
         task's `[PeerAgent:…]` marker. 'message' is a plain conversation — no task, no
         completion, and the reply arrives as a message.
 
+        **A 'task_response' is the settlement, not a message about one.**  The
+        bridge is resolved here — `complete_task` before this call returns — so
+        the peer's terminal reply leaves in the same call and nothing
+        downstream has to settle the task again.  The harness only ever
+        delivered the inbound message; it takes no part in answering one.
+
         `agent` is a peer's name, which `peer_agent_list` gives you. A peer may
         be another agent on this machine or one somewhere else; the mesh does not
         tell you which, and nothing you send depends on it.

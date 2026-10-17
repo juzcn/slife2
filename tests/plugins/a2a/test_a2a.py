@@ -2276,6 +2276,50 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_task_response_settles_the_task_in_the_same_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The send call is the settlement, and there is no second step.**
+
+    A model that decides to answer a task it was given calls
+    `message_type='task_response'`; the tool resolves that task's bridge
+    (`A2AMesh.complete_task`) before it returns, so the terminal reply leaves
+    in the same call.  The harness only ever delivered the inbound message —
+    it has no part in settling a task (`_drain` no longer speaks for a turn).
+    """
+    completed: list[tuple[str, str, bool]] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    def complete_task(
+        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
+    ) -> str:
+        completed.append((task_id, result, cancelled))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
+
+    async with Client(build(on_the_mesh=True)) as client:
+        answer = await client.call_tool(
+            PEER_SEND_MESSAGE,
+            {
+                "agent": PEER,
+                "message": "the answer",
+                "message_type": "task_response",
+                "task_id": TASK,
+            },
+            meta=client_meta(AGENT),
+        )
+
+    assert completed == [(TASK, "the answer", False)], (
+        "the tool did not settle the task it answered"
+    )
+    assert answer.data == {"peer": PEER, "task_id": TASK, "completed": True}
+
+
+@pytest.mark.asyncio
 async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     """The state a bare "offline" cannot tell apart from another agent holding
     this one's name — which is the whole of what v1's `__check` error field was
