@@ -3251,10 +3251,10 @@ async def test_a_broadcast_wakes_every_member_before_it_is_published(
 
 
 @pytest.mark.asyncio
-async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
-    tmp_path: Path,
+async def test_the_local_roster_takes_its_own_place_and_lists_the_members(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """**The roster is the membership, not the cache.**
+    """**The roster is the membership, not the cache — and the caller is on it.**
 
     `subagent_list` answered with the broker's retained cards, so a
     subagent that had been made and not yet messaged was simply absent from the
@@ -3263,7 +3263,19 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
     which is a thing a model can act on: a message to it wakes it.  The names
     come from the same look the send path takes, so the two agree by
     construction.
+
+    **And the first read connects.**  On a cold start nothing holds a local
+    agent's place, so a read that only built the session reported the caller
+    itself `offline` with `not connected to the broker`; that is the cold-start
+    lie this test pins.  The caller is online after the read, and an unwoken
+    member is still offline — the two facts the roster is made of.
     """
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
         server = local_build(configured=True)
@@ -3274,7 +3286,7 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
 
     data = answer.data
     assert data["agents"] == [
-        {"agent_name": AGENT, "status": "offline"},
+        {"agent_name": AGENT, "status": "online"},
         {"agent_name": "tester", "status": "offline"},
     ]
     # **The mesh, which on this network is whose it is.**  The section says
@@ -3282,6 +3294,43 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
     # this network's word (`Net.namespace`) — so the answer names the mesh
     # *and* which network it is on, where the section's pair named neither.
     assert (data["org"], data["unit"]) == ("subagent", AGENT)
+
+
+@pytest.mark.asyncio
+async def test_a_local_roster_that_cannot_connect_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A roster read reports a refused connect; it does not raise.**
+
+    The tool's contract is a roster that says why it is short, and the broker
+    being down is exactly that fact.  The send path still raises — a call that
+    cannot leave has not happened — but a read that could not take its place
+    still answers with the members and the reason.
+    """
+
+    async def connect(self: Any) -> None:
+        raise ConnectionError("the broker refused the connection")
+
+    async def disconnect(self: Any) -> None:
+        return None
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            answer = await client.call_tool(
+                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
+            )
+
+    data = answer.data
+    assert "the broker refused the connection" in data["error"]
+    assert data["agents"][0] == {"agent_name": AGENT, "status": "offline"}
+    assert ("tester", "offline") in [
+        (card["agent_name"], card["status"]) for card in data["agents"]
+    ]
 
 
 @pytest.mark.asyncio
@@ -3329,15 +3378,25 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
 
 
 @pytest.mark.asyncio
-async def test_a_members_own_roster_lists_it_once(tmp_path: Path) -> None:
+async def test_a_members_own_roster_lists_it_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """**`you first` is one row, and a member is in two of the lists.**
 
     A subagent asking this question is a member of the roster it is asking
     about — so the membership look finds its own name, under which it would be
     listed a second time, as a member nothing has woken, beside the row that is
-    the asker.  The maker is not here because this mesh is never connected: on a
-    broker its card is in the same unit and it is listed like any other peer.
+    the asker.  The fake connect keeps this test off a broker; with no cards
+    cached, the only names are the membership's, and the asker is excluded from
+    the added ones.  On a real broker the maker's card is in the same unit and
+    is listed like any other peer.
     """
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
         write_subagent(AGENT, "tester2")

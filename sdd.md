@@ -765,9 +765,12 @@ the maker's terminal as `Subagent(<name>)> ` — a channel, like `AsyncTask(<nam
 and not a marker: the answer reaches the maker as a message in its own
 conversation. **A turn that ends without a reply call is still an answer**: its
 final text completes the task (or is sent as the message), so the maker is not
-left waiting for words the member already wrote. On the wire, a message between
-agents carries `[PeerAgent:{…}]` and one on the subagent network carries its own
-envelope (`DESIGN §1.10`).
+left waiting for words the member already wrote. **A roster read takes the
+caller's place first**: no window holds a local agent's `join`, so the first
+`subagent_list` after a start connects it before reporting — a refused connect
+is the tool's `error`, not a raise, and an unwoken member is still `offline`.
+On the wire, a message between agents carries `[PeerAgent:{…}]` and one on the
+subagent network carries its own envelope (`DESIGN §1.10`).
 
 **Two verbs are not A2A's.** A2A coordinates peers that already exist: it has
 `join`, which is one of them taking its place, and nothing that makes one exist.

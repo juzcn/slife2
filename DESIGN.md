@@ -1844,6 +1844,15 @@ Three things, and they are one change:
   window is holding its `join` — and here nothing is, so `peer_agent_send_message`
   ensures the *target's* session before publishing.  It cannot be done once at
   start: a model may `subagent_set` while everything is already up.
+- **And the roster read takes the caller's place too.**  On the remote network
+  a window's `join` is what puts the agent online, so a read must not join on
+  its behalf.  On this network there is no window: the first `subagent_list`
+  after a restart used to build the session and report the caller itself
+  `offline` with `not connected to the broker`, which reads as a dead network
+  rather than a cold start.  The local roster now connects before it reads —
+  reporting a refused connect through `error` rather than raising, because a
+  roster that says why it is short is the tool's contract — and an unwoken
+  member is still `offline`, which is the other fact the same read carries.
 
 **What this costs, stated rather than implied.**  `handover` argues that running
 a turn with nobody watching is a fallback — work advancing where no person can

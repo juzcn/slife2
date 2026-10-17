@@ -177,7 +177,9 @@ FORGET = "forget"
 #: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
 #: needs the mesh and never released, because what follows a send is a reply the
-#: agent is waiting for.  `WINDOW` is a window's (`join`), and it is released the
+#: agent is waiting for — and a local roster read that takes the caller's place
+#: is a call that needs the mesh too, since nothing else on that network speaks
+#: for the maker.  `WINDOW` is a window's (`join`), and it is released the
 #: moment that window stops holding the call.  `MEMBER` is a subagent's, and it
 #: is never released either — but for a different reason, and that is why it is
 #: a third word rather than `USED`: nothing here is waiting for a reply, it is
@@ -1756,6 +1758,16 @@ def build_server(
         the send path takes (`membership`), and the status from the mesh: a
         member that has taken its place is `online` on the wire.
 
+        **On the local network the read connects first.**  The first
+        `subagent_list` after a restart used to report the caller itself
+        `offline` with `not connected to the broker`, because the session was
+        built and nothing had dialled yet; a model reads that as a dead network
+        rather than as a cold start.  So this call takes the caller's place
+        before it reads the cards, and a failure to take it is what the `error`
+        field says.  The remote network keeps the old rule: there a window's
+        `join` is the presence, and a read must not put an agent on the network
+        nobody is showing.
+
         `error` says why the list is short when it is: the last failure to join,
         or another agent holding your name — the two states a bare "offline"
         cannot tell apart.
@@ -1775,7 +1787,31 @@ def build_server(
                 "agents": [],
                 "error": switch_off(net),
             }
-        session = session_of(agent, mine)
+        # **On the local network, asking who is there takes the caller's own
+        # place first.**  Unlike the remote network, no window holds a local
+        # agent's `join` — the TUI has no part in a local network — so a roster
+        # read is the first thing a freshly started agent can do, and
+        # `session_of` alone leaves its own card `offline` until some send
+        # connects it.  A model reading that concludes the network is down, not
+        # that it has not dialled yet; measured on the live network as the first
+        # `subagent_list` after every restart reporting `not connected to the
+        # broker` and only the second one telling the truth.
+        #
+        # The refusal is reported through the tool's `error` field rather than
+        # raised, and that is this tool's contract: a roster says why it is
+        # short, and a broker that is genuinely down is the same fact the send
+        # path would name.  The session it leaves behind is the one
+        # `session_of` would have built anyway, so the roster still names the
+        # members and still shows them offline.
+        if net is LOCAL:
+            try:
+                session = await connected(agent, USED, mine)
+            except ToolError:
+                session = session_of(agent, mine)
+        else:
+            # The remote network's presence is its window's `join`; a read must
+            # not put an agent on it that nobody is showing.
+            session = session_of(agent, mine)
         mesh = session.mesh
         own, *peers = mesh.list_agents()
         found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}
