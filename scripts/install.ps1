@@ -139,16 +139,20 @@ function Update-ProcessPath {
 }
 
 function Get-RemoteFile([string]$Url, [string]$Path) {
+    # curl.exe draws a progress bar and is much faster than PS 5.1's
+    # Invoke-WebRequest on a large response; fall back to IWR (which also
+    # draws progress) when curl.exe is absent.
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        & curl.exe -fL --progress-bar -o $Path $Url
+        if ($LASTEXITCODE -eq 0) { return $true }
+    }
     try {
         Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop
         return $true
     }
-    catch { }
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -fsSL -o $Path $Url 2>$null
-        return ($LASTEXITCODE -eq 0)
+    catch {
+        return $false
     }
-    return $false
 }
 
 function Test-BrokerListening {
@@ -179,6 +183,7 @@ function Add-Owned([string]$Manager, [string]$Package, [string]$Tool) {
 function Ensure-Uv {
     Update-ProcessPath
     if (Get-Command uv -ErrorAction SilentlyContinue) {
+        Say '  updating uv'
         [void](Invoke-Quiet { & uv self update })
         return
     }
@@ -195,6 +200,7 @@ function Ensure-Uv {
 }
 
 function Ensure-Python {
+    Say '  installing Python 3.13'
     if (-not (Invoke-Quiet { & uv python install 3.13 --upgrade --default })) {
         Die 'Python 3.13 could not be installed'
     }
@@ -205,11 +211,13 @@ function Download-Source {
     $script:WorkDir = Join-Path $env:TEMP ("slife2-source-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     [void](New-Item -ItemType Directory -Path $script:WorkDir -Force)
     $zip = Join-Path $script:WorkDir 'source.zip'
+    Say '  downloading slife2'
     if (-not (Get-RemoteFile 'https://github.com/juzcn/slife2/archive/refs/heads/main.zip' $zip)) {
         if (-not (Get-RemoteFile 'https://gitee.com/juzcn/slife2/repository/archive/main.zip' $zip)) {
             Die 'slife2 could not be downloaded'
         }
     }
+    Say '  extracting slife2'
     Expand-Archive -Path $zip -DestinationPath $script:WorkDir -Force
     $source = Get-ChildItem $script:WorkDir -Directory |
         Where-Object { Test-Path (Join-Path $_.FullName 'pyproject.toml') } |
@@ -222,6 +230,7 @@ function Download-Source {
 
 function Install-SlifeTool {
     $wasInstalled = [bool]((& uv tool list 2>$null) -match '^slife2\s')
+    Say '  installing slife2'
     if (-not (Invoke-Quiet { & uv tool install --python 3.13 --force $script:SourceDir })) {
         Die 'slife2 could not be installed'
     }
@@ -233,9 +242,20 @@ function Install-SlifeTool {
     if (-not (Test-Path $script:Py)) { Die 'the slife2 environment is incomplete' }
 }
 
+function Ensure-Credstore {
+    if (Get-Command credstore -ErrorAction SilentlyContinue) { return }
+    Say '  installing credstore'
+    if (-not (Invoke-Quiet { & uv tool install --python 3.13 credstore })) {
+        Die 'credstore could not be installed'
+    }
+    Update-ProcessPath
+    Add-Owned 'uv-tool' 'credstore' 'credstore'
+}
+
 function Ensure-Venv {
     $script:Py = Join-Path $script:Root '.venv\Scripts\python.exe'
     if (-not (Test-Path $script:Py)) {
+        Say '  creating the virtualenv'
         if (-not (Invoke-Quiet { & uv venv --python 3.13 })) { Die 'the virtualenv could not be created' }
     }
     & $script:Py -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)'
@@ -245,6 +265,7 @@ function Ensure-Venv {
 }
 
 function Sync-Checkout {
+    Say '  syncing dependencies'
     if (-not (Invoke-Quiet { & uv sync --upgrade --inexact })) { Die 'uv sync failed' }
 }
 
@@ -316,11 +337,13 @@ function Install-Node {
     $nodeDir = Join-Path $tools 'node'
     $zip = Join-Path $env:TEMP ("node-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.zip')
     $expand = Join-Path $env:TEMP ("node-expand-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    Say "  downloading node $($info.Version)"
     if (-not (Get-RemoteFile "https://nodejs.org/dist/latest-v22.x/$($info.File)" $zip)) { return $false }
     if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $info.Sha.ToUpperInvariant()) {
         Remove-Item -Force $zip -ErrorAction SilentlyContinue
         return $false
     }
+    Say '  extracting node'
     Expand-Archive -Path $zip -DestinationPath $expand -Force
     $inner = Get-ChildItem $expand -Directory | Select-Object -First 1
     if (-not $inner) { return $false }
@@ -361,6 +384,7 @@ function Ensure-Cloudflared {
     }
     $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { '386' } else { 'amd64' }
     $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$arch.exe"
+    Say '  downloading cloudflared'
     if (-not (Get-RemoteFile $url $target)) { Fail 'cloudflared could not be downloaded'; return }
     Add-UserPath (Split-Path -Parent $target)
     Update-ProcessPath
@@ -377,10 +401,12 @@ function Ensure-Mosquitto {
 function Ensure-UvTool([string]$Executable, [string]$Python) {
     if (Get-Command $Executable -ErrorAction SilentlyContinue) {
         if ((& uv tool list 2>$null) -match "^$Executable\s") {
+            Say "  upgrading $Executable"
             [void](Invoke-Quiet { & uv tool upgrade $Executable })
         }
         return
     }
+    Say "  installing $Executable"
     if (Invoke-Quiet { & uv tool install --python $Python $Executable }) {
         [void](Invoke-Quiet { & uv tool update-shell })
         Update-ProcessPath
@@ -457,18 +483,14 @@ function Show-Next {
     if ($version) { Say "Installed slife2 $version." }
     else { Say 'Installed slife2.' }
     if ($script:Mode -eq 'checkout') {
-        Say '  run:       uv run slife2'
-        Say "  data:      $($script:HomeDir)"
-        Say "  config:    $(Join-Path $script:HomeDir 'slife2.yaml')"
-        Say '  uninstall: .\scripts\install.ps1 uninstall'
+        Say '  run:     uv run slife2'
     }
     else {
-        Say '  run:       slife2'
-        Say "  data:      $($script:HomeDir)"
-        Say "  config:    $(Join-Path $script:HomeDir 'slife2.yaml')"
-        Say '  uninstall: powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1))) uninstall"'
+        Say '  run:     slife2'
     }
-    Say '  api key:   set <PROVIDER>_API_KEY in your environment (see README)'
+    Say "  data:    $($script:HomeDir)"
+    Say "  config:  $(Join-Path $script:HomeDir 'slife2.yaml')"
+    Say '  api key: credstore set DEEPSEEK_API_KEY'
 }
 
 function Invoke-Install {
@@ -488,6 +510,7 @@ function Invoke-Install {
         Install-SlifeTool
         Seed-Config
     }
+    Ensure-Credstore
     Step '4/4' 'dependencies'
     $requirements = Get-Requirements
     Install-Dependencies $requirements

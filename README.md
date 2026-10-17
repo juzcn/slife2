@@ -204,13 +204,15 @@ including a single OpenAI-compatible provider.
 
 ## Quick start
 
-After the one-click installer, the dependencies are already synced; the
-remaining steps are the key and the window:
+After the one-click installer, the dependencies are already synced and
+`credstore` is installed. Set the key and start the window:
 
 ```bash
-uv run credstore set DEEPSEEK_API_KEY
-uv run slife2
+credstore set DEEPSEEK_API_KEY
+slife2
 ```
+
+From a source checkout, start it with `uv run slife2` instead.
 
 A manual installation starts one step earlier:
 

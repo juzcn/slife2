@@ -192,12 +192,14 @@ export DEEPSEEK_API_KEY=...
 
 ## 快速开始
 
-使用一键安装后，依赖已经同步，剩下的是 key 和窗口：
+使用一键安装后，依赖已经同步，`credstore` 也已安装。设置 key 并启动窗口：
 
 ```bash
-uv run credstore set DEEPSEEK_API_KEY
-uv run slife2
+credstore set DEEPSEEK_API_KEY
+slife2
 ```
+
+从源码目录运行时，用 `uv run slife2` 启动。
 
 手动安装则从同步开始：
 

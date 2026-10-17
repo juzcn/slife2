@@ -30,16 +30,24 @@ say() { printf '%s\n' "$*"; }
 step() { printf '[%s] %s\n' "$1" "$2"; }
 fail() { printf 'error: %s\n' "$*" >&2; FAILED=1; }
 die() { printf 'error: %s\n' "$*" >&2; exit 2; }
-run_quiet() {
-    local log
+stage() {  # message command...
+    local message=$1
+    shift
+    local log pid code
     log=$(mktemp) || return 1
-    if "$@" >"$log" 2>&1; then
-        rm -f "$log"
-        return 0
-    fi
-    tail -n 20 "$log" >&2
+    printf '  %s' "$message"
+    "$@" >"$log" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        [ -t 1 ] && printf '.'
+        sleep 1
+    done
+    wait "$pid"
+    code=$?
+    printf '\n'
+    [ "$code" -eq 0 ] || tail -n 20 "$log" >&2
     rm -f "$log"
-    return 1
+    return "$code"
 }
 
 for arg in "$@"; do
@@ -141,7 +149,8 @@ ensure_uv() {
         return 0
     fi
     say "  installing uv"
-    run_quiet sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' || die "uv could not be installed"
+    stage "installing uv" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' \
+        || die "uv could not be installed"
     record_owned local "$HOME/.local/bin/uv" uv
     refresh_path
     command -v uv >/dev/null 2>&1 || die "uv is not on PATH"
@@ -152,15 +161,17 @@ ensure_python() {
         require_homebrew
         if ! brew list --formula python@3.13 >/dev/null 2>&1; then
             say "  installing python@3.13"
-            run_quiet brew install python@3.13 || die "python@3.13 could not be installed"
+            stage "installing python@3.13" brew install python@3.13 \
+                || die "python@3.13 could not be installed"
             record_owned brew python@3.13 python
         else
-            run_quiet brew upgrade python@3.13 || true
+            stage "updating python@3.13" brew upgrade python@3.13 || true
         fi
         PY313="$(brew --prefix python@3.13)/bin/python3.13"
         [ -x "$PY313" ] || die "python@3.13 is missing"
     else
-        run_quiet uv python install 3.13 --upgrade --default || die "Python 3.13 could not be installed"
+        stage "installing Python 3.13" uv python install 3.13 --upgrade --default \
+            || die "Python 3.13 could not be installed"
         refresh_path
     fi
 }
@@ -170,8 +181,9 @@ download_source() {
     SOURCE="$WORK_DIR/source"
     mkdir -p "$SOURCE"
     archive="$WORK_DIR/source.tar.gz"
-    curl -fsSL -o "$archive" "https://github.com/juzcn/slife2/archive/refs/heads/main.tar.gz" \
-        || curl -fsSL -o "$archive" "https://gitee.com/juzcn/slife2/repository/archive/main.tar.gz" \
+    say "  downloading slife2"
+    curl -fL --progress-bar -o "$archive" "https://github.com/juzcn/slife2/archive/refs/heads/main.tar.gz" \
+        || curl -fL --progress-bar -o "$archive" "https://gitee.com/juzcn/slife2/repository/archive/main.tar.gz" \
         || die "slife2 could not be downloaded"
     tar -xzf "$archive" -C "$SOURCE" --strip-components=1 || die "slife2 could not be extracted"
     HELPER="$SOURCE/scripts/install_helper.py"
@@ -182,9 +194,11 @@ install_tool() {
     local was=0 tool_dir
     uv tool list 2>/dev/null | grep -q '^slife2 ' && was=1
     if [ "$PLATFORM" = macos ]; then
-        run_quiet uv tool install --python "$PY313" --force "$SOURCE" || die "slife2 could not be installed"
+        stage "installing slife2" uv tool install --python "$PY313" --force "$SOURCE" \
+            || die "slife2 could not be installed"
     else
-        run_quiet uv tool install --python 3.13 --force "$SOURCE" || die "slife2 could not be installed"
+        stage "installing slife2" uv tool install --python 3.13 --force "$SOURCE" \
+            || die "slife2 could not be installed"
     fi
     [ "$was" -eq 0 ] && record_owned uv-tool slife2 slife2
     uv tool update-shell >/dev/null 2>&1 || true
@@ -194,13 +208,23 @@ install_tool() {
     [ -x "$PY" ] || die "the slife2 environment is incomplete"
 }
 
+ensure_credstore() {
+    command -v credstore >/dev/null 2>&1 && return 0
+    stage "installing credstore" uv tool install --python 3.13 credstore \
+        || die "credstore could not be installed"
+    record_owned uv-tool credstore credstore
+    refresh_path
+}
+
 ensure_venv() {
     PY="$ROOT/.venv/bin/python"
     if [ ! -x "$PY" ]; then
         if [ "$PLATFORM" = macos ]; then
-            run_quiet uv venv --python "$PY313" || die "the virtualenv could not be created"
+            stage "creating the virtualenv" uv venv --python "$PY313" \
+                || die "the virtualenv could not be created"
         else
-            run_quiet uv venv --python 3.13 || die "the virtualenv could not be created"
+            stage "creating the virtualenv" uv venv --python 3.13 \
+                || die "the virtualenv could not be created"
         fi
     fi
     "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)' >/dev/null 2>&1 \
@@ -210,7 +234,7 @@ ensure_venv() {
 }
 
 sync_checkout() {
-    run_quiet uv sync --upgrade --inexact || die "uv sync failed"
+    stage "syncing dependencies" uv sync --upgrade --inexact || die "uv sync failed"
 }
 
 seed_config() {
@@ -230,7 +254,7 @@ requirements() {
 }
 
 install_node() {
-    local os arch sums line file sha tmp name
+    local os arch sums line file sha tmp name version
     case "$(uname -s)/$(uname -m)" in
         Linux/x86_64|Linux/amd64) os=linux; arch=x64 ;;
         Linux/aarch64|Linux/arm64) os=linux; arch=arm64 ;;
@@ -243,8 +267,11 @@ install_node() {
     [ -n "$line" ] || return 1
     file=$(printf '%s' "$line" | awk '{print $2}')
     sha=$(printf '%s' "$line" | awk '{print $1}')
+    version=$(printf '%s' "$file" | sed -n 's/.*node-\(v[0-9.]*\)-.*/\1/p')
     tmp=$(mktemp -d) || return 1
-    curl -fsSL -o "$tmp/node.tgz" "https://nodejs.org/dist/latest-v22.x/$file" || { rm -rf "$tmp"; return 1; }
+    say "  downloading node $version"
+    curl -fL --progress-bar -o "$tmp/node.tgz" "https://nodejs.org/dist/latest-v22.x/$file" \
+        || { rm -rf "$tmp"; return 1; }
     [ "$(hash_file "$tmp/node.tgz")" = "$sha" ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$HOME/.local/lib/nodejs"
     mkdir -p "$HOME/.local/lib/nodejs" "$HOME/.local/bin"
@@ -265,7 +292,8 @@ install_cloudflared() {
         *) return 1 ;;
     esac
     mkdir -p "$HOME/.local/bin"
-    curl -fsSL -o "$HOME/.local/bin/cloudflared" \
+    say "  downloading cloudflared"
+    curl -fL --progress-bar -o "$HOME/.local/bin/cloudflared" \
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" \
         || return 1
     chmod +x "$HOME/.local/bin/cloudflared"
@@ -286,7 +314,8 @@ install_mosquitto() {
     for pkg in $deps; do
         dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
     done
-    ( cd "$debs" && apt-get download mosquitto mosquitto-clients $missing ) >/dev/null 2>&1 || true
+    say "  downloading mosquitto packages"
+    ( cd "$debs" && apt-get -q download mosquitto mosquitto-clients $missing ) || true
     ls "$debs"/*.deb >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
     for deb in "$debs"/*.deb; do
         dpkg -x "$deb" "$HOME/.local" || { rm -rf "$tmp"; return 1; }
@@ -318,7 +347,7 @@ ensure_tool() {  # executable provenance
             broker_listening && return 0
             if [ "$PLATFORM" = macos ]; then
                 require_homebrew
-                if run_quiet brew install mosquitto; then
+                if stage "installing mosquitto" brew install mosquitto; then
                     record_owned brew mosquitto mosquitto
                     say "  installed mosquitto"
                 else
@@ -341,7 +370,7 @@ ensure_tool() {  # executable provenance
             command -v cloudflared >/dev/null 2>&1 && return 0
             if [ "$PLATFORM" = macos ]; then
                 require_homebrew
-                if run_quiet brew install cloudflared; then
+                if stage "installing cloudflared" brew install cloudflared; then
                     record_owned brew cloudflared cloudflared
                     say "  installed cloudflared"
                 else
@@ -381,7 +410,7 @@ ensure_tool() {  # executable provenance
                 return 0
             fi
             if [ "$exe" = yt-dlp ]; then python=3.13; else python=3.12; fi
-            if run_quiet uv tool install --python "$python" "$exe"; then
+            if stage "installing $exe" uv tool install --python "$python" "$exe"; then
                 uv tool update-shell >/dev/null 2>&1 || true
                 record_owned uv-tool "$exe" "$exe"
                 refresh_path
@@ -445,17 +474,13 @@ print_next() {
         say "Installed slife2."
     fi
     if [ "$MODE" = checkout ]; then
-        say "  run:       uv run slife2"
-        say "  data:      $HOME_DIR"
-        say "  config:    $HOME_DIR/slife2.yaml"
-        say "  uninstall: ./scripts/install.sh uninstall"
+        say "  run:     uv run slife2"
     else
-        say "  run:       slife2"
-        say "  data:      $HOME_DIR"
-        say "  config:    $HOME_DIR/slife2.yaml"
-        say "  uninstall: curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.sh | bash -s -- uninstall"
+        say "  run:     slife2"
     fi
-    say "  api key:   set <PROVIDER>_API_KEY in your environment (see README)"
+    say "  data:    $HOME_DIR"
+    say "  config:  $HOME_DIR/slife2.yaml"
+    say "  api key: credstore set DEEPSEEK_API_KEY"
 }
 
 do_install() {
@@ -475,6 +500,7 @@ do_install() {
         install_tool
         seed_config
     fi
+    ensure_credstore
     step 4/4 dependencies
     requirements
     install_dependencies
