@@ -43,7 +43,7 @@ import httpx2
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import unresolved_reference
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import work_dir
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +57,19 @@ logger = logging.getLogger(__name__)
 MEDIA_DIR = "media"
 
 
-def media_dir(agent: str, folder: str = "") -> Path:
-    """Where an artifact goes: `agents/<agent>/media[/folder]/`.
+def media_dir(agent: str, subagent: str = "", folder: str = "") -> Path:
+    """Where an artifact goes: `work_dir(agent, subagent)/media[/folder]/`.
 
-    **Per agent**, because what it holds is what that agent generated in its own
-    turns — and **contained**, which is not decoration: `folder` is a
-    model-written string, and `folder="../../.."` would be a model choosing
-    where on this machine to write a file.  Resolved before it is compared,
-    refused rather than rewritten — a silently corrected path is a file
-    somewhere other than where the model said (`slife2.plugins.cabinet.store.resolve`
-    draws the same line).
+    **Per conversation, with forks sharing their maker's.**  A non-fork subagent
+    owns its media; a fork is a temporary copy of its maker's conversation and
+    writes to the maker's directory.  **Contained**, which is not decoration:
+    `folder` is a model-written string, and `folder="../../.."` would be a model
+    choosing where on this machine to write a file.  Resolved before it is
+    compared, refused rather than rewritten — a silently corrected path is a
+    file somewhere other than where the model said
+    (`slife2.plugins.cabinet.store.resolve` draws the same line).
     """
-    root = agent_dir(agent) / MEDIA_DIR
+    root = work_dir(agent, subagent) / MEDIA_DIR
     if not folder.strip():
         root.mkdir(parents=True, exist_ok=True)
         return root

@@ -766,10 +766,12 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 | `fork` | 将创建者当前对话复制为 subagent 的起点。fork 的轮次不会存储。 |
 
 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db` 和
-`subagent.yaml`。记录保存其模型、角色、fork 状态和创建时间。文件柜、媒体目录、
-定时账本和微信登录属于创建者，因为这些存储按 agent 而不是按对话索引。树只到
-一层：subagent 不能创建或移除 subagent，因为本地网络只为其创建者自己的
-subagent 保留位置，再下一层没有位置。
+`subagent.yaml`。记录保存其模型、角色、fork 状态和创建时间。非 fork 的
+subagent 还拥有自己的文件柜和媒体目录，就在自己的目录下；fork 共享创建者的
+文件柜和媒体，因为它是创建者对话的临时副本。定时账本和微信登录仍属于创建者：
+定时触发要投递到窗口，而微信登录按账号保存。树只到一层：subagent 不能创建或
+移除 subagent，因为本地网络只为其创建者自己的 subagent 保留位置，再下一层
+没有位置。
 
 移除 subagent 时，先通知本地网络释放其位置，再停止其循环，最后删除其目录。
 如果网络通知无法完成，subagent 保持不变。
@@ -803,7 +805,8 @@ subagent:
       media/                   生成的图片、视频和音频
       wechat.yaml              此 agent 的微信登录
       subagents/
-        <name>/                subagent 的对话与记录
+        <name>/                subagent 的对话与记录；非 fork 的 subagent
+                               还有 cabinet/ 和 media/
 ```
 
 工具目录位于 agent 目录旁边，因为它属于整个 home，而不属于某一个 agent。

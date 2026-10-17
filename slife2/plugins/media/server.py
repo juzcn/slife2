@@ -159,7 +159,7 @@ class Media:
                 unaddressed("agent directory to write into", "the directory")
             )
         try:
-            return media_dir(found[0], folder)
+            return media_dir(found[0], found[1], folder)
         except MediaAdapterError as exc:
             raise ToolError(str(exc)) from exc
 

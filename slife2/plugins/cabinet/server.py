@@ -66,8 +66,12 @@ from fastmcp.exceptions import ToolError
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
-from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.plugin.protocol import agent_reader, house_server, serve_plugin
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    request_client,
+    unaddressed,
+)
+from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
 from slife2.libs.turn.tokens import estimate_lines_tokens, estimate_text_tokens
@@ -277,9 +281,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: embedder, which cannot happen while this process is running.
     synced: set[Path] = set()
 
-    async def store(agent: str) -> CabinetStore:
-        """One agent's cabinet, with its indexes brought up to date."""
-        opened = await off_loop(store_of, index_path(agent))
+    async def store(agent: str, subagent: str = "") -> CabinetStore:
+        """One conversation's cabinet, with its indexes brought up to date."""
+        opened = await off_loop(store_of, index_path(agent, subagent))
         if opened.path not in synced:
             status = await opened.sync(await embedding.get())
             if not status["ready"]:
@@ -299,13 +303,18 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: Whose cabinet a call is about, **refused rather than guessed**.  One
     #: cabinet serves every agent, and which one a call is for is a fact only the
     #: caller has — so a call that says nothing is refused rather than answered
-    #: with somebody else's diary.  The words are this plugin's and the sentence
-    #: is the house one (`slife2.libs.plugin.audience.UNADDRESSED`).
-    agent_of = agent_reader("cabinet to act on", "the cabinet")
+    #: with somebody else's diary.  The pair is the client id: a non-fork
+    #: subagent resolves to its own cabinet, and a fork to its maker's.
+    def client_of(ctx: Context) -> tuple[str, str]:
+        found = request_client(ctx)
+        if found is None or not found[0]:
+            raise ToolError(unaddressed("cabinet to act on", "the cabinet"))
+        return found
 
     async def cabinet(ctx: Context) -> CabinetStore:
         """The cabinet this call is about, with its index up to date."""
-        return await store(agent_of(ctx))
+        agent, subagent = client_of(ctx)
+        return await store(agent, subagent)
 
     # ── The three moves every kind makes ─────────────────────────────────
     #

@@ -1105,9 +1105,10 @@ A subagent:
   their own agent cannot say what a subagent is, whose it is, or where its work
   comes from;
 - has its own conversation and its own `subagent.yaml`;
-- shares the maker’s cabinet, media directory, schedule ledger, and WeChat
-  login, because those stores are keyed by the agent rather than by the
-  conversation;
+- owns its cabinet and media directory if it is not a fork; a fork shares the
+  maker’s, because it is a temporary copy of the maker’s conversation;
+- shares the maker’s schedule ledger and WeChat login, because a scheduled
+  trigger is delivered to a window and a login is per account;
 - has no process, window, or name claim;
 - is addressed by `(maker, name)`.
 
@@ -1292,10 +1293,12 @@ A media provider is not a chat provider. Its models are declared per kind:
 image, video, tts, asr. A vendor may serve several kinds, so `kind` is a fact
 about the model and `api:` selects the wire adapter.
 
-Artifacts are written under `agents/<agent>/media/`, not the process’s working
-directory. The daemon’s working directory is the runtime directory, which is
-documented as reconstructible; a generated file left there is the one file
-certain to be lost.
+Artifacts are written under the conversation’s work directory: the agent’s
+`media/`, or a non-fork subagent’s `subagents/<name>/media/`. A fork writes to
+its maker’s. They never go to the process’s working directory: the daemon’s
+working directory is the runtime directory, which is documented as
+reconstructible, and a generated file left there is the one file certain to be
+lost.
 
 `folder=` is contained inside that root. It is a model-written string;
 `folder="../../.."` would be a model choosing where on the operator’s machine to

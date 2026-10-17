@@ -30,7 +30,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import ToolResultSettings, load
-from slife2.libs.host.paths import agent_dir, data_dir
+from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.libs.store.index import table_exists
 from slife2.libs.turn.tokens import estimate_text_tokens
@@ -67,19 +67,31 @@ def cabinet() -> FastMCP:
     return build_server(load(), embedder=StubEmbedder())
 
 
-async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) -> str:
+async def ask(
+    client: Client,
+    tool: str,
+    agent: str = "jack",
+    subagent: str = "",
+    **arguments: Any,
+) -> str:
     """One tool call's answer as **text** — what a model is handed, byte for byte."""
     result = await client.call_tool(
-        tool, arguments, meta=client_meta(agent) if agent else None
+        tool, arguments, meta=client_meta(agent, subagent) if agent else None
     )
     return "".join(getattr(block, "text", "") for block in result.content or [])
 
 
 async def payload(
-    client: Client, tool: str, agent: str = "jack", **arguments: Any
+    client: Client,
+    tool: str,
+    agent: str = "jack",
+    subagent: str = "",
+    **arguments: Any,
 ) -> Any:
     """One tool call's answer as the JSON a model reads."""
-    return json.loads(await ask(client, tool, agent=agent, **arguments))
+    return json.loads(
+        await ask(client, tool, agent=agent, subagent=subagent, **arguments)
+    )
 
 
 def keys(rows: list[dict[str, Any]]) -> list[str]:
@@ -94,6 +106,47 @@ def bag(agent: str = "jack") -> Path:
 
 def store(agent: str = "jack") -> CabinetStore:
     return store_of(index_path(agent))
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_cabinet_follows_its_fork_flag(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-fork subagent owns its cabinet; a fork uses its maker's.
+
+    The cabinet is private work, so it follows the conversation.  A subagent
+    that is not a fork is a persistent agent of the maker's and gets its own
+    directory under `subagents/`; a fork is a temporary copy of its maker's
+    conversation, and what it writes lands in the maker's cabinet beside it.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    researcher = agent_dir("jack", "researcher")
+    record = subagent_file("jack", "researcher")
+
+    async with Client(cabinet()) as client:
+        record.write_text("fork: false\n", encoding="utf-8")
+        own = await payload(
+            client,
+            "note_edit",
+            subagent="researcher",
+            subject="own",
+            content="the subagent's note",
+        )
+        own_mirror = Path(own["mirror"])
+        assert (researcher / "cabinet" / own_mirror).is_file()
+        assert not (agent_dir("jack") / "cabinet" / own_mirror).exists()
+
+        record.write_text("fork: true\n", encoding="utf-8")
+        shared = await payload(
+            client,
+            "note_edit",
+            subagent="researcher",
+            subject="shared",
+            content="the maker's note",
+        )
+        shared_mirror = Path(shared["mirror"])
+        assert (agent_dir("jack") / "cabinet" / shared_mirror).is_file()
+        assert not (researcher / "cabinet" / shared_mirror).exists()
 
 
 # --- the surface the model is given -------------------------------------------

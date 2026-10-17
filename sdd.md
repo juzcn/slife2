@@ -535,8 +535,9 @@ A subagent:
 - has the maker's tool set, with one exception: `subagent_set` and
   `subagent_remove` refuse a subagent caller (see §4.5.3);
 - has its own role-specific system prompt (`subagent.j2`), its own conversation,
-  and its own `subagent.yaml`; the cabinet, media directory, schedule ledger,
-  and WeChat login are keyed by the agent and are therefore the maker's;
+  and its own `subagent.yaml`; a non-fork subagent also owns its cabinet and
+  media directory, while a fork shares the maker's; the schedule ledger and
+  WeChat login remain the maker's;
 - has no process, no window, and no claim on an agent name;
 - runs when something sends it a message;
 - is addressed by the second half of a client id: `(maker, name)`.
@@ -549,8 +550,10 @@ operations as a peer agent, under `subagent_*` names.
 
 Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. That
 directory contains the subagent's conversation (`turns.db`) and its record
-(`subagent.yaml`). Stores keyed by the agent rather than the conversation—the
-cabinet, media directory, schedule ledger, and WeChat login—remain the maker's.
+(`subagent.yaml`). A non-fork subagent also has its own `cabinet/` and `media/`
+there; a fork uses the maker's cabinet and media. The schedule ledger and WeChat
+login remain the maker's, because a scheduled trigger is delivered to a window
+and a WeChat login is per account.
 
 The container level is deliberate. `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker. A subagent named `cabinet` would
@@ -1233,6 +1236,11 @@ One table holds all kinds. The kinds are one corpus; a corpus whose rows live in
 four tables would have to be unioned before it could be ranked. `kind` says what
 a row is, `key` is what a read and a remove take, and columns a kind does not use
 are empty.
+
+The cabinet is per conversation. An agent's own conversation has
+`agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
+a fork uses the maker's. A fork is a temporary copy of the maker's conversation,
+and its work products belong with it.
 
 A document's Markdown mirror is written in the same operation as its row. The
 path is stored rather than derived, so a change to the naming rule orphans

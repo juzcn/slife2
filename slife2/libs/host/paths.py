@@ -628,6 +628,44 @@ SUBAGENTS_DIR = "subagents"
 _SUBAGENT_YAML = "subagent.yaml"
 
 
+def work_dir(agent: str, subagent: str = "") -> Path:
+    """The directory a conversation's private work lives in.
+
+    **A fork shares its maker's work directory; a subagent that is not a fork
+    owns its own.**  A fork is a temporary copy of its maker's conversation —
+    taken to answer one question and not recorded — so its cabinet and media are
+    the maker's.  A subagent that is not a fork is a persistent agent of the
+    maker's, so its cabinet and media live under its own directory and are
+    removed with it.
+
+    ``subagent=""`` is the maker's own conversation, which uses the agent's
+    directory like a fork does.
+    """
+    if subagent and not _forked(agent, subagent):
+        return agent_dir(agent, subagent)
+    return agent_dir(agent)
+
+
+def _forked(agent: str, subagent: str) -> bool:
+    """Whether *subagent* was made as a fork, read from its own record.
+
+    A missing or unreadable record is not a fork: the directory is then the
+    subagent's own, which is the safe answer for a live subagent.  The record is
+    the same file `subagent_spec` reads; this helper is here rather than in the
+    agent server because every plugin that writes per-conversation work needs
+    the answer, and a plugin must not import another plugin.
+    """
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    path = subagent_path(agent, subagent) / _SUBAGENT_YAML
+    try:
+        record = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, YAMLError):
+        return False
+    return isinstance(record, dict) and record.get("fork") is True
+
+
 def subagent_file(agent: str, subagent: str) -> Path:
     """The record that makes `<agent>/subagents/<subagent>/` a subagent: a file
     inside it.

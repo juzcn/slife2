@@ -120,7 +120,7 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import normalize_bound
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     MAX_PAGE,
@@ -242,36 +242,34 @@ SPECS: dict[str, Spec] = {
 }
 
 
-def cabinet_dir(agent: str) -> Path:
-    """One agent's cabinet: `<data>/agents/<agent>/cabinet/`.
+def cabinet_dir(agent: str, subagent: str = "") -> Path:
+    """One conversation's cabinet: `work_dir(agent, subagent)/cabinet/`.
 
-    **Per agent**, because a plugin here keys its state by the client id every
-    call carries (`slife2.libs.plugin.protocol`) and the cabinet is the most private state
-    there is: a diary is one person's.  Where a v1 cabinet ends up, too: v1 also
-    named its own directory after the agent (`<data>/<agent>.files/`), which is
-    what makes one adoptable by copying its contents in — the level that moved
-    is the one this module's docstring names.
+    **Per conversation, with forks sharing their maker's.**  A non-fork subagent
+    owns its cabinet (`agents/<agent>/subagents/<name>/cabinet/`); a fork is a
+    temporary copy of its maker's conversation and uses the maker's cabinet.  A
+    diary is one person's, and the client id is what says whose.
 
     The name is sanitised by `safe_agent_name` for the reason that function
     gives: an agent name comes from a command line, and `jack` becoming a
     *directory* is exactly the kind of thing a `..` in the wrong place turns
     into a write somewhere nobody intended.
     """
-    path = agent_dir(agent) / CABINET_DIR
+    path = work_dir(agent, subagent) / CABINET_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def index_path(agent: str) -> Path:
+def index_path(agent: str, subagent: str = "") -> Path:
     """The cabinet's index file, beside the documents it indexes.
 
-    Inside the cabinet rather than in `slife2.libs.store.db/` with the other stores, and
-    v1 put it there for a reason worth keeping: the cabinet is then **one
-    directory** — copy it, back it up, or delete it and the cabinet is gone with
-    nothing left behind.  The cost is that the store's path is not derivable
-    from the data directory alone, which is what these two functions are for.
+    Inside the cabinet rather than in `slife2.libs.store.db/` with the other
+    stores, so the cabinet is **one directory** — copy it, back it up, or delete
+    it and the cabinet is gone with nothing left behind.  The cost is that the
+    store's path is not derivable from the data directory alone, which is what
+    these two functions are for.
     """
-    return cabinet_dir(agent) / INDEX_NAME
+    return cabinet_dir(agent, subagent) / INDEX_NAME
 
 
 # ── The text a document is found by, and the text it is about ────────────────

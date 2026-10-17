@@ -29,7 +29,9 @@ from slife2.libs.host.paths import (
     runtime_dir,
     schedule_dbs,
     skills_dir,
+    subagent_file,
     turn_dbs,
+    work_dir,
 )
 
 pytestmark = pytest.mark.unit
@@ -239,6 +241,34 @@ def test_a_subagent_stays_inside_its_parent(
             agent_dir("jack", name)
 
     assert not (tmp_path / "agents" / "elsewhere").exists()
+
+
+def test_a_fork_shares_its_makers_work_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-fork subagent owns its work; a fork is a copy and shares.
+
+    The cabinet and media are work products, so where they land follows the
+    conversation rather than the process: a persistent subagent has its own
+    directory, a fork has its maker's.  The record inside the subagent's
+    directory is what says which it is.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    jack = agent_dir("jack")
+    researcher = agent_dir("jack", "researcher")
+    record = subagent_file("jack", "researcher")
+
+    record.write_text("fork: false\n", encoding="utf-8")
+    assert work_dir("jack", "researcher") == researcher
+    assert work_dir("jack") == jack
+
+    record.write_text("fork: true\n", encoding="utf-8")
+    assert work_dir("jack", "researcher") == jack
+
+    record.unlink()
+    assert work_dir("jack", "researcher") == researcher, (
+        "a missing record is not a fork"
+    )
 
 
 def test_a_home_is_found_by_the_ones_that_were_told_about_it(

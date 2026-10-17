@@ -118,7 +118,9 @@ agent-task:
 
 subagent:
   # Subagents per agent. The tree stops at one level: a subagent cannot create
-  # or remove a subagent.
+  # or remove a subagent. A non-fork subagent owns its cabinet and media under
+  # its own directory; a fork shares the maker's. The schedule ledger and
+  # WeChat login remain the maker's.
   max_running: 32
   # The local network. The unit is always the agent's name, so writing `unit:`
   # is refused; `org` may be set to group meshes. This is also the broker
