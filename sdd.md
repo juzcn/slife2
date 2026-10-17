@@ -763,9 +763,13 @@ a turn in the subagent's own conversation, because a window has no part in a loc
 network at all (`DESIGN §1.10`, "the road"). What the subagent answers is drawn on
 the maker's terminal as `Subagent(<name>)> ` — a channel, like `AsyncTask(<name>)> `,
 and not a marker: the answer reaches the maker as a message in its own
-conversation. **A turn that ends without a reply call is still an answer**: its
-final text completes the task (or is sent as the message), so the maker is not
-left waiting for words the member already wrote. **A roster read takes the
+conversation. **A turn that ends in prose is not a reply, and the harness does
+not send one**: the model's own `subagent_send_message` or `task_response` call
+is the only road out, so a task answered in prose stays pending — the model's
+failure made visible rather than a fallback that speaks for it. (A fallback
+that did speak for it was measured on 2026-10-17: two members echoed each other
+for 3h13m, ~2,200 turns, because every final text became the peer's next
+message.) **A roster read takes the
 caller's place first**: no window holds a local agent's `join`, so the first
 `subagent_list` after a start connects it before reporting — a refused connect
 is the tool's `error`, not a raise, and an unwoken member is still `offline`.

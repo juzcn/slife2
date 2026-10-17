@@ -301,10 +301,10 @@ def a2a_marker(text: str, net: Net) -> dict[str, Any] | None:
     """The payload of an inbound A2A message's marker, or ``None``.
 
     **One reader for the envelope, because two readers would be two spellings.**
-    :func:`a2a_message_type` asks this for the wire ``type``; `_drain` asks it
-    for the ``task_id`` it needs to complete the task a member's turn answered.
-    Both facts live in the same JSON object, and a second parse beside this one
-    is how the two would drift.
+    :func:`a2a_message_type` asks this for the wire ``type``, and the ``task_id``
+    rides the same JSON object for any caller that needs to name the task a
+    message carries.  Both facts are read through this one parse; a second
+    reader beside it is how the two would drift.
 
     ***net* is required, because the two meshes are independent and so are their
     envelopes** (`[PeerAgent:` and `[Subagent:`).  A reader with a default would
@@ -437,24 +437,6 @@ class Session:
     #: the first to finish was the last one — see `hold`, which is where that
     #: cost a live window its mesh.
     reasons: dict[str, int] = field(default_factory=dict)
-    #: How many replies this member has sent to each peer, so `_drain` can tell
-    #: whether the turn it just ran answered for itself.
-    #:
-    #: **Keyed by the peer rather than counted in one number.**  A subagent may
-    #: send something to a sibling during a turn and still owe the sender of the
-    #: task it was given an answer; one count would read the sibling's reply as
-    #: the sender's and leave the sender's task unanswered.  The value is
-    #: monotonic — only the difference across one turn is read — so nothing
-    #: resets it and no peer's entry ever has to be cleaned up.
-    replied_to: dict[str, int] = field(default_factory=dict)
-
-    def replied(self, peer: str) -> int:
-        """How many replies this member has sent to *peer* so far."""
-        return self.replied_to.get(peer, 0)
-
-    def note_reply(self, peer: str) -> None:
-        """Record one reply this member sent to *peer*."""
-        self.replied_to[peer] = self.replied(peer) + 1
 
     def hold(self, reason: str) -> None:
         """Add one reason for this agent to be on the mesh: one more *holder*.
@@ -580,17 +562,14 @@ async def run_turn(
     this client is the whole turn (the agent server's own `hub()` says the same
     thing about the same trap).
 
-    **What comes back is the turn's answer, and `_drain` decides whether it is
-    also the reply.**  A subagent normally answers with a tool call of its own —
-    a `task_response` — and then this value is the log line and a test's
-    evidence.  But a turn can end with prose and no call (a task that says
-    "answer in exactly three lines" is enough to make that happen), and then
-    the sender's task would stay pending for ever and its window would never see
-    the answer the member already wrote.  `_drain` compares the session's reply
-    count across the turn: a turn that sent nothing has this text completed as
-    the task's answer through the same bridge the tool would have used — one
-    road, not a second one — and a turn that sent something is left alone.  The
-    maker hears each answer once.
+    **What comes back is the turn's final text, and it is not a reply.**  A
+    subagent answers with a tool call of its own — a `task_response`, or a
+    `subagent_send_message` — and that call is what reaches the peer; this
+    value is the log line and a test's evidence.  A turn that ends in prose
+    has said nothing to anybody: the harness injects the message it received
+    and does not speak for the member, which is what keeps a turn free to stay
+    silent.  (The alternative was measured on 2026-10-17: the harness treating
+    the text as an answer made two members echo each other for 3h13m.)
 
     Raises:
         DeliveryFailed: The agent server could not be reached, so the message did
@@ -831,66 +810,6 @@ def _wire(session: Session) -> None:
     session.mesh.on_broadcast_event = on_broadcast_event
 
 
-async def _answer_for_turn(
-    session: Session, inbound: str, peer: str, said: str
-) -> None:
-    """Answer *peer* with the turn's own text when the turn sent nothing itself.
-
-    **The reply is still one road: this completes the same bridge the model's
-    own `subagent_send_message` would.**  A task is completed through
-    `A2AMesh.complete_task`, so the responder publishes the same terminal reply
-    the tool would have published and the sender's conversation learns of it in
-    exactly the same way — there is no second delivery path to the TUI, and no
-    message invented beside the protocol.  A task-less `message` takes the
-    send path instead, because a message has no bridge to complete.
-
-    **What this fixes is a turn that answered in prose and then stopped.**  The
-    model is told (in the tool's description) that a reply is the send call, but
-    a task that says "answer in exactly three lines" can still lead it to end
-    the turn with text and no call — measured on the live network, repeatedly.
-    The alternative is the sender's task staying `pending` for ever and the
-    maker waiting for an answer the member already wrote.  So a turn that sent
-    nothing has its final text treated as the answer, and a turn that did send
-    something is left alone (`Session.replied_to` is the difference across the
-    turn, and `_drain` is where it is taken).
-
-    An inbound with no marker — the orphan notice this plugin writes itself —
-    has no task and no peer to answer, and is left alone: nobody asked it a
-    question.
-    """
-    payload = a2a_marker(inbound, session.net) or {}
-    kind = payload.get("type")
-    task_id = payload.get("task_id")
-    if kind == "task_request" and isinstance(task_id, str) and task_id:
-        answer = session.mesh.complete_task(task_id, said, False)
-        if answer != "ok":
-            # A withdrawn or already-ended task: the peer has its ending, and
-            # a second answer is refused by the mesh rather than forced past it.
-            logger.warning(
-                "a2a_turn_answer_not_completed agent=%s task=%s: %s",
-                describe((session.agent, session.subagent)),
-                task_id,
-                answer,
-            )
-            return
-        logger.info(
-            "a2a_turn_answer_sent agent=%s peer=%s task=%s chars=%d",
-            describe((session.agent, session.subagent)),
-            peer,
-            task_id,
-            len(said),
-        )
-        return
-    if kind == "message" and said:
-        await session.mesh.send_message(peer, said, message_type="message")
-        logger.info(
-            "a2a_turn_answer_sent agent=%s peer=%s chars=%d",
-            describe((session.agent, session.subagent)),
-            peer,
-            len(said),
-        )
-
-
 async def _drain(
     session: Session,
     config: Config,
@@ -916,14 +835,15 @@ async def _drain(
     plugin has no ledger to write it into and no right to claim the work
     happened.
 
-    **A member's turn also answers the sender when the turn itself sent
-    nothing.**  What `run_turn` returns is the member's final text, and a turn
-    that made no reply call would otherwise leave the sender's task pending and
-    its window waiting for words the member already wrote.  `_answer_for_turn`
-    completes the same bridge the model's `task_response` would have completed,
-    so the answer reaches the maker's TUI along the one road a reply has; a turn
-    that did send something is left alone, because the count is read across the
-    turn (`Session.replied_to`).
+    **A member's turn is delivered to its conversation, and the harness does
+    not speak for the member.**  The inbound message becomes a turn there
+    (`run_turn`); a reply is the member's own `subagent_send_message` or
+    `task_response` call, and a turn that ends in prose ends there.  Treating
+    the final text as a reply — the rule this module used to hold — made
+    silence impossible, because any text became the next message: two members
+    that acknowledged each other echoed for ever, measured on 2026-10-17 as
+    ~2,200 turns over 3h13m of "received / I will not send any more messages".
+    The harness injects what arrived; it does not answer for the member.
 
     **The retry below is this plugin's own notices, and the count is the queue
     item's.**  An orphan notice is a message this process owes a peer about work
@@ -976,13 +896,6 @@ async def _drain(
                 continue
             try:
                 if session.subagent:
-                    # **Whether this turn answered through a tool is a
-                    # difference, not a flag to reset.**  A tool call changes
-                    # `replied_to` while `run_turn` is awaiting the turn, so
-                    # reading it before and after is what tells `_drain` that
-                    # the model sent its own reply — and that the final text is
-                    # not a second one.
-                    before = session.replied(peer)
                     said = await run_turn(
                         config,
                         session.agent,
@@ -1000,12 +913,6 @@ async def _drain(
                         peer,
                         len(said),
                     )
-                    if session.replied(peer) == before:
-                        # The turn wrote an answer and sent nothing: the
-                        # sender's task would sit `pending` and the maker's
-                        # window would never see it.  The text is the answer,
-                        # and it leaves on the same road a tool call does.
-                        await _answer_for_turn(session, text, peer, said)
                 else:
                     await hand_over(
                         config,
@@ -1679,13 +1586,6 @@ def build_server(
             answer = session.mesh.complete_task(task_id, message, False)
             if answer != "ok":
                 raise ToolError(answer.removeprefix("Error: "))
-            # **Only a member's own answer counts, and only when it went out.**
-            # `mine` is the subagent half of the caller's client id; the maker
-            # speaking has an empty one and is not a turn `_drain` will answer
-            # for.  A failed completion raises above, so it is not counted —
-            # the harness then completes with the turn's final text instead.
-            if mine:
-                session.note_reply(agent)
             return {"peer": agent, "task_id": task_id, "completed": True}
         # Before the publish, and only for a message somebody has to receive in.
         # A `task_response` above needs nothing placed: what it completes is a
@@ -1694,11 +1594,6 @@ def build_server(
         sent = await session.mesh.send_message(
             agent, message, message_type=message_type
         )
-        if message_type == "message" and mine:
-            # The same rule as the completion above: an explicit reply means
-            # the member answered for itself, so `_drain` must not answer again
-            # with the turn's final text.
-            session.note_reply(agent)
         if message_type == "message":
             return {
                 "peer": agent,

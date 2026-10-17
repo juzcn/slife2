@@ -1827,17 +1827,17 @@ Three things, and they are one change:
   step by hand.  A broadcast is the same rule once per member, since every
   member's responder receives it.
 
-  **A turn that ends with prose and no call is still an answer.**  Measured on
-  the live network, a task that says "answer in exactly three lines" reliably
-  makes the member end its turn with text and no `subagent_send_message` — the
-  tool's description notwithstanding — and the sender's task then stayed
-  `pending` for ever while its window waited for words the member had already
-  written.  So `_drain` reads the session's reply count across the turn: a turn
-  that sent nothing has its final text completed through the same bridge a
-  `task_response` would have completed (or sent as a `message` when the inbound
-  was task-less), and a turn that did send something is left alone.  The answer
-  still takes the one road a reply has — the responder's terminal reply, the
-  maker's session, the maker's TUI — so the maker hears it once.
+  **A turn that ends with prose is not an answer, and the harness does not
+  send one.**  The send tool's description says a reply is that call, and it
+  is the only road out: a task answered in prose stays `pending`, which is the
+  model's failure made visible rather than papered over.  This replaced a
+  fallback that completed the sender's bridge — or sent a task-less reply —
+  with the turn's final text.  Measured on 2026-10-17, that fallback made
+  silence impossible, because any final text became the next message: every
+  "received / I will not send any more messages" was echoed back, and critic
+  and strategy ran ~2,200 turns over 3h13m, each carrying a context that grew
+  to half a million tokens.  The harness delivers the message it received; the
+  member answers for itself.
 - **So the send path has to ensure the receiver's mesh exists.**  A message
   published to a member whose responder is not subscribed goes to nobody and
   reports nothing.  On the remote network that cannot happen — the peer's own

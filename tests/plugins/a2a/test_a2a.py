@@ -187,10 +187,9 @@ def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
 def test_the_marker_reads_its_whole_payload_back() -> None:
     """The task id rides the same envelope as the type.
 
-    `_drain` needs the id to complete the task a member's turn answered without
-    a tool call, and the type alone does not carry it.  One reader for the
-    payload is what keeps the type reader and the id reader from spelling the
-    same envelope twice.
+    A caller that needs to name the task a message carries reads it here, from
+    the same parse as the type — one reader for the payload, so the two
+    spellings of the envelope cannot drift.
     """
     text = marker(LOCAL, PEER, TASK, "task_request")
     assert a2a_marker(text, LOCAL) == {
@@ -2928,17 +2927,20 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
 
 
 @pytest.mark.asyncio
-async def test_a_members_turn_answer_completes_the_task_it_answered(
+async def test_a_prose_answer_to_a_task_does_not_complete_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_server: AgentServer
 ) -> None:
-    """**The answer a turn wrote is the task's answer, even without a tool call.**
+    """**The harness injects the message; it does not answer for the member.**
 
-    Measured live: a task that says "answer in exactly three lines" makes the
-    member end its turn with prose and no `subagent_send_message`, and the
-    sender's task stayed `pending` for ever while its window waited for words
-    the member had already written.  `_drain` now completes the bridge with the
-    turn's own text, so the sender's conversation — and the main agent's TUI —
-    receives it on the one road a reply has.
+    A task is completed by the member's own `subagent_send_message` or
+    `task_response` call.  A turn that ends in prose has said nothing to the
+    peer, so the task stays `pending` — the model's failure made visible
+    rather than a fallback that speaks for it.
+
+    The fallback this replaced completed the sender's bridge with the turn's
+    final text.  On 2026-10-17 that made silence impossible between two
+    members: every "received / I will not send any more messages" became the
+    peer's next message, and the two ran ~2,200 turns over 3h13m.
     """
     completed: list[tuple[str, str, bool]] = []
 
@@ -2951,57 +2953,24 @@ async def test_a_members_turn_answer_completes_the_task_it_answered(
     monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
     session = local_member(tmp_path)
     session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
-    await writer_until(session, lambda: bool(completed), agent=agent_server)
+    await drain_until_idle(session, agent=agent_server)
 
-    assert completed == [(TASK, f"{AGENT}/tester did it", False)], (
-        "the turn's answer did not complete the task it was given"
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_member_that_sent_its_own_reply_is_not_answered_again(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """**A tool call is the answer; the final text is not a second one.**
-
-    `Session.replied_to` is read before and after the turn, and a turn that
-    sent something is left alone.  Without that, every ordinary answer would
-    arrive twice — once as the tool's `task_response`, once as the turn's text.
-    """
-    completed: list[tuple[str, str, bool]] = []
-
-    def complete_task(
-        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
-    ) -> str:
-        completed.append((task_id, result, cancelled))
-        return "ok"
-
-    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
-    session = local_member(tmp_path)
-    turned = False
-
-    async def run_and_reply(*args: Any, **kwargs: Any) -> str:
-        nonlocal turned
-        session.note_reply(AGENT)
-        turned = True
-        return "already answered"
-
-    monkeypatch.setattr(a2a_server, "run_turn", run_and_reply)
-    session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
-    await writer_until(session, lambda: turned)
-
-    assert completed == [], "a turn that sent its own reply was answered again"
+    assert [turn["prompt"] for turn in agent_server.turns] == [
+        f"{marker(LOCAL, AGENT, TASK)}add one and one"
+    ], "the turn did not reach the member's conversation"
+    assert completed == [], "the harness answered the task with the turn's text"
 
 
 @pytest.mark.asyncio
-async def test_a_task_less_message_is_answered_with_the_turns_text(
+async def test_a_task_less_message_is_not_answered_by_the_harness(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_server: AgentServer
 ) -> None:
-    """A message has no bridge to complete, so its answer is sent as a message.
+    """A bare message's turn ends where it ends; the harness sends nothing.
 
-    The same rule, one road over: the member's turn text leaves the member's
-    own mesh for the peer it came from, and the peer's drain hands it to the
-    window exactly as it would a `subagent_send_message` call.
+    The model's own `subagent_send_message` is the reply road.  Echoing the
+    turn's text back instead is what let two members acknowledge each other
+    for ever: a turn could not decline to answer, because any final text
+    became the next message.
     """
     sent: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -3014,52 +2983,12 @@ async def test_a_task_less_message_is_answered_with_the_turns_text(
     monkeypatch.setattr(A2AMesh, "send_message", send_message)
     session = local_member(tmp_path)
     session.mesh.on_inbound_task(AGENT, "hello", "", kind="message")
-    await writer_until(session, lambda: bool(sent), agent=agent_server)
+    await drain_until_idle(session, agent=agent_server)
 
-    assert sent == [(AGENT, f"{AGENT}/tester did it", {"message_type": "message"})], (
-        "the turn's text did not go back to the sender as a message"
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_explicit_reply_is_counted_for_the_peer_it_went_to(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The counter `_drain` reads is written where the reply goes out.
-
-    Only a member's own send counts (`mine` non-empty): the maker speaking is
-    not a turn `_drain` answers for.  And it is counted per target, because a
-    message to a sibling is not an answer to the sender whose task is open.
-    """
-    counted: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        Session,
-        "note_reply",
-        lambda self, peer: counted.append((self.subagent, peer)),
-    )
-
-    async def connect(self: Any) -> None:
-        self._connected = True
-
-    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
-        return TASK
-
-    monkeypatch.setattr(A2AMesh, "connect", connect)
-    monkeypatch.setattr(A2AMesh, "send_message", send_message)
-
-    with in_home(tmp_path):
-        write_subagent(AGENT, "tester")
-        server = local_build(configured=True)
-        async with Client(server) as client:
-            await client.call_tool(
-                LOCAL.tool(SEND_MESSAGE),
-                {"agent": AGENT, "message": "done", "message_type": "message"},
-                meta=client_meta(AGENT, "tester"),
-            )
-
-    assert counted == [("tester", AGENT)], (
-        "the member's explicit reply was not counted for its target"
-    )
+    assert [turn["prompt"] for turn in agent_server.turns] == [
+        f"{marker(LOCAL, AGENT, None, type='message')}hello"
+    ], "the message did not reach the member's conversation"
+    assert sent == [], "the harness sent the turn's text back to the sender"
 
 
 @pytest.mark.asyncio
