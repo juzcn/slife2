@@ -2785,13 +2785,17 @@ async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_
 
 
 @pytest.mark.asyncio
-async def test_a_subagents_prompt_does_not_teach_the_send_tool(context, hub) -> None:
-    """**Schema over prompt**: the reply rule lives on the tool, not in the text.
+async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
+    context, hub
+) -> None:
+    """The prompt names the two ways to answer; the schema stays on the tools.
 
-    The prompt says what the conversation is — whose subagent it is, and where
-    its work comes from.  What a reply is belongs to the send
-    tool's description, where the model already reads the arguments; repeating it
-    here would be a second schema kept in step by hand.
+    A subagent's answer has to leave by `subagent_send_message` or
+    `subagent_broadcast`, and naming them here is what points a fresh
+    conversation at the right ones.  *How* to answer — `task_response` and
+    `message_type` — belongs to the tool descriptions, where the model already
+    reads the arguments; repeating it here would be a second schema kept in
+    step by hand.
     """
     backend = FakeBackend(text_turn("hello"))
     server = build_server(
@@ -2801,7 +2805,8 @@ async def test_a_subagents_prompt_does_not_teach_the_send_tool(context, hub) -> 
     await send(server, "one", subagent="researcher")
 
     prompt = backend.calls[0][0][0].content
-    assert "subagent_send_message" not in prompt
+    assert "subagent_send_message" in prompt
+    assert "subagent_broadcast" in prompt
     assert "task_response" not in prompt
     assert "message_type" not in prompt
 
@@ -2883,7 +2888,7 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
 
     named = backend.calls[0][0][0].content
     assert named.startswith(
-        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a code reviewer."
+        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — your role is code reviewer."
     )
     assert f"from {DEFAULT_AGENT} or another subagent" in named
     assert backend.calls[1][0][0].content == "be terse", "the operator's, for its maker"
@@ -2920,7 +2925,7 @@ async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
     ]
     head = backend.calls[1][0][0].content
     assert head.startswith(
-        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — a subagent."
+        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — your role is subagent."
     )
     # **A fork is not told that it is one** (the designer's call): the copy
     # above is the whole of what makes it a fork, and explaining it earned less

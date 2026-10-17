@@ -1785,7 +1785,8 @@ question — *where does one subagent's setting live?*
   a prompt for the agent they are running, and it cannot say the things a
   subagent needs to be told — what it is, whose subagent it is, and where its
   work comes from.  `role` reaches that template as a word ("You are scout, one of
-  jill's subagents — a code reviewer") and not yet as a choice of *file*.  **A
+  jill's subagents — your role is code reviewer") and not yet as a choice of
+  *file*.  **A
   fork is not told that it is one**: the explanation was longer than the fact was
   worth (the designer's call, 2026-10-17).  **The per-role template is the step
   left open**, and it is left open rather than guessed at: `role: reviewer`

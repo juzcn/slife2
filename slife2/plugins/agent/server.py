@@ -216,8 +216,8 @@ DEFAULT_ROLE = "subagent"
 #: among the templates shipped beside `system.j2`.
 #:
 #: **One template for every role, for now.**  `role` reaches it as a word ("You
-#: are scout, one of jill's subagents — a code reviewer") and not yet as a choice
-#: of *file*: a per-role
+#: are scout, one of jill's subagents — your role is code reviewer") and not yet
+#: as a choice of *file*: a per-role
 #: template is the step this design leaves open, and it is left open on purpose
 #: rather than guessed at — a role that selects `prompts/<role>.j2` needs an
 #: answer for a role with no file, and that answer is a design decision.
@@ -3290,11 +3290,11 @@ def build_server(
                 rather than now, so a `model_switch` you make in between reaches
                 it the way it reaches your own next turn.
             role: What it is for, as a word: it goes into the prompt the subagent
-                starts with, which opens
-                `You are <name>, one of <agent>'s subagents — a <role>`.  The
-                default is the plain one — `subagent` — and anything else is
-                worth saying only when it changes what the agent would do, the
-                way "code reviewer" does.
+                starts with, which opens `You are <name>, one of <agent>'s
+                subagents — your role is <role>`.  The default is the plain
+                one — `subagent` — and anything else is worth saying only when
+                it changes what the agent would do, the way "code reviewer"
+                does.
             fork: Whether it starts from a **copy of your own conversation**
                 instead of from nothing.  A fork is handed everything you have
                 said so far, as it stood at the moment you made it, and nothing it
