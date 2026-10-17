@@ -557,8 +557,10 @@ subagent has its conversation (`turns.db`), its record (`subagent.yaml`), and it
 own `cabinet/` and `media/` there. A fork has only the record: it is a copy of
 its maker's conversation held in memory, so it stores no turns, reads the
 maker's turn log for context without writing it, and shares the maker's cabinet
-and media. A subagent has no external identity of its own: WeChat and the
-peer-agent network belong to the agent, and scheduling stays with the agent too.
+and media. That record is removed when the agent server next starts: a fork is
+session-lived, and the start of a session ends the forks of the last one. A
+subagent has no external identity of its own: WeChat and the peer-agent network
+belong to the agent, and scheduling stays with the agent too.
 
 The container level is deliberate. `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker. A subagent named `cabinet` would
@@ -571,9 +573,9 @@ otherwise collide with the maker's own directory.
 - whether it was made as a fork;
 - when it was made.
 
-The file is deleted with the directory. The configuration file holds only
-machine-wide facts: how many subagents a maker may have, and where the local
-network meets.
+The file is deleted with the directory — or, for a fork, when the next session
+starts. The configuration file holds only machine-wide facts: how many subagents
+a maker may have, and where the local network meets.
 
 #### 4.5.2 Role and fork
 
@@ -583,8 +585,9 @@ network meets.
 - **`fork: true`** starts the subagent from a copy of its maker's conversation as
   it stood when the subagent's conversation starts. Nothing about the fork is
   stored: its turns are not recorded, it has no stored context to restore, and a
-  restart starts a fresh copy. The copy is cut back to the last completed
-  exchange, because a model provider rejects a conversation ending mid-exchange.
+  restart removes it — its record is deleted at the next start, and the name is
+  free for a new fork. The copy is cut back to the last completed exchange,
+  because a model provider rejects a conversation ending mid-exchange.
 
 #### 4.5.3 One level only
 
@@ -1168,8 +1171,9 @@ The loop reads these parameters off the call and strips them before dispatch.
 `libs/store/db.py` implements one SQLite file per conversation (client id):
 `agents/<agent>/turns.db` for the agent's own conversation, and
 `agents/<agent>/subagents/<name>/turns.db` for a non-fork subagent's. A fork has
-no file of its own; it reads the maker's turn log and never writes it. The
-store holds:
+no file of its own; it reads the maker's turn log and never writes it. A fork's
+`subagent.yaml` is removed when the agent server starts, so a fork does not
+outlive the session that made it. The store holds:
 
 - the turn log;
 - the live-context list;

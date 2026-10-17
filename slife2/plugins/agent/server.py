@@ -117,6 +117,8 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import (
     agent_dir,
+    in_home,
+    known_homes,
     subagent_dirs,
     subagent_file,
     subagent_path,
@@ -617,7 +619,12 @@ class Loop:
     #: conversation — copied out of it, and then its own — so writing it down
     #: would file one agent's work under another's history and put a second copy
     #: of that history in the store.  Nothing about it is written: no restore,
-    #: no rebuild, no record (`adopt_maker` is all three).
+    #: no rebuild, no turn record (`adopt_maker` is all three).
+    #:
+    #: **And its session is its whole life.**  The only file a fork leaves is
+    #: its `subagent.yaml`, and `forget_forks` removes that when the server
+    #: starts: a record with no conversation behind it would name a new fork of
+    #: the maker's current conversation, which is a different subagent.
     fork: bool = False
 
 
@@ -1254,9 +1261,16 @@ def build_server(
     def reap() -> None:
         """Drop conversations nothing has asked anything of for a while.
 
-        In-process state only.  Nothing a caller can observe depends on this — a key is
-        recreated on the next message that uses it — which is the whole reason
-        the sweep is allowed to be this casual.
+        In-process state only.  Nothing a caller can observe depends on this — a
+        key is recreated on the next message that uses it and restores what it
+        had — which is the whole reason the sweep is allowed to be this casual.
+
+        **A fork is the exception, and it is not idle state.**  What a restore
+        gives every other conversation back, a fork has nowhere else: its own
+        turns are the only copy, and letting them go would not reclaim a cache
+        but lose the conversation — the next message would start again from the
+        maker as it stood then.  So a fork is held for the session, which is the
+        whole of its life (`forget_forks` ends it at the next start).
 
         A conversation with a turn in flight is never idle, whatever its
         timestamp says: its own turn refreshes `last_used` when it finishes.
@@ -1266,6 +1280,8 @@ def build_server(
         # that name a conversation come from the loop (`agent`, `subagent`),
         # which is also what keeps the home out of a log line.
         for key, loop in list(loops.items()):
+            if loop.fork:
+                continue
             if loop.lock.locked():
                 continue
             if loop.last_used < cutoff:
@@ -2170,9 +2186,27 @@ def build_server(
         )
         return ToolError(f"{exc}\n{attachments.DROPPED_IMAGES}")
 
+    #: Whether this process has already cleared the forks the previous session
+    #: left behind.  **Once per server, not once per lifespan**: over the
+    #: in-memory transport FastMCP runs the lifespan once per client session, and
+    #: the loops deliberately outlive those sessions — a sweep on every one
+    #: would delete a fork another client had just made.
+    session_started = False
+
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        nonlocal context_conn, hub_conn, cabinet_conn
+        nonlocal context_conn, hub_conn, cabinet_conn, session_started
+        if not session_started:
+            session_started = True
+            # **The start of a session is the end of the last one's forks.**
+            # A fork's conversation lives in memory and nothing about it is
+            # written down, so the record a restart finds is the only part of it
+            # left — and a record with no conversation behind it is a name that
+            # would answer as a new fork of wherever its maker stands now.
+            # `forget_forks` says why that is a different subagent and not the
+            # same one resumed, and why the sweep is every home this process
+            # serves rather than its own.
+            forget_forks()
         try:
             yield {}
         finally:
@@ -3296,10 +3330,11 @@ def build_server(
                 it changes what the agent would do, the way "code reviewer"
                 does.
             fork: Whether it starts from a **copy of your own conversation**
-                instead of from nothing.  A fork is handed everything you have
-                said so far, as it stood at the moment you made it, and nothing it
-                does is written down: what it answers is the whole of what comes
-                back, and it keeps no memory between your messages.  Ask one a
+                instead of from nothing — a temporary stand-in for you.  A fork
+                is handed everything you have said so far, as it stood at the
+                moment you made it, and nothing it does is written down: it
+                remembers its own turns for as long as this session runs, and a
+                restart forgets it — the name is free for a new one.  Ask one a
                 question *about* what you are in the middle of when you want the
                 answer to that question to be the only thing that enters your
                 history.
@@ -3573,6 +3608,62 @@ def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
         logger.warning("the record of %s is not a mapping", path)
         return {}
     return loaded
+
+
+def forget_forks() -> list[Path]:
+    """Remove every fork a previous session left behind — at the start of one.
+
+    **A fork is session-lived: its lifetime is the process that made it.**  Its
+    conversation is held in memory and nothing it says is written down, so the
+    only thing a restart could find is the `subagent.yaml` record — a record of
+    a conversation that no longer exists.  Left in place, the name would answer
+    as a *new* fork of wherever its maker stands now: a different subagent
+    wearing the old one's name, role and model.  So the record goes when the
+    conversation it described does, and this is where: the start of a session is
+    the end of the last one's forks.
+
+    **The walk is every home this process serves** (`known_homes`), because a
+    shared daemon answers for all of them.  It is `turn_dbs`' shape one level in
+    and for its reason: what belongs to an agent is found by looking under its
+    directory, and nothing keeps a list to be kept in step.
+
+    **A record that cannot be read leaves its directory alone.**  `read_subagent`
+    reads a damaged record as absent, so `subagent_spec` answers "not a fork"
+    for it, and a read failure does not widen a deletion — the same rule that
+    stops a torn record widening `subagent_remove`'s blast radius.
+
+    Raises:
+        ToolError: A fork directory that could not be removed, naming the path
+            and the reason.  **This is a refusal to start rather than a warning**
+            because the session would otherwise begin with a fork of the last
+            one still holding its name — the state this function exists to
+            prevent.  The caller is the lifespan, so the server does not serve.
+    """
+    removed: list[Path] = []
+    for root in known_homes():
+        agents = root / "agents"
+        if not agents.is_dir():
+            continue
+        with in_home(root):
+            for agent in sorted(agents.iterdir()):
+                if not agent.is_dir():
+                    continue
+                for directory in subagent_dirs(agent.name):
+                    if not subagent_spec(agent.name, directory.name).fork:
+                        continue
+                    try:
+                        _remove_tree(directory)
+                    except ToolError as e:
+                        raise ToolError(
+                            f"the fork {directory} left by the previous session "
+                            f"could not be removed: {e}"
+                        ) from e
+                    removed.append(directory)
+                    logger.info(
+                        "forgot the fork %s: a fork is session-lived",
+                        describe((agent.name, directory.name)),
+                    )
+    return removed
 
 
 def settled_messages(messages: list[Message]) -> list[Message]:

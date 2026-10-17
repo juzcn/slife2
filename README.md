@@ -853,17 +853,20 @@ operations as a peer agent, under `subagent_*` names: `subagent_send_message`,
 | `name` | The subagent's name and directory. |
 | `model` | `provider/model`; empty uses the maker's model. |
 | `role` | A word included in the subagent's prompt. |
-| `fork` | Copy the maker's current conversation as the subagent's starting point. A fork's turns are not stored. |
+| `fork` | Copy the maker's current conversation as the subagent's starting point. A fork's turns are not stored, and it lives only for the current session. |
 
 A non-fork subagent lives in `agents/<maker>/subagents/<name>/` with its own
 `turns.db`, `subagent.yaml`, cabinet, and media directory. A fork has only the
 `subagent.yaml` record there: it stores no turns, keeps its conversation in
 memory as a copy of the maker's, and reads the maker's turn log for context. It
-writes nothing there, and it also shares the maker's cabinet and media. WeChat
-and the peer-agent network belong to the agent, not the subagent; scheduling
-also stays with the agent. The tree stops at one level: a subagent cannot create
-or remove a subagent, because the local network holds a place for the maker's
-own subagents and nothing holds a place for a level below them.
+writes nothing there, and it also shares the maker's cabinet and media. A fork
+is session-lived — a temporary stand-in for the maker — and when the agent
+server next starts it removes every fork record left by the previous session,
+so the name is free again. WeChat and the peer-agent network belong to the
+agent, not the subagent; scheduling also stays with the agent. The tree stops at
+one level: a subagent cannot create or remove a subagent, because the local
+network holds a place for the maker's own subagents and nothing holds a place
+for a level below them.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be

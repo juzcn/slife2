@@ -766,12 +766,14 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 | `name` | subagent 的名称和目录。 |
 | `model` | `provider/model`；为空时使用创建者的模型。 |
 | `role` | 包含在 subagent 提示词中的一个词。 |
-| `fork` | 将创建者当前对话复制为 subagent 的起点。fork 的轮次不会存储。 |
+| `fork` | 将创建者当前对话复制为 subagent 的起点。fork 的轮次不会存储，且只存活于当前会话。 |
 
 非 fork 的 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的
 `turns.db`、`subagent.yaml`、文件柜和媒体目录。fork 在该目录下只有
 `subagent.yaml` 记录：它不存储轮次，对话作为创建者对话的副本保存在内存中，
 只读取创建者的 turn log 作为上下文，不向其中写入；文件柜和媒体也共享创建者的。
+fork 是会话级（session-lived）的，就像创建者在当前会话中的一个临时分身：
+agent server 下次启动时会删除上一会话留下的所有 fork 记录，名称重新可用。
 微信和 peer agent 网络属于 agent，不属于 subagent；定时任务也留在 agent 上。
 树只到一层：subagent 不能创建或移除 subagent，因为本地网络只为其创建者自己的
 subagent 保留位置，再下一层没有位置。

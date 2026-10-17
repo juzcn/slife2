@@ -2979,6 +2979,82 @@ async def test_a_fork_writes_nothing_down(context, hub) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
+    """The next start removes the record; a subagent with a store is kept.
+
+    A fork is its conversation, and its conversation is in memory — so the
+    `subagent.yaml` a restart finds describes something that no longer exists.
+    Left there, the name would answer as a *new* fork of wherever its maker
+    stands now: a different subagent wearing the old one's name.  So the start
+    of a session ends the last one's forks, and frees their names.
+
+    A non-fork subagent is the contrast, and the reason this is about the record
+    rather than about tidiness: it owns a store, so a restart must keep it.
+    """
+    backend = FakeBackend(text_turn("the maker's"))
+    first = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    await set_subagent(first, "researcher", fork=True)
+    await set_subagent(first, "writer")
+
+    assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
+    assert subagent_of(DEFAULT_AGENT, "writer").is_dir()
+
+    # A second server on the same home is a restart: its first session is where
+    # the previous one's forks end.
+    second = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    await send(second, "one")
+
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists(), (
+        "a fork's record outlived the conversation it described"
+    )
+    assert subagent_of(DEFAULT_AGENT, "writer").is_dir(), (
+        "a subagent with a stored conversation is not a fork's to lose"
+    )
+
+    # And the name is free again rather than being a half-subagent that `set`
+    # would silently take for the old one.
+    remade = await set_subagent(second, "researcher", fork=True)
+    assert remade.data["created"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_idle_sweep_does_not_forget_a_fork(context, hub, monkeypatch) -> None:
+    """A fork's own turns are the only copy, so an idle fork is not idle state.
+
+    For every other conversation the sweep only reclaims memory: the turns are
+    in its store, and the next message restores them.  A fork has no store, so
+    reaping it would not reclaim anything — it would lose the conversation and
+    hand the next message a fresh copy of whatever the maker has said since.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "loop_idle", 0.0)
+    backend = FakeBackend(
+        text_turn("the maker's"),
+        text_turn("the fork's"),
+        text_turn("again"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await set_subagent(server, "researcher", fork=True)
+    await send(server, "two", subagent="researcher")
+    await send(server, "three", subagent="researcher")
+
+    assert prompts_seen(backend, 2) == [
+        "user:one",
+        "assistant:the maker's",
+        "user:two",
+        "assistant:the fork's",
+        "user:three",
+    ], "the fork kept its own turn instead of starting again from its maker"
+
+
+@pytest.mark.asyncio
 async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> None:
     """The maker moves on without it, and that is true in both directions.
 

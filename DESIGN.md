@@ -703,7 +703,9 @@ runs. A caller that can answer declares `watched=true`.
 `agents/<agent>/turns.db`, a non-fork subagent's at
 `agents/<agent>/subagents/<name>/turns.db`. A fork has no file of its own: it is
 a copy held in memory, and its context reads the maker's turn log. It writes
-nothing there.
+nothing there. Its `subagent.yaml` record is the one thing it leaves on disk,
+and the server removes it at the next start: a fork lives for the session that
+made it.
 
 The file holds:
 
@@ -1111,8 +1113,8 @@ A subagent:
 - has its own `subagent.yaml`; a non-fork subagent also has its own stored
   conversation, cabinet, and media directory; a fork stores no turns, reads the
   maker’s turn log for context without writing it, and shares the maker’s
-  cabinet and media, because it is a temporary copy of the maker’s
-  conversation;
+  cabinet and media, because it is a session-lived copy of the maker’s
+  conversation — its record is removed when the server next starts;
 - has no independent external identity: no WeChat login and no peer-agent
   membership; it is reached only on the local subagent network;
 - shares the maker’s schedule ledger, because scheduling stays with the agent;
@@ -1135,7 +1137,8 @@ A fork is a copy of the maker’s conversation, cut back to the last completed
 exchange. The copy must be sendable: the maker is mid-turn when it calls
 `subagent_set`, so its live list ends with an assistant message whose results
 have not come back. A fork records nothing and has no restore or rebuild; a
-restart starts a fresh copy.
+restart ends it — the server removes every fork record it finds and the name is
+free again.
 
 Removing a subagent tells the local network first, then stops the loop, then
 deletes the directory. If the network notification cannot be made, the subagent
