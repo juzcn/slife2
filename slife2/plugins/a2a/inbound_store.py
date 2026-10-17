@@ -22,7 +22,7 @@ walking into a refused ``task_response``.
 **That premise is single-process, so the ledger is per agent** — this is v1's own
 reason, and the file has v1's shape.  v1 wrote it to ``a2a_inbound_<agent>.yaml``
 in the data directory, with the agent in the *filename*; here an agent's state is
-a directory (§5, and `slife2.libs.host.paths`), so it is ``<agent>/a2a.yaml`` beside
+a directory (§5, and `slife2.libs.host.paths`), so it is ``<agent>/inbound.yaml`` beside
 ``turns.db`` and ``wechat.yaml`` — and that move is why there is an ``agent:`` key
 v1 did not need.  The directory holds the **sanitised** name
 (``slife2.libs.store.db.safe_agent_name``: ``a/b`` lands in ``a_b``), and whose ledger it is

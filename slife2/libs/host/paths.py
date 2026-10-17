@@ -671,7 +671,7 @@ def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
     the default would be a second spelling of one network's name in a module
     that has no business knowing which network is calling.  **It is a path
     relative to the agent's own directory**, which is how a network says where
-    its files live: the remote one is a name (`a2a.yaml`, beside `turns.db`), and
+    its files live: the remote one is a name (`inbound.yaml`, beside `turns.db`), and
     the subagent one is inside `subagents/` — the directory that network *is*,
     so the same word names the network's file and the members it holds.
 
@@ -712,7 +712,7 @@ def subagent_file(agent: str, subagent: str) -> Path:
     registry of subagents for the reason there is none of agents
     (`schedule_dbs`): an agent's subagents *are* the directories under
     `subagents/`, and what says which of them are subagents is a file in each —
-    the way `wechat.yaml` says a login and `a2a.yaml` says an answer is owed.
+    the way `wechat.yaml` says a login and `inbound.yaml` says an answer is owed.
 
     **And the container is what the blast radius rests on.**  A directory without
     this file is not a subagent's, which used to be the only thing keeping

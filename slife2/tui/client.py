@@ -581,7 +581,7 @@ class MCPMeshClient:
     async def connect(self) -> None:
         """Open the connection, or raise with a message worth showing.
 
-        The named-peer check is the point here too: an `a2a:` address pointed at
+        The named-peer check is the point here too: an `peer_agent:` address pointed at
         something else — a stale port, another plugin — fails by name rather than
         as a window whose agent silently never appears on the mesh
         (`slife2.libs.plugin.protocol.identifies`).

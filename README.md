@@ -77,14 +77,16 @@ bare provider, meaning its first model); without it the config's `default` is
 used. `--url` overrides the agent server's endpoint, for the case where it is
 already running somewhere this config does not name.
 
-**`--a2a-broker` points the mesh at a broker instead of the one in the config** —
-somebody else's, a team's, one already running on another machine — so joining
-one for a session does not mean editing a file every session reads. It overrides
-`a2a.broker` and nothing else — **not the local network's broker**, which is
-`subagent:`'s and is this machine's own, so an agent's subagents stay where the
-file put them. Which network this is (`org`/`unit`) is still the section's, and a
-machine with no `a2a:` section is still off the mesh, so the flag is refused
-there rather than switching one on. **A broker belongs to a
+**`--a2a-broker` points the peer network at a broker instead of the one in the
+config** — somebody else's, a team's, one already running on another machine —
+so joining one for a session does not mean editing a file every session reads.
+The flag keeps the plugin's technical name because the broker is the A2A wire's;
+what it overrides is `peer_agent.broker` and nothing else — **not the local
+network's broker**, which is `subagent:`'s and is this machine's own, so an
+agent's subagents stay where the file put them. Which network this is
+(`org`/`unit`) is still the section's, and a machine with no `peer_agent:` section
+is still off that network, so the flag is refused there rather than switching one
+on. **A broker belongs to a
 running stack**, which is why the flag can only be honoured by the command that
 starts the mesh: if the servers are already up they are on the broker they were
 started with, and `slife2` says so and stops rather than leaving you on the
@@ -985,23 +987,27 @@ task's `timezone` is an IANA name, and leaving it out means the machine's clock
 # machine where nobody writes one
 ```
 
-### The A2A mesh
+### Peer agents
 
-**Agent-to-agent traffic over MQTT**, on the published A2A-over-MQTT profile —
-so anything else that speaks it can talk to you. The wire, the topics, the agent
-cards and the task lifecycle are that SDK's; this is the driver and the plugin
-around it. v1's mesh, ported.
+**Your agent's peers are other agents, and this is how it talks to them.** The
+network is *peer agents* — the word every tool, envelope and channel uses —
+while the wire underneath is **A2A over MQTT**, on the published profile, so
+anything else that speaks it can talk to you. The wire, the topics, the agent
+cards and the task lifecycle are that SDK's; the plugin that carries it is
+`slife2-a2a`, and it is the same plugin that serves a `subagent:` section one
+port over. A person editing `slife2.yaml` writes `peer_agent:`; a model is
+handed `peer_agent_*`; nothing a model reads says `a2a`.
 
 | tool | what it does |
 |---|---|
-| `a2a_send_message` | Send a task, complete one you were sent, or just talk — `message_type` decides which |
-| `a2a_cancel_task` | Withdraw a task you sent |
-| `a2a_list_agents` | The roster: you first, then every peer, by name |
-| `a2a_task_list` | The tasks still open: waiting on an answer, or owing one |
-| `a2a_broadcast` | A fire-and-forget event to every peer |
+| `peer_agent_send_message` | Send a task, complete one you were sent, or just talk — `message_type` decides which |
+| `peer_agent_cancel_task` | Withdraw a task you sent |
+| `peer_agent_list` | The roster: you first, then every peer, by name |
+| `peer_agent_task_list` | The tasks still open: waiting on an answer, or owing one |
+| `peer_agent_broadcast` | A fire-and-forget event to every peer |
 
 ```
-a2a_send_message(agent="jill", message="Summarise the release notes.")
+peer_agent_send_message(agent="jill", message="Summarise the release notes.")
 → {"peer": "jill", "task_id": "61ab0c8a…", "message_type": "task_request",
    "note": "The result will arrive in this conversation."}
 ```
@@ -1014,8 +1020,8 @@ direction is in `from`, never `agent_name`, because that word is the agent's own
 identity. Incoming messages read as `PeerAgent(jill)> ` in the window, with the marker
 taken back off.
 
-**"Nothing to poll" is not "nothing to ask."** `a2a_task_list` answers what is
-still open — the tasks you sent that have not come back, the ones you were sent
+**"Nothing to poll" is not "nothing to ask."** `peer_agent_task_list` answers what
+is still open — the tasks you sent that have not come back, the ones you were sent
 and still owe, and any a previous process died holding — so a compacted
 conversation or a restart does not lose the ids it was waiting on.
 
@@ -1031,23 +1037,23 @@ than fighting over.
 as `[⚡ jill online]` beside `[restored 3 turns]` and `[kept 12 turns, recalled
 3]` — the same shape, because they are the same kind of thing: something the
 harness did rather than something anyone in the conversation said. Nothing runs
-and the model is not told: the roster is `a2a_list_agents`' answer, and a peer
+and the model is not told: the roster is `peer_agent_list`' answer, and a peer
 that wants to be answered sends a task.
 
 **An agent is on the mesh while somebody is being it.** A window holds a call
 open for its agent's life, so coming online and going offline follow somebody
 actually being there — a peer that watched the agent arrive watches it leave,
 with nothing to send. `slife2 --headless` holds that same call with no window at
-all, which is what an unattended machine wants. One `a2a_*` call joins its agent
-too and keeps it: what follows a send is a reply the agent is waiting for. The ledger at
-`<data>/agents/<agent>/a2a.yaml` is *not* the enrollment — what it records is the
-inbound tasks a process died holding, which is what a restart needs to tell an
-orphan from an id it has never seen.
+all, which is what an unattended machine wants. One `peer_agent_*` call joins its
+agent too and keeps it: what follows a send is a reply the agent is waiting for.
+The ledger at `<data>/agents/<agent>/inbound.yaml` is *not* the enrollment — what
+it records is the inbound tasks a process died holding, which is what a restart
+needs to tell an orphan from an id it has never seen.
 
 **The broker is started for you if it is not there, and stopped when you are
-done**, which is where this departs from v1. Left out, `a2a.broker` is the
+done**, which is where this departs from v1. Left out, `peer_agent.broker` is the
 subagent network's address (`subagent.broker`): one machine meets its subagents
-somewhere, and a remote mesh that names no broker meets there too. Point it at an
+somewhere, and a peer network that names no broker meets there too. Point it at an
 address; if
 nothing is listening there and it is *this* machine, `mosquitto` is started on it
 — and the last `slife2` to exit stops it again (or `slife2 down`, or `slife2
@@ -1059,7 +1065,7 @@ rather than leaving you five tools attached to nothing. `provider: mosquitto` is
 the only value; anything else is a config error, not a silently disabled feature.
 
 ```yaml
-a2a:
+peer_agent:
   provider: mosquitto
   broker:
     host: localhost      # another machine is reached the same way, and is
@@ -1072,8 +1078,8 @@ a2a:
 bridge and the peer's reply topic both lived in the process that died. The ledger
 draws the line between those and ids never seen, and the agent is **told once**,
 at the start that found them, so it can answer each peer with a plain message —
-the only reply those tasks can still get. **Omit the `a2a:` section entirely** to
-stay off the mesh: a machine that should not be on it is a machine where nobody
+the only reply those tasks can still get. **Omit the `peer_agent:` section
+entirely** to stay off that network: a machine that should not be on it is a machine where nobody
 writes one.
 
 ## Where things live
@@ -1096,11 +1102,11 @@ and a home is what `--data-dir` names:
                                    (the search index) inside
       media/                       what it generated
       wechat.yaml                  its WeChat login (~24h, written on a scan)
-      a2a.yaml                     its A2A ledger: the inbound tasks whose
-                                   completion bridge this process holds
+      inbound.yaml                 the peer network's ledger: the inbound tasks
+                                   whose completion bridge this process holds
       subagents/                   what this agent made with `subagent_set`,
                                    one directory each
-        a2a-subagent.yaml          the same ledger for the subagent network —
+        inbound.yaml               the same ledger for the subagent network —
                                    which is a second process and a second file,
                                    and the directory that network *is*
         <name>/                    the subagent: its own conversation, cabinet,

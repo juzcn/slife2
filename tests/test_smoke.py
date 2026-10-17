@@ -99,9 +99,9 @@ def test_the_mesh_url_is_the_key_the_address_is_filed_under() -> None:
     hand, so nothing exercised the line that reads one out of the file.
     """
     config = default_config()
-    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
 
-    assert mesh_url(config) == config.server("a2a").url
+    assert mesh_url(config) == config.server("peer_agent").url
     assert mesh_url(config) != A2A_SERVER_NAME
 
 
@@ -109,7 +109,7 @@ def test_a_machine_with_no_mesh_section_has_no_mesh_url() -> None:
     """`""`, so the window holds nothing — rather than holding a call to be told
     every two seconds that this machine is not on the mesh."""
     assert mesh_url(default_config()) == ""
-    assert not default_config().a2a.configured
+    assert not default_config().peer_agent.configured
 
 
 def test_the_broker_flag_is_parsed_and_reaches_the_environment(
@@ -154,7 +154,7 @@ def test_a_broker_the_running_mesh_was_not_started_on_is_refused(
     from slife2.libs.host.launcher import Outcome, ServerSpec, Status
 
     spec = ServerSpec(
-        name="a2a",
+        name="peer_agent",
         module="slife2.plugins.a2a.server",
         url="http://127.0.0.1:8040/mcp",
         host="127.0.0.1",
@@ -168,7 +168,7 @@ def test_a_broker_the_running_mesh_was_not_started_on_is_refused(
     config = default_config()
     object.__setattr__(
         config,
-        "a2a",
+        "peer_agent",
         A2ASettings(configured=True, broker_host="other.example", overridden=True),
     )
 
@@ -188,7 +188,7 @@ def test_a_mesh_this_command_started_honours_the_flag(
     from slife2.libs.host.launcher import Outcome, ServerSpec, Status
 
     spec = ServerSpec(
-        name="a2a",
+        name="peer_agent",
         module="slife2.plugins.a2a.server",
         url="http://127.0.0.1:8040/mcp",
         host="127.0.0.1",
@@ -202,7 +202,7 @@ def test_a_mesh_this_command_started_honours_the_flag(
     config = default_config()
     object.__setattr__(
         config,
-        "a2a",
+        "peer_agent",
         A2ASettings(configured=True, broker_host="other.example", overridden=True),
     )
 
@@ -228,7 +228,7 @@ def test_the_take_down_is_what_stops_the_broker(
     from slife2.libs.host import launcher
 
     config = default_config()
-    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
     monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
     monkeypatch.setattr(
         broker, "stop", lambda _settings: "stopped mosquitto on localhost:1883"
@@ -254,7 +254,7 @@ def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(
     from slife2.libs.host import launcher
 
     config = default_config()
-    object.__setattr__(config, "a2a", A2ASettings(configured=True))
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
     monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
     monkeypatch.setattr(broker, "stop", lambda _settings: "")
 

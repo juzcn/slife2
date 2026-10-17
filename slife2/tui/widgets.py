@@ -62,8 +62,8 @@ from slife2.libs.harness.markers import strip as strip_marker
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
 from slife2.libs.host.config import LOCAL
-from slife2.plugins.a2a.server import CHANNEL as A2A_CHANNEL
-from slife2.plugins.a2a.server import MARKER_PREFIX as A2A_MARKER
+from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
+from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
 from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
@@ -80,7 +80,7 @@ MARKERS: tuple[str, ...] = (
     WECHAT_MARKER,
     ASYNC_TASK_MARKER,
     ASYNC_CALL_MARKER,
-    A2A_MARKER,
+    PEER_MARKER,
     # **The local network's, which is a second envelope and not a second name
     # for the remote one.**  This list held the four the plugins export and
     # missed the one the *config* owns (`LOCAL.marker`, `[Subagent:`) — so a
@@ -184,17 +184,13 @@ def channel_prefix(channel: str) -> str:
         # from, which is why every message this plugin hands over names a task —
         # including the reconciliation, which is sent per task for this reason.
         return f"Scheduled({channel.split(':', 1)[1]})> "
-    if channel.startswith(f"{A2A_CHANNEL}:"):
-        # A peer on the mesh.  The name is in the channel because a hand-over
-        # carries the channel and the words and nothing else — the marker beside
-        # the message is taken back off (it is what a *reply* needs, which nothing
-        # a person reads can act on), and the footnote still carries the key it
+    if channel.startswith(f"{PEER_CHANNEL}:"):
+        # A peer agent.  The name is in the channel because a hand-over carries
+        # the channel and the words and nothing else — the marker beside the
+        # message is taken back off (it is what a *reply* needs, which nothing a
+        # person reads can act on), and the footnote still carries the key it
         # really came in on.
         #
-        # **`PeerAgent`, not the key spelled out.**  `a2a:jill` is an address —
-        # a protocol's name for a link — and what a person is being told is that
-        # another *agent* spoke, which is the same word its marker uses
-        # (`slife2.plugins.a2a.server.MARKER_PREFIX`).
         return f"PeerAgent({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{LOCAL.channel}:"):
         # One of this agent's own subagents, and **the word is the network's own

@@ -5,7 +5,7 @@ This is the one place this port departs from v1 on purpose, and the departure is
 the operator's call rather than a discovery.  v1's rule was that slife "does NOT
 spawn Mosquitto — the user must start it", and the presence of a listener *was*
 the feature's on/off switch: no broker, no mesh, everything else carried on.  Here
-a machine whose config says `a2a:` has said it wants the mesh, so a missing broker
+a machine whose config says `peer_agent:` has said it wants the mesh, so a missing broker
 is a missing dependency rather than a preference — the plugin brings one up, and a
 broker that will not serve is a start that fails loudly instead of an `a2a_*` tool
 surface quietly attached to nothing.

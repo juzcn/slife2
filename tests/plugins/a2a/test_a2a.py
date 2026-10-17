@@ -41,7 +41,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     BROADCAST,
     CANCEL_TASK,
-    LIST_AGENTS,
+    LIST,
     LOCAL,
     REMOTE,
     SEND_MESSAGE,
@@ -82,11 +82,6 @@ from slife2.plugins.a2a.mesh import (
     safe_name,
 )
 from slife2.plugins.a2a.server import (
-    A2A_BROADCAST,
-    A2A_CANCEL_TASK,
-    A2A_LIST_AGENTS,
-    A2A_SEND_MESSAGE,
-    A2A_TASK_LIST,
     A2A_TYPES,
     CHANNEL,
     FORGET,
@@ -94,6 +89,11 @@ from slife2.plugins.a2a.server import (
     MAX_QUEUED,
     ORPHAN_PEER,
     ORPHAN_RETRIES,
+    PEER_BROADCAST,
+    PEER_CANCEL_TASK,
+    PEER_LIST,
+    PEER_SEND_MESSAGE,
+    PEER_TASK_LIST,
     USED,
     WINDOW,
     Session,
@@ -123,7 +123,7 @@ TASK = "b1946ac92492d2347c6235b4d2611184"
 
 
 def settings(**overrides: Any) -> A2ASettings:
-    """A configured `a2a:` section, which is what puts a machine on the mesh."""
+    """A configured `peer_agent:` section, which is what puts a machine on the network."""
     base: dict[str, Any] = {"configured": True}
     base.update(overrides)
     return A2ASettings(**base)
@@ -184,36 +184,39 @@ def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
 
 def test_the_channel_names_the_peer() -> None:
     """The window draws a bubble from the channel alone, so the peer is in it."""
-    assert channel_for(REMOTE, PEER) == "a2a:jill"
-    assert CHANNEL == "a2a"
+    assert channel_for(REMOTE, PEER) == "peer_agent:jill"
+    assert CHANNEL == "peer_agent"
 
 
 def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
-    """A vocabulary each, and the one word that differs on purpose.
+    """A vocabulary each, and **neither one is the protocol's**.
 
     The remote network's envelope says `PeerAgent` and the local one's says
-    `Subagent`: one word each, and the window's `Subagent(name)>` is the same
-    word as the local envelope's, because the window belongs to the agent that
-    made the subagent and the envelope names the network the message came over.
+    `Subagent`: one word each, and the window's bubble is the same word as the
+    envelope's on both, because each names the network the message came over.
 
-    **The roster is the one tool whose *name* is not just the prefix.**  Three
-    verbs are one word under two prefixes; what the fourth lists differs in kind
-    — agents out there, subagents of yours — so `list_agents` names the one thing
-    the local network's members are not, and `roster_tool` is what asks each
-    network for its own.  The remote network's row says nothing about it, because
-    the shared verb is what the field defaults to: v1's four names are unchanged.
+    **Every name is the semantic one** — `peer_agent_list` and `subagent_list`
+    are one verb under two prefixes, and the prefix is what the model is taught.
+    A2A is what carries both networks; it is the plugin's and the operator's word
+    (`a2a:` in the config, `slife2-a2a` in `status`), and it appears in no name a
+    model calls — the same line the local network has always drawn.
     """
     assert channel_for(LOCAL, PEER) == "subagent:jill"
     assert marker(LOCAL, PEER) == '[Subagent:{"from": "jill", "type": "task_request"}] '
+    assert channel_for(REMOTE, PEER) == "peer_agent:jill"
+    assert marker(REMOTE, PEER) == (
+        '[PeerAgent:{"from": "jill", "type": "task_request"}] '
+    )
     assert LOCAL.tool("send_message") == "subagent_send_message"
-    assert REMOTE.tool("send_message") == "a2a_send_message"
-    assert LOCAL.roster_tool == "subagent_list"
-    assert REMOTE.roster_tool == "a2a_list_agents"
-    assert REMOTE.roster_tool == REMOTE.tool(LIST_AGENTS)
-    # And the word the remote network lists under is not one the local network
-    # answers to: a probe asking for it there would be looking for a tool that
-    # network does not serve.
-    assert LOCAL.roster_tool != REMOTE.tool(LIST_AGENTS)
+    assert REMOTE.tool("send_message") == "peer_agent_send_message"
+    assert LOCAL.tool(LIST) == "subagent_list"
+    assert REMOTE.tool(LIST) == "peer_agent_list"
+    # The two families are named by their relationship, not by a wire: the two
+    # names differ in the prefix and agree in the verb, on every one of the five.
+    for verb in (SEND_MESSAGE, CANCEL_TASK, LIST, BROADCAST, TASK_LIST):
+        assert LOCAL.tool(verb).removeprefix("subagent_") == verb
+        assert REMOTE.tool(verb).removeprefix("peer_agent_") == verb
+    assert "a2a" not in REMOTE.tool(SEND_MESSAGE), "the wire is not the model's word"
 
 
 # ── the scrubber, on values that come off the wire ──────────────────────────
@@ -335,7 +338,7 @@ def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     silence, which loses a peer's result and leaves the conversation that asked
     waiting for an answer that had already arrived.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     corr = "corr-pruned"
     mesh._corr_to_task[corr] = TASK
     mesh._sends[TASK] = _OutboundSend(TASK, PEER, "session", "{}")
@@ -389,7 +392,7 @@ async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
     `_withdrawn` beside them use.  The class is where the cap is stated now, so
     the assertion is on the class: a plain dict here is the drift coming back.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     assert isinstance(mesh._pending, FIFOCache)
     assert isinstance(mesh._corr_to_task, FIFOCache)
 
@@ -505,7 +508,7 @@ def test_completing_an_orphan_is_refused_with_the_reply_that_still_works() -> No
 
     InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
     mesh = A2AMesh(
-        default_config().a2a, AGENT, LEDGER
+        default_config().peer_agent, AGENT, LEDGER
     )  # opens the ledger: TASK → stale
 
     orphan = mesh.complete_task(TASK, "too late")
@@ -744,7 +747,7 @@ def test_a_broker_that_is_already_there_is_left_alone() -> None:
 
 def test_a_missing_broker_on_this_machine_is_started() -> None:
     """The one place this port contradicts v1: it spawns mosquitto rather than
-    leaving it to the operator, because a config that says `a2a:` has said it
+    leaving it to the operator, because a config that says `peer_agent:` has said it
     wants the mesh."""
     answers = iter([False, True])
     started: list[dict[str, Any]] = []
@@ -1053,7 +1056,9 @@ def wired(window: Window | None = None) -> Session:
     from slife2.plugins.a2a.mesh import A2AMesh
 
     session = Session(
-        agent=AGENT, net=REMOTE, mesh=A2AMesh(default_config().a2a, AGENT, LEDGER)
+        agent=AGENT,
+        net=REMOTE,
+        mesh=A2AMesh(default_config().peer_agent, AGENT, LEDGER),
     )
     _wire(session)
     return session
@@ -1106,7 +1111,7 @@ async def test_an_inbound_task_arrives_marked_and_on_the_peers_channel(
 
     handed = window.handed[-1]
     assert handed["agent"] == AGENT
-    assert handed["channel"] == f"a2a:{PEER}"
+    assert handed["channel"] == f"peer_agent:{PEER}"
     assert handed["text"] == f"{marker(REMOTE, PEER, TASK)}write me a poem"
     # The type is readable back off it, which is what a receiver needs to know
     # whether it owes a completion.
@@ -1137,7 +1142,7 @@ async def test_a_peer_withdrawal_is_a_message_and_not_a_control_signal(
     text = window.handed[-1]["text"]
     assert a2a_message_type(text) == "cancel_task"
     assert "withdrew this task" in text
-    assert window.handed[-1]["channel"] == f"a2a:{PEER}"
+    assert window.handed[-1]["channel"] == f"peer_agent:{PEER}"
 
 
 @pytest.mark.asyncio
@@ -1314,7 +1319,7 @@ async def test_a_peer_that_answered_with_a_failure_does_not_read_as_completed(
 async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
     window: Window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The promise `a2a_send_message` makes is the one this keeps.**
+    """**The promise `peer_agent_send_message` makes is the one this keeps.**
 
     The tool answers "The result will arrive in this conversation", so a send
     that dies on the retry ladder with one `warning` leaves the model waiting
@@ -1365,7 +1370,7 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
         def __init__(self, **kwargs: Any) -> None:
             raise OSError("the broker refused the probe connection")
 
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     monkeypatch.setattr("slife2.plugins.a2a.mesh.aiomqtt.Client", Refusing)
 
     with pytest.raises(RuntimeError, match="name probe"):
@@ -1384,7 +1389,7 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     hears, against a broker this process cannot publish to at all.  The warning
     names the task and which rung it was on.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     send = _OutboundSend("task-a-retry-that-failed", PEER, "session", "{}")
 
     async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
@@ -1440,13 +1445,13 @@ async def test_a_publish_that_never_left_is_not_a_rung_of_the_ladder(
     was pushed "it was sent 3 times over the requester retry ladder and never
     acknowledged" — a count of things no peer could have received — and nothing
     retried it when the link came back, so the task row `pending` that
-    `a2a_send_message` promised a result for stayed `pending` for ever.
+    `peer_agent_send_message` promised a result for stayed `pending` for ever.
 
     The link is down for four publishes and then up, and both halves of that
     are asserted: the send is still there when the link returns, and the rungs
     it then spends are its own.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     send = _OutboundSend("task-the-link-was-down-for", PEER, "session", "{}")
     published: list[str] = []
     down = 4
@@ -1489,7 +1494,7 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     A connect attempt on a mesh whose link had just dropped began with
     `disconnect()`, which cancelled every `_deliver` task and cleared the
     correlation routes — so a send that was between two rungs of its ladder
-    (with both `a2a_send_message`'s "The result will arrive in this
+    (with both `peer_agent_send_message`'s "The result will arrive in this
     conversation" and the retry profile still standing) died there: no terminal
     reply could route afterwards (`a2a_reply_unknown_corr`, its correlation
     gone), no `UNREACHABLE` notice came out of the ladder, and the task row
@@ -1505,7 +1510,7 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     async def the_name_is_taken() -> str:
         return "another A2A instance holds the name"
 
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
     monkeypatch.setattr(mesh, "_probe_own_name", the_name_is_taken)
     send = _OutboundSend("task-in-flight-over-a-reconnect", PEER, "session", "{}")
     mesh._sends[send.task_id] = send
@@ -1552,7 +1557,7 @@ async def test_a_teardown_that_ends_a_send_tells_the_conversation(
 
     `_deliver`'s contract is that the ladder's ending is told to the
     conversation and not only to the log — a task row stays `pending` for ever
-    otherwise, over a message `a2a_send_message` promised a result for.  A
+    otherwise, over a message `peer_agent_send_message` promised a result for.  A
     teardown that ends a ladder takes the same callback a terminal reply takes,
     wearing `UNREACHABLE`: no peer said anything, and whether the peer has the
     message is exactly what is unknown once the mesh has gone.
@@ -1618,7 +1623,7 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
     the clause below, written to log exactly this class of failure, could never
     see one.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
 
     def bug(_msg: Any) -> None:
         raise AttributeError("a body with no 'result' at all")
@@ -1649,7 +1654,7 @@ async def test_a_presence_change_is_drawn_and_a_heartbeat_is_not(
 
     This is where presence stopped being something the conversation is told.  A
     peer coming online asks the model for nothing — the peer that wants to be
-    answered sends a task, and the roster is `a2a_list_agents`' answer — so the
+    answered sends a task, and the roster is `peer_agent_list`' answer — so the
     line goes to the window that is showing the agent and stops there.
     """
     session = wired(window=window)
@@ -1771,7 +1776,7 @@ async def test_one_bad_message_does_not_end_the_writer(
     await drain_until_idle(session, window=window)
 
     assert window.handed == [
-        {"agent": AGENT, "text": "second", "channel": f"a2a:{PEER}"}
+        {"agent": AGENT, "text": "second", "channel": f"peer_agent:{PEER}"}
     ]
     assert any(
         "a2a_delivery_failed" in record.getMessage() for record in caplog.records
@@ -1998,7 +2003,7 @@ async def test_a_start_that_fails_after_building_a_session_still_tears_down(
     monkeypatch.setattr(a2a_server, "render", boom)
 
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(config, source=lambda: config, connecting=True)
 
     with pytest.raises(RuntimeError, match="will not render"):
@@ -2023,7 +2028,7 @@ async def test_another_homes_orphan_is_announced_in_that_home(
     them all — but the session built out of what it finds was keyed by the agent
     name alone and built in the ambient home, so a start in home A that found
     home B's `jack` ledger did four wrong things at once: its mesh opened a
-    *different* file (`<A>/agents/jack/a2a.yaml`, usually absent, which is why
+    *different* file (`<A>/agents/jack/inbound.yaml`, usually absent, which is why
     the notice was empty), the notice about B's peer — who is still owed an
     answer — was handed to A's conversation, a stray empty ledger was written
     in A, and the session cached under `jack` was the one B's own window then
@@ -2060,7 +2065,7 @@ async def test_another_homes_orphan_is_announced_in_that_home(
     monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
 
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(config, source=lambda: config, connecting=True)
 
     async with Client(mcp):
@@ -2089,14 +2094,14 @@ def build(**overrides: Any) -> FastMCP:
     """The plugin with no broker to dial and no peers to reach."""
     config = default_config()
     if overrides.pop("on_the_mesh", False):
-        object.__setattr__(config, "a2a", settings(**overrides))
+        object.__setattr__(config, "peer_agent", settings(**overrides))
     return build_server(config, source=lambda: config, connecting=False)
 
 
 @pytest.mark.asyncio
 async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     """v1's four, plus the one that reads what they left behind.  `__check` has
-    no port — v2 has no system_health and what it reported is `a2a_list_agents`'
+    no port — v2 has no system_health and what it reported is `peer_agent_list`'
     answer.
 
     `join` is here and is deliberately not one of them: it crosses a process
@@ -2107,22 +2112,22 @@ async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     tools = await build().list_tools()
     by_name = {t.name: t for t in tools}
     assert sorted(by_name) == [
-        A2A_BROADCAST,
-        A2A_CANCEL_TASK,
-        A2A_LIST_AGENTS,
-        A2A_SEND_MESSAGE,
-        A2A_TASK_LIST,
         FORGET,
         JOIN,
+        PEER_BROADCAST,
+        PEER_CANCEL_TASK,
+        PEER_LIST,
+        PEER_SEND_MESSAGE,
+        PEER_TASK_LIST,
     ]
 
     model_tools = [name for name, tool in by_name.items() if for_the_model(tool.meta)]
     assert sorted(model_tools) == [
-        A2A_BROADCAST,
-        A2A_CANCEL_TASK,
-        A2A_LIST_AGENTS,
-        A2A_SEND_MESSAGE,
-        A2A_TASK_LIST,
+        PEER_BROADCAST,
+        PEER_CANCEL_TASK,
+        PEER_LIST,
+        PEER_SEND_MESSAGE,
+        PEER_TASK_LIST,
     ]
     assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
     assert not for_the_model(by_name[FORGET].meta), (
@@ -2161,11 +2166,11 @@ async def test_the_local_instance_serves_the_local_network() -> None:
         JOIN,
         LOCAL.tool(BROADCAST),
         LOCAL.tool(CANCEL_TASK),
-        LOCAL.roster_tool,
+        LOCAL.tool(LIST),
         LOCAL.tool(SEND_MESSAGE),
         LOCAL.tool(TASK_LIST),
     ]
-    assert A2A_SEND_MESSAGE not in by_name, "and not the remote network's names"
+    assert PEER_SEND_MESSAGE not in by_name, "and not the remote network's names"
 
     send = by_name[LOCAL.tool(SEND_MESSAGE)]
     assert send.description.startswith(
@@ -2183,7 +2188,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     assert LOCAL.tool(SEND_MESSAGE) in by_name[LOCAL.tool(BROADCAST)].description
     # The other two say *member* for the same reason, and one of them is the
     # question a model asks before it has a name to use at all.
-    roster = by_name[LOCAL.roster_tool]
+    roster = by_name[LOCAL.tool(LIST)]
     assert roster.description.startswith("List the members of your subagent network")
     assert "the agents on your" not in roster.description
     assert (
@@ -2197,15 +2202,15 @@ async def test_a_call_that_does_not_say_whose_mesh_it_is_is_refused() -> None:
     """A shared process cannot guess the agent, and the name *is* the identity."""
     async with Client(build()) as client:
         with pytest.raises(ToolError, match="did not say which conversation"):
-            await client.call_tool(A2A_LIST_AGENTS, {})
+            await client.call_tool(PEER_LIST, {})
 
 
 @pytest.mark.asyncio
 async def test_a_machine_with_no_section_is_told_so_rather_than_dialled() -> None:
     async with Client(build()) as client:
-        answer = await client.call_tool(A2A_LIST_AGENTS, {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
     assert answer.data["agents"] == []
-    assert "no `a2a:` section" in answer.data["error"]
+    assert "no `peer_agent:` section" in answer.data["error"]
 
 
 @pytest.mark.asyncio
@@ -2213,7 +2218,7 @@ async def test_an_invented_message_type_is_refused() -> None:
     async with Client(build(on_the_mesh=True)) as client:
         with pytest.raises(ToolError, match="must be 'message'"):
             await client.call_tool(
-                A2A_SEND_MESSAGE,
+                PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "hi", "message_type": "invented"},
                 meta=client_meta(AGENT),
             )
@@ -2224,7 +2229,7 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
     async with Client(build(on_the_mesh=True)) as client:
         with pytest.raises(ToolError, match="task_id is required"):
             await client.call_tool(
-                A2A_SEND_MESSAGE,
+                PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "done", "message_type": "task_response"},
                 meta=client_meta(AGENT),
             )
@@ -2236,7 +2241,7 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     this one's name — which is the whole of what v1's `__check` error field was
     for, and it is here rather than in a tool of its own."""
     async with Client(build(on_the_mesh=True)) as client:
-        answer = await client.call_tool(A2A_LIST_AGENTS, {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
     data = answer.data
     assert data["agent_name"] == AGENT
     assert data["broker"] == "localhost:1883"
@@ -2328,7 +2333,7 @@ async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
     """
     joined, left = _a_mesh_that_records_its_ends(monkeypatch)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
         config, source=lambda: config, window_client=window.client, connecting=False
     )
@@ -2367,14 +2372,14 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
     monkeypatch.setattr(A2AMesh, "connect", connect)
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(config, source=lambda: config, connecting=False)
 
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
     async with Client(mcp) as client:
         with pytest.raises(ToolError, match="could not join the mesh"):
             await client.call_tool(
-                A2A_BROADCAST, {"event": "the build is green"}, meta=client_meta(AGENT)
+                PEER_BROADCAST, {"event": "the build is green"}, meta=client_meta(AGENT)
             )
 
     assert any(
@@ -2407,7 +2412,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
     monkeypatch.setattr(A2AMesh, "connect", connect)
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
         config, source=lambda: config, window_client=window.client, connecting=False
     )
@@ -2460,7 +2465,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     # would be a test that waits for them.
     monkeypatch.setattr(_T.timeouts.deliver, "keepalive", 0.01)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
         config, source=lambda: config, window_client=window.client, connecting=False
     )
@@ -2562,7 +2567,7 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     session = Session(
         agent=AGENT,
         net=REMOTE,
-        mesh=A2AMesh(default_config().a2a, AGENT, LEDGER),  # opens the ledger
+        mesh=A2AMesh(default_config().peer_agent, AGENT, LEDGER),  # opens the ledger
     )
 
     session.hold(WINDOW)
@@ -2601,7 +2606,7 @@ async def test_two_windows_showing_one_agent_are_two_holds(
     joined, left = _a_mesh_that_records_its_ends(monkeypatch)
     holds = _joins_that_wait(monkeypatch)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
         config, source=lambda: config, window_client=window.client, connecting=False
     )
@@ -2667,7 +2672,7 @@ async def test_a_window_arriving_as_the_mesh_is_torn_down_gets_a_live_one(
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     holds = _joins_that_wait(monkeypatch)
     config = default_config()
-    object.__setattr__(config, "a2a", settings())
+    object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
         config, source=lambda: config, window_client=window.client, connecting=False
     )
@@ -2714,7 +2719,7 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     X completed async task" over the cancellation the model had already been
     given.
     """
-    mesh = A2AMesh(default_config().a2a, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
 
     async def no_publish(*args, **kwargs) -> None:
         return None
@@ -2738,7 +2743,7 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
 #  for the mesh: what puts it on the network is the maker's next message, which
 #  cannot be delivered to a name nobody is listening for.  These are the three
 #  halves of that — the place (`place_for`), the road a message to it takes
-#  (`run_turn`), and the roster a maker reads (`a2a_list_agents`) — and the one
+#  (`run_turn`), and the roster a maker reads (`peer_agent_list`) — and the one
 #  thing deliberately absent is the wire itself: a real broker is what
 #  `test_a_window_that_goes_away_takes_the_agent_off_the_mesh` needs, and what
 #  these replace with a mesh whose `connect` is a recorder.
@@ -2877,7 +2882,7 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
     # And it is filed where the member lives: the bridges this mesh holds are the
     # member's, so its ledger is inside its own directory (`a2a_inbound_path`).
     assert (
-        tmp_path / "agents" / AGENT / "subagents" / "tester" / "a2a-subagent.yaml"
+        tmp_path / "agents" / AGENT / "subagents" / "tester" / "inbound.yaml"
     ).exists()
 
 
@@ -3088,7 +3093,7 @@ async def test_the_local_roster_lists_members_whose_cards_have_not_arrived(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.roster_tool, {}, meta=client_meta(AGENT)
+                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
             )
 
     data = answer.data
@@ -3130,17 +3135,15 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
         # nothing at all here.
         write_subagent(AGENT, PEER)
         config = default_config()
-        object.__setattr__(config, "a2a", settings(configured=True))
+        object.__setattr__(config, "peer_agent", settings(configured=True))
         server = build_server(config, source=lambda: config, connecting=False)
         async with Client(server) as client:
             await client.call_tool(
-                A2A_SEND_MESSAGE,
+                PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "hello"},
                 meta=client_meta(AGENT),
             )
-            answer = await client.call_tool(
-                A2A_LIST_AGENTS, {}, meta=client_meta(AGENT)
-            )
+            answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
 
     assert places == [AGENT], "a peer on the remote network is not this process's"
     # The cards and nothing else: `jill` is a directory that would be a member on
@@ -3165,7 +3168,7 @@ async def test_a_members_own_roster_lists_it_once(tmp_path: Path) -> None:
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.roster_tool, {}, meta=client_meta(AGENT, "tester")
+                LOCAL.tool(LIST), {}, meta=client_meta(AGENT, "tester")
             )
 
     names = [card["agent_name"] for card in answer.data["agents"]]
@@ -3180,7 +3183,7 @@ async def test_the_orphan_notice_names_the_tool_this_network_has(
     """**A reply tool is named in the reader's own words.**
 
     The notice tells a model the one reply an orphaned task can still get, and it
-    spelled `a2a_send_message` on *both* networks — so a reader on the subagent
+    spelled `peer_agent_send_message` on *both* networks — so a reader on the subagent
     network was told to call a tool it was never handed (`subagent_*` is what it
     has), and the same line taught it the name of the mechanism.  One template,
     one hole, and the plugin fills it from the session it is posting for — the
@@ -3205,7 +3208,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
 
     One module serves both, and the sentence naming the switch was the remote
     network's: a machine with a `subagent:` section and no mesh was told there is
-    no `a2a:` section — a key it does not have — and taught the word `A2A` for
+    no `peer_agent:` section — a key it does not have — and taught the word `A2A` for
     the network the rest of its tools call `subagent`.
     """
     server = build_server(default_config(), net=LOCAL, connecting=False)
@@ -3216,7 +3219,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
                 {"agent": "tester", "message": "hello"},
                 meta=client_meta(AGENT),
             )
-        answer = await client.call_tool(LOCAL.roster_tool, {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(LOCAL.tool(LIST), {}, meta=client_meta(AGENT))
 
     said = str(refused.value)
     assert "`subagent:` section" in said, "the refusal names the wrong section"

@@ -267,7 +267,7 @@ class SlifeApp(App[None]):
         #: of that are the same object as everywhere else here: the window is the
         #: mesh's client, and holding the call is what keeps the agent online
         #: (`slife2.tui.client.MeshClient`).  Empty means this machine is not on
-        #: the mesh at all — no `a2a:` section — and then nothing is held and no
+        #: the mesh at all — no `peer_agent:` section — and then nothing is held and no
         #: line is drawn, which is the whole of what the absence means.
         self._mesh_url = mesh_url
         #: Injectable so the TUI can be driven by a scripted client, with no

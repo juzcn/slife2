@@ -120,14 +120,16 @@ servers:
   # owns no section: a machine that should not run scheduled tasks is a machine
   # where nobody writes one, exactly as with WeChat (DESIGN.md §1.7).
   schedule: {port: 8039}
-  # The A2A mesh: agent-to-agent traffic over MQTT, on the published
-  # A2A-over-MQTT profile.  The one server here whose identity is *per agent* —
-  # the agent name is the MQTT client id and the request topic's last segment —
-  # so this one process holds a mesh per agent it serves, and a peer on this
-  # machine is reached exactly as one on another machine is.  What arrives is
-  # handed to the conversation (`hand_over`), and its section is `a2a:`
-  # (DESIGN.md §1.8).
-  a2a: {port: 8040}
+  # The **remote** network: the peers an agent reaches, on other machines as
+  # easily as on this one — over MQTT on the published A2A-over-MQTT profile,
+  # which is the plugin's technical fact and not the network's name.  The one
+  # server here whose identity is *per agent* — the agent name is the MQTT client
+  # id and the request topic's last segment — so this one process holds a mesh
+  # per agent it serves.  What arrives is handed to the conversation
+  # (`hand_over`), and its section is `peer_agent:` (DESIGN.md §1.8).  The key is
+  # the network it configures; the process is `slife2-a2a`, the plugin that
+  # serves this section and the `subagent:` one.
+  peer_agent: {port: 8040}
   # The **local** network: the same module one section over, serving an agent and
   # the subagents it made.  Two networks rather than one namespace because they
   # are different in kind — remote peers against local ones — and a machine may
@@ -359,7 +361,7 @@ subagent:
   # is a conversation in the shared agent server, not a process), so the number
   # is about a runaway rather than about the machine.
   max_running: 32
-  # Where a maker and its subagents meet.  The same shape as `a2a:` below and
+  # Where a maker and its subagents meet.  The same shape as `peer_agent:` below and
   # deliberately not the same *mesh*: a mesh is `{org}/{unit}`, and on this side
   # the unit is **the agent's own name** — the code sets it, so an agent and its
   # subagents are one mesh and two agents are two (`slife2` meets its subagents
@@ -371,7 +373,7 @@ subagent:
   # default (`subagent`), which is what keeps these meshes from being the remote
   # network's on a shared broker.
   #
-  # **This is the section that names the broker**, and `a2a:` below left out means
+  # **This is the section that names the broker**, and `peer_agent:` below left out means
   # this address: a machine meets its subagents somewhere, and a remote mesh that
   # says nothing about where it meets meets there.  Pointing *this* one somewhere
   # else is supported rather than encouraged — a subagent is local, so its traffic
@@ -906,18 +908,19 @@ file-tunnel:
       # published URL with HTTP 530.
       protocol: ${CLOUDFLARED_PROTOCOL:-http2}
 
-# ── The A2A mesh ──────────────────────────────────────────────────────────────
-# Agent-to-agent traffic over MQTT, and **the one section whose presence is
-# itself a setting**: a machine with no `a2a:` is a machine that is not on the
-# mesh, the same way the absence of a `wechat:` is the whole of what says a
-# machine does not talk to WeChat.  What it holds is the first two segments of
+# ── The remote network: your peer agents ──────────────────────────────────────
+# Agent-to-agent traffic over MQTT — the wire is A2A-over-MQTT, which is the
+# plugin's business and nobody else's — and **the one section whose presence is
+# itself a setting**: a machine with no `peer_agent:` is a machine that is not on
+# that network, the same way the absence of a `wechat:` is the whole of what says
+# a machine does not talk to WeChat.  What it holds is the first two segments of
 # the topic namespace (`$a2a/v1/…/{org}/{unit}/{agent}`), which is what tells two
 # groups on one broker apart — and a broker address only when the machine's is
 # somebody else's (see below).
 #
 # **The broker is started for you if it is not there**, and that is this port's
 # one departure from v1, which left mosquitto to the user.  A config that says
-# `a2a:` has said it wants the mesh, so a missing broker is a missing dependency
+# `peer_agent:` has said it wants that network, so a missing broker is a missing dependency
 # rather than a preference: `mosquitto` is started on the address in force, and a
 # broker that will not serve is a *startup failure* naming it and its log — not
 # a mesh that silently is not one.  The broker is left running afterwards,
@@ -937,10 +940,12 @@ file-tunnel:
 #
 # `provider` is a hard constraint rather than a default: mosquitto is the only
 # broker this build speaks to, and anything else is refused when the config is
-# read, because the alternative is `a2a_*` tools offered to a model for a mesh
-# that was quietly switched off.  The model's five tools are `a2a_send_message`,
-# `a2a_cancel_task`, `a2a_list_agents`, `a2a_task_list` and `a2a_broadcast`.
-a2a:
+# read, because the alternative is `peer_agent_*` tools offered to a model for a
+# network that was quietly switched off.  The model's five tools are
+# `peer_agent_send_message`, `peer_agent_cancel_task`, `peer_agent_list`,
+# `peer_agent_task_list` and `peer_agent_broadcast`; the `a2a` in the process's
+# name and the topics below is the implementation, not a name the model reads.
+peer_agent:
   provider: mosquitto
   # broker: {host: localhost, port: 1883}   # unset: `subagent.broker`'s address
   org: default

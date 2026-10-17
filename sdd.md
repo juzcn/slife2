@@ -291,7 +291,7 @@ the process that can describe it, and the wrong one for a service.
   by the context store.
 - **Turn** — one exchange: the messages in, the model's answer, the tool calls
   it made, recorded as one row.
-- **Channel** — where a message came in: `tui`, `wechat`, `a2a:<peer>`,
+- **Channel** — where a message came in: `tui`, `wechat`, `peer_agent:<peer>`,
   `agent-task:<name>`, `async-tool:<name>`, `schedule:<name>`. It is recorded
   with the turn and drawn in front of the line (§4.4).
 - **Marker** — the machine-readable prefix a channel puts in front of a message
@@ -506,7 +506,7 @@ loop must not pull a server in, and the agent loop in particular must never reac
 `openai_server`. The same reason keeps the ports here rather than in the module
 that listens — nothing needs the module to know where it will be.
 
-**Two rows are one module.** `a2a` and `subagent` are served by
+**Two rows are one module.** `peer_agent` and `subagent` are served by
 `plugins/a2a/server.py` and its three-line entry point, because the remote and
 local networks are one protocol and one mesh differing in a namespace and a
 broker (`Net`); they are two rows because the launcher starts two *processes*,
@@ -582,14 +582,15 @@ session reads. It travels the way `--data-dir` does (into the environment, so a
 server this process starts reads the same address), it overrides the *address*
 and nothing else — which network this is is that section's `org`/`unit` and
 stays the file's —
-and it cannot switch a mesh on: an absent `a2a:` section is still what "not on
+and it cannot switch a network on: an absent `peer_agent:` section is still what "not on
 the mesh" means, so the flag is refused there rather than answered with a mesh
 nobody described.
 
 **A broker belongs to a process, so only the command that starts one can choose
 it.** The MQTT sessions are the a2a server's, and a server already running is on
 whatever broker it was started with; a client that asked for another one is
-therefore told and stopped (`_broker_not_honoured`), rather than left with `a2a_*`
+therefore told and stopped (`_broker_not_honoured`), rather than left with
+`peer_agent_*`
 tools, peers that answer, and a broker nobody asked for — the failure that looks
 like success. It is the one setting in this system a flag can override and a
 running stack can refuse, and both halves are stated rather than discovered.
@@ -671,17 +672,19 @@ distinguish it, each of them about *status* rather than about ability:
   kind: the agent↔agent one is a network of **remote** agents — peers that may be
   on another machine, on a broker somebody else runs — and the agent↔its-
   subagents one is a network of **local** ones, which are directories here. Each
-  is a section of its own (`a2a:` and `subagent:`, §3.1), and the second is where
+  is a section of its own (`peer_agent:` and `subagent:`, §3.1), and the second is where
   a subagent is a peer — while the *broker* is the machine's: `subagent:` is where
-  it is said, and an `a2a:` that names none means the same address, because a
+  it is said, and a `peer_agent:` that names none means the same address, because a
   machine meets both networks through one broker by default and a second
   `host:port` in the file is a second thing to keep in step.
   It is the same protocol and the same five tools throughout, presented under
   `subagent_*` names — **a technical fact and not a meaning**: nothing a person
-  or a model reads on the local network says `a2a` anywhere, and where the two
-  networks' members are different things the *tool* is named for what it lists:
-  `a2a_list_agents` against **`subagent_list`**, the one name that is not the
-  shared verb under the other prefix.
+  or a model reads on the local network says `a2a` anywhere.  **The remote
+  network draws the same line**: its section is `peer_agent:`, its tools are
+  `peer_agent_*`, its envelope is `[PeerAgent:…]` — and `a2a` names only what
+  carries them (the plugin, the process, the broker, the SDK).  One verb table
+  serves both: `peer_agent_list` and `subagent_list` are one call under two
+  prefixes, and neither name says what its wire is.
   - **The local network is one mesh per agent**, and that is what its namespace
     says: `{org}/{unit}` *is* a mesh, so the unit is the agent's own name and the
     org is this network's word (`subagent`). Two agents may each have a
@@ -936,7 +939,7 @@ and the turn records **where it came in**:
 |---|---|---|---|
 | `tui` | the person, in this window | `You>` | none |
 | `wechat` | a WeChat login | `Wechat>` | `[Wechat:{…}]` |
-| `a2a:<peer>` | a peer agent | `PeerAgent(jill)>` | `[PeerAgent:{…}]` |
+| `peer_agent:<peer>` | a peer agent | `PeerAgent(jill)>` | `[PeerAgent:{…}]` |
 | `agent-task:<name>` | a background loop's answer | `AsyncTask(research)>` | `[AgentTaskResult:{…}]` |
 | `async-tool:<name>` | a background call's result | `AsyncTool(pdf_to_md)>` | `[AgentToolResult:{…}]` |
 | `schedule:<name>` | the clock | `Scheduled(daily)>` | none — a trigger is not a result |
@@ -1528,12 +1531,12 @@ One `slife2.yaml` inside the data directory, and its sections are the system's
 vocabulary: `servers:`, `providers:`, `embeddings:`, `agent:`, `agent-task:`,
 `context:`, `tool_load:`, `tool_result:`, `mcp:`, `rest-api:`, `cli:`,
 `skills:`, `media:`,
-`file-tunnel:`, `wechat:`, `a2a:`. **Every section is read by the plugin that
+`file-tunnel:`, `wechat:`, `peer_agent:`. **Every section is read by the plugin that
 owns it** — the family plugins read their own rows, the hub merges them — and no
 section is read by two processes.
 
 **A section that is absent is a capability that is off, not an error.** A machine
-with no `a2a:` section is a machine that is not on a mesh; no `media:` providers
+with no `peer_agent:` section is a machine that is not on that network; no `media:` providers
 is no images. What is not tolerated is a section that is there and wrong: an
 unknown provider, an unknown `api`, a port that is not a port are each refused by
 name at load, because a refusal is cheaper than a paid call that fails later —

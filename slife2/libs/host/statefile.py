@@ -1,7 +1,7 @@
 """The small YAML file a plugin keeps beside an agent's own state.
 
 Two write one: `slife2-wechat` its login (`<agent>/wechat.yaml`) and `slife2-a2a`
-the inbound tasks a restart orphaned (`<agent>/a2a.yaml`).  Both had worked out
+the inbound tasks a restart orphaned (`<agent>/inbound.yaml`).  Both had worked out
 the same two things for themselves, and the second said so — its `_yaml`
 docstring read "set up the way `slife2.plugins.wechat.server`'s is", which is a
 cross-reference standing in for a call.

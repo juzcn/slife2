@@ -381,7 +381,7 @@ re-finding them, so each says why:
 - **The ten plugin `main`s** are `serve_plugin`/`serve_backend` calls differing by
   `build=`, `note=` and `api=`, which is the table `PLUGINS` above.
 - **The four `channel_for`s** are one expression each over a different prefix
-  (`async-tool`, `schedule`, `agent-task`, `a2a`/`subagent`), and those prefixes
+  (`async-tool`, `schedule`, `agent-task`, `peer_agent`/`subagent`), and those prefixes
   are the vocabulary `tui/widgets.channel_prefix` branches on.  What was a
   duplication — `agent_task`'s own `task_id` and two hand-built `f"{CHANNEL}:…"`
   strings beside it — is one spelling now.
@@ -1408,7 +1408,7 @@ refusal rather than the second silently attaching to the first one's mesh.
 
 **And a name off the wire is scrubbed before it becomes one of ours.**  A card's
 `agent_name` and an envelope's `from` are written by another process and
-validated by nothing, and each becomes a *channel* (`a2a:jill`), a marker, a
+validated by nothing, and each becomes a *channel* (`peer_agent:jill`), a marker, a
 stored turn and a log line.  So `safe_name` runs at every callback that reads
 one — a name carrying a newline or an escape would otherwise forge a line in
 every window showing that conversation, and in the log beside it.  It is §10.1's
@@ -1430,7 +1430,7 @@ terminal is the case that question has a second answer for: `slife2 --headless`
 is that same window, holding the same call, with nothing drawn (§1.9).
 
 **The ledger is not the enrollment, and using it as one was the mistake.**  It
-is tempting — the file at `agents/<agent>/a2a.yaml` is already a per-agent record
+is tempting — the file at `agents/<agent>/inbound.yaml` is already a per-agent record
 — but what it records is the *inbound tasks a process died holding*, which is a
 fact about work already received.  Read as an enrollment list it made presence
 mean "has spoken at least once, ever": a card on the broker for a conversation
@@ -1460,7 +1460,7 @@ prompt uses for the agent's own identity; v1 measured receivers misreading a
 sender as themselves.  The `type` field is the one envelope's classifier, and the
 writer and the reader (`marker`, `a2a_message_type`) are one pair so the
 vocabulary stays one list.  `PeerAgent(<peer>)> ` is the bubble, drawn from the
-channel alone (`a2a:<peer>`) because a hand-over carries the channel and the words
+channel alone (`peer_agent:<peer>`) because a hand-over carries the channel and the words
 and nothing else.  **The spelling is not v1's** (`[A2A:` was): it is word-shaped
 like every other marker a row carries (§1.2), and it says *peer* because a prefix
 that said only "agent" would leave open which of the two agents is which — the
@@ -1501,7 +1501,7 @@ answer, so it is a **note** — `ChatView.add_note` in the window showing that
 agent, in the same bracket as `[restored 3 turns]`, with no turn run, nothing
 stored, and the conversation never told.  v1 kept presence out of the inbox for
 the same reason (its TUI had an activity feed, its model a per-turn prompt);
-here the roster a model can ask for is `a2a_list_agents`, and a peer that wants
+here the roster a model can ask for is `peer_agent_list`, and a peer that wants
 to be answered sends a task.  The words are v1's `format_presence_line` minus
 its trailing `[status]`, which v1 needed because a model read that line too and
 `online` twice in one line is a fact the first word already carries.
@@ -1515,17 +1515,17 @@ otherwise use to write instructions into somebody's turn.
 
 **Two things v1 had are gone.**  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported — the
-name, the collision, the broker, the roster — is `a2a_list_agents`' answer now,
+name, the collision, the broker, the roster — is `peer_agent_list`' answer now,
 which is where a model would look anyway.  And `broker.py`, v1's TCP probe, is
 `slife2.libs.host.runtime.tcp_listening`.
 
 **And the broker is started, which is the one place this contradicts v1.**
 v1's rule was that slife leaves mosquitto to the user and treats a listening
-broker as the feature's on/off switch; here a config that says `a2a:` has said it
+broker as the feature's on/off switch; here a config that says `peer_agent:` has said it
 wants the mesh, so a missing broker is a missing dependency rather than a
 preference.  `slife2/plugins/a2a/broker.py` probes the configured address, starts
 `mosquitto` on it if it can, and **fails the start** if it cannot — reported by
-the launcher with the child's own log, because the alternative is four `a2a_*`
+the launcher with the child's own log, because the alternative is five `peer_agent_*`
 tools offered to a model for a mesh that is not there.  Only a **local** broker is
 started: `broker.host` may name another machine, which is reached exactly the
 same way and which nothing on this machine can stand in for, so an absent remote
@@ -1737,7 +1737,7 @@ family is 2,492 bytes ≈ 620 tokens, plugin tools are exempt from `tool_load`
 eviction (`ToolLoadSettings`), so a second family is a per-request tax in every
 conversation forever — which is why the shell is names and descriptions rather
 than code, and why its descriptions have to say *whose* roster they list
-(`a2a_list_agents` says "peer"; a subagent family must say "yours").
+(`peer_agent_list` says "peer"; a subagent family must say "yours").
 
 **The second pass: what one subagent is, and what a fork is.**  `subagent_set`
 grew two parameters and the record grew two keys, and both are answers to one
@@ -1821,7 +1821,7 @@ Three things, and they are one change:
 - **So the send path has to ensure the receiver's mesh exists.**  A message
   published to a member whose responder is not subscribed goes to nobody and
   reports nothing.  On the remote network that cannot happen — the peer's own
-  window is holding its `join` — and here nothing is, so `a2a_send_message`
+  window is holding its `join` — and here nothing is, so `peer_agent_send_message`
   ensures the *target's* session before publishing.  It cannot be done once at
   start: a model may `subagent_set` while everything is already up.
 
@@ -4084,7 +4084,7 @@ which is where every other line it shows comes from.
   call time, which is what the two vocabularies already cost.
 * **A tool's own arguments were left alone where renaming would break a wire
   that mirrors them.** The WeChat marker's keys are named after `wechat_send_message`'s
-  arguments, so `text` stays `text` beside `a2a_send_message`'s `message`. The
+  arguments, so `text` stays `text` beside `peer_agent_send_message`'s `message`. The
   designer's rule is about a model reading several schemas; a rename that changed
   a channel's payload would be this rule buying uniformity with a broken contract.
 * **`text_to_speech` and `transcribe_audio` sit beside `generate_image` and

@@ -3580,7 +3580,7 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
 
     Written whole every time, because it is one small mapping and a merge would
     be a second rule about which keys survive a `set`.  Block style, like the two
-    neighbours this file sits beside (`wechat.yaml`, `a2a.yaml`): somebody opening
+    neighbours this file sits beside (`wechat.yaml`, `inbound.yaml`): somebody opening
     an agent's directory should not have to read three formats to see three
     facts.
     """

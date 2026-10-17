@@ -133,7 +133,7 @@ def member_name(agent: str, subagent: str = "") -> str:
     `subagent or agent`, and it is a function because it is *one* rule with more
     than one reader: the mesh's identity, the card it publishes and the topic it
     is addressed on are all this (`A2AMesh.__init__`), and a caller deciding what
-    to call somebody — `a2a_list_agents`' first row — has to answer the same word
+    to call somebody — `peer_agent_list`' first row — has to answer the same word
     without building a mesh to get it (a machine off the mesh has no session and
     still gets an answer).
     """
@@ -871,7 +871,7 @@ class A2AMesh:
         (`_end_send`).  `_deliver`'s contract is that the ladder's ending reaches
         the conversation and not just the log; a cancellation was the one exit
         that reached nobody, leaving the task row `pending` for ever over a
-        message `a2a_send_message` had promised a result for.
+        message `peer_agent_send_message` had promised a result for.
         """
         self._closing = True
         self._reviving = reviving
@@ -1305,7 +1305,7 @@ class A2AMesh:
 
         **Exhaustion is told to the conversation, not just to the log.**  A
         warning here left the send dead and the conversation waiting for an
-        arrival ``a2a_send_message`` had promised it ("The result will arrive in
+        arrival ``peer_agent_send_message`` had promised it ("The result will arrive in
         this conversation"), with the task row ``pending`` for ever.  So the
         ladder's last word takes the same callback a terminal reply does
         (:attr:`on_task_completion`) with the failure's own words, and the

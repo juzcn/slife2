@@ -70,10 +70,10 @@ server 的端点，用在它已经在别处跑着、而当前配置并不知道�
 
 **`--a2a-broker` 把网格指向另一个 broker，而不是配置里的那个** —— 别人的、团队的、
 已经在另一台机器上跑着的 —— 这样为了一次会话加入某个网格，不必去改一个每次会话都要
-读的文件。它只覆盖 `a2a.broker`，别的都不动 —— **本地那张网的 broker 不在其内**：那
+读的文件。它只覆盖 `peer_agent.broker`，别的都不动 —— **本地那张网的 broker 不在其内**：那
 是 `subagent:` 的、是本机自己的，所以一个 agent 的子 agent 仍然留在文件给它们的
 broker 上。这是哪张网（`org`/`unit`）仍然是那一节
-说了算，而没有 `a2a:` 节的机器仍然不在网上，所以在那里这个参数会被拒绝，而不是顺手把
+说了算，而没有 `peer_agent:` 节的机器仍然不在那张网上，所以在那里这个参数会被拒绝，而不是顺手把
 网格打开。**broker 归属于一个正在运行的整套服务**，所以这个参数只能由启动网格的那条
 命令来兑现：如果 server 们已经跑着了，它们就在自己启动时用的那个 broker 上，`slife2`
 会这么说然后停下，而不是把你留在一个错误的 broker 上。先 `slife2 down`。
@@ -794,24 +794,27 @@ plugin 被写下的全部。一个任务的 `timezone` 是 IANA 名字，不写�
 # 没有什么要配置的：一台不该跑定时任务的机器，就是一台没有人去写任务的机器
 ```
 
-### A2A 网格
+### 同伴 agent（Peer agents）
 
-**基于 MQTT 的 agent 间通信**，跑在公开发布的 A2A-over-MQTT profile 上 —— 所以任何
-别的会说它的东西都能跟你说话。协议、主题、agent card 和任务生命周期都属于那个 SDK；
-这里是驱动和包在它外面的 plugin。v1 的网格，移植过来的。
+**你的 agent 的同伴是别的 agent，这就是它和它们说话的方式。** 这一层的名字是
+*peer agents* —— 工具、信封、channel 用的都是这个词；底座是 **A2A over MQTT**，跑在
+公开发布的 profile 上，所以任何别的会说它的东西都能跟你说话。协议、主题、agent card
+和任务生命周期都属于那个 SDK；承载它的 plugin 是 `slife2-a2a`，和隔壁端口上服务
+`subagent:` 的是同一个 plugin。人在 `slife2.yaml` 里写 `peer_agent:`，模型拿到的是
+`peer_agent_*`，模型读到的东西里没有一处说 `a2a`。
 
 | 工具 | 做什么 |
 |---|---|
-| `a2a_send_message` | 发一个任务、完成别人发给你的一个，或者只是聊两句 —— 由 `message_type` 决定 |
-| `a2a_cancel_task` | 撤回一个你发出的任务 |
-| `a2a_list_agents` | 花名册：你排第一，然后是每一个同伴，按名字 |
-| `a2a_task_list` | 还开着的任务：在等回答的，和欠着回答的 |
-| `a2a_broadcast` | 给每一个同伴发一个发了就不管的事件 |
+| `peer_agent_send_message` | 发一个任务、完成别人发给你的一个，或者只是聊两句 —— 由 `message_type` 决定 |
+| `peer_agent_cancel_task` | 撤回一个你发出的任务 |
+| `peer_agent_list` | 花名册：你排第一，然后是每一个同伴，按名字 |
+| `peer_agent_task_list` | 还开着的任务：在等回答的，和欠着回答的 |
+| `peer_agent_broadcast` | 给每一个同伴发一个发了就不管的事件 |
 
-`a2a_task_list` 回答的是另一件事：**还开着的有哪些** —— 你发出去还没回来的、别人发给你你还欠着的，以及上一个进程死时攥在手里的。所以对话被压缩过、或者进程重启过，正在等的 id 也不会丢。它跟"不要轮询"不矛盾：不发模型调用，只读本地那两张表。
+`peer_agent_task_list` 回答的是另一件事：**还开着的有哪些** —— 你发出去还没回来的、别人发给你你还欠着的，以及上一个进程死时攥在手里的。所以对话被压缩过、或者进程重启过，正在等的 id 也不会丢。它跟"不要轮询"不矛盾：不发模型调用，只读本地那两张表。
 
 ```
-a2a_send_message(agent="jill", message="Summarise the release notes.")
+peer_agent_send_message(agent="jill", message="Summarise the release notes.")
 → {"peer": "jill", "task_id": "61ab0c8a…", "message_type": "task_request",
    "note": "The result will arrive in this conversation."}
 ```
@@ -831,27 +834,28 @@ a2a_send_message(agent="jill", message="Summarise the release notes.")
 **来和去是窗口里的一行，不是一轮。** 一个同伴到达时显示成 `[⚡ jill online]`，就在
 `[restored 3 turns]` 和 `[kept 12 turns, recalled 3]` 旁边 —— 同一个形状，因为它们是同
 一类东西：harness 做的事，而不是这段对话里谁说的话。什么都不跑，模型也不被告知：花名册
-是 `a2a_list_agents` 的回答，而一个想被回答的同伴会发一个任务过来。
+是 `peer_agent_list` 的回答，而一个想被回答的同伴会发一个任务过来。
 
 **有人在当这个 agent 的时候，它才在网格上。** 窗口在它的 agent 活着期间持有一个调用，
 所以上线和下线跟随的是真的有人在那里 —— 看着这个 agent 到达的同伴，也会看着它离开，
 而这中间没有什么要发。`slife2 --headless` 在完全没有窗口的情况下持有同一个调用，这正是
-一台无人值守的机器需要的。一次 `a2a_*` 调用也会让它的 agent 加入并保持加入：一次发送
-后面跟着的是这个 agent 正在等的回复。`<data>/agents/<agent>/a2a.yaml` 那本账*不是*入网
+一台无人值守的机器需要的。一次 `peer_agent_*` 调用也会让它的 agent 加入并保持加入：
+一次发送后面跟着的是这个 agent 正在等的回复。`<data>/agents/<agent>/inbound.yaml`
+那本账*不是*入网
 登记 —— 它记录的是一个进程死掉时攥在手里的入站任务，而这是重启时区分「一个孤儿」和
 「一个它从没见过的 id」所需要的东西。
 
 **broker 不在的话会替你启动，你结束的时候会被停掉**，这是它和 v1 分道扬镳的地方。把
-`a2a.broker` 指向一个地址；如果那里没有东西在听、而它又是*这*台机器，`mosquitto` 会被
+`peer_agent.broker` 指向一个地址；如果那里没有东西在听、而它又是*这*台机器，`mosquitto` 会被
 在那上面启动 —— 最后一个退出的 `slife2` 会再把它停掉（或者 `slife2 down`，或者
 `slife2 status` 去看它）。只有 *slife2 启动的* broker 才会被停掉：它启动时写下的那条
 记录就是许可的全部，所以一个系统装的 mosquitto 或者你自己跑起来的那个不会被碰。一个
 不肯服务的 broker —— 或者一个指名在另一台机器上、而那台机器挂了 —— 会让启动失败，点名
-它并展示它的日志，而不是把你留在四个接不到任何东西的工具上。`provider: mosquitto` 是
+它并展示它的日志，而不是把你留在五个接不到任何东西的工具上。`provider: mosquitto` 是
 唯一的值；别的任何东西都是配置错误，而不是一个被悄悄关掉的特性。
 
 ```yaml
-a2a:
+peer_agent:
   provider: mosquitto
   broker:
     host: localhost      # 另一台机器也是这样够到的，而且从不在本地启动
@@ -863,7 +867,7 @@ a2a:
 **一次重启会把所有在飞的任务变成孤儿**，因为完成用的网桥和同伴的回复主题都住在那个死掉
 的进程里。账本在这些任务和从没见过的 id 之间划出界线，而 agent 会**被告知一次**，在发现
 它们的那次启动里，好让它能用一条普通消息回答每一个同伴 —— 那是这些任务还能得到的唯一
-回复。**整个省掉 `a2a:` 节**就不在网格上：一台不该在网上的机器，就是一台没有人去写它的
+回复。**整个省掉 `peer_agent:` 节**就不在那张网上：一台不该在网上的机器，就是一台没有人去写它的
 机器。
 
 ## 东西都放在哪里
@@ -885,9 +889,9 @@ a2a:
                                    （搜索索引）
       media/                       它生成的东西
       wechat.yaml                  它的微信登录（约 24h，扫码时写下）
-      a2a.yaml                     它的 A2A 账本：那些完成用的网桥由本进程
+      inbound.yaml                 同伴这张网的账本：那些完成用的网桥由本进程
                                    持有的入站任务
-      a2a-subagent.yaml            本地那张网的同一本账 —— 那是另一个进程，
+      subagents/inbound.yaml       本地那张网的同一本账 —— 那是另一个进程，
                                    所以是另一个文件
 ```
 

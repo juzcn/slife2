@@ -235,7 +235,7 @@ def _broker_not_honoured(config: Config) -> int:
     yet, and the fix is one of two words in a shell.
     """
     print(
-        f"slife2: --a2a-broker {config.a2a.address} cannot be honoured: the a2a "
+        f"slife2: --a2a-broker {config.peer_agent.address} cannot be honoured: the a2a "
         f"server is already running, and a mesh is on the broker it was started "
         f"with.\n"
         f"  Stop it with `slife2 down` and start again, or drop the flag to use "
@@ -314,7 +314,7 @@ def _ensure(config: Config, config_path) -> int:
     plural = "" if count == 1 else "s"
     print(f"  {count} server{plural} in {_duration(time.monotonic() - started)}")
 
-    if config.a2a.overridden and not mesh_is_ours:
+    if config.peer_agent.overridden and not mesh_is_ours:
         return _broker_not_honoured(config)
 
     if failed:
@@ -438,7 +438,7 @@ def mesh_url(config: Config) -> str:
 
     **`""` is the whole of what "not on the mesh" means here**, and it is the
     config's own switch rather than a second one (`slife2.libs.host.config.A2ASettings`: a
-    machine with no `a2a:` section is a machine that is not on the mesh).  So the
+    machine with no `peer_agent:` section is a machine that is not on the mesh).  So the
     empty string is returned for an absent section and the window then holds
     nothing and draws nothing — rather than holding a call to a plugin that would
     answer "this machine is not on the A2A mesh" every two seconds, which reads
@@ -452,7 +452,7 @@ def mesh_url(config: Config) -> str:
     never been a key in that table.  `control_url` above is `"tui"` for the same
     reason.
     """
-    return config.server("a2a").url if config.a2a.configured else ""
+    return config.server("peer_agent").url if config.peer_agent.configured else ""
 
 
 def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
@@ -519,14 +519,14 @@ def _down(config: Config) -> int:
     # what keeps a broker *slife2 did not start* out of it: no record, no
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
-    if config.a2a.configured:
+    if config.peer_agent.configured:
         from slife2.plugins.a2a.broker import BROKER_NAME, log_url
         from slife2.plugins.a2a.broker import stop as stop_broker
 
-        said = stop_broker(config.a2a)
+        said = stop_broker(config.peer_agent)
         if said:
             anything = True
-            _report("", BROKER_NAME, log_url(config.a2a), said)
+            _report("", BROKER_NAME, log_url(config.peer_agent), said)
     if not anything:
         print("nothing running")
     return 0

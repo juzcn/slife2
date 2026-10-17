@@ -339,7 +339,7 @@ def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
         jack.mkdir(parents=True)
         (jack / "turns.db").write_bytes(b"")
         (jack / "schedule.db").write_bytes(b"")
-        (jack / "a2a.yaml").write_text("tasks: []\n", encoding="utf-8")
+        (jack / "inbound.yaml").write_text("tasks: []\n", encoding="utf-8")
     register_home(other)
 
     assert [path.parent.parent.parent.name for path in turn_dbs()] == ["mine", "other"]

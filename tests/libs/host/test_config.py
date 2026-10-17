@@ -1437,11 +1437,12 @@ def test_a_named_config_that_is_not_there_is_not_the_defaults(tmp_path) -> None:
 
 # --- the broker on the command line ------------------------------------------
 
-#: A config that is on the mesh: the `a2a:` section is what being on one means.
+#: A config that is on the peer network: the `peer_agent:` section is what
+#: being on one means.
 A_MESH = (
     A_PROVIDER
     + """
-a2a:
+peer_agent:
   broker:
     host: localhost
     port: 1883
@@ -1462,9 +1463,9 @@ def test_the_broker_flag_overrides_the_address_and_nothing_else(
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
     config = load(write(tmp_path, A_MESH))
 
-    assert config.a2a.address == "broker.example:2883"
-    assert config.a2a.overridden
-    assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
+    assert config.peer_agent.address == "broker.example:2883"
+    assert config.peer_agent.overridden
+    assert (config.peer_agent.org, config.peer_agent.unit) == ("an-org", "a-unit")
 
 
 A_MESH_AND_LOCAL = (
@@ -1493,8 +1494,8 @@ def test_the_broker_flag_leaves_the_local_network_alone(tmp_path, monkeypatch) -
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "somebody-elses.example:2883")
     config = load(write(tmp_path, A_MESH_AND_LOCAL))
 
-    assert config.a2a.address == "somebody-elses.example:2883"
-    assert config.a2a.overridden
+    assert config.peer_agent.address == "somebody-elses.example:2883"
+    assert config.peer_agent.overridden
     assert config.subagent.network.address == "localhost:1884"
     assert not config.subagent.network.overridden
 
@@ -1503,8 +1504,28 @@ def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
     config = load(write(tmp_path, A_MESH))
 
-    assert config.a2a.address == "localhost:1883"
-    assert not config.a2a.overridden
+    assert config.peer_agent.address == "localhost:1883"
+    assert not config.peer_agent.overridden
+
+
+def test_the_section_named_a2a_is_refused_rather_than_ignored(tmp_path) -> None:
+    """**A config written before the rename must not silently lose the network.**
+
+    `a2a:` is `peer_agent:` now: the section is named for what it configures —
+    an agent's peer agents — and `a2a` is the plugin that serves it.  An unknown
+    top-level key is normally ignored, which here would load with the network
+    off and nothing said, so the old name is refused by name with the new one in
+    the sentence.
+    """
+    text = (
+        A_PROVIDER
+        + """
+a2a:
+  provider: mosquitto
+"""
+    )
+    with pytest.raises(ConfigError, match="peer_agent"):
+        load(write(tmp_path, text))
 
 
 #: A remote section that says nothing about where to meet, and a subagent
@@ -1513,7 +1534,7 @@ def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
 A_MESH_WITHOUT_A_BROKER = (
     A_PROVIDER
     + """
-a2a:
+peer_agent:
   org: an-org
   unit: a-unit
 
@@ -1542,8 +1563,8 @@ def test_a_remote_mesh_with_no_broker_meets_where_the_subagent_network_does(
     config = load(write(tmp_path, A_MESH_WITHOUT_A_BROKER))
 
     assert config.subagent.network.address == "10.0.0.5:2883"
-    assert config.a2a.address == "10.0.0.5:2883"
-    assert (config.a2a.org, config.a2a.unit) == ("an-org", "a-unit")
+    assert config.peer_agent.address == "10.0.0.5:2883"
+    assert (config.peer_agent.org, config.peer_agent.unit) == ("an-org", "a-unit")
 
 
 def test_a_subagent_network_is_one_mesh_per_agent(tmp_path, monkeypatch) -> None:
@@ -1612,20 +1633,21 @@ def test_a_broker_the_remote_section_names_is_its_own(tmp_path, monkeypatch) -> 
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
     config = load(write(tmp_path, A_MESH_AND_LOCAL))
 
-    assert config.a2a.address == "localhost:1883"
+    assert config.peer_agent.address == "localhost:1883"
     assert config.subagent.network.address == "localhost:1884"
 
 
 def test_the_broker_flag_cannot_turn_the_mesh_on(tmp_path, monkeypatch) -> None:
     """The section's presence is the switch, and the flag is not a second one.
 
-    A machine with no `a2a:` is a machine that is not on the mesh — that is the
+    A machine with no `peer_agent:` is a machine that is not on that network —
+    that is the
     design's whole off switch (`A2ASettings`) — so a flag naming a broker is
     refused by name rather than answered with a mesh the file never described.
     """
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
 
-    with pytest.raises(ConfigError, match="not on the mesh"):
+    with pytest.raises(ConfigError, match="not on the peer network"):
         load(write(tmp_path, A_PROVIDER))
 
 
@@ -1663,7 +1685,7 @@ def test_a_broker_port_in_the_file_is_refused_like_the_one_on_the_flag(
     """
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
 
-    for section in ("a2a", "subagent"):
+    for section in ("peer_agent", "subagent"):
         for written in ("0", "70000"):
             text = f"{section}:\n  broker:\n    host: localhost\n    port: {written}\n"
             with pytest.raises(ConfigError) as raised:
@@ -1681,4 +1703,4 @@ def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -
     """
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "::1:2883")
 
-    assert load(write(tmp_path, A_MESH)).a2a.address == "::1:2883"
+    assert load(write(tmp_path, A_MESH)).peer_agent.address == "::1:2883"

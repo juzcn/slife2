@@ -44,13 +44,13 @@ presence transition — a peer arriving, a peer going — is a *note*: the windo
 draws it and nothing else happens, no turn is run and the conversation never
 learns of it.  v1 kept presence out of the inbox for the same reason (its TUI had
 an activity feed and its model a per-turn prompt); here the roster a model can
-ask for is `a2a_list_agents`, and a peer that wants to be answered sends a task.
+ask for is `peer_agent_list`, and a peer that wants to be answered sends a task.
 One queue, one writer, two kinds — because arrival order is worth keeping across
 both.
 
 **Who is on the mesh is a window, not a ledger.**  v1's plugin *was* its agent's
 process, so being up and being online were the same fact.  A shared process has
-to decide, and reading it off `agents/<agent>/a2a.yaml` — the record of inbound
+to decide, and reading it off `agents/<agent>/inbound.yaml` — the record of inbound
 tasks a process died holding — made it mean "has spoken at least once, ever": a
 card for a conversation nobody was having, and none for the window somebody had
 just opened.  So the mesh is joined by `join` for as long as a window holds that
@@ -60,14 +60,15 @@ job; it is just no longer an enrollment list.
 
 Two things v1 had here are deliberately absent.  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported is now
-`a2a_list_agents`' answer, which is where a model would look anyway.  And the
+`peer_agent_list`' answer, which is where a model would look anyway.  And the
 orphan reminder is no longer a line in a per-turn prompt — there is no per-turn
 prompt — so it is a message handed over once, at the start that found it.
 
 **And the broker is started rather than merely probed**, which is the one place
 this port contradicts v1's own rule and is the operator's call rather than a
 discovery: v1 left mosquitto to the user and treated a listener as the feature's
-on/off switch, where here a config that says `a2a:` has said it wants the mesh.
+on/off switch, where here a config that says `peer_agent:` has said it wants
+the mesh.
 `slife2/plugins/a2a/broker.py` holds the policy and the hard failure.
 """
 
@@ -92,7 +93,7 @@ from slife2.libs.host.config import (
     AGENT_SERVER_NAME,
     BROADCAST,
     CANCEL_TASK,
-    LIST_AGENTS,
+    LIST,
     LOCAL,
     REMOTE,
     SEND_MESSAGE,
@@ -129,31 +130,33 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = REMOTE.server_name
 
-#: This server's key in the config's `servers:` table — and the name of the
+#: This instance's key in the config's `servers:` table — and the name of the
 #: section it reads, which is the one section here whose *presence* is a
-#: setting: a machine with no `a2a:` is a machine that is not on the mesh
-#: (`slife2.libs.host.config.A2ASettings`).
+#: setting: a machine with no `peer_agent:` is a machine that is not on that
+#: network (`slife2.libs.host.config.A2ASettings`).  **The key is the semantic
+#: one and the process is not**: `peer_agent` is what a person writes, and
+#: `slife2-a2a` is the plugin that serves it.
 CONFIG_KEY = REMOTE.key
 
-#: The model's tools on this network — **v1's four under v1's names, and one
-#: that is not v1's**.  Two things that look like omissions are not: a
-#: `task_response` is not a tool, it is `a2a_send_message` with `message_type`
-#: said, because on the wire it *is* the same operation; and `A2A_TASK_LIST` is
-#: not a fifth *operation* either — it reads the two tables the others leave
-#: behind, and it is here because "what is still open" is the one question none
-#: of them can answer.
+#: The remote network's five tools, named.  **`PEER_*` and not `A2A_*`**, because
+#: what a model is handed is the semantic side of `Net`: this process speaks A2A,
+#: and the model is told it is talking to peer agents (`slife2.libs.host.config.REMOTE`
+#: is where that split is argued).  Two things that look like omissions are not: a
+#: `task_response` is not a tool, it is `peer_agent_send_message` with
+#: `message_type` said, because on the wire it *is* the same operation; and
+#: `PEER_TASK_LIST` is not a fifth *operation* either — it reads the two tables
+#: the others leave behind, and it is here because "what is still open" is the
+#: one question none of them can answer.
 #:
-#: **These are the remote network's**, and the roster is the one name that is not
-#: a constant here: this module serves both networks, so what a tool is
-#: *registered* under always comes from the network being served (`net.tool`,
-#: `net.roster_tool`), and the local one answers to `subagent_list`.  They are
-#: spelled out because the tests and a reader arriving here want the remote
-#: network's names in one place.
-A2A_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
-A2A_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
-A2A_LIST_AGENTS = REMOTE.tool(LIST_AGENTS)
-A2A_BROADCAST = REMOTE.tool(BROADCAST)
-A2A_TASK_LIST = REMOTE.tool(TASK_LIST)
+#: **These are the remote network's**, and the local instance registers its own
+#: from the same verbs (`net.tool`), which is why every registration site composes
+#: rather than naming a constant.  They are spelled out because the tests and a
+#: reader arriving here want the remote network's names in one place.
+PEER_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
+PEER_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
+PEER_LIST = REMOTE.tool(LIST)
+PEER_BROADCAST = REMOTE.tool(BROADCAST)
+PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
 
 #: The tool that puts an agent *on* the mesh — and it is not the model's.  A
 #: window calls it and holds it open; see `join` for why the mesh's membership
@@ -186,7 +189,7 @@ WINDOW = "window"
 MEMBER = "member"
 
 #: The channel an inbound message arrives on, and the first half of what it is
-#: keyed by: `a2a:jill`.  The window draws a bubble from the channel alone
+#: keyed by: `peer_agent:jill`.  The window draws a bubble from the channel alone
 #: (`slife2.tui.widgets.channel_prefix`), so the peer has to be *in* it for a
 #: person to see who spoke — and what it draws is `PeerAgent(jill)> `, the same
 #: word the marker below opens with.
@@ -239,7 +242,7 @@ MAX_QUEUED = 500
 ORPHAN_TEMPLATE = "a2a_orphans.j2"
 
 #: What the orphan notice is handed over as — and **it is not a peer.**  The name
-#: is the second half of the channel `channel_for` builds (`a2a:orphans`), which
+#: is the second half of the channel `channel_for` builds (`peer_agent:orphans`), which
 #: the window draws on its own (`PeerAgent(orphans)> `) rather than as somebody
 #: speaking, and the writer's log line names it the same way.
 ORPHAN_PEER = "orphans"
@@ -270,7 +273,7 @@ def marker(
     ``[PeerAgent:{"from": …, "task_id": …, "type": …}] `` — ``from`` names the
     *sending* peer (never the receiver).  ``type`` tells what it is:
     ``task_request`` (an inbound task to answer, via
-    ``a2a_send_message(message_type="task_response", task_id=…)`` — it may take
+    ``peer_agent_send_message(message_type="task_response", task_id=…)`` — it may take
     many turns), ``task_response`` (an auto-delivered task result),
     ``cancel_task`` (the peer withdrew that task — its completion bridge died
     with it, so a ``task_response`` for it is refused: answer with a plain
@@ -384,7 +387,7 @@ class Session:
     subagent: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
-    #: is the only place the reason survives to `a2a_list_agents` — otherwise it
+    #: is the only place the reason survives to `peer_agent_list` — otherwise it
     #: reports a bare "not connected" for what is really a name collision.
     connect_error: str = ""
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(MAX_QUEUED))
@@ -700,7 +703,7 @@ def _wire(session: Session) -> None:
         # **A note, not a message** — which is where this parts company with
         # every other callback here.  A peer coming online asks the model for
         # nothing: the peer that wants to talk sends a task, and the roster is
-        # `a2a_list_agents`' answer.  Handing a transition to the conversation
+        # `peer_agent_list`' answer.  Handing a transition to the conversation
         # instead spends a whole turn and a context on a fact nobody has to act
         # on, which is what v1 avoided by never putting presence in the inbox.
         #
@@ -711,7 +714,7 @@ def _wire(session: Session) -> None:
         # subagent's coming and going should look like on a terminal is not
         # designed yet, so this draws nothing rather than inventing it: the card
         # is still cached, which is what the roster reads
-        # (`a2a_list_agents`), and `_drain` drops the note a member's own session
+        # (`peer_agent_list`), and `_drain` drops the note a member's own session
         # would otherwise hand to a window it does not have.
         if session.net is LOCAL:
             return
@@ -944,7 +947,7 @@ def announce_orphans(session: Session) -> None:
     A `task_response` for any of these is refused by the mesh, so the notice
     names the one reply that still works — **and it is named in this network's
     words**: one module serves both, and the tool a maker replies with is
-    `a2a_send_message` while the one a subagent replies with is
+    `peer_agent_send_message` while the one a subagent replies with is
     `subagent_send_message`.  The notice used to spell the remote one, so half
     its readers were told to call a tool they do not have.
     """
@@ -1292,7 +1295,7 @@ def build_server(
         one that received the task.
 
         The broker is asked about first, and it is the one thing not tolerated:
-        a machine whose config says `a2a:` has said it wants the mesh, so an
+        a machine whose config says `peer_agent:` has said it wants the mesh, so an
         absent broker is a missing dependency rather than a preference.
         """
         # **The broker, before any of it.**  One is started if it can be, and one
@@ -1300,7 +1303,7 @@ def build_server(
         # failing to start, which is `slife2` refusing to start rather than
         # handing the model five tools attached to nothing
         # (`slife2/plugins/a2a/broker.py`).
-        logger.info("a2a_broker %s", ensure_broker(config_now.a2a))
+        logger.info("a2a_broker %s", ensure_broker(config_now.peer_agent))
 
         for ledger in a2a_inbound_paths(net.ledger):
             store = InboundStore.at(ledger.path)
@@ -1388,7 +1391,7 @@ def build_server(
         should be decided by whether anyone is there, not by which process
         happened to be running.
 
-        **This is the enrollment.**  The ledger at `agents/<agent>/a2a.yaml` is
+        **This is the enrollment.**  The ledger at `agents/<agent>/inbound.yaml` is
         the record of inbound tasks a process died holding, which is a fact about
         work already received rather than a claim about who is here; a window is
         the only thing that is both true while somebody is present and untrue the
@@ -1490,7 +1493,7 @@ def build_server(
         description=describe_tool(net, SEND_MESSAGE),
         meta=FOR_THE_MODEL,
     )
-    async def a2a_send_message(
+    async def peer_agent_send_message(
         ctx: Context,
         agent: str,
         message: str,
@@ -1507,7 +1510,7 @@ def build_server(
         task's `[PeerAgent:…]` marker. 'message' is a plain conversation — no task, no
         completion, and the reply arrives as a message.
 
-        `agent` is a peer's name, which `a2a_list_agents` gives you. A peer may
+        `agent` is a peer's name, which `peer_agent_list` gives you. A peer may
         be another agent on this machine or one somewhere else; the mesh does not
         tell you which, and nothing you send depends on it.
 
@@ -1566,7 +1569,9 @@ def build_server(
         description=describe_tool(net, CANCEL_TASK),
         meta=FOR_THE_MODEL,
     )
-    async def a2a_cancel_task(ctx: Context, agent: str, task_id: str) -> dict[str, Any]:
+    async def peer_agent_cancel_task(
+        ctx: Context, agent: str, task_id: str
+    ) -> dict[str, Any]:
         """Withdraw a task you sent to another agent.
 
         `status` is the answer: 'cancelled' when the withdrawal went out,
@@ -1584,11 +1589,11 @@ def build_server(
         return {"peer": agent, "task_id": task_id, "status": status}
 
     @mcp.tool(
-        name=net.roster_tool,
-        description=describe_tool(net, LIST_AGENTS),
+        name=net.tool(LIST),
+        description=describe_tool(net, LIST),
         meta=FOR_THE_MODEL,
     )
-    async def a2a_list_agents(ctx: Context) -> dict[str, Any]:
+    async def peer_agent_list(ctx: Context) -> dict[str, Any]:
         """List the agents on the A2A mesh — you first, then each peer by name.
 
         Every card is `{"agent_name": …, "status": "online"|"offline"}`, and
@@ -1667,7 +1672,7 @@ def build_server(
         description=describe_tool(net, TASK_LIST),
         meta=FOR_THE_MODEL,
     )
-    async def a2a_task_list(ctx: Context) -> dict[str, Any]:
+    async def peer_agent_task_list(ctx: Context) -> dict[str, Any]:
         """List the tasks this conversation has open — both ways, oldest first.
 
         **The send tool promises an answer will arrive on its own, and says not
@@ -1709,12 +1714,12 @@ def build_server(
         description=describe_tool(net, BROADCAST),
         meta=FOR_THE_MODEL,
     )
-    async def a2a_broadcast(ctx: Context, event: str) -> dict[str, Any]:
+    async def peer_agent_broadcast(ctx: Context, event: str) -> dict[str, Any]:
         """Publish a fire-and-forget event to every agent on the mesh.
 
         Nobody answers one and it is delivered at most once, so it is for
         information a peer may act on and not for anything you need a reply to —
-        use `a2a_send_message` for that. Peers receive it as a `[PeerAgent:…]` of type
+        use `peer_agent_send_message` for that. Peers receive it as a `[PeerAgent:…]` of type
         'broadcast', with no task and no completion.
 
         **A local broadcast wakes the whole roster first**, because published is
@@ -1785,7 +1790,7 @@ _TOOL_TEXTS: dict[str, str] = {
         "finished result is never lost by asking), or 'not_found' for an id this\n"
         "process never sent."
     ),
-    LIST_AGENTS: (
+    LIST: (
         "List {roster}.\n"
         "\n"
         'Every card is `{{"agent_name": …, "status": "online"|"offline"}}`, and\n'
@@ -1828,17 +1833,23 @@ _TOOL_TEXTS: dict[str, str] = {
 #: it is not cosmetic: a peer that said it was leaving and a subagent nobody has
 #: woken yet are both `offline` on the card, and what a model should do about
 #: them is the opposite — wait, and send.
+#:
+#: **The remote network's words are its semantic ones.**  No hole here says
+#: "A2A", "mesh", "broker" or "MQTT": a model is talking to peer agents, and the
+#: wire that carries them is the operator's fact and the plugin's
+#: (`slife2.libs.host.config.REMOTE` argues the line).  `section` is the one
+#: exception and it has to be — it names the key a person writes in
+#: `slife2.yaml` to turn the network on.
 _NET_WORDS: dict[str, dict[str, str]] = {
     REMOTE.key: {
-        "them": "another agent on the A2A mesh",
-        "everyone": "every agent on the mesh",
-        "roster": "the agents on the A2A mesh — you first, then each peer by name",
-        "name": "the A2A mesh",
-        "section": "`a2a:`",
+        "them": "another peer agent",
+        "everyone": "every peer agent",
+        "roster": "the peer agents — you first, then each by name",
+        "name": "the peer network",
+        "section": "`peer_agent:`",
         "offline": (
-            "Offline entries are the ones whose card is still retained on the\n"
-            "broker but which have said they are leaving, so they are listed\n"
-            "rather than hidden."
+            "Offline entries are the ones that have said they are leaving, so\n"
+            "they are listed rather than hidden."
         ),
     },
     LOCAL.key: {
@@ -1886,7 +1897,7 @@ def switch_off(net: Net) -> str:
     the roster's `error` field, and the start-up note — because a sentence that
     names a section is one place to name the wrong one, and the remote network's
     words were being said on the subagent network: a machine with a `subagent:`
-    section and no mesh was told there was no `a2a:` section, and taught a name
+    section and no mesh was told there was no `peer_agent:` section, and taught a name
     for a thing the rest of its tools do not use.
     """
     words = _NET_WORDS[net.key]
