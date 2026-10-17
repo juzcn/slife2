@@ -1,54 +1,87 @@
 # slife2
 
-**终端 AI 智能体 —— slife v2，推倒重来的一次重建。**
-
 [English](README.md)
 
-**plugin 就是 Streamable HTTP 上的一个 MCP server，外加一份很小的契约** —— 它是
-这套协议的一个实现，而不是自创的协议。TUI 只是个客户端，别的什么都不是；agent
-主循环既是 server 又是 client；每个模型后端都是自己的 server，工具来源的 hub 也是，
-连终端自己的收件箱也是一个 plugin，与其余的一视同仁。这个词把 slife2 自己启动的
-server 和 `mcp:` 下别人写的 server 区分开，而这个区分是承重的：**plugin 是必需的**
-—— 少一个这一轮就失败；而 `mcp:` 下的一项是可选的，它不在只是意味着工具少一些。
+**slife2 是一个终端 AI agent。** 它与语言模型进行对话，通过模型上下文协议（MCP）
+向模型提供工具，并通过本地 plugin 进程连接外部世界。终端窗口只是一个客户端：
+agent 主循环、工具 hub、模型后端、记忆以及每一项能力，都是 slife2 启动并共享的
+MCP server。
 
-由此有两条性质，而它们正是这套安排的意义所在：
+本文件是用户手册。系统设计见 [sdd.md](sdd.md)，设计决策与实测记录见
+[DESIGN.md](DESIGN.md)。
 
-- **密钥只存在于需要它的那个进程里。** provider 的 API key 住在调用它的 LLM
-  server 里；工具 server 的 token 住在持有那个 server 的 plugin 里 —— `mcp:` 归
-  `slife2-mcp-tools`，`rest-api:` 归 `slife2-restapi-tools`。agent 循环哪一个都
-  泄露不出去，因为它从来没有过。
-- **agent 循环不 import 任何 provider SDK。** 换 provider 就是改一个 URL，加工具
-  就是往配置文件里加一项。
+**目录**
 
-**plugin 是一种能力，library 是它的实现。** 持有凭证、SDK 或别人的连接的东西是一个
-进程；持有一个*文件*的不是，因为单一写入者本来就是 SQLite 锁。所以
-`slife2.libs.store.db`（对话轮次日志）是一个 library，由拥有它的 plugin
-`slife2-context` import；`slife2.libs.store.catalogue` 是工具目录，由 `slife2-toolhub`
-在进程内打开。`slife2.libs.store.index` 也一样，那是这两个存储被*检索*所用的机制，
-同时也是文件柜的 library。判定标准和它的代价见 DESIGN §1.1。
+- [概述](#概述)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [命令行接口](#命令行接口)
+- [使用终端界面](#使用终端界面)
+- [配置](#配置)
+- [能力](#能力)
+- [数据位置](#数据位置)
+- [架构](#架构)
+- [开发](#开发)
+- [已知限制](#已知限制)
+- [许可证](#许可证)
 
-[DESIGN.md](DESIGN.md) 讲的是这些决定，以及它们背后的实测数据。
+## 概述
 
-## 快速开始
+slife2 围绕四条规则构建。
 
-需要 [uv](https://docs.astral.sh/uv/) 和 Python 3.13。
+1. **plugin 是 slife2 自己的一个 MCP server。** 它通过 Streamable HTTP 使用
+   MCP，并实现一份很小的附加契约：状态按 client id 而不是按 session 保存；
+   每个面向模型的工具都声明自己的受众；客户端可以校验 server 的身份；
+   每个 plugin 在中央注册表中占一行。plugin 是必需的：如果某个 plugin
+   无法连接，这一轮就会失败。`mcp:` 下的外部 MCP server 是可选的；
+   无法连接时，模型只是少一些工具。
 
-```bash
-uv sync
-credstore set DEEPSEEK_API_KEY         # 或者 export 出去
-uv run slife2
-```
+2. **凭证只留在使用它的进程里。** provider 的 key 住在调用该 provider 的模型
+   server 中。工具 server 的 key 住在拥有该连接的 plugin 中（`mcp:` 归
+   `slife2-mcp-tools`，`rest-api:` 归 `slife2-restapi-tools`）。agent 主循环
+   不 import 任何 provider SDK，也不持有任何 key。
 
-就这么多。`slife2` 会拉起配置需要的那些 MCP server，接上已经在跑的那些，然后启动
-TUI。
+3. **server 在整台机器上共享。** launcher 启动配置所需的 server，并复用已经
+   在运行的那些。server 是守护进程，所以关闭一个窗口不会打断另一个窗口。
+   最后一个客户端退出时，会停掉正在运行的 server；使用 `--keep-servers`
+   可以保留它们。
 
-**macOS 上必须用一个能加载 SQLite 扩展的 Python**，而你最可能正在用的那两个都不是。
-向量索引是一个 SQLite 扩展（`sqlite-vec`），而没有用
-`--enable-loadable-sqlite-extensions` 构建的解释器根本没有办法加载它：uv 自带的托管
-CPython 就是（它静态链接 SQLite），Apple 的 `/usr/bin/python3` 也是（系统 SQLite
-出于沙箱原因没编这个功能）。这里没有任何绕过的办法 —— 没有索引数据库就打不开，于是
-一个 plugin 都起不来，第一条命令会以 `this Python's sqlite3 cannot load extensions`
-失败。Windows 和 Linux 上的构建有这个功能，Homebrew 的 Python 也有：
+4. **`slife2.yaml` 是“存在什么”的唯一描述。** provider、server、工具来源、
+   embedding、媒体后端、隧道和网络设置都从该文件读取，没有第二份配置存储。
+
+### 术语
+
+| 术语 | 含义 |
+|---|---|
+| **plugin** | slife2 自己的一个 MCP server，由 launcher 启动并共享，实现 plugin 契约。外部 MCP server 不是 plugin。 |
+| **agent** | 由 `--agent NAME` 命名的身份。一个名字在一台机器上只能有一个活着的持有者。 |
+| **client id** | `(agent, subagent)`：一次调用所代表的身份。每个 server 都按它保存状态。 |
+| **conversation** | 一个 client id 的历史。 |
+| **turn** | 一次交换：输入、模型的回答以及它发起的工具调用，作为一行存储。 |
+| **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`subagent:<name>`、`agent-task:<name>`、`async-tool:<name>` 或 `schedule:<name>`。 |
+| **marker** | channel 在投递消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。marker 随消息存储，只在显示时移除。 |
+| **family** | 拥有一个配置节并声明该节所描述行的 plugin。 |
+| **source** | plugin 持有的一个条目，例如 `mcp:` server、playbook 或命令。 |
+| **catalogue** | 模型可以发现的所有工具、playbook 和命令的机器可读清单。 |
+| **dump** | 因为对对话而言过大而完整保存在文件柜中的工具输出。 |
+| **home** | 一个数据目录：配置、skills、agent 及其文件。 |
+| **runtime 目录** | 共享 server 在整台机器范围内的记录、锁和日志。 |
+
+## 环境要求
+
+- **Python 3.13 或更高版本**
+- **[uv](https://docs.astral.sh/uv/)**，用于依赖管理和运行
+
+slife2 在 Windows、macOS 和 Linux 上测试。
+
+### SQLite 扩展支持
+
+向量索引是一个 SQLite 扩展（`sqlite-vec`），因此 Python 解释器必须能够加载
+SQLite 扩展。
+
+Windows 和 Linux 的构建通常支持该功能。在 macOS 上，uv 自带的 CPython 和
+Apple 的 `/usr/bin/python3` 都不能加载扩展。请使用 Homebrew 的 Python：
 
 ```bash
 brew install python@3.13
@@ -56,998 +89,852 @@ uv venv --python "$(brew --prefix python@3.13)/bin/python3.13"
 uv sync
 ```
 
+如果无法加载扩展，数据库就无法打开，任何 plugin 都无法启动，第一条命令会以
+如下错误失败：
+
+```text
+this Python's sqlite3 cannot load extensions
 ```
-slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
-       [--a2a-broker HOST:PORT] [--keep-servers] [--headless] [--lang EN|ZH]
-                                         确保各个 server 就绪，然后运行 TUI
-slife2 status                            什么在运行，在哪里
-slife2 down                              停掉本配置指名的那些 server
-```
 
-`--model` 选择这个实例启动时用哪个模型，写成 `provider/model`（也可以只写
-provider，表示它的第一个模型）；不写就用配置里的 `default`。`--url` 覆盖 agent
-server 的端点，用在它已经在别处跑着、而当前配置并不知道那个地址的时候。
+### 可选外部程序
 
-**`--a2a-broker` 把网格指向另一个 broker，而不是配置里的那个** —— 别人的、团队的、
-已经在另一台机器上跑着的 —— 这样为了一次会话加入某个网格，不必去改一个每次会话都要
-读的文件。它只覆盖 `peer_agent.broker`，别的都不动 —— **本地那张网的 broker 不在其内**：那
-是 `subagent:` 的、是本机自己的，所以一个 agent 的子 agent 仍然留在文件给它们的
-broker 上。这是哪张网（`org`/`unit`）仍然是那一节
-说了算，而没有 `peer_agent:` 节的机器仍然不在那张网上，所以在那里这个参数会被拒绝，而不是顺手把
-网格打开。**broker 归属于一个正在运行的整套服务**，所以这个参数只能由启动网格的那条
-命令来兑现：如果 server 们已经跑着了，它们就在自己启动时用的那个 broker 上，`slife2`
-会这么说然后停下，而不是把你留在一个错误的 broker 上。先 `slife2 down`。
+| 程序 | 用途 |
+|---|---|
+| `mosquitto` | peer agent 或 subagent 网络的本地 MQTT broker。当配置的 broker 在本机且不存在时，slife2 会启动一个。 |
+| `cloudflared` | `cloudflare` 文件隧道 provider（随附配置中选择的 provider）。 |
+| `ssh` | `localhost.run` 文件隧道 provider。Windows 10 及更新版本自带 OpenSSH 客户端。 |
+| `npx` | 使用 `command: npx` 配置的 `mcp:` 条目。 |
+| `uvx` | `rest-api:` 条目，会展开为 `uvx mcp-openapi-proxy`。 |
 
-**`--headless` 让那个窗口不带终端运行。** 同样的 server、同样的连接、同样的轮次，
-由同一份代码运行 —— 只是什么都不画、什么都不打印。它要解决的问题是面前没人的机器：
-窗口持有 **agent 在 A2A 网格上的位置**，所以同伴可以把任务派给它并得到回答；而没有
-人开过窗口的机器会让那个 agent 干脆处于离线状态。agent 本身别的什么都不变 —— 它是一
-个没有屏幕的窗口，而不是另一种 agent —— 而告诉*模型*没人在那儿的，是它的系统提示词
-（提示词模板里的 `headless`），那才是决定它行为方式的杠杆。**Ctrl+C** 是退出的方式。
+## 安装
 
-**`--lang` 是窗口的语言** —— 英文或中文，不给就从系统语言推断。不给时中文系统得到中文
-窗口、其它一律英文；给了则可以在任何机器上要其中任意一种，这正是它的用途。它覆盖的是
-窗口：标签、harness 自己那几行、各个面板、选择器、批准行、状态栏。**它到不了模型那里。**
-无论这个参数怎么说，系统提示词、每一个工具 schema、每一行日志都是英文 —— 因为一个会
-随终端改变语言的对话，是在最不该出岔子的那个地方多出了一个变量 —— 而外部文本（工具的
-结果、同伴的消息）是别人的话，原样通过。按键保留英文名，因为 `Esc` 和 `Ctrl+S` 是键盘
-上印着的；它们后面的动作词才是界面的。
-
-**各个 server 是共享的。** 再起一个 `slife2`（无论 `--agent` 叫什么）会发现它们已经在
-跑，于是直接复用；没有任何东西会被启动两次，也没有任何东西是按 agent 一份的。它们是
-守护进程，所以关掉一个 TUI 不会打断另一个；而当**最后一个**实例退出时，它会停掉正在
-运行的那些。`--keep-servers` 则把它们留着。
-
-`--agent NAME`（默认 `slife2`）给这个实例命名。它是窗口标题、是助手消息的署名、也是
-渲染系统提示词用的名字 —— 并且它是**独占的**，两个活着的实例不能共用一个名字。它*确实*
-做了划分的地方，在那些仍然共享的 server 内部：每个 agent 的轮次进自己的数据库，每个
-agent 是 `slife2-tui` 上自己的一个会话 —— 这就是为什么从手机发来的消息到达的是*你的*
-终端，而不是旁边那一个。
-
-**上下文是选出来的，不是攒出来的**：每一轮之前先做一次模型调用，决定手上的对话留下
-什么、又从日志里召回什么，这一轮就跑在这两者之上。没有关掉它的开关。一个重启的对话，
-或者闲置够久以致循环被回收的对话，会在退出时的那个上下文上回来。下一节讲的完全是这件事。
-
-那份日志是模型可以回看的地方。`turn_list` 浏览它 —— 最新在前，一轮一行，`since`/`until`
-接受 ISO 日期或者一个人会写的那种说法（`yesterday`、`last month`、`3 days ago`），用
-`limit`/`offset` 按 `total` 翻页 —— 而 `turn_read` 返回完整的一轮。两者都不接受 `agent`：
-调用本身带着它代表的是哪段对话，所以模型读到的是自己的历史，别的什么都读不到，它的任何
-参数都改变不了这一点。
-
-每一轮在存入时还会**被索引两次** —— 一个建立在「这一轮靠什么被找到」的文本上的关键词
-索引，和一个建立在「它讲的是什么」上的向量索引 —— 于是以后一轮可以被相关性找到，而不
-只是按时间。两个索引都派生自轮次、也可以从轮次重建，这就是为什么换 embedding 模型
-（配置里的 `embeddings:`）的代价是下次启动时把整段历史重新嵌入一遍，而不是一次迁移。
-模型可以浏览日志，但还不能*搜索*它：上下文决策所用的召回是存储自己的，把同一个搜索作为
-工具提供出来是另一件事（DESIGN §9）。
-
-每个 plugin 也是自己的 console script，所以进程管理器不用传参数就能单独跑一个：
+从代码检出安装：
 
 ```bash
-uv run slife2-agent            # the agent loop,             :8000
-uv run slife2-toolhub          # the model's tools,          :8020
-uv run slife2-skills           # the playbooks,              :8031
-uv run slife2-cli              # the cli: registry,          :8032
-uv run slife2-mcp-tools        # holds the mcp: servers,   :8033
-uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
-uv run slife2-wechat           # WeChat, a login per agent,  :8030
-uv run slife2-cabinet          # notes, diary, files,        :8035
-uv run slife2-media            # images, video, speech,      :8036
-uv run slife2-file-tunnel      # a public URL for a file,    :8038
-uv run slife2-schedule         # scheduled tasks, the clock, :8039
-uv run slife2-a2a              # the A2A mesh over MQTT,    :8040
-uv run slife2-tui              # the terminal's inbox,       :8005
-uv run slife2-context          # turns, and the context,  :8010
-uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
-uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
-uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
-uv run slife2-llm-embeddings   # vectors for both indexes,  :8004
+git clone https://github.com/juzcn/slife2.git
+cd slife2
+uv sync
 ```
 
-TUI 里：**Enter** 发送，**Shift+Enter** 换行，**Esc** 取消正在跑的一轮，**Ctrl+C**
-也取消，没有在跑的就退出（有选中内容时则改为复制），**Ctrl+S** 打开模型选择器 ——
-`↑`/`↓` 移动，`Enter` 选定，`Esc` 离开。这些就是状态栏点名的键，而且只点名这些：
-**Ctrl+Q** 也能退出（任何 Textual 应用都这样），之所以不说，是因为带流控的终端会在窗口
-看到它之前就把它当成 XON 吃掉。
+保存你将使用的 provider 的 API key。可以通过 `credstore` 存入操作系统
+keyring，也可以导出为环境变量：
 
-**PageUp/PageDown** 翻动对话记录，**Home/End** 跳到它的两端，滚轮在指针所在的任何位置
-滚动它 —— 这些键移动的是对话记录而不是输入框，所以下一封消息还没写完时也能读一段很长
-的回答。向上滚动会把页面停在那儿：流式到来的 token 不会把视图拽回去，发一条消息才会把
-它带回末尾。输入框保留 **Ctrl+A** 和 **Ctrl+E** 用于行的两端。
-
-**Ctrl+C 仍然是复制键。** 有选中内容时 —— 在输入框里，或者用鼠标在对话记录里选中 ——
-它复制，什么都不取消；别的程序里它就是这个行为，而一个不能复制的终端，比一个「停下当前
-一轮」需要第二种写法的终端更糟。**Esc** 就是那第二种写法，而且仅仅是它：它取消在飞的
-那一轮，无论按多少次都不会关掉窗口。没有选中内容时，**Ctrl+C** 取消这一轮；连在跑的
-都没有时，它退出。
-
-**Ctrl+S 切换模型。** 选择器列出 `providers:` 下的每一个模型并标出正在用的那个，选中
-一个会调用模型自己调用的同一个 `model_switch`，所以人切换模型和模型切换模型是同一种
-行为。对话保留自己的历史，从下一轮起换到新模型上 —— 已经在飞的那一轮用启动它的模型跑完
-—— 状态栏也跟着换成新模型的窗口和各项能力标记。**这条路径上没有任何一步需要那个正在
-失败的模型**：它是一次配置读取加一行发往 agent server 的请求，这正是这个键的意义，因为
-一个已经不回答的模型不是拿来跟它讲道理的东西。
-
-在一轮还在被回答时再发一条消息，它会**排队**：已经在跑的跑完，你的下一个跑，状态栏说
-还有几条在等。Esc 停掉在飞的那一轮，不碰队列 —— 你放弃的那条和还在等的那条不是同一条
-消息。
-
-**重启不等于新对话。** 关掉窗口再打开 —— 或者重启守护进程，或者让它闲置到空闲清理把
-这段对话放掉 —— 对话记录会回来：同样的问题、同样的回答、同样的工具调用连同它们返回的
-结果，每一行打的都是它被发出的那一刻，而不是窗口打开的那一刻。被放回去的是这段对话的
-*上下文*，由 agent server 在它构建循环的那一刻恢复；窗口则去要那段上下文是由哪些轮次
-构成的，并把它们画出来，连同推理一起 —— 一次先想后答的迭代回来时，它的思考折叠在
-活着的那个版本里原本折叠的位置。
-
-**窗口也会说上下文正在做什么。** 一段被恢复的对话会在状态栏里显示它的大小 —— 是上一次
-调用把对话留在的那个数，不是累加总数，以及它占模型窗口的百分之多少。之后每一轮前面都会
-有一行注记，说明*判别器*为它决定了什么：手上的对话留下了多少，又为多少回到轮次日志里
-去取。那是每一轮一次、别的地方都不会展示给你的模型调用，而它正是让长对话不至于无界增长
-的机制 —— `slife2-context` 自己的判断，论证见 DESIGN §5.1。
-
-指名一张图片，模型就会把它附上：
-
+```bash
+uv run credstore set DEEPSEEK_API_KEY
+# 或者
+export DEEPSEEK_API_KEY=...
 ```
+
+不需要配置文件。没有 `slife2.yaml` 时，slife2 使用内置默认值，其中包括一个
+OpenAI 兼容 provider。
+
+## 快速开始
+
+```bash
+uv sync
+uv run credstore set DEEPSEEK_API_KEY
+uv run slife2
+```
+
+`slife2` 会启动配置所需的 MCP server，复用已经运行的那些，打开终端界面，
+并在最后一个实例退出时停掉这些 server。
+
+```bash
+slife2 status    # 当前配置中的 server 在做什么
+slife2 down      # 停掉它们
+```
+
+## 命令行接口
+
+```text
+slife2 [COMMAND] [OPTIONS]
+
+命令：
+  run       确保 server 可用，然后运行 TUI（默认）。
+  status    报告配置所命名的每个 server 的状态。
+  down      停掉配置所命名的 server。
+```
+
+选项：
+
+| 选项 | 含义 |
+|---|---|
+| `--data-dir DIR` | 使用 `DIR` 作为数据目录。覆盖 `SLIFE2_DATA_DIR`。 |
+| `--agent NAME` | 以 `NAME` 身份运行。默认值：`slife2`。同一台机器上一个名字只能有一个活着的实例。 |
+| `--model PROVIDER/MODEL` | 以此模型启动。只写 provider 时选择它的第一个模型。默认值：配置中的 `default`。 |
+| `--url URL` | 将窗口连接到 `URL` 上的 agent server，而不是配置中的地址。 |
+| `--a2a-broker HOST:PORT` | 本次运行让 peer agent 网络使用该 broker。它只覆盖 `peer_agent.broker`，从不覆盖 subagent 网络的 broker。它不能启用一个没有 `peer_agent:` 节的网络；如果 A2A server 已在另一个 broker 上运行，它会被拒绝，此时先停止整套服务。 |
+| `--keep-servers` | 本实例退出后保留共享 server。 |
+| `--headless` | 运行同一个窗口、同一批 server、连接和轮次，但不使用终端：不绘制、不打印。agent 仍然可以在 peer 网络上被访问。使用 Ctrl+C 退出。 |
+| `--lang {en,zh}` | 设置窗口语言。不指定时从操作系统检测。 |
+
+`--headless` 不是另一种 agent。它运行的是没有屏幕的同一个窗口；系统提示词会
+被告知没有人在看着，以便模型调整行为。
+
+`--lang` 只影响窗口：标签、harness 自己的行、面板、模型选择器、批准行和状态栏。
+系统提示词、工具 schema 和日志行始终是英文。外部文本（例如工具结果和 peer
+消息）保持其原始语言。
+
+### plugin 可执行文件
+
+每个 plugin 也可以直接启动，便于进程管理器或单独调试。
+
+| 可执行文件 | server | 默认端口 |
+|---|---|---|
+| `slife2-agent` | agent 主循环与对话 | 8000 |
+| `slife2-llm-openai` | OpenAI 兼容 chat completions | 8001 |
+| `slife2-llm-anthropic` | Anthropic Messages | 8002 |
+| `slife2-llm-openai-responses` | OpenAI Responses | 8003 |
+| `slife2-llm-embeddings` | embeddings | 8004 |
+| `slife2-tui` | 终端收件箱，每个 agent 一个会话 | 8005 |
+| `slife2-context` | 轮次日志与上下文决策 | 8010 |
+| `slife2-toolhub` | 工具目录与模型工具清单 | 8020 |
+| `slife2-wechat` | 微信登录与消息 | 8030 |
+| `slife2-skills` | playbook 与 `skill_use` | 8031 |
+| `slife2-cli` | `cli:` 节 | 8032 |
+| `slife2-mcp-tools` | `mcp:` 节 | 8033 |
+| `slife2-restapi-tools` | `rest-api:` 节 | 8034 |
+| `slife2-cabinet` | 笔记、日记、文件、报告、dump | 8035 |
+| `slife2-media` | 图片、视频、语音、转写 | 8036 |
+| `slife2-agent-task` | 后台 agent 任务 | 8037 |
+| `slife2-file-tunnel` | 本地文件的公开 HTTPS URL | 8038 |
+| `slife2-schedule` | 定时任务及其账本 | 8039 |
+| `slife2-a2a` | 基于 MQTT 的 peer agent 网络 | 8040 |
+
+subagent 网络由同一个模块在 8041 端口提供，通过
+`python -m slife2.plugins.a2a.local_server` 启动；它没有单独的命令行脚本。
+
+## 使用终端界面
+
+### 按键
+
+| 按键 | 操作 |
+|---|---|
+| `Enter` | 发送消息。 |
+| `Shift+Enter` | 插入换行。 |
+| `Esc` | 取消正在运行的轮次。 |
+| `Ctrl+C` | 有选中内容时复制；否则取消正在运行的轮次；否则退出。 |
+| `Ctrl+S` | 打开模型选择器。`↑`/`↓` 移动，`Enter` 选择，`Esc` 关闭。 |
+| `Ctrl+Q` | 退出（Textual 的标准绑定）。状态栏不显示它，因为带流控的终端可能在应用看到它之前就将其消费。 |
+| `PageUp` / `PageDown` | 翻动对话记录。 |
+| `Home` / `End` | 跳到对话记录的开头或结尾。 |
+| `Ctrl+A` / `Ctrl+E` | 移到输入行的开头或结尾。 |
+
+鼠标滚轮在指针所在位置滚动对话记录。向上滚动会让视图停在原处，新的 token
+不会把它拽回底部；发送消息后才会回到末尾。
+
+### 发送消息
+
+如果在一轮运行时发送消息，它会排队。当前轮次结束后，排队的消息开始运行。
+状态栏显示队列深度。`Esc` 取消正在运行的轮次，但不会清空队列。
+
+轮次运行期间到达的消息会在下一个迭代边界交付给该轮次，而不是留到下一轮。
+这适用于窗口中的输入、其他 channel 转交的消息，以及 headless 窗口的输入。
+
+### 模型选择
+
+`Ctrl+S` 列出 `providers:` 下的所有模型，并标记当前使用的那个。选择一个模型会
+调用模型自己也能调用的同一个 `model_switch` 工具。对话保留历史，从下一轮起使用
+新模型；已经在运行的轮次会用启动它时的模型完成。状态栏会更新上下文窗口和
+能力标记。
+
+### 恢复对话
+
+关闭再打开窗口、重启 server，或者等待空闲清理放掉对话，都不会开始新对话。
+对话记录会带着原始时间戳、工具调用和结果恢复。推理内容会折叠在实时对话中
+原本折叠的位置。
+
+状态栏还会显示上一次模型调用留下的上下文大小，以及它占模型窗口的比例。每一轮
+之前，会有一行注记说明上下文决策保留了哪些轮次、从日志中召回了哪些轮次。
+
+### 图片
+
+在句子中写出图片文件：
+
+```text
 这个布局哪里不对？ D:\shots\screenshot.png
 ```
 
-**这就是全部约定，它不是一种语法** —— 路径就是一句话里的一个路径，模型会为它调用
-`attach_image`。没有要学的标记：人写的就是人的意思。一次调用支持三种来源 —— 本地路径、
-`http(s)` URL 和 `data:` URI —— 也可以同时给几个，读不到的来源会在回答里被点名，而不是
-让其余的失败。URL 交给 provider 去取，这里不取。
+模型会为它调用 `attach_image`。没有特殊语法。一次调用可以接受本地路径、
+`http(s)` URL 或 `data:` URI，也可以同时接受多个。无法读取的来源会在回答中
+被点名，而不会让其余来源失败。URL 会交给 provider 去获取。
 
-只在模型的配置在 `input` 下列了 `image` 时才成立：读不了图片的模型会被告知这一点，并且
-说出来，而不是默默忽略你指名的东西。
+只有模型的配置在 `input` 下列出 `image` 时，图片才可用。图片只发送到模型，
+不会存进日志。轮次日志保留句子、点名文件的工具回答，以及一条记录图片曾被
+附加及其大小的注记。因此恢复后的对话是文本；之后需要图片的轮次会按点名路径
+重新附加。
 
-图片只到模型为止。日志留下的是那句话和工具的答复（它点名了每一个文件），再加上一行注记
-说明图片原本在那里、有多大 —— 所以重建出来的对话是文本，而一轮如果又需要那张图，就按
-那个名字重新附一次。重新附就是重新发 —— 文件在提示词里被指名，所以一个月后回看的一轮
-仍然说得清它讲的是哪张图。
+## 配置
 
-**provider 不肯读的一张图，是唯一可能把整段对话一起带走的东西**，因为它拒绝的那些字节会
-被之后每一轮重新发送，而每一轮都会以同样的方式失败。所以在那里死掉的一轮会把像素留下：
-活着的对话丢掉它们，附上日志也保留的那行注记，并在错误里说明这件事。凡是提示词已经指名
-过的东西，一样都没有丢。
+### 位置与默认值
 
-## 上下文
+配置文件是数据目录中的 `slife2.yaml`。从代码检出运行时，数据目录就是检出目录；
+否则是 `~/.slife2`。使用 `--data-dir DIR` 或 `SLIFE2_DATA_DIR` 覆盖它。
 
-一段对话不累积上下文，它**选择**一个。`slife2-context` 保存轮次日志 —— 每个
-`(agent, subagent)` 一个 SQLite 文件，和以前完全一样 —— 并在每一轮之前做**一次模型
-调用**，读手上的这段对话，回答两件事：已经在手的那几轮留下什么，以及从日志里召回什么。
-这一轮就跑在这两者之上，按时间排序。
+缺少配置文件不是错误：会使用内置默认值。文件存在但无法加载时，启动会以一行
+错误停止，并点名文件和错误原因。
 
-这次读的是整段对话而不是单独那条新消息，这不是细节：要被召回的那一轮通常是追问，而
-「另一个呢」只有通过它上面的那些轮次才说得清自己指的是什么。它的回答是一次选择，绝不是
-一次倾倒 —— 上下文是有界的，所以一次匹配到的东西超过容量时，返回的是放得下的那部分，
-而 keep 列表就是模型说明自己还在用手中哪几轮的方式。它读到的每一轮都带一条 `[TURN:{…}]`
-脚注，写明它的 id、它的 channel 和它的跨度，那些 id 就是从这里来的 —— 而进程自己跑过的
-每一轮也有一条，在存入的那一刻写下，所以最新的轮次和恢复回来的一样可寻址。
-按约定，大写就是提示：大写里的名字是 harness 自己的注解，从来不是记录的一部分；而读起来
-像一个词的标记 —— 比如别人从微信发来的那一轮上的 `[Wechat:{…}]` —— 是某个人说过的，
-和人说的话一起存着。
+配置文件可以安全地纳入版本控制。它不应包含秘密；每个凭证都是运行时解析的
+`${VAR}` 或 `keyring:` 引用。
 
-**模型能调用的任何东西都决定不了这件事。** 模型有 `turn_list` 和 `turn_read` —— 读自己
-的历史正是日志的意义 —— 而那两个决定是 harness 的：`restore`，重放一段对话上次停下时
-（进程重启过，或者空闲清理把它放掉了）所拥有的上下文；以及 `rebuild`，执行上面那个决定。
-一次决定「手里这些原样保留」的 rebuild 什么都不重建，这是最常见的情况，也正是让一次这么
-贵的调用不至于白花钱的原因。
+### 配置节
 
-它在 `slife2.yaml` 的 `context:` 下调参 —— 上下限是模型自己窗口的占比，召回的各项上限，
-以及超时之后这一轮干脆用手上的上下文跑：
+| 配置节 | 作用 |
+|---|---|
+| `servers:` | 每个 plugin server 的地址与端口。未指定时使用默认值。 |
+| `providers:` | chat provider 及其模型。 |
+| `default:` | 新对话使用的模型，格式为 `provider/model`。 |
+| `agent:` | 迭代上限与系统提示词模板。 |
+| `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
+| `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
+| `embeddings:` | 记忆索引使用的 embedding provider。 |
+| `context:` | 上下文决策的限制。 |
+| `tool_load:` | 模型可加载工具的上限。 |
+| `tool_result:` | 单个工具结果的 token 预算。 |
+| `mcp:` | 外部 MCP server（stdio 或 HTTP）。 |
+| `rest-api:` | 作为工具暴露的 OpenAPI 文档。 |
+| `cli:` | 本机已安装的命令。 |
+| `skills:` | `skills/` 下 playbook 的环境变量。 |
+| `media:` | 图片、视频、语音和转写 provider。 |
+| `file-tunnel:` | 本地文件的公开 URL provider。 |
+| `peer_agent:` | 远程 peer agent 网络。 |
+
+没有 `wechat:`、`cabinet:`、`schedule:` 或 `tui:` 配置节。微信登录通过扫码
+创建，保存在 agent 目录下。文件柜、定时器和终端收件箱由其 server 以及所保存的
+数据决定是否启用。
+
+### 秘密
+
+一个值可以是：
+
+- 字面字符串；
+- `${VAR}`，依次通过 shell 环境、[credstore](https://pypi.org/project/credstore/)
+  和可选的字面默认值（`${VAR:-default}`）解析；
+- `keyring:<service>/<key>` 引用，直接从操作系统 keyring 解析。
+
+解析是惰性且宽松的。无法解析的引用会原样保留，因此缺失的 key 会在 API 调用处
+失败，并能在错误信息中被点名，而不是在启动时失败。
+
+### 示例
 
 ```yaml
+agent:
+  max_iterations: 0          # 0 或省略表示不设上限
+  # system_prompt: prompts/jack.j2
+
+agent-task:
+  max_running: 4
+
+subagent:
+  max_running: 32
+  provider: mosquitto
+  broker: {host: localhost, port: 1883}
+
 context:
-  ceiling: 0.8         # 保留的上下文以什么为衡量基准
+  ceiling: 0.8               # 占模型窗口的比例
   floor: 0.2
   recall_limit: 40
-  min_similarity: 0.45 # 只把关*实测*相似度；关键词命中不受它管
-  timeout: 20.0        # 判别器调用的超时，超过就按现有上下文跑
-```
+  min_similarity: 0.45
+  timeout: 20.0              # 判别器调用的秒数
 
-**这里失败不等于对话失败。** 判别器超时、provider 报错、回答不是要求的形状 —— 全都会
-保留上下文并让这一轮跑下去。存储*不见了*是另一回事，它会让这一轮失败，和别的任何缺失的
-plugin 一样。
+tool_load:
+  threshold: 100             # 加载工具超过该数量后卸载最久未使用的
 
-## 工具
+tool_result:
+  tokens: 8000               # 单个结果的预算；最小 128
 
-模型的工具清单 —— slife2 自带的，和别人在跑的 —— 由 **`slife2-toolhub`** 决定，而且
-它是唯一做这个决定的进程。它不是*够到*那些 server 的进程：`mcp:` 归 `slife2-mcp-tools`
-持有，`rest-api:` 归 `slife2-restapi-tools`，各自申报自己持有什么 —— 来源、它的工具、
-它是否在应答 —— 而 hub 合并这些行、给它们把关、给它们命名，并把调用路由回去。一个
-plugin 无论前面是别人的 server 还是根本没有连接，贡献方式都一样：一份 playbook 和一条
-命令同样是被申报的行，这就是它们「可被找到但不可被调用」的方式。
-
-**凭证和连接放在一起**，所以某个工具 server 的 key 由持有它那条配置项的 plugin 保存
-—— `SERPER_API_KEY` 在 `slife2-mcp-tools`，provider 的 key 在需要它的模型 server，
-`BAIDU_API_KEY` 在 `slife2-skills`。模型被*交到*手上的是它已经加载的那部分清单，也就是
-配置之后的这一节：
-
-### 配置
-
-```yaml
-# 下面每一节都既是手写的、也是模型写的：每个 family 提供编辑自己那一节的工具
-# （`mcp_set`、`rest_api_set`、`cli_set`、`skill_set`，旁边还有 `remove` / `list` /
-# `set_enabled`，用的都是 v1 的名字）。底部的 `providers:` 和 `default:` 由
-# `model_set` / `model_remove` / `model_switch` 以同样的方式编辑，它们住在 agent
-# server 上而不是自己的 family plugin 里（DESIGN.md §8）。两种方式下，写入都经过
-# `slife2.libs.host.configfile` —— 单一写入者、文件的注释保留，而每次启动都读这个
-# 文件的加载器就是裁判。
-
-mcp:                                  # 别人写的 MCP server
+mcp:
   arxiv:
     url: https://arxiv.mcp.brunosan.de/mcp
   serper:
-    command: npx                        # stdio：由 slife2 启动的进程
+    command: npx
     args: [-y, serper-search-scrape-mcp-server]
     env:
       SERPER_API_KEY: ${SERPER_API_KEY}
 
-rest-api:                               # OpenAPI 文档，一个端点一个工具
+rest-api:
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
     base_url: https://api.github.com
     api_key: ${GITHUB_TOKEN}
 
-cli:                                    # 这台机器上已经装好的程序
+cli:
   yt-dlp:
     command: yt-dlp
     description: Download video from 1000+ sites, subtitles and playlists.
     install: uv pip install yt-dlp
 
-skills:                                 # skills/ 里某份 playbook 被给到的东西
-  baidu-search:
-    env:
-      BAIDU_API_KEY: ${BAIDU_API_KEY}
-    # enabled: false                    # 装了，但先放一边
-
-tool_load:                              # 模型最多能持有多少个工具
-  threshold: 100
-
-tool_result:                            # 一次工具结果交给它多少
-  tokens: 8000                          # 花在超长结果上，同时用它
-                                        # 给 `dump_read` 封顶 —— 就这一个数，
-                                        # 且至少 128：窗口比它自己开头那行
-                                        # 地址还小的话，会被拒绝
-
-context:                                # 一段对话的上下文如何决定
-  ceiling: 0.8
-  floor: 0.2
-```
-
-**没有 `wechat:` 节**：微信登录是扫出来的而不是配出来的，它住在
-`agents/<agent>/wechat.yaml` —— 见上文「WeChat」。
-
-`command` 启动一个进程并经由它的标准输入交谈；`url` 经网络连上别人的。一条 `rest-api`
-配置项是同一件事的简短写法 —— 它会被展开成服务它的那条 `uvx mcp-openapi-proxy` 命令，
-所以持有它的 plugin 只有一套机制而不是两套。`${VAR}` 与 provider 的 key 走同一条解析链。
-
-`cli` 一项是个例外：没有进程要启，也没有 URL 要连，因为程序本来就装好了。写下来是为了
-能让模型知道它存在 —— 而写在*这里*、写在运维者自己的文件里，是因为一条配置项本身就是
-opt-in，跟 `mcp:` 下的一条配置项完全一样。命令最终不在 `PATH` 上时，告诉人的就是
-`install`；`cli_set` 会在有人看着的时候检查这件事。**每一条配置项都是工具目录里的一行**
-（`cli:yt-dlp`），所以 `tool_search` 能按它做什么而不是按它的名字找到一个命令 —— 可被
-找到是已经落地的那一半。**还没有任何东西真的去运行它**：做这件事的工具是下一个改动
-（DESIGN.md §9），在那之前 `func_tool_load` 说的正是这个。**`slife2-cli`** 申报这些行，
-并提供写这一节的 `cli_*` 工具。
-
-`skills/` 里的 playbook 以同样的方式进目录，而且*确实*可读 —— `skill_use`，由
-**`slife2-skills`** 提供，与它一起的还有 `skill_list` 以及安装、移除、启停一份 playbook
-的那些 `skill_*` 工具。它成为一个 plugin 是同一个理由，并且它持有 `skills:` 这一节解析
-出来的东西，因为一份声明了 `requires.env` 的 skill 需要一个知道答案的进程。
-
-**模型可以编辑这些节，读这一段就是为了这件事。** 四个 family 各自提供自己的管理工具 ——
-`mcp_set` / `rest_api_set` / `cli_set` / `skill_set`，旁边是 `remove`、`list` 和
-`set_enabled`，用的都是 v1 的名字 —— 所以「写在*这里*、写在运维者的文件里」不再等于
-「运维者写的」。**第五个编辑者是模型配置本身**：`model_list` / `model_set` /
-`model_remove` / `model_switch` 作用于 `providers:` 和顶层的 `default:`，由
-`slife2-agent` 而不是某个 family plugin 提供 —— 把 provider 和模型变成一段对话所用模型
-的正是 agent server，所以这次编辑和兑现它的那次读取是同一个进程（DESIGN.md §8）。`set`
-写的是*整条*配置项而不是打补丁：漏写的字段就是被丢掉，而 `set_enabled` 才是那个只改一个
-字段、其余照旧的操作。不变的是编辑所走的那条路：文件由一个模块
-（`slife2.libs.host.configfile`）在跨进程锁下写入，作为一次保留全部注释的文档编辑，结果
-交给和*启动*时同一批解析器和同一个加载器 —— 加载器拒绝的配置项会被放回去，并告诉调用方
-为什么。所以能写进去的，就是运维者写得出来的，而且落在他们会写的地方。这里*还*没有的是
-写入之前的一道闸：带 `command:` 的 `mcp_set` 指名了 slife2 将要启动的一个程序，而没有
-任何东西先问一句（DESIGN.md §9，「Tool approval」）。
-
-### 交到模型手上的是什么
-
-工具的名字在有来源可带的时候会带上来它的 server：`mcp:` 下的一条配置项到模型那里是
-`{name}__{tool}` —— `arxiv__arxiv_search_papers`。**我们自己的不带。** `turn_read` 和
-`tool_search` 是 slife2 自己的工具，而 `context__turn_read` 等于把这套系统自己的安排
-泄进了模型每次请求都要读的那唯一一样东西里：哪个 plugin 提供某个工具是关于我们的事实，
-而 `servers()` 会把它报告给任何在调试的人。所以我们自己的工具是裸名，而且它们共用一个
-命名空间 —— 两个 plugin 不能合计提供一个名字 —— 目录会大声拒绝，而不是替它做裁决。
-
-**交到模型手上的是它已经加载的工具，不是存在的工具。** 这份清单在*每次模型调用*之前都
-从 hub 重新读一遍，一开始就在里面的是 slife2 自己的：`tool_search`、`func_tool_load`、
-`_func_tool_unload`、`skill_use`、两个历史工具、`attach_image`、harness 的
-`_check_new_input`，以及编辑那五个配置节的二十二个工具 —— 最后这一组正是清单明显变长的
-原因，也是唯一一组「常驻加载」值得再看一眼的。其余一切都按需加载 —— 一个有九十个工具的
-server，在其中一个被需要之前不花任何代价。`tool_search` 同时按关键词*和*按语义搜索整个
-目录，一次混合检索；`func_tool_load` 把一个或几个名字放进清单，它们从同一轮的下一次迭代起
-就在那里。目录是 `<data>/agents/tools.db`，整个数据目录一个文件而不是每个 agent 一个：
-一段对话里加载的工具，下一段对话也是加载的，重启之后仍然是。
-
-有两件事决定什么一开始就是加载的。**我们自己的永远加载** —— 一个悄悄丢掉了 `turn_read`
-的模型，是没有人看得见的故障 —— 别人的则在它的配置项写了 `autoload: true` 时加载，这也
-是一个「每一轮都要用到它的工具」的 server 被写下来的方式。其余一切都按需到来。
-
-**而工具回答的东西统一是 JSON。** schema 和回答都是模型要读的东西，所以它们是同一个
-面：列表回答 `{"<名词>": [...], "total", "limit", "offset"}` —— `total` 就是「还有没有
-下一页」的答案 —— 读取回答那一行自己的字段，而**拒绝和「没有这样东西」都是抛出**，由
-harness 作为一次失败调用连同原因交给模型。只有一个例外：`_check_new_input` 原样交出一个
-人的消息，因为它交出去的不是关于某物的数据，而是那样东西本身。任何回答都不该超过
-`tool_result: tokens:`；可能超的列表走 `limit`/`offset`，而无法设界的输出走大输出本来就
-会走的 dump（见下文 `dump_read`）。
-
-### 每个工具都接受的三个参数
-
-**每个工具都接受三个模型可以加到任何一次调用上的元参数。** 它们不在任何工具自己的
-schema 里 —— 它们是在每个 schema 出去的路上被加上去的（`slife2.libs.turn.tools.advertised`），
-循环会把它们读走并在分发之前剥掉，所以没有任何工具 server 见过它们。
-
-```yaml
-# 来自模型的任意一次工具调用
-{ "e": "6*7", "_timeout": 30 }              # 这一次调用可以花 30 s
-{ "prompt": "a cat", "_async": true }        # 放到后台去跑
-{ "path": "notes.md", "_approve": true }     # 先问一下用户
-```
-
-- **`_timeout`** —— 秒。它覆盖工具自己的默认值；`0` 或更小表示「用默认」，
-  **绝不**表示「不限时」。一个自己声明了 `timeout` 参数的工具由它自己执行（一次调用
-  恰好一个计时器）；两者都没有时，调用一直跑到它结束。这里**没有默认预算**：一个套在
-  所有工具上的数字，对其中大多数都是错的。
-- **`_async`** —— 放到后台跑。模型拿到一个 `task_id`，结果到达时会被**交回这段对话**，
-  戴着 `[AgentToolResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`；窗口把它
-  画成 `async-tool:<tool>` channel 上的一条消息。结果和别的结果一样要过
-  `tool_result: tokens:` —— 放到后台是让这次调用不必*等*，不是让它不受这个上限 ——
-  所以超大的输出到达时是一个窗口，其余部分用 `dump_read` 读。`check_async` 回答这次调用*现在*在哪
-  （在跑、已结束、失败、已取消），`cancel_async` 放弃它。**agent task 自己的循环没有
-  `_async`** —— 它只跑一轮，没有地方可以把结果交回去 —— 它会这么说，而不是假装可以
-  （DESIGN.md §9）。
-- **`_approve`** —— 调用跑之前先问用户。终端画一行内联的行（`y` 批准，`n`/`Esc` 拒绝），
-  并用 `answer_approval` 作答；循环等着那个回答，被拒绝就拒绝这次调用，不挂任何工具面板。
-  **背后没有人的 channel 不会问，调用直接跑** —— 微信、定时运行、另一个 agent，以及任何
-  没有被教会画这个提示的客户端（一个*能*回答的调用方会用
-  `send_message(..., watched=true)` 说明这一点，终端就是这么做的）。
-
-### 预算，以及 harness 写下的那几对
-
-清单是有界的，因为它随每一次请求出去：超过 `tool_load: threshold:`（`slife2.yaml` 里的
-100）时，最近最少被*调用*的工具会被卸载，我们自己的和 `autoload` 的除外。算数的是调用
-而不是加载 —— 模型整轮都在用的工具，比刚被拿进来的活得久 —— 而一个加载之后从未被调用过
-的工具，按它被加载的时间排序。这次裁剪发生在轮的边界上 —— harness 在存下这一轮之前调用
-`_func_tool_unload`，那些名字会回来，所以模型刚刚失去的东西是日志说得出来的，而不是没有
-任何东西注意到的事。**而且模型也读得到它**：这次裁剪被写成一次工具调用和它的结果进入
-对话，所以一个清单缩水了的模型是从对话记录里知道的，而不是伸手去拿一个已经不存在的工具
-才知道。什么都没拿走时，什么都不写。被逐出的代价是一次搜索和一次加载，不是一种能力。
-
-**一轮正在跑时到达的消息会被交给那一轮。** 在下一次迭代边界，harness 调用
-`_check_new_input`，把这次调用和这条消息自己的话写进正在跑的那一轮 —— v1 的 *cut-in*，
-始终开启 —— 所以 agent 干活时你说的话，在它到达的那一轮之内就传到了，而不是晚一轮。
-和裁剪一样，它是一对工具调用：它在记录里，也在之后每一次请求里，模型把它读成「它干活时
-到达的东西」。**窗口把它画在开着的那一轮里面** —— 消息自己的话、自己的气泡，而且不会
-结束还在流式输出的回答 —— 重建出来的对话也从轮日志里的这一对画出同一行。**所有来源都走
-同一条规则**：在窗口里打字、别的 channel 递过来的消息、没有终端的窗口的输入，都立刻提交
-给对话；agent server 的 inbox 是唯一的队列，在哪个迭代边界交付由 loop 决定。
-
-### 一个 plugin 如何贡献
-
-一个 plugin 的哪些工具模型可以调用，是写在工具上的 —— `@mcp.tool(meta=FOR_THE_MODEL)`，
-`skill_use` 带着它，而上下文存储的 `remember` 没有。一个 plugin 的工具在其中一个开口说
-之前，都是它自己代码的，所以你忘了标记的工具是不可见的，而不是危险的。
-
-**hub 够得到我们的 plugin，对其它一切则是被*告知*的。** 有两类东西到达它。一个 plugin
-的**自有工具**来自 `tools/list`，就是它回答任何人的方式。一个 plugin 的**来源**则是被
-申报的：`mcp:` 的一条、`rest-api:` 的一条、一份 playbook、一条命令 —— hub 一个都够不到
-—— 由拥有那一节的 plugin 在一次 `list_sources` 调用里替它们作答，hub 合并这些行，并把
-每次调用路由回持有它们的 plugin。所以这个进程不持有任何通往别人运行的 server 的连接，
-也不持有属于它的 key：`slife2-mcp-tools` 和 `slife2-restapi-tools` 持有那些，一条配置项
-一个连接，而 hub 拥有工具*集合*，别的什么都不拥有。
-
-**一次申报就是整份清单，而且每次搜索之前都会再问一遍。** 整份清单是「被删掉的一条不再
-是命中」的原因 —— 合并把缺席的名字读成来源已经没有的那一行 —— 再问一遍则是「把目录丢进
-`skills/`、或者改配置，在下次搜索就生效而不是下次重启才生效」的原因。无论哪种方式，hub
-都是目录唯一的写入者：来源申报，hub 合并。
-
-hub 自己的工具就是剩下的那些，而它们恰好是集合层面的活。
-**`tool_search`、`func_tool_load` 和 `_func_tool_unload`** 由 hub 提供，因为它们每一个
-都是关于*整个*目录的问题 —— 存在什么、模型正拿着什么、预算收回了什么 —— 所以拥有这个
-集合的进程来回答，别的 plugin 回答不了。它们的名字不带 server，因为没有 server 可带，
-我们自己的每一个工具都是这么命名的。
-
-**`skill_use`** 已经不再是它们中的一员：**`slife2-skills`** 提供它，而 `slife2-cli`
-拥有 `cli:` 那一节。两者都是和其它 plugin 一样的 plugin，理由从另一端看更容易明白 ——
-每个 family 都还有一个面向模型的工具没做（DESIGN.md §9），而工具需要一个 server 才能被
-提供。一份 skill 是 `<data>/skills/` 里的一份文档，工具去读它：
-`skill_use(name="browser-harness")` 返回那份 skill 的 `SKILL.md`，前面带上它所在的目录，
-这样正文里的路径才有意义。安装一份 skill 就是把一个目录放进那个文件夹 —— 工具每次调用
-都读磁盘，所以没有东西需要重启。
-
-**一份 skill 也是一行**（`skill:browser-harness`），每一条 `cli:` 配置项也是 —— 这正是
-让 `tool_search` 能回答「关于浏览器我能做什么」的原因，而不必模型已经知道要按名字
-问 `browser-harness`：被搜索索引的是 playbook 的整份文档，而「drive a browser」能命中
-它就是全部意义。这一行不是一个工具：它没有加载状态，从不进入模型的清单，调用它得到的
-回答是真正够得到那东西的那一步（`skill_use`），而不是一次拒绝。名字带命名空间是因为
-`browser-harness` 既是一条命令*又是*记录它的那份 skill，而一个名字就是一行。
-
-**模型可以调用的一切都是工具目录里的一行**，hub 自己那三个也算。hub 决定工具是*什么*
-—— 哪些来源、上面的命名规则、谁可以调用 —— 而记录是 hub 自己打开的一个文件，
-`<data>/agents/tools.db`，经由 `slife2.libs.store.catalogue.ToolStore`：行加上建在它们
-上面的两个索引，用的就是轮次用的那套机制，因为一个存储只有一个写入者，而单一写入者本来
-就是 SQLite 文件。它回答关于这些行的问题 —— 哪些是加载的、某一个在远端叫什么、以及那两
-条搜索腿 —— 里面没有任何东西知道什么是代理名。
-
-一份 skill 是一份文档，它仍然可能需要一个 key：`baidu-search` 在自己的头部声明了
-`BAIDU_API_KEY`，而它的第一条指令就要跑一个没有它就会死的脚本。值来自 `skills:` ——
-和别的每一个密钥走同一条链，这正是把它写下来的意义，因为一个几天前启动的守护进程从来
-没见过你今天早上 export 的 key。
-
-```yaml
 skills:
   baidu-search:
     env:
-      BAIDU_API_KEY: ${BAIDU_API_KEY}   # shell env → credstore
+      BAIDU_API_KEY: ${BAIDU_API_KEY}
 ```
 
-`skill_use` 会把这个差别报出来：读一份 key 没有配置的 skill，回答会开门见山地说出来，
-而不是让模型等到它被告知要跑的那条命令失败时才发现。什么都没声明的 skill 什么都不说。
-目前还没有任何东西真的去跑那些脚本（DESIGN.md §9）—— 而这正是这个检查属于读取者的原因。
+随附的 `slife2.yaml` 在原处带有注释，是每个配置键的参考。
 
-`enabled: false` 让一条配置项保持配置好但永不连接，这是值得知道的那个杠杆：凡是启用的，
-启动时都是一个进程、每次请求里都是它的工具。它必须是**真正的布尔值，否则文件加载不了**：
-在这个 YAML 读取器眼里 `no`、`off`、`'false'` 都是字符串（YAML 1.2 去掉了那些布尔写法），
-把其中一个读成「关」—— 更糟的是读成「开」—— 等于替写下这个值的人去猜；拒绝时会点名是哪个
-配置项、哪个键。`servers()` 把它报告成 `off`，所以「我的
-工具为什么不见了」连一条在跑起来之前就被关掉的配置项都有答案 —— 而它开着时提供的那些
-工具留在目录里，标成 `disabled`，所以搜索仍然找得到它们。`slife2 down` 把这些再推进一步
-—— 它停掉的一个 plugin，会带走那个 plugin 启动的子进程。
+### 编辑配置
 
-plugin 是必需的，而 `mcp:` 里的一切都是可选的：hub 向每个 plugin 要一份工具清单，答不上
-来的那个会让这一轮失败，而不是悄悄少几个工具继续跑；而别人的 server 会被报告出来并排除
-在外。一个悄悄丢掉了 `turn_read` 的模型是没有人看得见的故障，而这就是这条规则值得存在的
-原因。
+配置既可以手写，也可以由模型编辑。每个 family 为自己的配置节提供工具：
+
+| family | 工具 |
+|---|---|
+| `mcp:` | `mcp_set`、`mcp_list`、`mcp_list_tools`、`mcp_remove`、`mcp_set_enabled` |
+| `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |
+| `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
+| `skills:` | `skill_set`、`skill_list`、`skill_remove`、`skill_set_enabled` |
+| `providers:` 与 `default:` | `model_set`、`model_list`、`model_remove`、`model_switch` |
+
+所有写入都经过同一个模块（`slife2.libs.host.configfile`），并在跨进程锁下执行。
+写入是一次保留注释的文档编辑，结果由启动时使用的同一个加载器校验。加载器拒绝的
+条目会被恢复，并告知调用方原因。
+
+`set` 写入整个条目：省略的字段会被删除。`set_enabled` 只修改 `enabled` 字段。
+写入之前没有批准闸；特别是，带 `command:` 的 `mcp_set` 会记录一个 slife2 将要
+启动的程序。
+
+## 能力
+
+### 对话与记忆
+
+对话不会无界地累积上下文。`slife2-context` 保存轮次日志，并在每一轮之前进行
+一次模型调用，决定：
+
+- 手头的对话中保留哪些轮次；
+- 从日志中召回哪些轮次。
+
+这一轮在两者合并后的结果上运行，按时间排序。这次调用读取整个手头对话，而不是
+只看新消息，因为追问通常通过上面的轮次来指代对象。回答是一次选择，绝不是倾倒；
+如果召回匹配到的内容超过容量，只返回放得下的部分。
+
+被决策读取的每一轮都带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。
+最新的轮次也有脚注，因此它们和被恢复的轮次一样可寻址。大写 marker 是 harness
+添加的注解，不属于存储记录。读起来像词的 marker（例如 `[Wechat:{…}]`）是发送者
+写的，会随消息一起存储。
+
+模型可以用 `turn_list` 和 `turn_read` 浏览历史。`turn_list` 按最新优先，每轮一行；
+`since`/`until` 接受 ISO 日期或 `yesterday`、`last month`、`3 days ago` 之类的
+说法，`limit`/`offset` 按 `total` 翻页。两个工具都不接受 agent 参数：调用本身
+携带对话身份，因此模型只能读取自己的历史。
+
+每一轮存储时都会建立两个索引：一个按“这一轮靠什么被找到”的文本建立的关键词
+索引，一个按“它讲的是什么”建立的向量索引。两个索引都派生自轮次，也可以从轮次
+重建。修改 `embeddings:` 下的 embedding 模型后，下次启动会重新嵌入全部历史。
+
+有两个 harness 决策不是工具：
+
+- `restore` 在对话开始时重放已保存的上下文。
+- `rebuild` 在每一轮之前执行上下文决策。
+
+如果 rebuild 决定保留手头的全部内容，就不会重建任何东西。判别器超时、provider
+报错或回答无法解析时，会保留现有上下文并继续运行该轮。轮次存储缺失则会使该轮
+失败，和其他缺失的 plugin 一样。
+
+模型可以浏览轮次日志，但不能语义搜索它；上下文决策使用的召回属于存储自身。
+
+### 工具
+
+`slife2-toolhub` 是唯一决定模型可以看到哪些工具的进程。它自己不去连接外部
+server。`slife2-mcp-tools` 持有 `mcp:` 连接，`slife2-restapi-tools` 持有
+`rest-api:` 连接；它们各自声明来源及其提供的工具，hub 合并声明、命名工具、
+把关并把调用路由回来源。
+
+hub 提供三个集合级工具：
+
+- `tool_search` 按关键词和语义搜索整个目录。
+- `func_tool_load` 将一个或多个工具放入模型看到的清单。
+- `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
+
+模型可以调用 `tool_search` 返回的名字而不加载它，但加载会让它保留在每次请求
+随附的清单中。模型的清单在每次模型调用前都从 hub 重新读取，因此轮次中加载的
+工具从下一次迭代起可用。
+
+slife2 自己的 plugin 提供的工具一开始都是加载的。外部来源只有在其条目设置
+`autoload: true` 时才一开始加载。其他一切都按需发现和加载。
+
+已加载清单由 `tool_load.threshold` 限制（默认 100）。超过限制时，最近最少被
+调用的工具会被卸载；slife2 自己的工具和 `autoload` 来源永远不会被卸载。从未
+被调用过的工具按加载时间排序。裁剪发生在轮次边界；被移除的名字会作为一次工具
+调用及其结果写入对话，因此模型会知道清单缩小了。被逐出的代价是一次搜索和一次
+加载，而不是失去一种能力。
+
+工具命名：
+
+- `mcp:` 条目提供的工具名为 `{server}__{tool}`，例如
+  `arxiv__arxiv_search_papers`。
+- plugin 自己的工具使用裸名，例如 `turn_read`。哪个 plugin 提供工具是系统内部
+  的事实，不需要出现在模型读取的名字里。
+
+每个工具结果都是一个 JSON 对象。列表回答：
+
+```json
+{"<noun>": [], "total": 0, "limit": 20, "offset": 0}
+```
+
+`total` 说明是否还有下一页。读取回答该行自己的字段。拒绝或未找到会抛出
+`ToolError`，harness 将其作为失败调用连同原因交给模型。`_check_new_input`
+是唯一例外：它原样返回一个人的消息。
+
+任何回答都不应超过 `tool_result.tokens`。可能增长的列表使用 `limit`/`offset`；
+无法设界的输出会保存为 dump（见[文件柜](#文件柜)）。
+
+#### 工具调用参数
+
+每个工具都接受三个元参数。它们会被添加到每个对外公布的 schema 中，并在分发前
+剥离，因此工具 server 永远看不到它们。
+
+| 参数 | 作用 |
+|---|---|
+| `_timeout` | 本次调用的秒数，覆盖工具的默认值。`0` 或负数表示“使用默认值”，绝不是“不设限”。自身声明了 `timeout` 参数的工具会自行执行该参数。两者都不适用时，调用会一直运行到结束。没有默认超时。 |
+| `_async` | 在后台运行。模型会收到一个 `task_id`；结果会带着 `[AgentToolResult:{…}]` marker 交回对话，并绘制在 `async-tool:<tool>` channel 上。`check_async` 报告调用是在运行、已完成、失败还是已取消；`cancel_async` 放弃它。后台化只是去掉等待，不是去掉结果预算。agent task 的循环没有 `_async`。 |
+| `_approve` | 运行前询问用户。终端会画一行内联提示（`y` 批准，`n` 或 `Esc` 拒绝），并通过 `answer_approval` 回答。如果 channel 背后没有人（微信、定时运行、另一个 agent，或无法绘制提示的客户端），调用会直接运行。能够回答的调用方会用 `send_message(..., watched=true)` 表明这一点。 |
+
+#### Skills 与命令
+
+Playbook 位于 `<data>/skills/<name>/SKILL.md`。`slife2-skills` 提供 `skill_use`，
+它返回 playbook 文本，并在前面附上其所在目录。安装 skill 就是把一个目录放进
+`skills/`；该工具每次调用都会读取磁盘，因此不需要重启。
+
+Skill 可以在头部声明环境变量要求。值来自 `skills:` 配置节，通过和其他秘密相同的
+链解析。如果缺少 key，`skill_use` 会在模型执行依赖它的指令之前报告。
+
+`cli:` 条目描述本机已经安装的程序。每个条目都是目录中的一行（`cli:yt-dlp`），
+因此 `tool_search` 可以按功能找到它。该行不是可调用工具，也没有加载状态。目前
+没有工具执行 `cli:` 条目；`func_tool_load` 会报告这一点。
+
+`enabled: false` 让条目保持配置但不连接。该值必须是真正的 YAML 布尔值：在
+YAML 1.2 中，`no`、`off` 和 `'false'` 是字符串，会被拒绝而不是猜测。禁用条目的
+工具仍留在目录中，标记为 `disabled`，搜索仍能找到它们。
 
 ### 媒体
 
-一个配置节背后是四种能力：**画一张图、渲染一段视频、开口说一句话、把一段音频里说的
-写下来**。
+`media:` 配置节提供四种能力：
+
+- `generate_image`：根据提示词绘制图片。
+- `generate_video`：根据提示词或图片渲染视频。
+- `text_to_speech`：将文本写成音频文件。
+- `transcribe_audio`：转写音频文件，使用 `offset` 和 `limit` 分页。
+
+每个模型声明自己的用途：
 
 ```yaml
 media:
-  defaults:                              # 不指名时一次调用拿到哪个模型
+  defaults:
     image: bailian_personal/wan2.7-image
     video: bailian_personal/happyhorse-1.1-t2v
   providers:
     bailian_personal:
-      api: dashscope-aigc                # 说的是协议，不是品牌
+      api: dashscope-aigc
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
       api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
       models:
-        - { model: wan2.7-image, kind: image }
-        - { model: happyhorse-1.1-t2v, kind: video, params: { resolution: 720P, duration: 5 } }
-        - { model: qwen-audio-3.0-tts-plus, kind: tts, voice: longanhuan_v3.6 }
-        - { model: qwen-audio-3.0-asr-flash, kind: asr }
+        - {model: wan2.7-image, kind: image}
+        - {model: happyhorse-1.1-t2v, kind: video, params: {resolution: 720P, duration: 5}}
+        - {model: qwen-audio-3.0-tts-plus, kind: tts, voice: longanhuan_v3.6}
+        - {model: qwen-audio-3.0-asr-flash, kind: asr}
 ```
 
-**一个模型是*干什么用的*，是关于这个模型的事实**，而这是它与 `providers:` 和
-`embeddings:` 唯一不同之处 —— 一个厂商可能四种都提供，它的配置项说明哪个是哪个，所以
-「换到便宜的那个画图模型」是一次配置编辑，而不是换一种调用。`defaults:` 是一次不指名
-任何模型的调用拿到哪个，而一次调用永远可以指名自己的。
+支持的 `api:` 值为 `dashscope-aigc`（图片、视频、语音、转写）和
+`openai-images`（仅图片生成）。选择不支持所请求类型的模型会被拒绝。
 
-**`api:` 选定协议**，目前有两种：`dashscope-aigc`（百炼：图片、视频、语音和转写）和
-`openai-images`（OpenAI 兼容的 `/images/generations`，它只会画图，另外三种会按名字拒绝
-—— 比厂商回一个 404 更好）。
-
-生成的文件写在 **`<data>/agents/<agent>/media/`** 下，别处不写。按 agent 分是因为里面
-装的是那个 agent 生成的东西；放在 `agents/` 下而不是 `runtime/` 下，是因为守护进程的
-工作目录在文档里被定义为可重建的 —— 一张生成好的图留在那里，就会是那个注定会丢的文件。
-它们是工作产物而不是文件柜文档：没有任何东西登记它们，回答是一个路径。`folder=` 把它们
-归进那个根目录*内部*的子目录，而指向它外部的路径会被拒绝，所以模型不能决定一个文件被
-写到你磁盘上的哪里。一段视频可能要几分钟，而等待是有界的：超过 `timeout` 之后，调用会
-带着 provider 的作业 id 被拒绝，而不是带着它的结果 —— 因为渲染在那边继续进行，再问一次
-就是为它付两次钱。
+生成的文件写在 `<data>/agents/<agent>/media/` 下。`folder` 参数会在该根目录
+内部创建子目录；指向根目录之外的路径会被拒绝。超过超时的长时间视频调用会带着
+provider 的作业 id 被拒绝，而不是返回结果。
 
 ### 文件隧道
 
-**给一个本地文件一个公开的 HTTPS URL**，好让读不到你磁盘的东西也能取到它 —— 一个被问
-到某张图的视觉模型，一个只接受 URL、别的什么都不接受的聊天 API。
+`slife2-file-tunnel` 将本地文件发布到公开 HTTPS URL，使无法读取本地磁盘的服务
+也能获取它：
 
-```
-expose_local_image(path)      → https://<tunnel>/share/<token>
-unexpose_local_image(token)   → 那个 URL 失效
-```
-
-文件不会被移动也不会被复制：它就放在原地被提供，只要隧道还在。链接在**文件改变**的那一刻
-失效（所以一条链接底下被换掉的路径，绝不可能把新字节送给拿着旧链接的人），对其 token
-调用 `unexpose_local_image` 时失效，进程退出时也失效 —— 这三条就是全部，其中**没有**
-「对话结束」：一次分享会比创建它的那一轮活得更久，撤回它得由模型或操作者来做。
-私钥、`.env` 或保存下来的密码会被按名字拒绝 —— 隧道还在时分享 URL 就是公开的，
-那等于把它发布出去。
-
-**隧道是别人的进程，配置说明是谁的。** 三个 provider，恰好一个生效，其余保持配置好而
-不参与：
-
-```yaml
-file-tunnel:
-  active: cloudflare
-  providers:
-    ngrok:        { token: ${NGROK_AUTHTOKEN} }
-    localhost.run: { binary: ${SSH_BINARY:-ssh}, user: nokey, remote_port: 80 }
-    cloudflare:   { binary: ${CLOUDFLARED_BINARY:-cloudflared}, protocol: http2 }
+```text
+expose_local_image(path)      -> https://<tunnel>/share/<token>
+unexpose_local_image(token)   -> 该 URL 失效
 ```
 
-| provider | 需要什么 | URL | *浏览器*看到什么 |
-|---|---|---|---|
-| `ngrok` | 一份 `NGROK_AUTHTOKEN` 凭证 | 每个账号一个固定的 dev domain | 免费档有一个插页式提示页（ngrok 对任何 `Mozilla` User-Agent 都回它，并且禁止在服务端关掉） |
-| `localhost.run` | 一个 `ssh` 客户端 —— Windows 10+ 自带 | 一个每几小时轮换一次的随机 `*.lhr.life` 主机名 | 文件本身；TLS 在它们那一端终止。字节由第三方中转 |
-| `cloudflare` | `cloudflared` 二进制，没有任何东西会替你装它 | 一个在进程生命周期内稳定的 `*.trycloudflare.com` 主机名 | 文件本身 |
+文件从原位置提供，不会被复制。以下情况会使链接失效：
 
-程序化的抓取 —— 也就是它存在的理由，多模态 LLM 那条路 —— 不受 ngrok 提示页影响，这就是
-什么都没配置时 ngrok 是默认值的原因。上面这份配置出厂时 **`cloudflare` 生效**，因为它
-不需要账号，而且不把字节中转给任何人；如果你没装 `cloudflared`，把 `active:` 改成
-`localhost.run`，Windows 自带的 OpenSSH 客户端就是全部要求。**没有起来的隧道，或者发布了
-一个没人够得到的 URL 的隧道，会被拒绝而不是被发出去**：一条回 HTTP 530 的链接比一个错误
-更糟，因为取不到它的模型说不出为什么。细节在 `tunnel_status` 里 —— 状态、URL、是否可达、
-它正在拨的边缘地址，以及正在跑它的那个程序的路径。
+- 文件发生变化（token 与文件的身份和元数据绑定）；
+- 使用 token 调用 `unexpose_local_image`；
+- 进程退出。
+
+分享会比创建它的轮次活得更久；由模型或操作者撤回。私钥、`.env` 文件和保存的
+密码会被按名字拒绝。
+
+支持三个 provider，恰好一个生效，其他可以保持配置但不参与：
+
+| provider | 要求 | URL 行为 |
+|---|---|---|
+| `ngrok` | `NGROK_AUTHTOKEN` | 每个账号一个稳定的开发域名。免费档会向浏览器显示插页提示页。 |
+| `localhost.run` | `ssh` 客户端 | 随机 `*.lhr.life` 主机名，每几小时轮换一次。TLS 在 provider 处终止，字节由第三方中转。 |
+| `cloudflare` | `cloudflared` 二进制 | 在进程生命周期内稳定的 `*.trycloudflare.com` 主机名。 |
+
+内置默认值是 `ngrok`。随附的 `slife2.yaml` 选择 `cloudflare`，它不需要账号，
+也不把字节中转给任何人；如果未安装 `cloudflared`，将 `active:` 改为
+`localhost.run`。
+
+没有启动的隧道，或者发布了无法访问的 URL 的隧道，会被拒绝而不是交出去。
+`tunnel_status` 工具报告状态、URL、可达性、边缘地址和使用的二进制；它是内部
+诊断工具，不暴露给模型。
 
 ### 文件柜
 
-你自己的笔记、日记、存下来的文件和报告，放在一个地方，搜索一次全都能覆盖，人也可以在
-编辑器里直接读。四种，它们的区别在于一份*文档*是什么：
+文件柜按 agent 保存笔记、日记、文件、报告和 dump。
 
-| 种类 | 以什么为键 | 第二次写入 |
+| 类型 | 键 | 第二次写入 |
 |---|---|---|
-| **note** | 你选的一个主题 | 替换它 |
-| **diary** | 日期 | 追加一节 |
-| **file** | 它在文件柜里的路径 | 把文件复制进来 |
-| **report** | 一个标题 | 追加一节 |
+| `note` | 用户选择的主题 | 替换笔记。 |
+| `diary` | 日期 | 追加一节。 |
+| `file` | 文件柜内的路径 | 复制文件进来。 |
+| `report` | 标题 | 追加一节。 |
+| `dump` | 产生输出的工具调用 | 由 harness 写入。 |
 
-笔记和存下来的文件是文档 —— 第二次写入*就是*它的内容 —— 而一天和一个标题是日志，因为
-同一个日期下的两条记录是关于它的两个事实，后一段文字里没有任何东西说明它替换了前一段的
-哪一部分。这就是为什么只有那两种文档有删除工具。
+笔记和文件是文档：第二次写入就是它们的内容，因此只有这两种类型有删除工具。
+日记和报告是日志：同一日期或标题下的两条记录是两个事实，后一段文字不会说明
+它替换了前一段的哪一部分。
 
-**第五种不是你的。** 一份大到放不进对话的工具输出会整份留在这里 —— 一个 **dump**，以
-产生它的那次调用为键 —— 而对话携带的是那份输出自己若干行的一个选集，在
-`tool_result: tokens:` 之内。什么都不切掉，也什么都不摘要：给模型看的行是工具自己的话，
-是在这段对话正在做什么的光照下选出来的，别的一切离一次 `dump_read` 之遥。**`dump_read`
-是一个会搜索的读取器**，因为一份大输出需要的正是这个：给它一个词，它找出那些行以及它们
-周围的行；给它一个行号，它从那里往下读（`-1` 是最后一行）；给它一个数量，它少读一点。
-每个回答都带行号，并且始终在同一个窗口内，所以把一份输出读回来，代价永远不会超过这段
-对话本来就要付的 —— 而一次没有指名 `dump` 的搜索看不到 dump，因为机器输出不是你的笔记
-应该被拿来比较排序的东西。
+dump 是对对话而言过大的工具输出。输出会完整保存，以工具调用 id 为键；对话携带
+输出自身若干行的选集，并在 `tool_result.tokens` 之内。不做任何改写。选集由一次
+判别器调用完成：它接收输出、手头对话和当前输入，并回答行范围。模型可以用
+`dump_read` 读回 dump 的任意部分，这是一个会搜索的读取器：`pattern` 查找行，
+`context` 加上相邻行，`offset` 从某一行开始读（负数从末尾算），`limit` 少读一些。
+每个回答都保持在同一个 token 预算内。除非 `kind` 为 `dump`，搜索不会看到 dump。
 
-**一切都是写两遍的**，其中一遍是给你的：行是 `cabinet_search` 读的，同一份文档还会作为
-markdown 落到 `agents/<agent>/cabinet/` 下 —— `notes/会议记录.md`、`diary/2026-10-11.md`、
-`reports/weekly.md` —— 那就是你不必问任何人就能打开、编辑或删除的东西。**主题名如果本身
-不是全小写，文件名里会带一小段摘要**（`notes/Python~6e3604888c.md`），因为路径不是字符串：
-在 Windows 和 macOS 上 `Python.md` 和 `python.md` 是*同一个文件*，而两条笔记共用一份文件
-是这个目录唯一不能做的事 —— 第二次写入会顶掉第一条的 markdown，而两行记录看上去都还对。
-文件名里可读的那一半保留着，日期则永远不需要摘要。存下来的文件的
-字节也在那里（`<category>/`），而且从不进索引：`file_read` 返回一个文件的*文本*，遇到
-PDF 或图片会说出它是什么而拒绝，而不是把它解码成一整页替换字符。别的编码的文本会被读出
-来，并把编码写在第一行，因为*静默*的错误解码是唯一值得拒绝的结果。
+每个文档都会写两遍：文件柜索引中的一行，以及 `agents/<agent>/cabinet/` 下的
+Markdown 文件（`notes/`、`diary/`、`reports/`），无需 slife2 即可打开、编辑或
+删除。主题名如果本身不是全小写，文件名中会带一个短摘要
+（`notes/Python~6e3604888c.md`），因为 Windows 和 macOS 将 `Python.md` 和
+`python.md` 视为同一个文件。保存文件的字节也放在文件柜下，但不进入索引；
+`file_read` 返回文件文本，遇到 PDF、图片或压缩包会说出它是什么而拒绝。其他编码
+的文本会被解码，并在回答中说明编码。
 
-**`cabinet_search` 接受词或者句子**，和 `tool_search` 接受的同样两种输入：`keywords` 是
-必须全部出现的词（一个名字、一个路径、一个符号），`sentences` 是按语义匹配的问题 ——
-几个就是几个问题，而每一个都只可能增加结果。一个文件没有自己的文本，所以让它可以按
-它*是*什么被找到，靠的是 `cabinet_summarize` —— 给一个文件写摘要会把它重新嵌入一遍，
-因为它的描述是构建它那个向量时所用材料的一部分。
+`cabinet_search` 接受与 `tool_search` 相同的两种输入：`keywords` 是必须全部出现
+的词，`sentences` 是按语义匹配的问题。多个句子就是多个问题，每个问题只会增加
+结果。`cabinet_summarize` 为文档写描述；为文件写描述会重新嵌入它，因为描述是
+构建其向量所用材料的一部分。
 
-有两件事它不做，都是按名字说的：**`file_save` 不抓取 URL**（它复制这台机器上已经有的
-文件 —— v1 的 URL 那一半带着一个 SSRF 防护，那是它自己的一个改动），而**没有 `grep`
-腿**（DESIGN.md §9 把 v1 的第三种搜索模式推迟到整个系统层面，文件柜继承这一点，而不是
-长出自己的第二个正则引擎）。
+`file_save` 复制本机已有的文件，不获取 URL。文件柜没有 `grep` 搜索腿。
 
 ### 微信
 
-`slife2-wechat` 每个 agent 连一个微信账号，经由 iLink 托管的网桥。它没有任何东西需要
-配置：登录是*扫*出来的，所以 `wechat_login` 把一张二维码放进模型的回复里，有人用微信
-App 去扫它，回来的 token 存进 `agents/<agent>/wechat.yaml`，下次启动就从那里取。一次
-登录大约持续一天；`wechat_check_status` 说还剩多少。
+`slife2-wechat` 通过 iLink 托管网桥为每个 agent 连接一个微信账号。登录是扫描
+出来的，而不是配置出来的。`wechat_login` 返回二维码；扫码后 token 保存到
+`agents/<agent>/wechat.yaml`，下次启动时读取。登录大约持续一天；
+`wechat_check_status` 报告剩余时间。
 
-**一个微信号只有一个活着的登录。** 用同一部手机给第二个 agent（或者在第二台机器上）扫码，
-原先那个登录会被网桥悄悄作废：从那以后它得到的回答是 `session timeout`，所以它发出去的
-东西都到不了。slife2 把这个回答读成它本来的意思，这就是为什么第一个 agent 的窗口会说
-`[✗ Wechat offline]`，而它的 `wechat_check_status` 说得清为什么；修法是再扫一次码，把
-账号拿回来。
+一个微信账号只能有一个活着的登录。用同一账号为第二个 agent 或第二台机器扫码，
+会静默作废第一个登录，之后它会收到网桥的 `session timeout`。第一个 agent 的
+窗口显示 `[✗ Wechat offline]`，`wechat_check_status` 给出原因。再次扫码可以
+拿回账号。
 
-四个工具，模型四个都会用：
-
-| 工具 | 做什么 |
+| 工具 | 作用 |
 |---|---|
-| `wechat_login` | 取一张二维码，并开始盯着这次扫码 |
-| `wechat_check_status` | 连上了吗？还剩多久？以及**该回给谁** |
-| `wechat_send_message` | 给某个联系人发一条文本 |
-| `wechat_logout` | 忘掉这个 agent 的登录 |
+| `wechat_login` | 获取二维码并开始监听扫码。 |
+| `wechat_check_status` | 报告连接状态、剩余时间，以及应回复的 peer。 |
+| `wechat_send_message` | 向 peer 发送文本消息。 |
+| `wechat_logout` | 忘记此 agent 的登录。 |
 
-**这条链路自己的来去是窗口里的一行**，不是一轮：扫码落地时是 `[⚡ Wechat online]`，
-登录掉线或被忘掉时是 `[✗ Wechat offline]` —— 和 A2A 网格过来的 `[⚡ jill online]`
-同一个形状，因为两者说的都是关于一段对话的同一件事：它现在够得到什么。*启动时接上*的
-登录什么都不说，因为窗口展示的是你看着的时候发生了什么，而不是进程启动过。*原因*留在
-`wechat_check_status` 里，那是模型去问的地方。
+连接的到来和离开会作为 harness 行绘制，而不是轮次：`[⚡ Wechat online]` 和
+`[✗ Wechat offline]`。原因仍可通过 `wechat_check_status` 获取。
 
-别人发来的一条消息，作为**那个 agent 自己对话的一轮到达 —— 就在窗口里**。plugin 把它
-交给正在展示那段对话的终端，终端像它是被敲进去的一样运行它：同一个队列、同一轮、同一份
-对话记录。所以从手机发出的消息出现在屏幕上，它的回答在那里流式写出来，之后两者都在记录
-里。
+来自微信的消息会成为该 agent 对话中的一个轮次，并绘制在显示该对话的窗口中。
+它以 `wechat` channel 和 `[Wechat:{…}]` 前缀记录，前缀点名发送者。回复是模型的
+职责：没有任何东西会自动派发回答。模型使用 peer 和 marker 中的 `context_token`
+调用 `wechat_send_message`。轮次运行期间，对方会看到“正在输入”提示。
 
-为了做到这一点，消息发给 **`slife2-tui`**，终端自己的收件箱：一个和其它任何一个一样的
-plugin —— `servers:` 下的一个地址，由 `slife2` 启动并共享，由 `slife2 status` 列出
-—— 它保持**每个 agent 一个会话**。窗口打开时附加上去，并在展示一段对话期间一直持有那次
-调用，这才让一次调用说得出它指的是*哪一个*终端；两个窗口同时开着就是两个会话，谁也不比
-谁特殊（DESIGN.md §4）。
+每个 agent 单独登录，有自己的文件和轮询循环。plugin 是一个共享进程。
 
-这一轮以 `channel=wechat` 记录，并带一个说明是谁发来的
-`[Wechat:{"peer_wechat_id": …}]` 前缀。这个名字故意不用大写 —— 这是约定而不是规则：
-**大写标记的是不属于这段对话的注解**，`[TURN:{…}]` 就是这种，也就是一轮在模型把上下文
-读回来时携带的那条脚注（构建清单时加上，从不存储）—— 而这个标记是消息的一部分，和消息
-一起进这一轮的日志。没有任何东西检查大小写；它是写给人读的。窗口展示的是 channel 而不是
-标记：这一行戴的是 `Wechat> ` 而不是 `You> `，标记里的两个 id 被拿掉，因为它们是回复
-需要的，不是读者需要的。回复是模型的事，而且只是模型的事：这里没有任何东西自动派发一条
-回复，所以什么都没说的一轮就什么都不发 —— 用联系人加上标记里带的 `context_token` 调用
-`wechat_send_message`。这一轮跑的时候，对面那个人看到的是*正在输入…*，回复发出时它停下。
+### Agent 任务
 
-每个 agent 各自登录，有自己的账号、自己的文件、自己的轮询循环；plugin 是一个共享进程
-（DESIGN.md §1.2）。没有 `wechat:` 节要写：登录是扫出来的而不是配出来的，而
-`agents/<agent>/wechat.yaml` 这些文件就是 plugin 恢复的全部内容。一台不该跟微信说话的
-机器，就是一台没有人去扫码的机器。
+agent 任务是由同一个 agent 运行的独立循环，以名称和描述启动，稍后在同一段对话
+中通过消息回答。
 
-### Agent task
-
-模型不再调用工具时，一轮就结束了，所以任何耗时的事情都会把那一轮一直挂着：人看着一个
-什么都敲不进去的提示符。**agent task** 就是那件活跑到别处去了 —— 一个属于这个 agent
-自己的循环，带着一个名字和一段描述启动，稍后由一条消息在同一段对话里被回答。
-
-模型有四个操作它们的工具，而**其中没有一个会等**：
-
-| 工具 | 做什么 |
+| 工具 | 作用 |
 |---|---|
-| `agent_task_start` | 启动一个，立刻带着它的 id 回答 |
-| `agent_task_status` | 某一个在干什么 —— 从来不是它的结果，结果自己会来 |
-| `agent_task_list` | 这个 agent 有哪些，在跑的排在前面 |
-| `agent_task_cancel` | 停掉一个，回答它*在调用之后*的状态 |
+| `agent_task_start` | 启动任务并立即返回 id。 |
+| `agent_task_status` | 报告任务正在做什么，从不返回结果。 |
+| `agent_task_list` | 列出此 agent 的任务，运行中的在前。 |
+| `agent_task_cancel` | 停止任务并报告调用后的状态。 |
 
-```
-agent_task_start(name="research", description="Find the retry policy, and say what it is")
-→ {"task_id": "agent-task:research", "name": "research", "status": "running", ...}
-```
-
-**它以这个 agent 的身份、在这个 agent 自己的上下文上运行。** 同一份系统提示词、同一个
-模型、同一批工具 —— 而 `restore` 和 `rebuild` 用的是这个 agent 自己的键，所以一个 task
-是从这段对话一直在谈什么开始的，而不是从空开始。它*没有*的是启动它的那一轮：`restore`
-读的是*已存储*的清单，而一轮是在它结束时才被写下的，所以最后那次交流必须在那段描述里
-重述。没有任何东西代表它被记录 —— 回答作为一条消息抵达这段对话，这就是记录得到的东西
-—— 而它自己的回复是自行交回的，所以没有什么要轮询，也没有办法去取一份。
-
-回答在 `agent-task:<name>` channel 上到达，戴着 `[AgentTaskResult:{…}]` —— 那个 task 的
-id、名字、状态和时间 —— 所以窗口显示 `AsyncTask(research)> `，而模型知道了它下次调用
-需要的那个 id。它去的是正在展示那段对话的终端，别处不去：没有窗口就没有对话在跑，于是
-回答是 `undelivered`，日志也这么说，而不是为没人跑一轮。
+任务以 agent 身份运行，使用相同的系统提示词、模型、工具和上下文决策。它没有
+启动它的那个轮次：`restore` 读取已存储的轮次列表，而轮次只在结束时写入，因此
+描述必须重述相关上下文。任务的轮次不会写入 agent 的对话。它的回答作为一条带有
+`[AgentTaskResult:{…}]` marker 的消息，在 `agent-task:<name>` channel 上投递，
+并绘制为 `AsyncTask(<name>)>`。如果没有窗口显示该对话，回答会被报告为
+`undelivered`，日志会说明这一点。
 
 ```yaml
 agent-task:
-  max_running: 4   # 每个 agent 同时运行的 task 数
+  max_running: 4
 ```
 
-**那是 task 拥有的唯一一个键。** 构成它的其它一切来自上面的 `agent:`，因为一个 task
-*就是*这个 agent 在干活 —— 这个文件里唯一一节有两个读者。`max_running` 是这个特性唯一
-的一条界：工具集合是那唯一一份目录，没有任何东西对它做过滤，所以一个 task 可以启动一个
-task，由此无界的是随时间发生了多少活，而不是同时发生多少（DESIGN.md §9）。
+`max_running` 是该节唯一的键。其他一切来自 `agent:`。一个任务可以启动另一个
+任务，因此 `max_running` 限制并发，但不限制随时间发生的总工作量。
 
 ### 定时任务
 
-**这里是唯一会在它启动的那一刻开始干没人要求它干的活的东西。** 一个定时任务是一个名字、
-一段描述和一条 cron 表达式，由模型写下；从那以后 `slife2-schedule` 触发它，到期时 agent
-会拿到这个任务，作为它自己的一轮，在正在展示那段对话的终端里。**那一轮只有一条指令**：
-用它携带的到期时间调用 `schedule_run_now`。一次没有人接的触发 —— 没有窗口在展示那个
-agent —— 会以 `failed` 结束这次运行并记下原因，而不是让它留在 `pending`：账本是回答
-「它跑了吗」的地方。一个已经到期的任务是**不由这个 agent 决定推掉的**；
-`schedule_run_skip` 是给那些压根没有发生的运行准备的 —— 而一次**正在跑**的运行会被
-拒绝而不是被关掉：关掉它等于活儿还在干、却没有任何地方记着这件事。那一种要用
-`agent_task_cancel` 收尾，随后 `reconcile` 会带着原因把这次运行记为 `failed`。
+定时任务是由模型写下的名称、描述和 cron 表达式。`slife2-schedule` 在 slife2
+运行期间触发它。任务到期时，agent 在显示该对话的窗口中收到它，作为一个轮次。
+该轮次调用 `schedule_run_now`，并带上它携带的到期时间。如果触发时没有窗口，
+这次运行会以 `failed` 结束并记录原因。
 
-| 工具 | 做什么 |
+| 工具 | 作用 |
 |---|---|
-| `schedule_set` | 写下一个任务（或替换一个）—— 名字、描述、cron、时区 |
-| `schedule_remove` | 忘掉它，以及它做过的所有事 |
-| `schedule_list` | 有什么被排上了，每个下次什么时候到期 |
-| `schedule_runs` | 它实际做过什么 —— 一次触发一行 |
-| `schedule_run_now` | 现在就启动这次运行的工作；带上 `due_at` 则是补做那一次 |
-| `schedule_run_skip` | 关掉一次不会发生的运行，并说明原因 |
+| `schedule_set` | 写入或替换任务：名称、描述、cron、时区。 |
+| `schedule_remove` | 移除任务及其所有运行记录。 |
+| `schedule_list` | 列出任务及其下次到期时间。 |
+| `schedule_runs` | 列出账本：每次触发一行。 |
+| `schedule_run_now` | 立即启动本次运行的工作；带 `due_at` 时补做某次运行。 |
+| `schedule_run_skip` | 关闭一次不会发生的运行，并说明原因。 |
 
-```
-schedule_set(name="daily", description="Write the day's entry from the turns.",
-             cron="0 22 * * *", timezone="Asia/Shanghai")
-→ {"name": "daily", "cron": "0 22 * * *", "next_run": "2026-10-12T22:00:00+08:00", ...}
-```
+一次运行就是一次触发，以到期时刻命名。状态从 `pending` 迁移到 `ran`、`failed`、
+`missed` 或 `skipped`。记录在工作交接之前写入，因此下一次轮询不会重复触发。
+交接被拒绝会将运行标记为 `failed`。工作无法启动的运行会以 `failed` 关闭并记录
+原因，而不是保持打开。
 
-**`schedule_run_now` 是 plugin 在启动这件活，不是 agent 在做它。** 这次调用把运行交给
-`agent-task`，作为一个属于这个 agent 自己的 task —— 同样的提示词、模型和工具，同样的
-上下文 —— 并立刻返回。因为调用方是 *plugin*，它拿到了这个 task 的 id，所以时钟自己的
-轮询可以问它后来怎么样了：`finished` 会以 task 自己的 `finished_at` 把这次运行关成
-`ran`，一次失败或一次取消会把它关成 `failed`，不需要在之后某一轮里记住任何东西。回答
-本身由 `agent-task` 交回这段对话，像任何别的后台 task 一样戴着 `[AgentTaskResult:…]`。
+任务只在 slife2 运行期间触发。启动时，清扫会关闭被停止进程留下的运行，轮询会
+记录每个任务最近一次错过的触发。`schedule_runs(status="missed")` 列出它们。
+错过的运行可以用 `schedule_run_now(name, due_at)` 补做，或用 `schedule_run_skip`
+关闭。
 
-**账本就是这个特性。** 一次*运行*是一次触发，用它**到期**的那一刻命名而不是用它跑的
-时刻，它的状态在 `pending → ran | failed | missed | skipped` 之间迁移。这一行在触发被
-交出去之前就写下了，所以一次触发不可能在下次轮询时重复；一次被拒绝的交接把这次运行标成
-`failed`；一次没有回来的则让它留在 `pending`，因为一次命运未知的运行不能被报告成两者中
-的任何一种。一次工作**没能启动**的运行，会带着原因被关成 `failed`，而不是敞着口、后面
-什么都没有。
+账本位于 `<data>/agents/<agent>/schedule.db`。没有配置节。任务的 `timezone` 是
+IANA 名称；省略时使用机器当前时钟，不会跟随夏令时变化。
 
-**任务只在 slife2 运行期间触发**，而错过的东西不会被藏起来：启动时，清扫会把一个停掉的
-进程开着口留下的一切判为失败，轮询则记录每个任务错过的最新一次触发 ——
-`schedule_runs(status="missed")` 就是你找它们的地方 —— 于是这次运行可以用
-`schedule_run_now(name, due_at)` 补做，或者用 `schedule_run_skip` 关掉。没有任何东西
-宣告它们：**触发是时钟对一段对话说过的唯一一样东西**，而账本是回答「它跑了吗」的地方
-（DESIGN.md §1.7、§9）。触发也不戴任何标记，因为标记这套词汇是用来把*结果*和产生它的
-东西对应起来的，而触发不是结果 —— `schedule:<task>` channel 携带的是哪个任务，话里说的
-则是**这次运行记在谁的账上**，而这是唯一能把「送错对话的触发」和「读者自己的触发」区分
-开的东西。
+### Peer agent
 
-账本在 `<data>/agents/<agent>/schedule.db`，而且**没有配置节** —— 一个地址就是这个
-plugin 被写下的全部。一个任务的 `timezone` 是 IANA 名字，不写就意味着这台机器的时钟
-*在现在这一刻*的样子，它不会跟着夏令时的切换走。
+agent 的 peer 是其他 agent，通过公开发布的 A2A-over-MQTT profile 通信。用户在
+`slife2.yaml` 中写 `peer_agent:`；模型看到 `peer_agent_*` 工具。底层协议名称不会
+出现在模型读取的任何内容中。
 
-```yaml
-# 没有什么要配置的：一台不该跑定时任务的机器，就是一台没有人去写任务的机器
-```
-
-### 同伴 agent（Peer agents）
-
-**你的 agent 的同伴是别的 agent，这就是它和它们说话的方式。** 这一层的名字是
-*peer agents* —— 工具、信封、channel 用的都是这个词；底座是 **A2A over MQTT**，跑在
-公开发布的 profile 上，所以任何别的会说它的东西都能跟你说话。协议、主题、agent card
-和任务生命周期都属于那个 SDK；承载它的 plugin 是 `slife2-a2a`，和隔壁端口上服务
-`subagent:` 的是同一个 plugin。人在 `slife2.yaml` 里写 `peer_agent:`，模型拿到的是
-`peer_agent_*`，模型读到的东西里没有一处说 `a2a`。
-
-| 工具 | 做什么 |
+| 工具 | 作用 |
 |---|---|
-| `peer_agent_send_message` | 发一个任务、完成别人发给你的一个，或者只是聊两句 —— 由 `message_type` 决定 |
-| `peer_agent_cancel_task` | 撤回一个你发出的任务 |
-| `peer_agent_list` | 花名册：你排第一，然后是每一个同伴，按名字 |
-| `peer_agent_task_list` | 还开着的任务：在等回答的，和欠着回答的 |
-| `peer_agent_broadcast` | 给每一个同伴发一个发了就不管的事件 |
+| `peer_agent_send_message` | 发送任务、完成收到的任务，或发送消息。由 `message_type` 选择操作。 |
+| `peer_agent_cancel_task` | 撤回此 agent 发出的任务。 |
+| `peer_agent_list` | 列出此 agent（排第一），然后按名字列出每个 peer。 |
+| `peer_agent_task_list` | 列出仍然打开的任务：等待回答的和仍欠回答的。 |
+| `peer_agent_broadcast` | 向每个 peer 发送即发即忘的事件。 |
 
-`peer_agent_task_list` 回答的是另一件事：**还开着的有哪些** —— 你发出去还没回来的，和别人发给你你还欠着的。它跟"不要轮询"不矛盾：不发模型调用，只读本地那两张表。
+`task_request` 立即返回 id；结果稍后作为一条带有
+`[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker 的消息
+到达。没有需要轮询的东西。`task_response` 使用 marker 中的 `task_id` 完成此
+agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己的身份。
 
-```
-peer_agent_send_message(agent="jill", message="Summarise the release notes.")
-→ {"peer": "jill", "task_id": "61ab0c8a…", "message_type": "task_request",
-   "note": "The result will arrive in this conversation."}
-```
+每个 agent 有一张 mesh，因为 agent 名称就是 MQTT client id 和请求主题的最后
+一段。同一台机器上的两个 agent 是两个 peer。一个 agent 从两个地方被访问时，
+会在加入之前被名称冲突检查拒绝。
 
-**什么都不等。** 一次 `task_request` 立刻返回一个 id，结果稍后自己作为一条戴着
-`[PeerAgent:{"from": "jill", "type": "task_response", "task_id": "…"}]` 的消息到达。
-没有什么要轮询。`task_response` 完成一个*你*收到的任务，用的是它自己那个标记里的
-`task_id`；方向在 `from` 里，从来不在 `agent_name` 里，因为那个词是这个 agent 自己的
-身份。收到的消息在窗口里读作 `PeerAgent(jill)> `，标记被拿掉了。
+在线状态作为 harness 行绘制，而不是轮次：`[⚡ jill online]`。花名册可通过
+`peer_agent_list` 获取。窗口持有 `join` 调用期间，agent 就在 mesh 上；
+`--headless` 在没有窗口的情况下持有同一个调用。入站任务不持久化：进行中的
+任务保存在内存中，重启后从零开始。
 
-**一个同伴可能在这台机器上，也可能在另一台上**，而没有任何东西区分它们 —— 本地 agent
-只是「它的网格由这个进程持有」的那一个，以自己的名字发布到 broker 上。**每个 agent 一张
-网格**，因为 agent 的名字*就是*网格身份：MQTT 的 client id 和请求主题的最后一段。于是
-一台机器上的两个 agent 就是两个同伴，而一个 agent 从两个地方被够到，正是那个名字冲突
-检查在加入之前就拒绝掉的情况，而不是事后去争。
-
-**来和去是窗口里的一行，不是一轮。** 一个同伴到达时显示成 `[⚡ jill online]`，就在
-`[restored 3 turns]` 和 `[kept 12 turns, recalled 3]` 旁边 —— 同一个形状，因为它们是同
-一类东西：harness 做的事，而不是这段对话里谁说的话。什么都不跑，模型也不被告知：花名册
-是 `peer_agent_list` 的回答，而一个想被回答的同伴会发一个任务过来。
-
-**有人在当这个 agent 的时候，它才在网格上。** 窗口在它的 agent 活着期间持有一个调用，
-所以上线和下线跟随的是真的有人在那里 —— 看着这个 agent 到达的同伴，也会看着它离开，
-而这中间没有什么要发。`slife2 --headless` 在完全没有窗口的情况下持有同一个调用，这正是
-一台无人值守的机器需要的。一次 `peer_agent_*` 调用也会让它的 agent 加入并保持加入：
-一次发送后面跟着的是这个 agent 正在等的回复。入站任务表只在内存里，没有落盘的记录；
-重启从零开始。
-
-**broker 不在的话会替你启动，你结束的时候会被停掉**，这是它和 v1 分道扬镳的地方。把
-`peer_agent.broker` 指向一个地址；如果那里没有东西在听、而它又是*这*台机器，`mosquitto` 会被
-在那上面启动 —— 最后一个退出的 `slife2` 会再把它停掉（或者 `slife2 down`，或者
-`slife2 status` 去看它）。只有 *slife2 启动的* broker 才会被停掉：它启动时写下的那条
-记录就是许可的全部，所以一个系统装的 mosquitto 或者你自己跑起来的那个不会被碰。一个
-不肯服务的 broker —— 或者一个指名在另一台机器上、而那台机器挂了 —— 会让启动失败，点名
-它并展示它的日志，而不是把你留在五个接不到任何东西的工具上。`provider: mosquitto` 是
-唯一的值；别的任何东西都是配置错误，而不是一个被悄悄关掉的特性。
+当配置的 broker 在本机且不存在时，会自动启动；只有 slife2 启动的 broker 才会随
+整套服务停止。系统安装的 broker 或手动启动的 broker 不会被碰。无法服务的 broker
+会使启动失败，并点名它及其日志。`provider: mosquitto` 是唯一支持的值。
 
 ```yaml
 peer_agent:
   provider: mosquitto
   broker:
-    host: localhost      # 另一台机器也是这样够到的，而且从不在本地启动
-    port: 1883           # —— 那台主机上的 broker 是他们的
-  org: default           # 主题命名空间：一个 broker 上的两组由
-  unit: default          # 这两个来区分
+    host: localhost
+    port: 1883
+  org: default
+  unit: default
 ```
 
-**一次重启会丢掉所有在飞的任务**，因为完成用的网桥和同伴的回复主题都住在那个死掉的
-进程里。什么都不记住、也不通告：还在等的同伴会在自己的 `peer_agent_task_list`（或
-subagent 的 `subagent_task_list`）里看到它，然后重发 —— 重发会作为一次全新的请求到达，
-带着全新的网桥。**整个省掉 `peer_agent:` 节**就不在那张网上：一台不该在网上的机器，就是一台没有人去写它的
-机器。
+省略 `broker:` 时，peer 网络使用 subagent 网络的 broker 地址。完全省略
+`peer_agent:` 节会让机器不接入该网络。
 
-## 东西都放在哪里
+重启会丢掉所有进行中的任务。仍在等待的 peer 会在自己的 `peer_agent_task_list`
+中看到该任务并重新发送，重发会作为新请求到达。
 
-**两个地方，因为有两类东西。** 一个 **home** 就是一个数据目录 —— 配置、playbooks，以及
-数据住在里面的那些 agents —— 而 home 就是 `--data-dir` 指名的东西：
+### Subagent
 
-```
-<data>/                            --data-dir DIR，或者 $SLIFE2_DATA_DIR
-  slife2.yaml                      配置；不在就是默认值
-  skills/                          <name>/SKILL.md —— playbooks，你写的
-  agents/                          属于某一个 agent 的一切
-    tools.db                       工具目录 —— 那个共享的文件
-    <agent>/                       一个目录就是某个 agent 的全部
-      turns.db                     它的对话，以及它跑在什么之上
-      schedule.db                  它排了什么，以及每一次运行
-      cabinet/                     作为 markdown 的 notes/、diary/、reports/，
-                                   以及按类别存的文件，里面还有 `.index.db`
-                                   （搜索索引）
-      media/                       它生成的东西
-      wechat.yaml                  它的微信登录（约 24h，扫码时写下）
-      subagents/                   这个 agent 用 `subagent_set` 造出来的东西，
-                                   一个目录一个
-        <name>/                    这个 subagent：它自己的对话、cabinet、
-                                   media 和记录
-```
+subagent 是属于另一个 agent 的 agent。它拥有创建者的工具集、自己的角色系统
+提示词和自己的对话，但没有进程、没有窗口，也不占用 agent 名称。它在有消息发送
+给它时运行。它的两个成员管理工具 `subagent_set` 和 `subagent_remove` 会拒绝
+subagent 调用者。
 
-**agent 目录里的任何东西都不重复它的名字** —— 目录本身已经说了它是谁的 —— 而目录是
-那条规则的例外，也正因如此印证了它：它坐在各个 agent 目录旁边，因为它属于所有人，因此
-不属于任何人。
+subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建后，它通过
+本地网络使用与 peer agent 相同的五个操作访问，名称为 `subagent_*`：
+`subagent_send_message`、`subagent_cancel_task`、`subagent_list`、
+`subagent_task_list` 和 `subagent_broadcast`。
 
-**一个目录装有数据在它里面的那些 agents。** 一个目录可以装好几个，它们于是共享它的
-`slife2.yaml` 和它的目录 —— 工具集合**就是**配置，所以跑在同一份配置上的 agents 跑在
-同一批工具上，一个加载的工具对下一个也是加载的。`--agent jack --data-dir D` 既命名了
-这个 agent，*也*说明了它的文件去哪里，而这是两个独立的事实：名字是这个 agent 是谁 ——
-这台机器上一个名字一个活着的实例，无论在哪个目录 —— 而 `D` 是那次运行所读写的 home，
-它的配置、目录和对话都在那里。一个名字上次在哪个目录启动过是不被记住的：它下一次运行用
-的是这次给它的那个。
+| 键 | 含义 |
+|---|---|
+| `name` | subagent 的名称和目录。 |
+| `model` | `provider/model`；为空时使用创建者的模型。 |
+| `role` | 包含在 subagent 提示词中的一个词。 |
+| `fork` | 将创建者当前对话复制为 subagent 的起点。fork 的轮次不会存储。 |
 
-**一个 home 是你把一个 agent 启动在它里面时形成的。** `slife2 --data-dir D` 把 `D`
-记录下来，在 `agents/` 和 `skills/` 不在的时候把它们建出来，并构建它的配置指名的工具
-目录 —— 所以 `D/agents/tools.db` 从第一次启动起就在那里，而不是从你发出的第一条消息起。
-**两个数据目录就有两份目录**，各自由自己的 `slife2.yaml` 构建：在一个里加载的工具不会在
-另一个里加载，两者也不会被提供对方的工具。
+subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db` 和
+`subagent.yaml`。记录保存其模型、角色、fork 状态和创建时间。文件柜、媒体目录、
+定时账本和微信登录属于创建者，因为这些存储按 agent 而不是按对话索引。树只到
+一层：subagent 不能创建或移除 subagent，因为本地网络只为其创建者自己的
+subagent 保留位置，再下一层没有位置。
 
-**一个外部 server 是一个名字一个 server，无论多少个 home 指名了它。** 一条 `mcp:` 配置
-项是*这台机器上*的一个进程，所以两个都配了 `serper` 的数据目录 —— 也就是复制一份配置会
-产生的结果 —— 在它们之间得到的是一个 `serper` 而不是各一个，它的工具出现在两份目录里。
-两个 home 用不同的命令指名同一条配置项，是日志会报告的一种分歧：名字才是让它成为同一个
-server 的东西，所以正在跑的那个会被用上，给它另一个名字才是同时跑两个的办法。它们全都
-会在最后一个实例把整套服务带下来时停下来，和 plugin 持有的其它一切一样。
+移除 subagent 时，先通知本地网络释放其位置，再停止其循环，最后删除其目录。
+如果网络通知无法完成，subagent 保持不变。
 
-**那个文件夹在哪里取决于你在跑什么。** 在源码检出里它就是检出本身 —— 这正是让你面前这份
-`slife2.yaml` 就是正在用的那一份的原因 —— 否则它是 `~/.slife2`，按用户分，而且与命令
-恰好在哪里启动无关。`--data-dir DIR`（或 `$SLIFE2_DATA_DIR`）把两者都覆盖掉。
+本地网络在 `subagent:` 下配置。它需要 `broker`；没有 broker 的 `peer_agent:`
+会使用同一地址。`unit` 始终是 agent 的名称，写入它会被拒绝。可以设置 `org`
+来对 mesh 分组。
 
-**各个 server 是这台机器的，不是一个 home 的。** 一个 `slife2` 启动它的配置需要的那些
-plugin，并接上已经在跑的任何东西，所以第二个实例就是一条命令、不多一个重复进程 ——
-跨 home 也是。一台机器正在跑的一个 plugin 为这台机器上的每一个 home 服务，而每一次调用
-都被提供它来的那个 home 的配置和文件。这就是为什么它们的簿记 —— 记着 pid 的记录、启动
-锁、日志，以及对一个 agent 名字的占用 —— 也是这台机器的，住在
-`~/.slife2/runtime`（`$SLIFE2_RUNTIME_DIR` 覆盖它），而不是某个数据目录里：只有一套
-server，所以就只该有一份关于它们的记录。它是*可重建的* —— 删掉它，下次启动会把需要的
-东西重新建出来。
-
-所以在一个源码检出里，`agents/` 留在工作树中，这就是 `.gitignore` 覆盖它的原因。它
-*不*覆盖 `slife2.yaml` 或 `skills/`：那些是人写的，而不是某次运行产生出来的，它们正是
-这套安排的意义所在。
-
-删掉一个 agent 的目录，代价就是那个 agent —— 它的对话、它的文件柜和它的各个登录，都在
-一个地方，这正是让备份它、或者把它移到另一台机器上成为一次操作的原因。目录是故意用另
-一种方式保存的，坐在它们外面：工具不是任何人的，所以一个 hub 把它们提供给*那个 home 里*
-的每一段对话。
-
-`slife2.yaml` 是入库的，也是在原处有文档的，因为**它不装任何秘密**：里面每一个 key 都是
-一个运行时才解析的 `${VAR}` 引用。一个里面没有配置的数据目录用内置默认值，所以一次全新
-安装没有它也能跑。
-
-秘密从不写在文件里。`${VAR}` 经由 shell env →
-[credstore](https://pypi.org/project/credstore/) → 字面默认值解析，而
-`keyring:<service>/<key>` 这样的值直接对系统 keyring 解析。解析是宽松的 —— 解析不了的
-引用原样留着，所以缺失的 key 会在那次能点名它的 API 调用上失败，而不是在启动时。
-
-## 代码布局
-
-四层，一个模块在哪一层，是关于它*是*什么的事实：
-
-```
-slife2/
-├─ libs/              # library：被 import，从不经由 socket 够到
-│  ├─ host/           # 这台机器 —— 配置文件及它唯一的写入者、一次调用由哪个
-│  │                  #   home 服务、守护进程的记录和锁、把 server 拉起来的
-│  │                  #   launcher，以及 plugin 养在 agent 旁边的那份状态文件
-│  ├─ plugin/         # 每个 plugin 都坐在上面的契约：`protocol`（要成为我们的
-│  │                  #   server 需要什么）、`audience`（谁可以调用一个工具）、
-│  │                  #   `family`（一个 family 共享的那一半）
-│  ├─ store/          # 三份语料和它们共享的机制：轮次（`db`）、工具目录、
-│  │                  #   FTS5 + `sqlite-vec` 索引，以及那条文本规则
-│  ├─ turn/           # 一轮由什么构成：循环、上下文决策、中立的消息、
-│  │                  #   事件词汇、工具注册表、提示词和它的 `templates/`
-│  ├─ harness/        # harness *放进*一段对话的东西：标记、交接、后台任务
-│  └─ model/          # 作为协议的模型：`Chunk`、`Stream`、`LLMBackend`
-├─ clients/           # 一跳的客户端那一半，每个对端一个模块
-│  ├─ model.py        # MCPBackend —— agent 循环唯一的 backend
-│  ├─ toolclient.py   # hub：它的清单、它的调用、那次裁剪
-│  ├─ embedder.py     # embeddings 端点，两个索引共用
-│  └─ gateway.py      # 别人在跑的一个 server
-├─ helpers/           # 小而无可状态：时钟、时间语法、超时，
-│                     #   以及把阻塞调用挪出事件循环的那一跳
-├─ plugins/           # 每个一个进程：一个目录，里面有 `server.py`
-│  ├─ agent/          # slife2-agent —— 循环，以及它拥有的那些对话
-│  ├─ context/        # slife2-context —— 轮次日志和关于它的那个决定
-│  ├─ toolhub/        # slife2-toolhub —— 模型的工具和它们构成的那个集合
-│  ├─ llm/            # 四个模型 server，每种协议一个
-│  ├─ skills/ cli/ mcp_tools/ restapi/     # 拥有某一节的四个
-│  ├─ cabinet/ media/ file_tunnel/         # 文档、生成、一个公开 URL
-│  ├─ wechat/ a2a/ agent_task/ schedule/   # 活找上门的几种方式
-│  └─ tui/            # slife2-tui —— 终端的收件箱，每个 agent 一个会话
-└─ tui/               # 终端：Textual，以及上面两者的客户端
-   ├─ app.py client.py widgets.py      # 窗口、它的各个客户端、它的绘制
-   ├─ notes.py restore.py theme.py     # harness 的那几行、一段重新打开的
-   └─ app.tcss                         #   对话、调色板
+```yaml
+subagent:
+  max_running: 32
+  provider: mosquitto
+  broker: {host: localhost, port: 1883}
+  # org: subagent
 ```
 
-一个 plugin 目录保留自己私有的 library（`cabinet/store.py`、
-`schedule/expressions.py`、`skills/playbooks.py`、`wechat/ilink.py`、
-`media/adapters.py`、`a2a/mesh.py`）：一种能力放在拥有它的那个 plugin 里，而 `libs/`
-是给*不止一个*东西 import 的东西的。测试树和这一棵一一对应，一个文件对一个文件。
+## 数据位置
 
-依赖方向是单向的，而正是它让每一层都能被单独测试：`tui/` → MCP →
-`plugins/agent/` → `libs/turn/loop.py` → {`libs/model/base.py`、
-`libs/turn/tools.py`、`libs/turn/events.py`、`libs/turn/messages.py`} →
-`libs/host/config.py`。循环既不 import agent server 也不 import 终端，它也不 import
-hub 或 hub 的客户端：交给它的是一个返回注册表的协程，而那个注册表是从哪来的，是 agent
-server 自己的事。
+一个数据目录（**home**）包含：
 
-`libs/plugin/protocol.py` 是每一个 server 坐在上面的叶子：成为我们的一个 server 意味着
-什么 —— 那些标志、HTTP 传输、说明这里有守护进程的记录、那些否则会被复制进每个 server
-的约定（`house_server`），以及一个 server `main` 的全部（`serve_plugin`），那是十一个
-行、否则每一个都要自己拼一遍。**是每一个**：一个 server 只提供三个钩子 —— 构建什么、
-关于自己这次启动说什么、以及没有它就不能启动的是什么 —— 而模型后端经由一层包装走到
-同一个函数，而不是它的第二份副本。
+```text
+<data>/
+  slife2.yaml                  配置；不存在时使用内置默认值
+  skills/                      <name>/SKILL.md playbook
+  agents/
+    tools.db                   此 home 共享的工具目录
+    <agent>/
+      turns.db                 对话及其实时上下文
+      schedule.db              定时任务及其运行账本
+      cabinet/                 notes/、diary/、reports/、保存的文件、.index.db
+      media/                   生成的图片、视频和音频
+      wechat.yaml              此 agent 的微信登录
+      subagents/
+        <name>/                subagent 的对话与记录
+```
 
-**一个 plugin 同时也是同一张表里的一行。** `libs/host/config.py` 的 `PLUGINS` 为二十个
-server 各写下：它在 `servers:` 里的键、服务它的模块、它应答的 MCP 名字、探针据以认出它
-的工具、以及配置没写时它监听的端口。其余一切都是从那张表推出来的 —— 启动顺序、
-`default_config` 起始的地址、每一个 `*_SERVER_NAME` 常量、launcher 据以启动的 spec ——
-而每个 plugin 从自己那一行里读出自己的名字。所以加一个 plugin 就是写模块加一行；去掉一个
-就是两处都删。从前这是每个 plugin 五处，外加两个只为发现其中两处不一致而存在的测试。
-它不是 LLM 专属的，这就是它不在 `plugins/llm/` 下的原因：
-上下文存储、hub 和 agent server 都不是 LLM plugin，而它们所坐的脚手架不该从 LLM 包里
-出来。embeddings server 是 `llm/` 下唯一一个不是聊天后端的 plugin —— 它只说
-`/embeddings`，别的什么都不说 —— 它在那里，是因为它是这套系统里另一个 import provider
-SDK 的东西。
+工具目录位于 agent 目录旁边，因为它属于整个 home，而不属于某一个 agent。
 
-## 测试
+### 运行时目录
 
-**测试套件是这个项目据以改动的东西**，所以有两条道，默认那条很快：
+机器级共享 server 的记录保存在 `~/.slife2/runtime`：
+
+```text
+<runtime>/
+  servers/        每个运行中 server 的一条记录
+  logs/           每个 server 的输出
+  locks/          按端点的启动锁
+  agents/         agent 名称占用
+  clients/        哪些客户端正在使用共享 server
+  homes/          此机器使用过的数据目录
+```
+
+`SLIFE2_RUNTIME_DIR` 覆盖该位置。运行时目录是可重建的：删除它后，下次启动会
+重建所需内容。
+
+### 多个数据目录
+
+一个数据目录可以包含多个 agent。它们共享该目录的 `slife2.yaml`、`skills/` 和
+`agents/tools.db`，因此运行在同一套工具上。一个 agent 加载的工具对另一个也是
+加载的。
+
+agent 身份与目录无关。`--agent jack --data-dir D` 命名 agent 并说明其文件位置。
+名称在整台机器上只占用一次，因此另一个数据目录中的第二个活着的 `jack` 会被拒绝。
+一个名称上次在哪个目录使用不会被记住。
+
+server 跨数据目录共享。为一个 home 启动的 server 为该机器上的每个 home 服务，
+每次调用按它来自的 home 解析。外部 `mcp:` 条目按名称只对应一个 server，无论多少
+个 home 配置它；如果两个 home 为同一个名称给出不同命令，日志会报告分歧，并使用
+正在运行的那个。
+
+## 架构
+
+### 分层
+
+包按模块“是什么”划分，而不是按大小划分：
+
+| 目录 | 内容 |
+|---|---|
+| `slife2/plugins/` | 每个 plugin 一个进程。每个 plugin 有一个带 `main` 和 `SERVER_NAME` 的模块。 |
+| `slife2/clients/` | 一次 MCP 跳转的客户端部分。 |
+| `slife2/libs/` | 被多个组件 import 的库。 |
+| `slife2/helpers/` | 小型无状态辅助函数。 |
+| `slife2/tui/` | 终端窗口。它是客户端，不提供任何东西。 |
+
+plugin 目录可以保留自己的私有库，例如 `plugins/cabinet/store.py` 或
+`plugins/schedule/expressions.py`；`libs/` 用于被多个组件 import 的代码。
+
+依赖方向是单向的：
+
+```text
+tui/ -> MCP -> plugins/agent/ -> libs/turn/loop.py
+     -> {libs/model/base.py, libs/turn/tools.py, libs/turn/events.py,
+         libs/turn/messages.py} -> libs/host/config.py
+```
+
+主循环既不 import agent server，也不 import 终端。它接收一个 backend 和一个
+返回工具注册表的协程；注册表来自哪里是 agent server 的职责。
+
+### Plugin 注册表
+
+`libs/host/config.py` 的 `PLUGINS` 中每个 plugin 一行。一行记录：
+
+- `servers:` 中使用的键；
+- 提供它的模块；
+- 它应答的 MCP 名称；
+- 用于识别它的探针工具；
+- 默认端口；
+- 它是否为模型 API 后端。
+
+启动顺序、默认地址、server 名称常量和 launcher 规格都从该表派生。添加 plugin
+就是写模块并添加一行；删除就是删除两者。
+
+`libs/plugin/protocol.py` 提供共享的 server 脚手架（`serve_plugin`）。server 提供
+三个钩子：构建什么、关于启动说什么，以及它需要什么。所有 server 都走这条路径，
+包括模型后端，它们通过一层包装到达同一个函数。
+
+## 开发
+
+### 测试
 
 ```bash
-uv run pytest                  # unit + integration，每个模块，跨核并行
-uv run pytest -m unit          # 单独跑快的那条道
-uv run pytest -m integration   # 会绑 socket 或起进程的那些测试
-uv run pytest -m e2e           # 整套服务作为进程（约 70s）
+uv run pytest                  # 快车道：单元与集成测试，并行
+uv run pytest -m unit          # 仅单元测试
+uv run pytest -m integration   # 需要绑定 socket 或启动进程的测试
+uv run pytest -m e2e           # 整套服务作为进程（约 70 秒）
 uv run ruff check . && ruff format --check .
-uv run pyright                 # 一个 dev 依赖，接进了 CI
+uv run pyright
 ```
 
-`uv run pytest` 在所有核上跑（`-n auto`，来自 `addopts`），并排除 `e2e`，那是唯一一条
-会启动真实整套服务的道：十七个守护进程、磁盘上的一份配置和一个桩 provider，端到端驱动
-（`tests/e2e/`）。它驱动的是对话真实会走的那几种路：一轮对话、跑在前一轮之上的第二轮、
-**模型调用工具的轮次**（由 hub 路由到拥有该工具的 plugin 进程，在那里作答，再被读回），
-以及一段超出窗口的输出（保存下来并分页读取）。两条道都在 CI 里跑。
+默认运行会跨所有核心执行（`addopts` 中的 `-n auto`），并排除 `e2e` 标记。
 
-**快的那条道里没有任何东西需要 API key 或一个正在跑的 server。** 模型是假的，server
-们经由 FastMCP 的**内存传输**驱动 —— 真的
-MCP 消息和真的进度通知，没有绑定任何端口。`integration` 的那些测试才是需要 socket 的，
-而每一个绑的都是临时端口而不是固定端口，所以在一个活着的整套服务旁边跑测试，仍然是能
-跑过的测试。
+快车道不需要 API key，也不需要运行中的 server。模型是假的，server 通过 FastMCP
+的内存传输驱动：真实的 MCP 消息和进度通知，不绑定端口。集成测试绑定临时端口，
+因此测试套件可以在正在运行的服务旁边运行。
 
-那些替身住在 `tests/fakes.py` 里并且是共享的：一个桩模型、一个桩 embedder、假的窗口和
-网格客户端，以及不止一个测试模块会用到的那几个小工厂（`upstream_server`、
-`plugin_transports`、`config_file`）。一个测试模块跑到另一个模块里去拿 fixture，就是
-两条道最后对「一个替身长什么样」产生分歧的方式。
+端到端车道将真实整套服务作为进程启动：launcher、十七个守护进程、磁盘上的配置，
+以及一个桩 OpenAI 兼容 provider。它验证启动顺序、跨进程轮次、工具路由、进度
+通知、大输出处理和对话恢复。
+
+共享测试替身位于 `tests/fakes.py`：一个桩模型、一个桩 embedder、假的窗口和 mesh
+客户端，以及被多个测试模块使用的工厂。
+
+### CI
+
+CI 在 Ubuntu、macOS 和 Windows 上使用 Python 3.13 运行：
+
+1. 构建 wheel；
+2. 断言解释器可以加载 SQLite 扩展；
+3. `ruff check` 与 `ruff format --check`；
+4. `pyright`；
+5. 默认测试车道；
+6. 端到端车道。
+
+## 已知限制
+
+- `cli:` 条目会进入目录并可被发现，但目前没有工具执行它们。
+- slife2 不执行 playbook 脚本；`skill_use` 返回 playbook 文本，由模型自己运行
+  其中的命令。
+- 文件柜的 `file_save` 不获取 URL，文件柜也没有 `grep` 搜索腿。
+- 模型可以用 `turn_list` 和 `turn_read` 浏览轮次日志，但不能语义搜索它。
+- 编辑配置前没有批准闸，包括带 `command:` 的 `mcp_set`；该调用会记录一个
+  slife2 将要启动的程序。
+- 一个 agent 任务可以启动另一个 agent 任务；`agent-task.max_running` 限制并发，
+  不限制随时间发生的总工作量。
+
+## 许可证
+
+MIT。见 [LICENSE](LICENSE)。

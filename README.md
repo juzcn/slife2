@@ -1,62 +1,93 @@
 # slife2
 
-**Terminal-based AI agent — slife v2, a clean-slate rebuild.**
-
 [中文](README.zh-CN.md)
 
-**A plugin is an MCP server over Streamable HTTP plus a small contract** — an
-implementation of the protocol, not one of its own. The TUI is a client and
-nothing else; the agent loop is a server and a client; each model backend is its
-own server, and so is the hub the tools come from — and so is the terminal's own
-inbox, which is a plugin like the rest. The word separates the servers slife2 starts from
-the ones somebody else wrote under `mcp:`, and the difference is load-bearing:
-**a plugin is required** — a missing one fails the turn — where an entry under
-`mcp:` is optional and its absence just means fewer tools.
+**slife2 is a terminal-based AI agent.** It runs a conversation with a language
+model, exposes tools to that model over the Model Context Protocol (MCP), and
+reaches the outside world through local plugin processes. The terminal window is
+only a client: the agent loop, the tool hub, the model backends, memory, and
+every capability are MCP servers that slife2 starts and shares.
 
-Two properties follow, and they are the point of the arrangement:
+This file is the user manual. The system design is described in
+[sdd.md](sdd.md); the decisions and measurements behind it are recorded in
+[DESIGN.md](DESIGN.md).
 
-- **A key exists only inside the process that needs it.** A provider's API key
-  lives in the LLM server that calls it; a tool server's token lives in the
-  plugin that holds that server — `slife2-mcp-tools` for `mcp:`,
-  `slife2-restapi-tools` for `rest-api:`. The agent loop cannot leak either,
-  because it never has one.
-- **The agent loop imports no provider SDK.** Switching providers is changing a
-  URL, and adding tools is adding an entry to a config file.
+**Contents**
 
-**A plugin is a capability; a library is its implementation.** What holds a
-credential, an SDK or somebody else's connection is a process; what holds a
-*file* is not, because one writer is what a SQLite lock already is. So
-`slife2.libs.store.db` — the turn log — is a library, imported by the plugin that owns it,
-`slife2-context`, and `slife2.libs.store.catalogue` is the tool catalogue, opened in-process
-by `slife2-toolhub`. So is `slife2.libs.store.index`, the machinery those two stores are
-*searched* by, which is the cabinet's library too. DESIGN §1.1 is the test and
-what it costs.
+- [Overview](#overview)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Command-line interface](#command-line-interface)
+- [Using the terminal UI](#using-the-terminal-ui)
+- [Configuration](#configuration)
+- [Capabilities](#capabilities)
+- [Data locations](#data-locations)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+- [License](#license)
 
-[DESIGN.md](DESIGN.md) explains the decisions and the measurements behind them.
+## Overview
 
-## Quickstart
+slife2 is built around four rules.
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.13.
+1. **A plugin is one of slife2's own MCP servers.** It speaks MCP over
+   Streamable HTTP and implements a small additional contract: state is keyed by
+   a client id rather than by a session, every model-facing tool declares its
+   audience, a client can verify the server's identity, and the plugin has one
+   row in the central registry. A plugin is required: if one cannot be reached,
+   the turn fails. An external MCP server under `mcp:` is optional; if it cannot
+   be reached, the model simply has fewer tools.
 
-```bash
-uv sync
-credstore set DEEPSEEK_API_KEY         # or export it
-uv run slife2
-```
+2. **Credentials stay in the process that uses them.** A provider key lives in
+   the model server that calls the provider. A tool server's key lives in the
+   plugin that owns the connection (`slife2-mcp-tools` for `mcp:`,
+   `slife2-restapi-tools` for `rest-api:`). The agent loop imports no provider
+   SDK and holds no key.
 
-That is the whole thing. `slife2` brings up the MCP servers its config needs,
-attaches to any that are already running, and starts the TUI.
+3. **Servers are shared machine-wide.** The launcher starts the servers a
+   configuration needs and attaches to any that are already running. Servers are
+   daemons, so closing one window does not interrupt another. The last client to
+   exit stops the running servers, unless `--keep-servers` is used.
 
-**On macOS the Python has to be one that can load SQLite extensions**, and
-neither of the two you are most likely to be using is. The vector index is a
-SQLite extension (`sqlite-vec`), and an interpreter built without
-`--enable-loadable-sqlite-extensions` has no way to load one: that is uv's own
-managed CPython, which links SQLite statically, and Apple's `/usr/bin/python3`,
-whose system SQLite is compiled without it for sandboxing reasons. Nothing here
-can work around it — with no index the database will not open, so no plugin
-starts and the first command fails with `this Python's sqlite3 cannot load
-extensions`. The builds on Windows and Linux have the feature. Homebrew's Python
-does too:
+4. **`slife2.yaml` is the single description of what exists.** Providers,
+   servers, tool sources, embeddings, media backends, tunnels, and network
+   settings are read from that file. There is no second configuration store.
+
+### Terminology
+
+| Term | Meaning |
+|---|---|
+| **Plugin** | One of slife2's own MCP servers. It is started and shared by the launcher and implements the plugin contract. An external MCP server is not a plugin. |
+| **Agent** | An identity named by `--agent NAME`. One name has one live holder on a machine. |
+| **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. Every server keys its state by it. |
+| **Conversation** | One client id's history. |
+| **Turn** | One exchange: the input, the model's answer, and the tool calls it made, stored as one row. |
+| **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. |
+| **Marker** | The machine-readable prefix a channel adds to a delivered message, e.g. `[Wechat:{…}]`. Markers are stored with the message and removed only for display. |
+| **Family** | A plugin that owns a configuration section and declares the rows that section describes. |
+| **Source** | One entry a plugin holds, such as an `mcp:` server, a playbook, or a command. |
+| **Catalogue** | The machine-readable list of every tool, playbook, and command the model may discover. |
+| **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
+| **Home** | A data directory: configuration, skills, agents, and their files. |
+| **Runtime directory** | The machine-wide records, locks, and logs of the shared servers. |
+
+## Requirements
+
+- **Python 3.13 or newer**
+- **[uv](https://docs.astral.sh/uv/)** for dependency management and execution
+
+slife2 is tested on Windows, macOS, and Linux.
+
+### SQLite extension support
+
+The vector index is a SQLite extension (`sqlite-vec`). The Python interpreter
+must be able to load SQLite extensions.
+
+Windows and Linux builds normally have this support. On macOS, neither uv's
+managed CPython nor Apple's `/usr/bin/python3` can load extensions. Use
+Homebrew's Python instead:
 
 ```bash
 brew install python@3.13
@@ -64,1238 +95,947 @@ uv venv --python "$(brew --prefix python@3.13)/bin/python3.13"
 uv sync
 ```
 
+Without extension loading, the database cannot be opened, no plugin starts, and
+the first command fails with:
+
+```text
+this Python's sqlite3 cannot load extensions
 ```
-slife2 [--data-dir DIR] [--agent NAME] [--model PROVIDER/MODEL] [--url URL]
-       [--a2a-broker HOST:PORT] [--keep-servers] [--headless] [--lang EN|ZH]
-                                         ensure the servers, then run the TUI
-slife2 status                            what is running, and where
-slife2 down                              stop the servers this config names
-```
 
-`--model` picks the model this instance starts on, as `provider/model` (or a
-bare provider, meaning its first model); without it the config's `default` is
-used. `--url` overrides the agent server's endpoint, for the case where it is
-already running somewhere this config does not name.
+### Optional external programs
 
-**`--a2a-broker` points the peer network at a broker instead of the one in the
-config** — somebody else's, a team's, one already running on another machine —
-so joining one for a session does not mean editing a file every session reads.
-The flag keeps the plugin's technical name because the broker is the A2A wire's;
-what it overrides is `peer_agent.broker` and nothing else — **not the local
-network's broker**, which is `subagent:`'s and is this machine's own, so an
-agent's subagents stay where the file put them. Which network this is
-(`org`/`unit`) is still the section's, and a machine with no `peer_agent:` section
-is still off that network, so the flag is refused there rather than switching one
-on. **A broker belongs to a
-running stack**, which is why the flag can only be honoured by the command that
-starts the mesh: if the servers are already up they are on the broker they were
-started with, and `slife2` says so and stops rather than leaving you on the
-wrong one. `slife2 down` first.
+| Program | Needed for |
+|---|---|
+| `mosquitto` | A local MQTT broker for the peer-agent or subagent network. slife2 starts one when the configured broker is local and absent. |
+| `cloudflared` | The `cloudflare` file-tunnel provider (the provider selected in the shipped configuration). |
+| `ssh` | The `localhost.run` file-tunnel provider. Windows 10 and newer ship an OpenSSH client. |
+| `npx` | `mcp:` entries configured with `command: npx`. |
+| `uvx` | `rest-api:` entries, which are expanded into `uvx mcp-openapi-proxy`. |
 
-**`--headless` runs that window with no terminal.** The same servers, the same
-connections, the same turns, run by the same code — and nothing drawn and nothing
-printed. What it is for is a machine nobody is sitting in front of: the window
-holds **the agent's place on the A2A mesh**, so a peer can task it and be
-answered, where a machine nobody had opened a window on would leave that agent
-simply offline. Nothing else about the agent changes — it is a window with no
-screen rather than a second kind of agent — and what tells a *model* that nobody
-is there is its system prompt (`headless` in the template a prompt is written
-in), which is the lever for how it behaves. **Ctrl+C** is the way out.
+## Installation
 
-**`--lang` is the window's language** — English or Chinese, otherwise detected
-from the OS. Without it a Chinese system gets a Chinese window and anything else
-gets an English one; with it you can have either on any machine, which is what it
-is for. What it covers is the window: the labels, the harness's own lines, the
-panels, the picker, the approval row, the status bar. **It does not reach the
-model.** The system prompt, every tool schema and every log line are English
-whatever the flag says, because a conversation that changed language with the
-terminal's would be a second variable in the one place a difference is expensive
-to find — and external text (a tool's result, a peer's message) is somebody
-else's words and passes through as it is. The keys keep their English names,
-since `Esc` and `Ctrl+S` are what is printed on the keyboard; the action words
-after them are the interface's.
-
-**The servers are shared.** A second `slife2` — under any `--agent` — finds them
-already running and reuses them; nothing is started twice and nothing is
-per-agent. They are daemons, so closing one TUI does not interrupt another, and
-when the **last** instance exits it stops what is running. `--keep-servers`
-leaves them up instead.
-
-`--agent NAME` (default `slife2`) names the instance. It titles the window, it
-signs the assistant's messages, and it renders the system prompt — and it is
-**exclusive**, so two live instances may not share a name. Where it *does*
-partition is inside servers that stay shared: each agent's turns go in their own
-database, and each agent is its own session on `slife2-tui` — which is how a
-message from a phone reaches *your* terminal and not the one next to it.
-
-The **context** is chosen rather than accumulated: one model call before every
-turn decides what to keep of the conversation in hand and what to recall from the
-log, and the turn runs on the two together. There is no switch that turns that
-off. A conversation that restarts, or that sat idle long enough for the loop to
-be reclaimed, comes back on the context it had at exit. The next section is the
-whole of it.
-
-That log is where the model can look back. `turn_list` browses it — newest
-first, one line per turn, `since`/`until` taking an ISO date or a phrase a person
-would write (`yesterday`, `last month`, `3 days ago`), paged with
-`limit`/`offset` against a `total` — and `turn_read` returns one turn whole.
-Neither takes an `agent`: the call carries the conversation it is on behalf of,
-so a model reads its own history and nothing else, and no argument of its can
-change that.
-
-Every turn is also **indexed twice as it is stored** — a keyword index over the
-text a turn is found by, and a vector index over what it was about — so a turn
-can later be found by relevance rather than only by time. Both indexes are
-derived from the turns and rebuilt from them, which is why changing the
-embedding model (under `embeddings:` in the config) costs a re-embedding of the
-whole history on the next start rather than a migration. A model can browse the
-log but cannot *search* it yet: the recall the context decision uses is the
-store's, and offering the same search as a tool is its own change (DESIGN §9).
-
-Each plugin is also its own console script, so a process manager can run one
-without passing an argument:
+Install from a checkout:
 
 ```bash
-uv run slife2-agent            # the agent loop,             :8000
-uv run slife2-toolhub          # the model's tools,          :8020
-uv run slife2-skills           # the playbooks,              :8031
-uv run slife2-cli              # the cli: registry,          :8032
-uv run slife2-mcp-tools        # holds the mcp: servers,   :8033
-uv run slife2-restapi-tools    # holds the rest-api: ones,   :8034
-uv run slife2-wechat           # WeChat, a login per agent,  :8030
-uv run slife2-cabinet          # notes, diary, files,        :8035
-uv run slife2-media            # images, video, speech,      :8036
-uv run slife2-file-tunnel      # a public URL for a file,    :8038
-uv run slife2-schedule         # scheduled tasks, the clock, :8039
-uv run slife2-a2a              # the A2A mesh over MQTT,    :8040
-uv run slife2-tui              # the terminal's inbox,       :8005
-uv run slife2-context          # turns, and the context,  :8010
-uv run slife2-llm-openai       # the OpenAI-compatible API,  :8001
-uv run slife2-llm-anthropic    # the Anthropic Messages API, :8002
-uv run slife2-llm-openai-responses  # the OpenAI Responses API, :8003
-uv run slife2-llm-embeddings   # vectors for both indexes,  :8004
+git clone https://github.com/juzcn/slife2.git
+cd slife2
+uv sync
 ```
 
-In the TUI: **Enter** sends, **Shift+Enter** breaks the line, **Esc** cancels a
-running turn, **Ctrl+C** cancels one too and quits when there is none (copying
-instead when something is selected), and **Ctrl+S** opens the model picker —
-`↑`/`↓` move, `Enter` picks, `Esc` leaves it. Those are the keys the status bar
-names, and it names only those: **Ctrl+Q** quits too, as it does in any Textual
-app, and it is left unsaid because a terminal with flow control takes it as XON
-before the window ever sees it.
+Store the API key of the provider you intend to use. It can be placed in the OS
+keyring through `credstore`, or exported as an environment variable:
 
-**PageUp/PageDown** page the transcript and **Home/End** jump to its ends, and
-the wheel scrolls it wherever the pointer happens to be — the transcript is what
-those keys move, not the draft, so a long answer can be read while the next
-message is being typed. Scrolling up holds the page there: streamed tokens do
-not drag the view back down, and sending a message is what returns it to the
-end. The draft keeps **Ctrl+A** and **Ctrl+E** for the ends of the line.
-
-**Ctrl+C is still the copy key.** With something selected — in the prompt, or
-with the mouse in the transcript — it copies, and nothing is cancelled; that is
-what it does in every other program, and a terminal where it cannot copy is
-worse than one where stopping a turn has a second spelling. **Esc** is that
-second spelling, and it is only that: it cancels the turn in flight and will not
-close the window however often it is pressed. With nothing selected, **Ctrl+C**
-cancels the turn; with nothing running either, it quits.
-
-**Ctrl+S switches the model.** The picker lists every model under `providers:`
-with the one in use marked, and choosing one calls the same `model_switch` the
-model itself calls, so a person switching a model and a model switching one are
-one behaviour. The conversation keeps its history and moves onto the new model
-from its next turn — a turn already in flight finishes on the model it started
-on — and the status bar takes the new model's window and capability marks with
-it. **Nothing in that path needs the model that is failing**: it is a config edit
-and a line to the agent server, which is the point of the key, since a model that
-has stopped answering is not something to argue with.
-
-Send a second message while one is still being answered and it **queues**: the
-turn already running finishes, yours runs next, and the status bar says how many
-are waiting. Esc stops the turn in flight and leaves the queue alone — the
-message you gave up on and the one you are still waiting for are not the same
-message.
-
-**A restart is not a new conversation.** Close the window and open it again — or
-restart the daemons, or leave it long enough for the idle sweep to let the
-conversation go — and the transcript comes back: the same questions, the same
-answers, the same tool calls with the results they returned, each line stamped
-with the moment it was sent rather than with the moment the window opened. What
-is put back is the conversation's *context*, restored by the agent server the
-moment it builds the loop; the window asks for the turns that context was made of
-and draws them, reasoning and all — an iteration that thought before it answered
-comes
-back with its thinking folded away exactly where a live one had it.
-
-**The window also says what the context is doing.** A restored conversation shows
-its size in the status bar — the count the last call left the conversation at, not
-a running total, and what fraction of the model's window that is. Each turn is
-then preceded by a note naming what the *discriminator* decided for it: how much
-of the conversation in hand it kept, and how much it went back to the turn log
-for. That is one model call per turn that nothing else would show you, and it is
-the mechanism that keeps a long conversation from growing without bound —
-`slife2-context`'s own judgement, argued in DESIGN §5.1.
-
-Name an image and the model attaches it:
-
-```
-what is wrong with this layout? D:\shots\screenshot.png
+```bash
+uv run credstore set DEEPSEEK_API_KEY
+# or
+export DEEPSEEK_API_KEY=...
 ```
 
-**That is the whole convention, and it is not a syntax** — the path is a path in
-a sentence, and the model calls `attach_image` for it. There are no markers to
-learn: what a person writes is what a person means. Three kinds of source work
-in one call — a local path, an `http(s)` URL, and a `data:` URI — and several at
-once, with a source that cannot be read named in the answer rather than failing
-the rest. A URL is passed to the provider, which fetches it; nothing here does.
+No configuration file is required. Without `slife2.yaml`, slife2 uses built-in
+defaults, including a single OpenAI-compatible provider.
 
-Only when the model's config lists `image` under `input`: a model that cannot
-read images is told so, and says so, rather than quietly ignoring what you
-named.
+## Quick start
 
-The picture goes to the model and no further. What the log keeps is the sentence
-and the tool's answer, which names every file — plus a note where the image was
-saying it was there and how big it was — so a rebuilt conversation is text, and
-a turn that needs the picture again attaches it again from that name.
-Attaching it again is what sends it again — the file is named in the prompt, so
-a turn read back a month later still says which picture it was about.
+```bash
+uv sync
+uv run credstore set DEEPSEEK_API_KEY
+uv run slife2
+```
 
-**A picture the provider will not read is the one thing that could take the
-conversation with it**, because the bytes it refused would be sent again by every
-turn that follows, and each one would fail the same way. So a turn that dies
-there leaves the pixels behind: the live conversation drops them, with the same
-note the log keeps and a word in the error saying so. Nothing is lost that the
-prompt does not already name.
+`slife2` starts the MCP servers the configuration needs, reuses any that are
+already running, opens the terminal UI, and stops the servers when the last
+instance exits.
 
-## Context
+```bash
+slife2 status    # what this configuration's servers are doing
+slife2 down      # stop them
+```
 
-A conversation does not accumulate a context; it **chooses** one. `slife2-context`
-keeps the turn log — one SQLite file per `(agent, subagent)`, exactly as before —
-and before every turn makes **one model call** that reads the conversation in
-hand and answers with two things: what to keep of the turns already in it, and
-what to recall from the log. The turn runs on the two together, in time order.
+## Command-line interface
 
-The call reads the conversation rather than the new message alone, and that is
-not a detail: the turn being recalled is usually a follow-up, and "what about the
-other one" names its subject only through the turns above it. Its answer is a
-selection, never a dump — the context is bounded, so a recall that matched more
-than fits returns what fits, and the keep-list is how a model says which of the
-turns in hand it is still working from. Every turn it reads carries a `[TURN:{…}]`
-footnote naming its id, its channel and its span, which is where those ids come
-from — and every turn the process ran itself gets one too, written the moment it
-is saved, so the newest turns are as addressable as the restored ones. The
-capitals are the tell, by convention: a name in capitals is the harness's own
-annotation, never part of the record, where a marker that reads as a word —
-`[Wechat:{…}]`, on a turn somebody sent over WeChat — was said by somebody and is
-stored with what they said.
+```text
+slife2 [COMMAND] [OPTIONS]
 
-**Nothing a model can call decides this.** The model has `turn_list` and
-`turn_read` — reading its own history is the point of a log — and the two
-decisions are the harness's: `restore`, which replays the context a conversation
-had when it last stopped (a restarted process, or one the idle sweep let go), and
-`rebuild`, which runs the decision above. A rebuild that decides to keep exactly
-what is in hand rebuilds nothing at all, which is the common case and what keeps
-a call this expensive from being paid for nothing.
+Commands:
+  run       Ensure the servers are available, then run the TUI (default).
+  status    Report what each server named by the configuration is doing.
+  down      Stop the servers named by the configuration.
+```
 
-It is tuned under `context:` in `slife2.yaml` — the ceiling and floor as
-fractions of the model's own window, the recall's caps, and the timeout after
-which the turn simply runs on the context it has:
+Options:
+
+| Option | Meaning |
+|---|---|
+| `--data-dir DIR` | Use `DIR` as the data directory. Overrides `SLIFE2_DATA_DIR`. |
+| `--agent NAME` | Run as `NAME`. Default: `slife2`. One live instance per name per machine. |
+| `--model PROVIDER/MODEL` | Start on this model. A bare provider selects its first model. Default: the configuration's `default`. |
+| `--url URL` | Connect the window to an agent server at `URL` instead of the configured one. |
+| `--a2a-broker HOST:PORT` | Use this broker for the peer-agent network for this run. It overrides `peer_agent.broker` only, never the subagent network's broker. It cannot enable a network that has no `peer_agent:` section, and it is refused when the A2A server is already running on another broker; stop the stack first. |
+| `--keep-servers` | Leave the shared servers running after this instance exits. |
+| `--headless` | Run the same window, servers, connections, and turns without a terminal: nothing is drawn and nothing is printed. The agent remains reachable on the peer network. Exit with Ctrl+C. |
+| `--lang {en,zh}` | Set the window's language. Without the flag, the language is detected from the operating system. |
+
+`--headless` does not create a different kind of agent. It runs the same window
+with no display, and the system prompt is told that nobody is watching so the
+model can adjust its behavior.
+
+`--lang` affects the window only: labels, harness lines, panels, the model
+picker, the approval row, and the status bar. System prompts, tool schemas, and
+log lines remain English. External text, such as tool results and peer messages,
+is passed through in its original language.
+
+### Plugin executables
+
+Each plugin can also be started directly. This is useful for a process manager
+or for debugging a single server.
+
+| Executable | Server | Default port |
+|---|---|---|
+| `slife2-agent` | Agent loop and conversations | 8000 |
+| `slife2-llm-openai` | OpenAI-compatible chat completions | 8001 |
+| `slife2-llm-anthropic` | Anthropic Messages | 8002 |
+| `slife2-llm-openai-responses` | OpenAI Responses | 8003 |
+| `slife2-llm-embeddings` | Embeddings | 8004 |
+| `slife2-tui` | Terminal inbox, one session per agent | 8005 |
+| `slife2-context` | Turn log and context decision | 8010 |
+| `slife2-toolhub` | Tool catalogue and model tool list | 8020 |
+| `slife2-wechat` | WeChat login and messaging | 8030 |
+| `slife2-skills` | Playbooks and `skill_use` | 8031 |
+| `slife2-cli` | The `cli:` section | 8032 |
+| `slife2-mcp-tools` | The `mcp:` section | 8033 |
+| `slife2-restapi-tools` | The `rest-api:` section | 8034 |
+| `slife2-cabinet` | Notes, diary, files, reports, dumps | 8035 |
+| `slife2-media` | Image, video, speech, transcription | 8036 |
+| `slife2-agent-task` | Background agent tasks | 8037 |
+| `slife2-file-tunnel` | Public HTTPS URL for a local file | 8038 |
+| `slife2-schedule` | Scheduled tasks and their ledger | 8039 |
+| `slife2-a2a` | Peer-agent network over MQTT | 8040 |
+
+The subagent network is served by the same module on port 8041 and is started
+as `python -m slife2.plugins.a2a.local_server`; it has no separate console
+script.
+
+## Using the terminal UI
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `Enter` | Send the message. |
+| `Shift+Enter` | Insert a line break. |
+| `Esc` | Cancel the running turn. |
+| `Ctrl+C` | Copy when something is selected; otherwise cancel the running turn; otherwise quit. |
+| `Ctrl+S` | Open the model picker. `↑`/`↓` move, `Enter` selects, `Esc` closes. |
+| `Ctrl+Q` | Quit (the standard Textual binding). It is not shown in the status bar because terminals with flow control may consume it before the application sees it. |
+| `PageUp` / `PageDown` | Page the transcript. |
+| `Home` / `End` | Jump to the start or end of the transcript. |
+| `Ctrl+A` / `Ctrl+E` | Move to the start or end of the draft. |
+
+The mouse wheel scrolls the transcript wherever the pointer is. Scrolling up
+holds the view in place while new tokens arrive; sending a message returns it to
+the end.
+
+### Sending messages
+
+If a message is sent while a turn is running, it is queued. The running turn
+finishes, then the queued message runs. The status bar shows the queue depth.
+`Esc` cancels the running turn but leaves the queue intact.
+
+A message that arrives while a turn is running is delivered to that turn at the
+next iteration boundary, not held for a later turn. This applies to text typed
+in the window, messages handed over by another channel, and input to a headless
+window.
+
+### Model selection
+
+`Ctrl+S` lists every model under `providers:` and marks the one in use.
+Selecting a model calls the same `model_switch` tool the model itself can call.
+The conversation keeps its history and moves to the new model on its next turn;
+a turn already in progress finishes on the model it started with. The status bar
+updates its context window and capability marks.
+
+### Restoring a conversation
+
+Closing and reopening the window, restarting the servers, or waiting long enough
+for the idle sweep does not start a new conversation. The transcript is restored
+with its original timestamps, tool calls, and results. Reasoning is folded away
+where it was folded in the live conversation.
+
+The status bar also reports the context size left by the last model call and
+its fraction of the model's window. Before each turn, a note names what the
+context decision kept and what it recalled from the turn log.
+
+### Images
+
+Name an image file in a sentence:
+
+```text
+What is wrong with this layout? D:\shots\screenshot.png
+```
+
+The model calls `attach_image` for it. There is no special syntax. A call can
+take a local path, an `http(s)` URL, or a `data:` URI, and can take several at
+once. A source that cannot be read is named in the answer without failing the
+rest. A URL is passed to the provider, which fetches it.
+
+Images are available only when the model's entry lists `image` under `input`.
+The image goes to the model and no further. The turn log keeps the sentence, the
+tool's answer naming the file, and a note recording that the image was attached
+and how large it was. A restored conversation is therefore text; a later turn
+that needs the picture attaches it again from the named path.
+
+## Configuration
+
+### Location and defaults
+
+The configuration file is `slife2.yaml` inside the data directory. A data
+directory is the checkout when running from a checkout, otherwise
+`~/.slife2`. Use `--data-dir DIR` or `SLIFE2_DATA_DIR` to override it.
+
+A missing configuration file is not an error: built-in defaults are used. A file
+that exists but cannot be loaded stops the start with a one-line error naming
+the file and the mistake.
+
+The file is safe to check in. It should contain no secrets; every credential is
+a `${VAR}` or `keyring:` reference resolved at runtime.
+
+### Sections
+
+| Section | Purpose |
+|---|---|
+| `servers:` | Address and port of each plugin server. Defaults are used when absent. |
+| `providers:` | Chat providers and their models. |
+| `default:` | The model a new conversation starts on, as `provider/model`. |
+| `agent:` | The iteration cap and the system-prompt template. |
+| `agent-task:` | `max_running`, the number of background tasks per agent. |
+| `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
+| `embeddings:` | Embedding providers used by the memory index. |
+| `context:` | Limits for the context decision. |
+| `tool_load:` | Maximum number of loaded model tools. |
+| `tool_result:` | Token budget for a single tool result. |
+| `mcp:` | External MCP servers (stdio or HTTP). |
+| `rest-api:` | OpenAPI documents exposed as tools. |
+| `cli:` | Commands already installed on the machine. |
+| `skills:` | Environment for playbooks under `skills/`. |
+| `media:` | Image, video, speech, and transcription providers. |
+| `file-tunnel:` | The public-URL provider for local files. |
+| `peer_agent:` | The remote peer-agent network. |
+
+There is no `wechat:`, `cabinet:`, `schedule:`, or `tui:` section. A WeChat login
+is created by scanning a QR code and stored under the agent's directory. The
+cabinet, scheduler, and terminal inbox are enabled by their servers and by the
+existence of the data they hold.
+
+### Secrets
+
+A value may be:
+
+- a literal string;
+- `${VAR}`, resolved through the shell environment, then
+  [credstore](https://pypi.org/project/credstore/), then an optional literal
+  default (`${VAR:-default}`);
+- a `keyring:<service>/<key>` reference, resolved directly against the OS
+  keyring.
+
+Resolution is lazy and lenient. An unresolved reference is left verbatim, so a
+missing key fails at the API call where the error message can name it rather
+than at startup.
+
+### Example
 
 ```yaml
+agent:
+  max_iterations: 0          # 0 or absent means no cap
+  # system_prompt: prompts/jack.j2
+
+agent-task:
+  max_running: 4
+
+subagent:
+  max_running: 32
+  provider: mosquitto
+  broker: {host: localhost, port: 1883}
+
 context:
-  ceiling: 0.8         # what a kept context is measured against
+  ceiling: 0.8               # fraction of the model's window
   floor: 0.2
   recall_limit: 40
-  min_similarity: 0.45 # gates a *measured* similarity; a keyword hit is exempt
-  timeout: 20.0        # the discriminator call, after which the context stands
-```
+  min_similarity: 0.45
+  timeout: 20.0              # seconds for the discriminator call
 
-**A failure here is not a failed conversation.** A discriminator that times out,
-a provider that errors, an answer that is not the shape asked for — all of them
-keep the context and run the turn. A store that is *gone* is different and fails
-the turn, like every other missing plugin.
+tool_load:
+  threshold: 100             # loaded tools before the least recently used go
 
-## Tools
+tool_result:
+  tokens: 8000               # per-result budget; minimum 128
 
-The model's tool list — the ones slife2 ships and the ones other people run —
-is decided by **`slife2-toolhub`**, and it is the only process that decides it.
-It is not the process that *reaches* any of those servers: `mcp:` is held by
-`slife2-mcp-tools` and `rest-api:` by `slife2-restapi-tools`, each of which
-declares what it holds — the source, its tools, whether it is answering — and the
-hub merges the rows, gates them, names them and routes the calls back. A plugin
-contributes the same way whether it fronts somebody else's server or has no
-connection at all: a playbook and a command are declared rows too, which is how
-they are findable without being callable.
-
-**The credentials live with the connections**, so a tool server's key is held by
-the plugin that holds its entry — `SERPER_API_KEY` by `slife2-mcp-tools`, a
-provider key by the model server that needs it, `BAIDU_API_KEY` by
-`slife2-skills`. What the model is *handed* is the part of the list it has
-loaded, which is the section after the config:
-
-### The config
-
-```yaml
-# Every section below is written by hand *and* by the model: each family serves
-# the tools that edit its own (`mcp_set`, `rest_api_set`, `cli_set`, `skill_set`
-# with `remove` / `list` / `set_enabled` beside them, v1's names).  `providers:`
-# and `default:` at the bottom are edited the same way by `model_set` /
-# `model_remove` / `model_switch`, which live on the agent server rather than on
-# a family plugin of their own (DESIGN.md §8).  Either way
-# the write goes through `slife2.libs.host.configfile` — one writer, the file's comments
-# kept, and the loader that reads this file at every start as the judge.
-
-mcp:                                  # other people's MCP servers
+mcp:
   arxiv:
     url: https://arxiv.mcp.brunosan.de/mcp
   serper:
-    command: npx                        # stdio: a process slife2 starts
+    command: npx
     args: [-y, serper-search-scrape-mcp-server]
     env:
       SERPER_API_KEY: ${SERPER_API_KEY}
 
-rest-api:                               # OpenAPI documents, one tool per endpoint
+rest-api:
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
     base_url: https://api.github.com
     api_key: ${GITHUB_TOKEN}
 
-cli:                                    # programs already on this machine
+cli:
   yt-dlp:
     command: yt-dlp
     description: Download video from 1000+ sites, subtitles and playlists.
     install: uv pip install yt-dlp
 
-skills:                                 # what one playbook in skills/ is given
-  baidu-search:
-    env:
-      BAIDU_API_KEY: ${BAIDU_API_KEY}
-    # enabled: false                    # installed, and out of the way
-
-tool_load:                              # how many tools the model may hold
-  threshold: 100
-
-tool_result:                            # how much of one tool result it is handed
-  tokens: 8000                          # spend it on an oversized result, and
-                                        # cap `dump_read` with it — one number,
-                                        # and at least 128: a window smaller than
-                                        # the address it opens with is refused
-
-context:                                # how a conversation's context is decided
-  ceiling: 0.8
-  floor: 0.2
-```
-
-**There is no `wechat:` section**: a WeChat login is scanned rather than
-configured, and it lives in `agents/<agent>/wechat.yaml` — see "WeChat" above.
-
-`command` starts a process and talks over its standard input; `url` connects to
-somebody else's over the network. A `rest-api` entry is the same thing said
-shorter — it is expanded into the `uvx mcp-openapi-proxy` invocation that serves
-it, so the plugin that holds it has one mechanism rather than two. `${VAR}`
-resolves through the same chain as a provider key.
-
-A `cli` entry is the odd one out: there is no process to start and no URL to
-connect to, because the program is already installed. It is written down so the
-model can be told it exists — and written *here*, in the operator's file,
-because an entry is the opt-in, exactly as an entry under `mcp:` is. `install`
-is what a person is told when the command turns out not to be on `PATH`, which
-`cli_set` checks for while somebody is looking. **Every entry is a row in the
-tool catalogue** (`cli:yt-dlp`), so `tool_search` finds a command by what it does
-rather than by its name — being findable is the half that landed. **Nothing runs
-one yet**: the tool that does is the next change (DESIGN.md §9), and until then
-`func_tool_load` says exactly that. **`slife2-cli`** declares the rows and serves
-the `cli_*` tools that write the section.
-
-The playbooks in `skills/` are catalogued the same way and *are* readable —
-`skill_use`, which **`slife2-skills`** serves, along with `skill_list` and the
-`skill_*` tools that install, remove and switch a playbook. It is a plugin for
-the same reason, and it holds what the `skills:` section resolved, because a
-skill that declares `requires.env` needs one process that knows the answer.
-
-**The model can edit these sections, and that is the thing to read this
-paragraph for.** Each of the four families serves its own management tools —
-`mcp_set` / `rest_api_set` / `cli_set` / `skill_set`, with `remove`, `list` and
-`set_enabled` beside them, v1's names — so "written *here*, in the operator's
-file" is no longer the same as "written by the operator". **A fifth editor is
-the model config itself**: `model_list` / `model_set` / `model_remove` /
-`model_switch` over `providers:` and the top-level `default:`, served by
-`slife2-agent` rather than by a family plugin — the agent server is what turns a
-provider and a model into a conversation's model, so the edit and the read that
-honours it are one process (DESIGN.md §8). A `set` writes the
-*whole* entry rather than patching it: a field left out is dropped, and
-`set_enabled` is the one that changes a single field and leaves the rest. What
-is unchanged is
-the road an edit travels: the file is written by one module
-(`slife2.libs.host.configfile`) under a cross-process lock, as a document edit that keeps
-every comment, and the result is handed to the same parsers and the same loader
-a *start* uses — an entry the loader refuses is put back and the caller told
-why. So what can be written is what an operator could write, and it lands where
-they would have written it. What is *not* here yet is a gate before the write:
-`mcp_set` with a `command:` names a program slife2 will start, and nothing asks
-first (DESIGN.md §9, "Tool approval").
-
-### What the model is handed
-
-A tool's name carries the server it came from when there is one to carry: an
-entry under `mcp:` reaches the model as `{name}__{tool}` —
-`arxiv__arxiv_search_papers`. **Ours do not.** `turn_read` and `tool_search` are
-slife2's tools, and `context__turn_read` was this system's own arrangement leaking
-into the one thing the model reads on every request: which plugin serves a tool
-is a fact about us, and `servers()` reports it to whoever is debugging. So our
-tools are bare, and they are one namespace — two plugins cannot offer one name
-between them — which the catalogue refuses loudly rather than resolving.
-
-**What the model is handed is the tools it has loaded, not the tools that
-exist.** The list is re-read from the hub before *every model call*, and what
-starts in it is slife2's own: `tool_search`, `func_tool_load`,
-`_func_tool_unload`, `skill_use`, the two history tools, `attach_image`, the
-harness's `_check_new_input`, and the twenty-two tools that edit the five config
-sections — that last group is why the list is noticeably longer than it was, and
-it is the one group whose being always-loaded is worth a second look. Everything else is loaded on demand — a
-server with ninety tools costs nothing until one of them is wanted.
-`tool_search` searches the whole catalogue by keyword *and* by meaning, one
-hybrid search; `func_tool_load` puts one or several names in the list, and they
-are there from the next iteration of the same turn. The catalogue is
-`<data>/agents/tools.db`, one file for the data directory rather than one per
-agent: a tool loaded in one conversation is loaded for the next, and still loaded
-after a restart.
-
-Two things decide what starts loaded. **Ours always do** — a model that has
-quietly lost `turn_read` is a failure nobody can see — and somebody else's
-do when their entry says `autoload: true`, which is how a server whose tools are
-wanted every turn is written down as such. Everything else arrives on demand.
-
-**And what a tool answers is JSON, uniformly.** The schema and the answer are
-both things the model reads, so they are one surface: a listing answers
-`{"<noun>": [...], "total", "limit", "offset"}` — `total` is what says whether
-another page exists — a read answers the row's own fields, and **a refusal or a
-miss raises**, which the harness hands the model as a failed call with the
-reason. One exception: `_check_new_input` returns a person's message verbatim,
-because what it hands over is not data about something but the thing itself. No
-answer is meant to exceed `tool_result: tokens:`; a listing that could goes
-through `limit`/`offset`, and one that cannot be bounded is the dump a large
-output already goes to (`dump_read`, below).
-
-### Three arguments every tool takes
-
-**Every tool accepts three meta-parameters the model may add to any call.** They
-are not in any tool's schema of its own — they are added to every schema on its
-way out (`slife2.libs.turn.tools.advertised`), and the loop reads them off and strips them
-before dispatch, so no tool server ever sees one.
-
-```yaml
-# any tool call, from the model
-{ "e": "6*7", "_timeout": 30 }              # this one call may take 30 s
-{ "prompt": "a cat", "_async": true }        # run it in the background
-{ "path": "notes.md", "_approve": true }     # ask the user first
-```
-
-- **`_timeout`** — seconds. It overrides the tool's own default; `0` or less
-  means "use the default", **never** "no limit". A tool that declares its own
-  `timeout` argument enforces it itself (exactly one timer per call); with
-  neither, the call runs until it finishes. There is **no default budget**: a
-  number applied to every tool is wrong for most of them.
-- **`_async`** — run it in the background. The model gets a `task_id` and the
-  result is **handed back into the conversation** when it arrives, wearing
-  `[AgentToolResult:{"call_id":…,"tool":…,"task_id":…,"status":…}]`; the
-  window shows it as a message on the `async-tool:<tool>` channel. The result
-  goes through `tool_result: tokens:` like any other — backgrounding is how a
-  call escapes the *wait*, not the bound — so a huge output arrives as a window
-  over it, with `dump_read` for the rest.
-  `check_async` answers where the call *is* (running, finished, failed,
-  cancelled), and `cancel_async` abandons it. **An agent task's own loop has no
-  `_async`** — it runs one turn, so there would be nowhere to hand a result back
-  to, and it says so rather than pretending (DESIGN.md §9).
-- **`_approve`** — ask the user before the call runs. The terminal draws an
-  inline row (`y` approve, `n`/`Esc` deny) and answers with `answer_approval`;
-  the loop waits on that answer and refuses the call if it is denied, mounting no
-  tool panel. **A channel with nobody behind it does not ask and the call simply
-  runs** — WeChat, a scheduled run, another agent, and any client that has not
-  been taught to draw the prompt (a caller that *can* answer says so with
-  `send_message(..., watched=true)`, which the terminal does).
-
-### The budget, and the pairs the harness writes
-
-The list is bounded, because it goes out with every request: over
-`tool_load: threshold:` (100, in `slife2.yaml`) the least recently *called* tools
-are unloaded, never ours and never an `autoload` one. Calling, not loading, is
-what counts — a tool the model has been using all turn outlives one that was
-just brought in — and a tool never called since it was loaded is ordered by when
-it was loaded. That trim happens at a turn
-boundary — the harness calls `_func_tool_unload` before it saves the turn, and
-the names come back, so what the model just lost is something the log can say
-rather than something nothing notices. **And the model reads it too**: the trim
-is written into the conversation as a tool call and its result, so a model whose
-list shrank learns that from the transcript rather than by reaching for a tool
-that is no longer there. Nothing is written when nothing was taken. Being
-evicted costs a search and a load, not a capability.
-
-**A message that arrives while a turn is running is handed to that turn.** At
-the next iteration boundary the harness calls `_check_new_input` and writes the call
-and the message's own words into the running turn — v1's *cut-in*, always on — so
-what you say while the agent is working reaches it inside the turn it arrived in
-rather than one turn later. Like the trim, it is a tool pair: it is in the record
-and in every request that follows, and the model reads it as something that
-arrived while it was working. **The window draws it inside the open turn** — the
-message's own words, in its own bubble, without closing the answer still being
-streamed — and a rebuilt conversation draws the same line from the pair in the
-turn log. **Every source follows that one rule**: typing in the window, a message
-handed over by another channel, and a headless window's input are all submitted
-to the conversation immediately; the agent server's inbox is the only queue, and
-the loop decides where the next iteration boundary is.
-
-### How a plugin contributes
-
-Which of a plugin's tools the model may call is said on the tool —
-`@mcp.tool(meta=FOR_THE_MODEL)`, which `skill_use` carries and the
-context store's `remember` does not. A plugin's tools are its own code's until one of
-them says otherwise, so a tool you forget to mark is invisible rather than
-dangerous.
-
-**The hub reaches our plugins, and it is *told* about everything else.** Two
-kinds of thing arrive at it. A plugin's **own tools** come from `tools/list`, the
-way it would answer anybody. A plugin's **sources** are declared instead: a
-`mcp:` entry, a `rest-api:` entry, a playbook, a command — none of which the
-hub can reach — are answered for by the plugin that owns that section, in one
-call to `list_sources`, and the hub merges the rows and routes every call back to
-the plugin that holds them. So this process holds no connection to a server
-somebody else runs and no key belonging to one: `slife2-mcp-tools` and
-`slife2-restapi-tools` hold those, one connection per entry, and the hub owns the
-tool *set* and nothing else.
-
-**A declaration is the whole list, and it is asked for again before every
-search.** The whole list is what makes a deleted entry stop being a hit — a merge
-reads an absent name as a row the source no longer has — and asking again is what
-makes dropping a directory into `skills/`, or editing the config, take effect at
-the next search rather than at the next restart. The hub stays the only writer of
-the catalogue either way: a source declares, the hub merges.
-
-The hub's own tools are what is left over, and they are exactly the set-level
-work.
-**`tool_search`, `func_tool_load` and `_func_tool_unload`** are served by the hub
-because each is a question about the *whole* catalogue — what exists, what the
-model is holding, what the budget takes back — so the process that owns the set
-answers it and no plugin can. Their names carry no server because there is none
-to name, which is how every one of our tools is named.
-
-**`skill_use`** is not one of them any more: **`slife2-skills`** serves it, and
-`slife2-cli` owns the `cli:` section. Both are plugins like any other, for a
-reason that is easier to see from the other end — each family has a
-model-facing tool still to come (DESIGN.md §9), and a tool needs a server to be
-served from. A skill is a document in `<data>/skills/` and the tool reads it:
-`skill_use(name="browser-harness")` returns that skill's `SKILL.md`, with the
-folder it lives in in front of it so the paths in the body mean something.
-Skills are installed by putting a directory in that folder — the tool reads the
-disk on every call, so there is nothing to restart.
-
-**A skill is also a row** (`skill:browser-harness`), and so is every `cli:`
-entry — which is what lets `tool_search` answer "what can I do about a browser"
-without the model already knowing to ask for `browser-harness` by name: the
-playbook's whole document is what the search indexes, and "drive a browser"
-reaching it is the entire point. The row is not a tool: it has no load state,
-it never enters the model's list, and calling it answers with the iteration that
-does
-reach the thing (`skill_use`) rather than a refusal. The name is namespaced
-because `browser-harness` is a command *and* the skill documenting it, and one
-name is one row.
-
-**Everything the model may call is a row in the tool catalogue**, the hub's own
-three included. The hub decides what tools *are* — which sources, the naming
-rule above, who may call one — and the record is a file the hub itself opens,
-`<data>/agents/tools.db` through `slife2.libs.store.catalogue.ToolStore`: rows and two
-indexes over them, and the same machinery the turns use, because a store has one writer
-and one writer is what a SQLite file already is. It answers the questions about
-the rows — which are loaded, what one is called at the far end, and the two
-search legs — and nothing in it knows what a proxy name is.
-
-A skill is a document, and it can still need a key: `baidu-search` declares
-`BAIDU_API_KEY` in its own header, and its first instruction runs a script that
-dies without it. `skills:` is where the value comes from — the same chain as
-every other secret, which is the point of writing it down, because a daemon
-started days ago never saw the key you exported this morning.
-
-```yaml
 skills:
   baidu-search:
     env:
-      BAIDU_API_KEY: ${BAIDU_API_KEY}   # shell env → credstore
+      BAIDU_API_KEY: ${BAIDU_API_KEY}
 ```
 
-`skill_use` reports the difference: read a skill whose key is not configured and
-the answer says so, up front, instead of leaving the model to find out when the
-command it was told to run fails. A skill that declares nothing says nothing.
-Nothing runs those scripts yet (DESIGN.md §9) — which is exactly why the check
-belongs in the reader.
+The shipped `slife2.yaml` is annotated in place and is the reference for every
+key.
 
-`enabled: false` keeps an entry configured but never connects it, which is the
-lever worth knowing: everything enabled is a process at startup and its tools in
-every request. It is a **real boolean, or the file does not load**: `no`, `off`
-and `'false'` are strings to this YAML reader (YAML 1.2 dropped the boolean
-spellings), and reading one as "off" — or worse, as "on" — would be this system
-guessing at a value somebody wrote down; the refusal names the entry and the key.
-`servers()` reports it as `off`, so "why is my tool missing" has
-an answer even for an entry that was switched off before it ever ran — and the
-tools it offered while it was on stay in the catalogue, marked `disabled`, so a
-search still finds them. `slife2 down` takes those a step further — a plugin it
-stops takes the child processes that plugin started with it.
+### Editing the configuration
 
-A plugin is required and everything in `mcp:` is optional: the hub asks
-each plugin for a tool list, and one that cannot answer fails the turn rather
-than quietly continuing with fewer tools, while a server that is somebody else's
-is reported and left out. A model that has quietly lost `turn_read` is a
-failure nobody can see, and that is what makes the rule worth having.
+The configuration is edited by hand or by the model. Each family serves tools
+for its own section:
+
+| Family | Tools |
+|---|---|
+| `mcp:` | `mcp_set`, `mcp_list`, `mcp_list_tools`, `mcp_remove`, `mcp_set_enabled` |
+| `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |
+| `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
+| `skills:` | `skill_set`, `skill_list`, `skill_remove`, `skill_set_enabled` |
+| `providers:` and `default:` | `model_set`, `model_list`, `model_remove`, `model_switch` |
+
+All writes go through one module (`slife2.libs.host.configfile`) under a
+cross-process lock. The write is a document edit that preserves comments, and
+the result is validated by the same loader used at startup. An entry the loader
+refuses is put back and the caller is told why.
+
+`set` writes the whole entry: a field that is left out is removed. `set_enabled`
+changes only the `enabled` field. There is no approval gate before a write; in
+particular, `mcp_set` with a `command:` records a program slife2 will start.
+
+## Capabilities
+
+### Conversation and memory
+
+A conversation does not accumulate an unbounded context. `slife2-context` stores
+the turn log and, before each turn, makes one model call that decides:
+
+- which turns already in the conversation to keep;
+- which turns to recall from the log.
+
+The turn runs on the two selections together, in time order. The call reads the
+whole conversation in hand rather than only the new message, because a follow-up
+usually names its subject through the turns above it. The answer is a
+selection, never a dump; if a recall matches more than fits, only what fits is
+returned.
+
+Each turn read by the decision carries a `[TURN:{…}]` footnote naming its id,
+channel, and span. The newest turns carry one too, so they are as addressable as
+restored ones. Capitalized markers are annotations added by the harness and are
+not part of the stored record. A marker that reads as a word, such as
+`[Wechat:{…}]`, was written by a sender and is stored with the message.
+
+The model can browse its history with `turn_list` and `turn_read`.
+`turn_list` is newest first, one line per turn, with `since`/`until` accepting an
+ISO date or a phrase such as `yesterday`, `last month`, or `3 days ago`, and
+`limit`/`offset` paging against `total`. Neither tool takes an agent argument:
+the call itself carries the conversation, so a model reads its own history and
+nothing else.
+
+Every turn is indexed twice when stored: a keyword index over the text by which
+a turn is found, and a vector index over what it is about. Both indexes are
+derived from the turns and can be rebuilt from them. Changing the embedding
+model under `embeddings:` re-embeds the whole history on the next start.
+
+Two harness decisions are not tools:
+
+- `restore` replays the stored context when a conversation starts.
+- `rebuild` runs the context decision before a turn.
+
+A rebuild that decides to keep exactly what is in hand rebuilds nothing. A
+discriminator that times out, a provider that errors, or an unreadable answer
+keeps the existing context and runs the turn. A missing turn store fails the
+turn, like any missing plugin.
+
+The model can browse the turn log but cannot semantically search it; the recall
+used by the context decision belongs to the store.
+
+### Tools
+
+`slife2-toolhub` is the only process that decides which tools the model may see.
+It does not reach external servers itself. `slife2-mcp-tools` holds the `mcp:`
+connections and `slife2-restapi-tools` holds the `rest-api:` connections; each
+declares its sources and the tools they offer, and the hub merges the
+declarations, names the tools, gates them, and routes calls back.
+
+The hub serves three set-level tools:
+
+- `tool_search` searches the whole catalogue by keyword and by meaning.
+- `func_tool_load` puts one or more tools into the list shown to the model.
+- `_func_tool_unload` removes tools from that list. The harness also calls it
+  at a turn boundary to enforce the budget.
+
+A model can call a name returned by `tool_search` without loading it, but loading
+is what keeps it in the list sent with every request. The model's list is
+re-read from the hub before every model call, so a tool loaded during a turn is
+available from the next iteration.
+
+Every tool served by slife2's own plugins starts loaded. An external source
+starts loaded only when its entry sets `autoload: true`. Everything else is
+discovered and loaded on demand.
+
+The loaded list is bounded by `tool_load.threshold` (default 100). Over the
+limit, the least recently called tools are unloaded, never slife2's own tools
+and never an `autoload` source. A tool that has never been called is ordered by
+when it was loaded. The trim happens at a turn boundary; the names removed are
+written into the conversation as a tool call and its result, so the model learns
+that the list shrank. Eviction costs a search and a load, not a capability.
+
+Tool names:
+
+- A tool from an `mcp:` entry is `{server}__{tool}`, for example
+  `arxiv__arxiv_search_papers`.
+- A plugin's own tools use bare names, for example `turn_read`. The plugin
+  serving a tool is a fact about the system, not something the model needs in
+  the name.
+
+Every tool result is a JSON object. A listing answers:
+
+```json
+{"<noun>": [], "total": 0, "limit": 20, "offset": 0}
+```
+
+`total` is what says whether another page exists. A read answers the row's own
+fields. A refusal or a miss raises a `ToolError`, which the harness reports to
+the model as a failed call with the reason. `_check_new_input` is the one
+exception: it returns a person's message verbatim.
+
+No answer is intended to exceed `tool_result.tokens`. Listings that can grow use
+`limit`/`offset`; an output that cannot be bounded is stored as a dump (see
+[Cabinet](#cabinet)).
+
+#### Tool call options
+
+Every tool accepts three meta-parameters. They are added to every advertised
+schema and stripped before dispatch, so no tool server sees them.
+
+| Parameter | Effect |
+|---|---|
+| `_timeout` | Seconds for this call. It overrides the tool's default. `0` or a negative value means "use the default", never "no limit". A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. There is no default timeout. |
+| `_async` | Run the call in the background. The model receives a `task_id`; the result is delivered back into the conversation with an `[AgentToolResult:{…}]` marker and drawn on the `async-tool:<tool>` channel. `check_async` reports whether the call is running, finished, failed, or cancelled; `cancel_async` abandons it. Backgrounding removes the wait, not the result budget. An agent task's loop has no `_async`. |
+| `_approve` | Ask the user before running the call. The terminal draws an inline row (`y` approves, `n` or `Esc` denies) and answers with `answer_approval`. If the channel has no person behind it — WeChat, a scheduled run, another agent, or a client that cannot draw the prompt — the call runs without asking. A caller that can answer says so with `send_message(..., watched=true)`. |
+
+#### Skills and commands
+
+Playbooks live in `<data>/skills/<name>/SKILL.md`. `slife2-skills` serves
+`skill_use`, which returns the playbook's text preceded by its directory.
+Installing a skill is dropping a directory into `skills/`; the tool reads the
+disk on every call, so no restart is needed.
+
+A skill can declare environment requirements in its header. The values come from
+the `skills:` section, resolved through the same chain as any other secret.
+`skill_use` reports a missing key before the model runs an instruction that
+depends on it.
+
+`cli:` entries describe programs already installed on the machine. Every entry is
+a catalogue row (`cli:yt-dlp`), so `tool_search` can find it by what it does.
+The row is not a callable tool and has no load state. No tool executes a `cli:`
+entry yet; `func_tool_load` reports that.
+
+`enabled: false` keeps an entry configured but never connects it. The value must
+be a real YAML boolean: `no`, `off`, and `'false'` are strings under YAML 1.2
+and are refused rather than guessed. A disabled entry's tools remain in the
+catalogue, marked `disabled`, so searches still find them.
 
 ### Media
 
-Four capabilities behind one config section: **draw an image, render a video,
-say something out loud, write down what an audio file says**.
+The `media:` section provides four capabilities:
+
+- `generate_image` — draw an image from a prompt.
+- `generate_video` — render a video from a prompt or an image.
+- `text_to_speech` — write speech to an audio file.
+- `transcribe_audio` — transcribe an audio file, paged by `offset` and `limit`.
+
+Each model declares what it is for:
 
 ```yaml
 media:
-  defaults:                              # which model a call gets unnamed
+  defaults:
     image: bailian_personal/wan2.7-image
     video: bailian_personal/happyhorse-1.1-t2v
   providers:
     bailian_personal:
-      api: dashscope-aigc                # the wire, not a brand
+      api: dashscope-aigc
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
       api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
       models:
-        - { model: wan2.7-image, kind: image }
-        - { model: happyhorse-1.1-t2v, kind: video, params: { resolution: 720P, duration: 5 } }
-        - { model: qwen-audio-3.0-tts-plus, kind: tts, voice: longanhuan_v3.6 }
-        - { model: qwen-audio-3.0-asr-flash, kind: asr }
+        - {model: wan2.7-image, kind: image}
+        - {model: happyhorse-1.1-t2v, kind: video, params: {resolution: 720P, duration: 5}}
+        - {model: qwen-audio-3.0-tts-plus, kind: tts, voice: longanhuan_v3.6}
+        - {model: qwen-audio-3.0-asr-flash, kind: asr}
 ```
 
-**What a model is *for* is a fact about the model**, which is the one place this
-differs from `providers:` and `embeddings:` — a vendor may serve all four kinds
-and its entries say which is which, so "switch to the cheap image model" is a
-config edit rather than a different call. `defaults:` is which one a call gets
-when it names none, and a call may always name its own.
+The supported `api:` values are `dashscope-aigc` (images, video, speech,
+transcription) and `openai-images` (image generation only). Choosing a model
+that does not support the requested kind is refused.
 
-**`api:` selects the wire**, and there are two today: `dashscope-aigc` (Bailian:
-images, video, speech and transcription) and `openai-images` (an OpenAI-compatible
-`/images/generations`, which draws pictures and refuses the other three by name —
-better than a 404 from the vendor).
+Generated files are written under `<data>/agents/<agent>/media/`. A `folder`
+argument creates a subdirectory inside that root; a path outside it is refused.
+A long-running video call that exceeds its timeout is refused with the
+provider's job id rather than its result.
 
-Generated files are written under **`<data>/agents/<agent>/media/`** and nowhere
-else. Per agent because what it holds is what that agent generated, and under
-`agents/` rather than `runtime/` because a daemon's working directory is
-documented as reconstructible — a generated image left there would be the one
-file certain to be lost. They are work products rather than cabinet documents:
-nothing registers them and the answer is a path. `folder=` sorts them into
-subdirectories *inside* that root and a path outside it is refused, so a model
-does not get to choose where on your disk a file is written. A video can
-take minutes and the wait is bounded: past `timeout` the call is refused with the
-provider's job id rather than its result, because the render carries on there and
-asking again would pay for it twice.
+### File tunnel
 
-### The file tunnel
+`slife2-file-tunnel` publishes a local file at a public HTTPS URL so a service
+that cannot read the local disk can fetch it:
 
-**A public HTTPS URL for a local file**, so something that cannot read your disk
-can fetch one anyway — a vision model asked about a picture, a chat API that
-takes a URL and nothing else.
-
-```
-expose_local_image(path)      → https://<tunnel>/share/<token>
-unexpose_local_image(token)   → that URL stops working
+```text
+expose_local_image(path)      -> https://<tunnel>/share/<token>
+unexpose_local_image(token)   -> the URL stops working
 ```
 
-The file is not moved or copied: it is served from where it is, for as long as
-the tunnel is up. The link stops working the moment the **file changes** (so a
-path swapped underneath a link can never serve new bytes to whoever holds the
-old one), when `unexpose_local_image` is called on its token, and when the
-process exits — those three are the whole list, and ending with a *conversation*
-is not on it: a share outlives the turn that made it, so it is the model's or
-the operator's to withdraw. A private key, a `.env` or a saved password
-is refused by name — a share URL is public while the tunnel is up, so that would
-be publishing it.
+The file is served from its original location and is not copied. A link stops
+working when:
 
-**A tunnel is somebody else's process, and the config says whose.** Three
-providers, exactly one active; the others stay configured and inert:
+- the file changes (the token is pinned to the file's identity and metadata);
+- `unexpose_local_image` is called with the token;
+- the process exits.
 
-```yaml
-file-tunnel:
-  active: cloudflare
-  providers:
-    ngrok:        { token: ${NGROK_AUTHTOKEN} }
-    localhost.run: { binary: ${SSH_BINARY:-ssh}, user: nokey, remote_port: 80 }
-    cloudflare:   { binary: ${CLOUDFLARED_BINARY:-cloudflared}, protocol: http2 }
-```
+A share outlives the turn that created it; it is withdrawn by the model or the
+operator. Private keys, `.env` files, and saved passwords are refused by name.
 
-| provider | needs | the URL | what a *browser* sees |
-|---|---|---|---|
-| `ngrok` | an `NGROK_AUTHTOKEN` credential | one stable dev domain per account | on the free tier, an interstitial splash page (ngrok answers any `Mozilla` User-Agent with it, and forbids suppressing it server-side) |
-| `localhost.run` | an `ssh` client — Windows 10+ ships one | a random `*.lhr.life` hostname that rotates every few hours | the file; TLS ends at their edge. Bytes are relayed by a third party |
-| `cloudflare` | the `cloudflared` binary, which nothing installs | a `*.trycloudflare.com` hostname, stable for the process's life | the file |
+Three providers are supported. Exactly one is active; the others may stay
+configured and inert.
 
-Programmatic fetches — the multimodal-LLM path this exists for — are unaffected
-by ngrok's splash page, which is why ngrok is the default when nothing is
-configured. The config above ships with **`cloudflare` active**, because it
-needs no account and relays the bytes to nobody; if you have not installed
-`cloudflared`, set `active:` to `localhost.run` and the OpenSSH client Windows
-already ships is the whole requirement. **A tunnel that is not up, or that has
-published a URL nothing can reach, is refused rather than handed out**: a link
-that answers HTTP 530 is worse than an error, because the model that cannot
-fetch it cannot say why. `tunnel_status` is where the detail is — the state, the
-URL, whether it is reachable, the edge address it is dialing, and the path of
-the program that is running it.
-
-### The cabinet
-
-Your own notes, a diary, saved files and reports, in one place that a search
-covers all at once and a person can read in an editor. Four kinds, and the
-difference between them is what a *document* is:
-
-| kind | keyed by | a second write |
+| Provider | Requirement | URL behavior |
 |---|---|---|
-| **note** | a subject you choose | replaces it |
-| **diary** | the date | appends a section |
-| **file** | its path inside the cabinet | copies the file in |
-| **report** | a title | appends a section |
+| `ngrok` | `NGROK_AUTHTOKEN` | One stable development domain per account. The free tier shows an interstitial page to browsers. |
+| `localhost.run` | An `ssh` client | A random `*.lhr.life` hostname that rotates every few hours. TLS terminates at the provider, which relays the bytes. |
+| `cloudflare` | The `cloudflared` binary | A `*.trycloudflare.com` hostname that is stable for the process's lifetime. |
 
-A note and a saved file are documents — the second write *is* what it holds —
-and a day and a title are logs, because two entries under one date are two facts
-about it and nothing in the later text says which part of the earlier one it
-replaces. That is why only the two document kinds have a remove tool.
+The built-in default is `ngrok`. The shipped `slife2.yaml` selects `cloudflare`,
+which needs no account and relays the bytes to nobody; set `active:` to
+`localhost.run` if `cloudflared` is not installed.
 
-**A fifth kind is not yours.** A tool output too large to put in a conversation
-is kept here whole — a **dump**, keyed by the call that produced it — and the
-conversation carries a selection of that output's own lines instead, within
-`tool_result: tokens:`. Nothing is cut and nothing is summarised: the lines the
-model is shown are the tool's own words, chosen in the light of what the
-conversation is doing, and everything else is one `dump_read` away. **`dump_read`
-is a searching reader**, because that is what a large output needs: give it a
-word and it finds the lines and the lines around them; give it a line number and
-it reads on from there (`-1` is the last line); give it a count and it reads
-fewer. Every answer is numbered and stays within the same window, so reading an
-output back never costs more than the conversation would have — and a search that
-does not name `dump` does not see dumps, because machine output is not what your
-own notes should be ranked against.
+A tunnel that is not up, or that has published a URL that cannot be reached, is
+refused rather than handed out. The `tunnel_status` tool reports the state, URL,
+reachability, edge address, and the binary in use; it is an internal diagnostic
+tool and is not exposed to the model.
 
-**Everything is written twice**, and one of the two is for you: the row is what
-`cabinet_search` reads, and the same document lands as markdown under
-`agents/<agent>/cabinet/` — `notes/会议记录.md`, `diary/2026-10-11.md`,
-`reports/weekly.md` — which is what you open, edit or delete without asking
-anybody. **A subject that is not already lower-case carries a short digest in its
-filename** (`notes/Python~6e3604888c.md`), because a path is not a string:
-`Python.md` and `python.md` are *one file* on Windows and macOS, and two notes
-sharing one file is the one thing this directory may not do — the second write
-would replace the first's markdown while both rows stayed correct. The readable
-half of the name survives, and a date never needs the digest. A saved file's bytes live there too (`<category>/`) and are never
-put in the index: `file_read` returns a file's *text*, and refuses a PDF or an
-image by saying what it is rather than decoding it into a page of replacement
-characters. Text in another encoding is read and the encoding named on the first
-line, because a *silent* wrong decode is the one outcome worth refusing.
+### Cabinet
 
-**`cabinet_search` takes words or sentences**, the same two inputs
-`tool_search` takes: `keywords` are words that must all be there (a name, a
-path, a symbol), and `sentences` are questions matched by meaning — several are
-several questions, and each one can only add results. A file has no text of its
-own, so `cabinet_summarize` is how it becomes findable by what it *is* rather
-than by its name; writing a summary for a file re-embeds it, because its
-description is part of what its vector was built from.
+The cabinet is a per-agent store of notes, diary entries, saved files, reports,
+and dumps.
 
-Two things it does not do, both by name: **`file_save` does not fetch a URL**
-(it copies files already on this machine — v1's URL half came with an SSRF guard
-that is a change of its own), and **there is no `grep` leg** (DESIGN.md §9
-defers v1's third search mode for the whole system, and the cabinet inherits
-that rather than growing a second regex engine).
+| Kind | Key | A second write |
+|---|---|---|
+| `note` | A subject chosen by the user | Replaces the note. |
+| `diary` | A date | Appends a section. |
+| `file` | Its path inside the cabinet | Copies the file in. |
+| `report` | A title | Appends a section. |
+| `dump` | The tool call that produced the output | Written by the harness. |
+
+Notes and files are documents: the second write is their content, which is why
+only those two kinds have remove tools. A diary and a report are logs: two
+entries under one date or title are two facts, and nothing in the later text says
+which part of the earlier one it replaces.
+
+A dump is a tool output too large for the conversation. The output is stored
+whole, keyed by the tool call id, and the conversation carries a selection of the
+output's own lines within `tool_result.tokens`. Nothing is paraphrased. The
+selection is made by a discriminator call that is given the output, the
+conversation in hand, and the current input, and answers with line ranges. The
+model reads any part of the dump back with `dump_read`, a searching reader:
+`pattern` finds lines and `context` adds their neighbours, `offset` reads from a
+line (negative counts from the end), and `limit` reads fewer lines. Every answer
+stays within the same token budget. A search does not see dumps unless `kind` is
+`dump`.
+
+Every document is written twice: a row in the cabinet index and a Markdown file
+under `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`), which can be
+opened, edited, or deleted without slife2. A subject that is not already
+lowercase carries a short digest in its filename (`notes/Python~6e3604888c.md`)
+because Windows and macOS treat `Python.md` and `python.md` as one file. A saved
+file's bytes live under the cabinet as well and are not indexed; `file_read`
+returns a file's text and refuses a PDF, image, or archive by saying what it is.
+Text in another encoding is decoded and the encoding is named in the answer.
+
+`cabinet_search` accepts the same two inputs as `tool_search`: `keywords` are
+words that must all be present, and `sentences` are questions matched by
+meaning. Several sentences are several questions, and each can only add results.
+`cabinet_summarize` writes a description for a document; writing one for a file
+re-embeds it, because the description is part of what its vector is built from.
+
+`file_save` copies files already on the machine. It does not fetch URLs. The
+cabinet has no `grep` search leg.
 
 ### WeChat
 
-`slife2-wechat` connects one WeChat account per agent, over iLink's hosted
-bridge. Nothing about it is configured: a login is *scanned*, so
-`wechat_login` puts a QR code in the model's reply, somebody points the WeChat
-app at it, and the token that comes back is saved to
-`agents/<agent>/wechat.yaml` where the next start picks it up. A login lasts
-about a day; `wechat_check_status` says how much of it is left.
+`slife2-wechat` connects one WeChat account per agent through iLink's hosted
+bridge. A login is scanned rather than configured. `wechat_login` returns a QR
+code; scanning it saves a token to `agents/<agent>/wechat.yaml`, where the next
+start reads it. A login lasts about a day; `wechat_check_status` reports the
+remaining time.
 
-**One WeChat account holds one live login.** Scan a code with the same phone for
-a second agent — or on a second machine — and the login that was there first is
-retired by the bridge, silently: it is answered `session timeout` from then on,
-so nothing it sends arrives. slife2 reads that answer for what it is, which is
-why the first agent's window says `[✗ Wechat offline]` and its
-`wechat_check_status` says why; the fix is to scan a code again, taking the
-account back.
+One WeChat account holds one live login. Scanning the same account for a second
+agent or on a second machine silently retires the first login, which then
+receives `session timeout` from the bridge. The first agent's window shows
+`[✗ Wechat offline]`, and `wechat_check_status` gives the reason. Scanning again
+takes the account back.
 
-Four tools, and the model uses all of them:
-
-| tool | what it does |
+| Tool | Purpose |
 |---|---|
-| `wechat_login` | Fetch a QR code and start watching for the scan |
-| `wechat_check_status` | Connected? How long left? And **who to reply to** |
-| `wechat_send_message` | Send a text to a peer |
-| `wechat_logout` | Forget this agent's login |
+| `wechat_login` | Fetch a QR code and start watching for the scan. |
+| `wechat_check_status` | Report connection state, remaining time, and the peer to reply to. |
+| `wechat_send_message` | Send a text message to a peer. |
+| `wechat_logout` | Forget this agent's login. |
 
-**The link's own coming and going is a line in the window**, not a turn:
-`[⚡ Wechat online]` when a scan lands, `[✗ Wechat offline]` when the login drops
-or is forgotten — the same shape as `[⚡ jill online]` from the A2A mesh, because
-both say the same thing about a conversation: what it can reach now. A login
-*picked up at start-up* says nothing, since a window shows what happened while
-you were watching rather than that the process started. The *reasons* stay in
-`wechat_check_status`, where a model asks for them.
+The connection's arrival and departure are drawn as harness lines, not turns:
+`[⚡ Wechat online]` and `[✗ Wechat offline]`. The reasons remain available
+through `wechat_check_status`.
 
-A message somebody sends arrives as a **turn of that agent's own conversation —
-in the window**. The plugin hands it to the terminal showing that conversation,
-which runs it exactly as if it had been typed there: the same queue, the same
-turn, the same transcript. So the message sent from a phone appears on screen,
-its answer streams there, and both are in the record afterwards.
+A message from WeChat becomes a turn in that agent's conversation and is drawn in
+the window showing that conversation. It is recorded with channel `wechat` and a
+`[Wechat:{…}]` prefix naming the sender. Replying is the model's job: nothing
+auto-dispatches an answer. The model calls `wechat_send_message` with the peer
+and the `context_token` from the marker. While the turn runs, the other person
+sees a typing indicator.
 
-For that, the message goes to **`slife2-tui`**, the terminal's own inbox: a
-plugin like every other one — an address under `servers:`, started and shared by
-`slife2`, listed by `slife2 status` — which keeps **a session per agent**. The
-window attaches to it when it opens and holds that call for as long as it is
-showing a conversation, which is what lets a call say *which* terminal it means;
-two windows at once are two sessions, and neither is more special than the other
-(DESIGN.md §4).
+Each agent logs in separately and has its own file and poll loop. The plugin is
+one shared process.
 
-The turn is recorded with `channel=wechat` and a
-`[Wechat:{"peer_wechat_id": …}]` prefix naming who it is from. The name is
-deliberately not in capitals — a convention rather than a
-rule: **capitals mark an annotation that is not part of the conversation**,
-which is what `[TURN:{…}]` is, the footnote a turn carries when the model reads
-its context back (added when the list is built, never stored) — while this marker
-is part of the message and goes into the turn's log with it. Nothing checks the
-case; it is there to be read. A window shows the channel rather than the marker:
-the line wears `Wechat> ` instead of `You> ` and the two ids inside the marker
-come off, because they are what a reply needs and not what a reader does.
-Answering is the model's job and only the
-model's: nothing here auto-dispatches a reply, so a turn that says nothing sends
-nothing — call `wechat_send_message` with the peer and the `context_token` the
-marker carried. While the turn runs the person on the other end sees *typing…*,
-and it stops when the reply goes out.
+### Agent tasks
 
-Each agent logs in separately and gets its own account, its own file and its own
-poll loop; the plugin is one shared process (DESIGN.md §1.2). There is no
-`wechat:` section to write: a login is scanned rather than configured, and the
-`agents/<agent>/wechat.yaml` files are the whole of what the plugin resumes. A machine
-that should not talk to WeChat is a machine where nobody scans a code.
+An agent task is a separate loop of the same agent, started with a name and a
+description and answered later by a message in the same conversation.
 
-### The agent task
-
-A turn ends when the model stops calling tools, so anything long holds that turn
-open: the person watches a prompt nothing can be typed into. **An agent task** is
-that work gone elsewhere — one loop of the agent's own, started with a name and a
-description and answered later, by a message, in the same conversation.
-
-The model has four tools over them, and **not one of them waits**:
-
-| tool | what it does |
+| Tool | Purpose |
 |---|---|
-| `agent_task_start` | Start one, and answer at once with its id |
-| `agent_task_status` | What one is doing — never its result, which arrives by itself |
-| `agent_task_list` | What this agent has, running ones first |
-| `agent_task_cancel` | Stop one, answering with its state *after* the call |
+| `agent_task_start` | Start a task and return its id immediately. |
+| `agent_task_status` | Report what a task is doing. Never returns its result. |
+| `agent_task_list` | List this agent's tasks, running first. |
+| `agent_task_cancel` | Stop a task and report its state after the call. |
 
-```
-agent_task_start(name="research", description="Find the retry policy, and say what it is")
-→ {"task_id": "agent-task:research", "name": "research", "status": "running", ...}
-```
-
-**It runs as the agent, on the agent's own context.** The same system prompt, the
-same model, the same tools — and `restore` and `rebuild` under the agent's own
-key, so a task starts from what this conversation has been about rather than from
-nothing. What it does *not* have is the turn that started it: `restore` reads the
-*stored* list and a turn is written when it ends, so the description is where the
-last exchange has to be restated. Nothing is recorded on its behalf — the answer
-reaching the conversation as a message is what the record gains — and its own
-reply is handed back on its own, so there is nothing to poll for and no way to
-fetch one.
-
-The answer arrives on the `agent-task:<name>` channel wearing
-`[AgentTaskResult:{…}]` — the task's id, name, state and times — so the window
-shows `AsyncTask(research)> ` and the model learns the id its next call
-needs. It goes to the terminal showing that conversation, and nowhere else: with
-no window there is no conversation running, so the answer is `undelivered` and
-the log says so rather than a turn being run for nobody.
+A task runs as the agent, with the same system prompt, model, tools, and
+context decision. It does not have the turn that started it: `restore` reads the
+stored turn list, and a turn is written only when it ends, so the description
+must restate the relevant context. The task's turns are not written to the
+agent's conversation. Its answer is delivered as a message with an
+`[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
+`AsyncTask(<name>)>`. If no window is showing the conversation, the answer is
+reported as `undelivered` and the log says so.
 
 ```yaml
 agent-task:
-  max_running: 4   # tasks running at once, per agent
+  max_running: 4
 ```
 
-**That is the only key a task owns.** Everything else it is made of comes out of
-`agent:` above, because a task *is* the agent working — the one section in this
-file with two readers. `max_running` is the one bound the feature has: the tool
-set is the single catalogue and nothing filters it, so a task may start a task,
-and what that leaves unbounded is how much work happens over time rather than how
-much happens at once (DESIGN.md §9).
+`max_running` is the only key the section owns. Everything else comes from
+`agent:`. A task may start another task, so `max_running` bounds concurrency but
+not the total amount of work over time.
 
 ### Scheduled tasks
 
-**The one thing here that starts work nobody asked for at the moment it starts.**
-A scheduled task is a name, a description and a cron expression, written down by
-the model; from then on `slife2-schedule` fires it, and when it comes due the
-agent is handed the task as a turn of its own, in the terminal running that
-conversation. **That turn has one instruction**: call `schedule_run_now` with the
-due time it carries. A fire nothing was there to receive — no window showing that
-agent — ends the run `failed` with the reason recorded, rather than leaving it
-`pending`: the ledger is where "did it run?" is answered. A task that
-has come due is **not the agent's to decline**; `schedule_run_skip` exists for the
-runs that did not happen at all — and a run whose task *is* running is refused
-rather than closed, because closing it would leave the work going with nothing
-recording it: `agent_task_cancel` is how that one ends, and `reconcile` then
-closes the run `failed` with the reason.
+A scheduled task is a name, a description, and a cron expression written by the
+model. `slife2-schedule` fires it while slife2 is running. When a task comes due,
+the agent receives it as a turn in the window showing that conversation. That
+turn calls `schedule_run_now` with the due time it carries. A fire that reaches
+no window ends the run as `failed` with the reason recorded.
 
-| tool | what it does |
+| Tool | Purpose |
 |---|---|
-| `schedule_set` | Write a task (or replace one) — name, description, cron, timezone |
-| `schedule_remove` | Forget it, and everything it ever did |
-| `schedule_list` | What is scheduled, and when each next comes due |
-| `schedule_runs` | What it has actually done — one row per fire |
-| `schedule_run_now` | Start this run's work now; with a `due_at`, backfill that run |
-| `schedule_run_skip` | Close a run that is not going to happen, and say why |
+| `schedule_set` | Write or replace a task: name, description, cron, timezone. |
+| `schedule_remove` | Remove a task and all of its runs. |
+| `schedule_list` | List tasks and their next due times. |
+| `schedule_runs` | List the ledger: one row per fire. |
+| `schedule_run_now` | Start this run's work now; with `due_at`, backfill a run. |
+| `schedule_run_skip` | Close a run that will not happen, with a reason. |
 
-```
-schedule_set(name="daily", description="Write the day's entry from the turns.",
-             cron="0 22 * * *", timezone="Asia/Shanghai")
-→ {"name": "daily", "cron": "0 22 * * *", "next_run": "2026-10-12T22:00:00+08:00", ...}
-```
+A run is one fire, named by the moment it was due. Its state moves from
+`pending` to `ran`, `failed`, `missed`, or `skipped`. The row is written before
+the work is handed over, so a fire cannot repeat on the next poll. A hand-over
+that is refused marks the run `failed`. A run whose work could not be started is
+closed `failed` with the reason rather than left open.
 
-**`schedule_run_now` is the plugin starting the work, not the agent doing it.**
-The call hands the run to `agent-task` as a task of the agent's own — the same
-prompt, model and tools, the same context — and returns at once. Because the
-*plugin* is the caller it is handed the task's id, so the clock's own poll can ask
-what became of it: `finished` closes the run `ran` at the task's own `finished_at`,
-a failure or a cancellation closes it `failed`, and nothing has to be remembered
-in a later turn. The answer itself is delivered back to the conversation by
-`agent-task`, wearing `[AgentTaskResult:…]` like any other background task's.
+Tasks fire only while slife2 is running. On startup, the sweep closes runs left
+open by a stopped process, and the poll records the newest missed fire for each
+task. `schedule_runs(status="missed")` lists them. A missed run can be
+backfilled with `schedule_run_now(name, due_at)` or closed with
+`schedule_run_skip`.
 
-**The ledger is the feature.** A *run* is one fire, named by the moment it was
-**due** rather than by when it ran, and it moves `pending → ran | failed | missed |
-skipped`. The row is written before the trigger is handed over, so a fire cannot
-repeat on the next poll; a hand-over that is refused marks the run `failed`; one
-that does not come back leaves it `pending`, because a run whose fate is unknown
-is not reported as either. A run whose work **could not be started** is closed
-`failed` with the reason, rather than left open with nothing behind it.
-
-**Tasks fire only while slife2 is running**, and what was missed is not hidden:
-coming up, the sweep fails anything a stopped process left open and the poll
-records the newest fire each task missed — `schedule_runs(status="missed")` is
-where you find them — so a run can be backfilled with `schedule_run_now(name,
-due_at)` or closed with `schedule_run_skip`. Nothing announces them: **a trigger
-is the only thing the clock ever says to a conversation**, and the ledger is where
-"did it run?" is answered (DESIGN.md §1.7, §9). A trigger wears no marker either,
-because the marker vocabulary is for matching a *result* to what produced it and a
-trigger is not a result — the `schedule:<task>` channel carries which task, and
-the words say **whose ledger the run is in**, which is the one thing that tells a
-trigger delivered to the wrong conversation from a reader's own.
-
-A ledger lives at `<data>/agents/<agent>/schedule.db`, and there is **no config
-section** — an address is the whole of what is written down about the plugin. A
-task's `timezone` is an IANA name, and leaving it out means the machine's clock
-*as it is now*, which does not follow a daylight-saving change.
-
-```yaml
-# nothing to configure: a machine that should not run scheduled tasks is a
-# machine where nobody writes one
-```
+The ledger is `<data>/agents/<agent>/schedule.db`. There is no configuration
+section. A task's `timezone` is an IANA name; leaving it out uses the machine's
+current clock, which does not follow a daylight-saving change.
 
 ### Peer agents
 
-**Your agent's peers are other agents, and this is how it talks to them.** The
-network is *peer agents* — the word every tool, envelope and channel uses —
-while the wire underneath is **A2A over MQTT**, on the published profile, so
-anything else that speaks it can talk to you. The wire, the topics, the agent
-cards and the task lifecycle are that SDK's; the plugin that carries it is
-`slife2-a2a`, and it is the same plugin that serves a `subagent:` section one
-port over. A person editing `slife2.yaml` writes `peer_agent:`; a model is
-handed `peer_agent_*`; nothing a model reads says `a2a`.
+An agent's peers are other agents, reached over the published A2A-over-MQTT
+profile. A person writes `peer_agent:` in `slife2.yaml`; the model sees
+`peer_agent_*` tools. The underlying protocol name does not appear in anything
+the model reads.
 
-| tool | what it does |
+| Tool | Purpose |
 |---|---|
-| `peer_agent_send_message` | Send a task, complete one you were sent, or just talk — `message_type` decides which |
-| `peer_agent_cancel_task` | Withdraw a task you sent |
-| `peer_agent_list` | The roster: you first, then every peer, by name |
-| `peer_agent_task_list` | The tasks still open: waiting on an answer, or owing one |
-| `peer_agent_broadcast` | A fire-and-forget event to every peer |
+| `peer_agent_send_message` | Send a task, complete a received task, or send a message. `message_type` selects the operation. |
+| `peer_agent_cancel_task` | Withdraw a task this agent sent. |
+| `peer_agent_list` | List this agent first, then every peer by name. |
+| `peer_agent_task_list` | List open tasks: those waiting for an answer and those still owed one. |
+| `peer_agent_broadcast` | Send a fire-and-forget event to every peer. |
 
-```
-peer_agent_send_message(agent="jill", message="Summarise the release notes.")
-→ {"peer": "jill", "task_id": "61ab0c8a…", "message_type": "task_request",
-   "note": "The result will arrive in this conversation."}
-```
+A `task_request` returns an id immediately; the result arrives later as a
+message with a `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]`
+marker. There is nothing to poll. `task_response` completes a task this agent
+was sent, using the `task_id` from the marker. The direction is carried by
+`from`; `agent_name` is the agent's own identity.
 
-**Nothing waits.** A `task_request` returns an id immediately and the result
-arrives later on its own as a message wearing `[PeerAgent:{"from": "jill",
-"type": "task_response", "task_id": "…"}]`. There is nothing to poll. `task_response`
-completes a task *you* were sent, with the `task_id` from its own marker; the
-direction is in `from`, never `agent_name`, because that word is the agent's own
-identity. Incoming messages read as `PeerAgent(jill)> ` in the window, with the marker
-taken back off.
+There is one mesh per agent, because the agent name is the MQTT client id and the
+last segment of the request topic. Two agents on one machine are two peers. An
+agent reached from two places is refused by the name-collision check before it
+joins.
 
-**"Nothing to poll" is not "nothing to ask."** `peer_agent_task_list` answers what
-is still open — the tasks you sent that have not come back, the ones you were sent
-and still owe, and any a previous process died holding — so a compacted
-conversation or a restart does not lose the ids it was waiting on.
+Presence is drawn as a harness line, not a turn: `[⚡ jill online]`. The roster is
+available through `peer_agent_list`. An agent is on the mesh while a window holds
+its `join` call; `--headless` holds the same call without a window. No inbound
+record is persisted: in-flight tasks are held in memory, and a restart starts
+with none.
 
-**A peer may be on this machine or on another one**, and nothing tells them
-apart — a local agent is just one whose mesh this process holds, published to the
-broker under its own name. There is a **mesh per agent**, because the agent name
-*is* the mesh identity: the MQTT client id and the last segment of the request
-topic. Two agents on one machine are therefore two peers, and one agent reached
-from two places is what the name-collision check refuses, before joining, rather
-than fighting over.
-
-**Coming and going is a line in the window, not a turn.** A peer arriving shows
-as `[⚡ jill online]` beside `[restored 3 turns]` and `[kept 12 turns, recalled
-3]` — the same shape, because they are the same kind of thing: something the
-harness did rather than something anyone in the conversation said. Nothing runs
-and the model is not told: the roster is `peer_agent_list`' answer, and a peer
-that wants to be answered sends a task.
-
-**An agent is on the mesh while somebody is being it.** A window holds a call
-open for its agent's life, so coming online and going offline follow somebody
-actually being there — a peer that watched the agent arrive watches it leave,
-with nothing to send. `slife2 --headless` holds that same call with no window at
-all, which is what an unattended machine wants. One `peer_agent_*` call joins its
-agent too and keeps it: what follows a send is a reply the agent is waiting for.
-There is no persisted inbound record: the in-flight tasks are in memory, and a
-restart starts with none.
-
-**The broker is started for you if it is not there, and stopped when you are
-done**, which is where this departs from v1. Left out, `peer_agent.broker` is the
-subagent network's address (`subagent.broker`): one machine meets its subagents
-somewhere, and a peer network that names no broker meets there too. Point it at an
-address; if
-nothing is listening there and it is *this* machine, `mosquitto` is started on it
-— and the last `slife2` to exit stops it again (or `slife2 down`, or `slife2
-status` to see it). Only a broker *slife2 started* is ever stopped: the record
-its start wrote is the whole of the permission, so a system mosquitto or one you
-ran yourself is left alone. A broker that will not serve — or one named on
-another machine that is down — fails the startup, naming it and showing its log,
-rather than leaving you five tools attached to nothing. `provider: mosquitto` is
-the only value; anything else is a config error, not a silently disabled feature.
+The broker is started automatically when the configured one is local and absent,
+and stopped with the stack only if slife2 started it. A system broker or one
+started by hand is left alone. A broker that cannot serve fails startup with its
+name and log. `provider: mosquitto` is the only supported value.
 
 ```yaml
 peer_agent:
   provider: mosquitto
   broker:
-    host: localhost      # another machine is reached the same way, and is
-    port: 1883           # never started locally — that host's broker is theirs
-  org: default           # the topic namespace: two groups on one broker are
-  unit: default          # told apart by these
+    host: localhost
+    port: 1883
+  org: default
+  unit: default
 ```
 
-**A restart drops every task that was in flight**, because the completion
-bridge and the peer's reply topic both lived in the process that died. Nothing
-is remembered or announced: a peer that is still waiting sees the task in its
-own `peer_agent_task_list` (or the subagent's `subagent_task_list`) and re-sends
-it, which arrives as a fresh request. **Omit the `peer_agent:` section
-entirely** to stay off that network: a machine that should not be on it is a machine where nobody
-writes one.
+If `broker:` is omitted, the peer network uses the subagent network's broker
+address. Omitting the `peer_agent:` section keeps the machine off the network
+entirely.
 
-## Where things live
+A restart drops every in-flight task. A peer that is still waiting sees the task
+in its own `peer_agent_task_list` and re-sends it, which arrives as a new
+request.
 
-**Two places, because there are two kinds of thing.** A **home** is a data
-directory — the config, the playbooks, and the agents whose data lives in it —
-and a home is what `--data-dir` names:
+### Subagents
 
-```
-<data>/                            --data-dir DIR, or $SLIFE2_DATA_DIR
-  slife2.yaml                      the config; absent means the defaults
-  skills/                          <name>/SKILL.md — playbooks, written by you
-  agents/                          everything that belongs to one agent
-    tools.db                       the tool catalogue — the one shared file
-    <agent>/                       one directory is the whole of one agent
-      turns.db                     its conversation, and what it runs on
-      schedule.db                  what it scheduled, and every run of it
-      cabinet/                     notes/, diary/, reports/ as markdown and the
-                                   saved files by category, with `.index.db`
-                                   (the search index) inside
-      media/                       what it generated
-      wechat.yaml                  its WeChat login (~24h, written on a scan)
-      subagents/                   what this agent made with `subagent_set`,
-                                   one directory each
-        <name>/                    the subagent: its own conversation, cabinet,
-                                   media and record
-```
+A subagent is an agent that belongs to another agent. It has the maker's tool
+set, its own role-specific system prompt, and its own conversation, but no
+process, no window, and no claim on an agent name. It runs when something sends
+it a message. Its two membership tools, `subagent_set` and `subagent_remove`,
+refuse a subagent caller.
 
-**Nothing inside an agent's directory repeats its name** — the directory says
-whose it is — and the catalogue is the exception that proves the rule: it sits
-beside the agent directories because it is everybody's and therefore nobody's.
+A subagent is created with `subagent_set` and removed with `subagent_remove`.
+Once created, it is addressed over the local network with the same five
+operations as a peer agent, under `subagent_*` names: `subagent_send_message`,
+`subagent_cancel_task`, `subagent_list`, `subagent_task_list`, and
+`subagent_broadcast`.
 
-**A directory holds the agents whose data is in it.** A directory may hold
-several, and they then share its `slife2.yaml` and its catalogue — the tool set
-**is** the config, so agents running on one config run on one set of tools, and a
-tool loaded by one is loaded for the next. `--agent jack --data-dir D` names the
-agent *and* says where its files go, and the two are separate facts: the name is
-who the agent is — one live instance per name on this machine, whichever
-directory — and `D` is the home whose config, catalogue and conversations that
-run reads and writes. Which directory a name was last started in is not
-remembered: the next run of it uses the one it is given.
+| Key | Meaning |
+|---|---|
+| `name` | The subagent's name and directory. |
+| `model` | `provider/model`; empty uses the maker's model. |
+| `role` | A word included in the subagent's prompt. |
+| `fork` | Copy the maker's current conversation as the subagent's starting point. A fork's turns are not stored. |
 
-**A home is made when you start an agent in it.** `slife2 --data-dir D` records
-`D`, gives it its `agents/` and `skills/` if they are not there, and builds the
-tool catalogue its config names — so `D/agents/tools.db` is there from the first
-start rather than from the first message you send. **Two data directories have
-two catalogues**, each built from its own `slife2.yaml`: a tool loaded in one is
-not loaded in the other, and neither is served the other's tools.
+A subagent lives in `agents/<maker>/subagents/<name>/`, with its own `turns.db`
+and `subagent.yaml`. The record holds its model, role, fork status, and creation
+time. The cabinet, media directory, schedule ledger, and WeChat login are the
+maker's, because those stores are keyed by the agent rather than by the
+conversation. The tree stops at one level: a subagent cannot create or remove a
+subagent, because the local network holds a place for the maker's own subagents
+and nothing holds a place for a level below them.
 
-**An external server is one server per name, however many homes name it.** A
-`mcp:` entry is a process on *this machine*, so two data directories that both
-configure `serper` — which is what copying a config produces — get one `serper`
-between them rather than one each, and its tools appear in both catalogues. Two
-homes naming one entry with different commands is a disagreement the log reports:
-the name is what makes it the same server, so the running one is used and giving
-it another name is how you run both. All of them stop when the last instance out
-takes the stack down, like everything else a plugin is holding.
+Removing a subagent first tells the local network to release its place, then
+stops its loop, then deletes its directory. If the network notification cannot be
+made, the subagent is left unchanged.
 
-**Where that folder is depends on what you are running.** In a checkout it is
-the checkout itself — which is what makes the `slife2.yaml` in front of you the
-one in use — and otherwise it is `~/.slife2`, per-user and independent of
-wherever the command happened to be started. `--data-dir DIR` (or
-`$SLIFE2_DATA_DIR`) overrides both.
+The local network is configured under `subagent:`. It needs a `broker`; a
+`peer_agent:` section with no broker uses the same address. The `unit` is always
+the agent's name, and writing one is refused. `org` may be set to group meshes.
 
-**The servers are the machine's, not a home's.** One `slife2` starts the plugins
-its config needs and attaches to whatever is already running, so a second
-instance is one command and no duplicate process — across homes too. A plugin a
-machine is running serves every home on it, and each call is served the config
-and the files of the home it came from. That is why their bookkeeping — the
-records naming pids, the start locks, the logs, and the claim on an agent name —
-is the machine's as well and lives in `~/.slife2/runtime` (`$SLIFE2_RUNTIME_DIR`
-overrides), not in a data directory: there is one set of servers, so there is
-one record of them. It is *reconstructible* — delete it and the next start
-rebuilds what it needs.
-
-A checkout therefore keeps `agents/` in the working tree, which is why
-`.gitignore` covers it. It does *not* cover `slife2.yaml` or `skills/`: those are
-written by a person rather than produced by a run, and they are the point of the
-arrangement.
-
-Deleting an agent's directory costs that agent — its conversation, its cabinet
-and its logins, in one place, which is what makes backing one up or moving one
-to another machine one operation. The catalogue is kept differently on purpose
-and sits outside them: the tools are not anybody's, so one hub serves them to
-every conversation *in that home*.
-
-`slife2.yaml` is checked in and documented in place, because **it holds no
-secrets**: every key in it is a `${VAR}` reference resolved at runtime. A data
-directory with no config in it uses the built-in defaults, so a fresh install
-runs without one.
-
-Secrets are never written in the file. `${VAR}` resolves through shell env →
-[credstore](https://pypi.org/project/credstore/) → literal default, and a
-`keyring:<service>/<key>` value resolves against the OS keyring directly.
-Resolution is lenient — an unresolved reference stays verbatim, so a missing key
-fails at the API call where the message can name it, rather than at startup.
-
-## Layout
-
-Four layers, and which one a module is in is a fact about what it *is*:
-
-```
-slife2/
-├─ libs/              # a library: imported, never reached over a socket
-│  ├─ host/           # the machine — the config file and its one writer, which
-│  │                  #   home a call is served from, the daemon records and
-│  │                  #   locks, the launcher that brings the servers up, and
-│  │                  #   the state file a plugin keeps beside an agent
-│  ├─ plugin/         # the contract every plugin sits on: `protocol` (what it
-│  │                  #   takes to be one of our servers), `audience` (who may
-│  │                  #   call a tool), `family` (the shared half of a family)
-│  ├─ store/          # the three corpora and the machinery they share: the
-│  │                  #   turns (`db`), the tool catalogue, the FTS5 +
-│  │                  #   `sqlite-vec` index, and the text rule
-│  ├─ turn/           # what one turn is made of: the loop, the context
-│  │                  #   decision, the neutral messages, the event vocabulary,
-│  │                  #   the tool registry, the prompt and its `templates/`
-│  ├─ harness/        # what the harness puts *into* a conversation: markers,
-│  │                  #   the hand-over, the background tasks
-│  └─ model/          # the model as a wire: `Chunk`, `Stream`, `LLMBackend`
-├─ clients/           # the client half of a hop, one module per peer
-│  ├─ model.py        # MCPBackend — the agent loop's only backend
-│  ├─ toolclient.py   # the hub: its listing, its calls, the trim
-│  ├─ embedder.py     # the embeddings endpoint, shared by the two indexes
-│  └─ gateway.py      # a server somebody else runs
-├─ helpers/           # small and stateless: the clock, time grammar, timeouts,
-│                     #   and the hop that takes a blocking call off the loop
-├─ plugins/           # a process each: one directory, `server.py` inside it
-│  ├─ agent/          # slife2-agent — the loop, and the conversations it owns
-│  ├─ context/        # slife2-context — the turn log and the decision about it
-│  ├─ toolhub/        # slife2-toolhub — the model's tools and the set they are
-│  ├─ llm/            # the four model servers, one per wire protocol
-│  ├─ skills/ cli/ mcp_tools/ restapi/     # the four that own a section
-│  ├─ cabinet/ media/ file_tunnel/         # documents, generation, a public URL
-│  ├─ wechat/ a2a/ agent_task/ schedule/   # the ways work arrives
-│  └─ tui/            # slife2-tui — the terminal's inbox, a session per agent
-└─ tui/               # the terminal: Textual, and a client of the two above
-   ├─ app.py client.py widgets.py      # the window, its clients, its drawing
-   ├─ notes.py restore.py theme.py     # the harness's lines, a reopened
-   └─ app.tcss                         #   conversation, the palette
+```yaml
+subagent:
+  max_running: 32
+  provider: mosquitto
+  broker: {host: localhost, port: 1883}
+  # org: subagent
 ```
 
-A plugin directory keeps its own private libraries (`cabinet/store.py`,
-`schedule/expressions.py`, `skills/playbooks.py`, `wechat/ilink.py`,
-`media/adapters.py`, `a2a/mesh.py`): a capability goes where the plugin that
-owns it is, and `libs/` is for what *more than one* thing imports. The test tree
-mirrors this one, file for file.
+## Data locations
 
-The dependency direction is one-way, and it is what makes each layer testable
-alone: `tui/` → MCP → `plugins/agent/` → `libs/turn/loop.py` →
-{`libs/model/base.py`, `libs/turn/tools.py`, `libs/turn/events.py`,
-`libs/turn/messages.py`} → `libs/host/config.py`. The loop imports neither the
-agent server nor the terminal, and it does not import the hub or the hub's
-client either: it is handed a coroutine that returns a registry, and where that
-registry came from is the agent server's business.
+A data directory (a **home**) contains:
 
-`libs/plugin/protocol.py` is the leaf every server sits on: what being one of
-our servers means — the flags, the HTTP transport, the record that says a daemon
-is here, the conventions (`house_server`) that would otherwise be copied into
-each server, and the whole of a server's `main` (`serve_plugin`), which is eleven
-lines every one of them would otherwise spell out. **Every** one of them: a
-server supplies three hooks — what to build, what to say about its own start, and
-what it cannot start without — and the model backends reach the same function
-through a wrapper rather than a second copy of it.
+```text
+<data>/
+  slife2.yaml                  configuration; absent means built-in defaults
+  skills/                      <name>/SKILL.md playbooks
+  agents/
+    tools.db                   the shared tool catalogue for this home
+    <agent>/
+      turns.db                 the conversation and its live context
+      schedule.db              scheduled tasks and their run ledger
+      cabinet/                 notes/, diary/, reports/, saved files, .index.db
+      media/                   generated images, video, and audio
+      wechat.yaml              this agent's WeChat login
+      subagents/
+        <name>/                a subagent's conversation and record
+```
 
-**A plugin is also one row of one table.** `libs/host/config.py`'s `PLUGINS` says,
-for each of the twenty servers, its key in `servers:`, the module that serves it,
-the MCP name it answers to, the tool a probe identifies it by and the port it
-listens on. Everything else is derived from that — the start order, the addresses
-`default_config` begins from, every `*_SERVER_NAME` constant, and the specs the
-launcher starts things from — and each plugin reads its own name out of its own
-row. So adding a plugin is writing the module and adding a row; removing one is
-deleting both. It used to be five places per plugin and two tests whose only job
-was noticing when two of them disagreed. It is not
-LLM-specific, which is why it is not under `plugins/llm/`: the context store,
-the hub and the agent server are not LLM plugins, and the scaffold they serve on
-should not come out of the LLM package. The embeddings server is the one plugin
-under `llm/` that is not a chat backend — it speaks `/embeddings` and nothing
-else — and it is there because it is the other thing in this system that imports
-a provider SDK.
+The tool catalogue sits beside the agent directories because it belongs to the
+whole home, not to one agent.
 
-## Tests
+### The runtime directory
 
-**The suite is the thing this project is changed against**, so there are two
-lanes and the default one is fast:
+The machine's shared-server bookkeeping is kept in `~/.slife2/runtime`:
+
+```text
+<runtime>/
+  servers/        one record per running server
+  logs/           each server's output
+  locks/          per-endpoint start locks
+  agents/         agent-name claims
+  clients/        which clients are using the shared servers
+  homes/          data directories this machine has used
+```
+
+`SLIFE2_RUNTIME_DIR` overrides the location. The runtime directory is
+reconstructible: deleting it causes the next start to rebuild what it needs.
+
+### Multiple data directories
+
+A data directory may hold several agents. They share its `slife2.yaml`, its
+`skills/`, and its `agents/tools.db`, so they run on the same tool set. A tool
+loaded by one is loaded for the other.
+
+Agent identity is independent of the directory. `--agent jack --data-dir D`
+names the agent and says where its files go. The name is claimed once per
+machine, so a second live `jack` in another data directory is refused. Which
+directory a name used previously is not remembered.
+
+Servers are shared across data directories. A server started for one home serves
+every home on the machine, and each call is resolved against the home it came
+from. An external `mcp:` entry is one server per name regardless of how many
+homes configure it; if two homes give the same name different commands, the log
+reports the disagreement and the running server is used.
+
+## Architecture
+
+### Layers
+
+The package is divided by what a module is, not by its size:
+
+| Directory | What it contains |
+|---|---|
+| `slife2/plugins/` | One process per plugin. Each plugin has a module with a `main` and a `SERVER_NAME`. |
+| `slife2/clients/` | The client half of an MCP hop. |
+| `slife2/libs/` | Libraries imported by more than one component. |
+| `slife2/helpers/` | Small stateless helpers. |
+| `slife2/tui/` | The terminal window. It is a client and serves nothing. |
+
+A plugin directory may keep its own private library, such as
+`plugins/cabinet/store.py` or `plugins/schedule/expressions.py`; `libs/` is for
+code that more than one component imports.
+
+The dependency direction is one-way:
+
+```text
+tui/ -> MCP -> plugins/agent/ -> libs/turn/loop.py
+     -> {libs/model/base.py, libs/turn/tools.py, libs/turn/events.py,
+         libs/turn/messages.py} -> libs/host/config.py
+```
+
+The loop imports neither the agent server nor the terminal. It is handed a
+backend and a coroutine that returns a tool registry; where that registry comes
+from is the agent server's business.
+
+### Plugin registry
+
+`libs/host/config.py` contains one row per plugin in `PLUGINS`. A row records:
+
+- the key used in `servers:`;
+- the module that serves it;
+- the MCP name it answers to;
+- the probe tool used to identify it;
+- the default port;
+- whether it is a model API backend.
+
+Start order, default addresses, server-name constants, and launcher specs are
+derived from this table. Adding a plugin means writing the module and adding a
+row; removing one means deleting both.
+
+`libs/plugin/protocol.py` provides the shared server scaffold
+(`serve_plugin`). A server supplies three hooks: what to build, what to say about
+its start, and what it requires. All servers use this path, including the model
+backends, which reach it through a wrapper.
+
+## Development
+
+### Tests
 
 ```bash
-uv run pytest                  # unit + integration, every module, across cores
-uv run pytest -m unit          # the fast lane on its own
-uv run pytest -m integration   # the tests that bind a socket or spawn a process
-uv run pytest -m e2e           # the whole stack as processes (~70s)
+uv run pytest                  # fast lane: unit and integration, parallel
+uv run pytest -m unit          # unit tests only
+uv run pytest -m integration   # tests that bind a socket or spawn a process
+uv run pytest -m e2e           # full stack as processes (about 70 seconds)
 uv run ruff check . && ruff format --check .
-uv run pyright                 # a dev dependency, wired into CI
+uv run pyright
 ```
 
-`uv run pytest` runs the suite on every core (`-n auto`, from `addopts`) and
-leaves out `e2e`, which is the one lane that starts the real stack: seventeen
-daemons, a config on disk and a stub provider, driven end to end
-(`tests/e2e/`). What it drives is the ways a conversation actually goes: a turn,
-a second turn that runs on the first, **a turn whose model calls a tool** — routed
-by the hub to the plugin process that owns it, answered there, and read back —
-and an output too large for the window, saved and paged. Both lanes run in CI.
+The default run executes across all cores (`-n auto` from `addopts`) and excludes
+the `e2e` marker.
 
-**Nothing in the fast lane needs an API key or a running server.** The model is
-faked, and the servers are driven over FastMCP's **in-memory transport** — real
-MCP messages and real progress notifications, with no port bound. The
-`integration` tests are the ones that need a socket, and each binds an ephemeral
-port rather than a fixed one, so a suite run beside a live stack is still a
-suite that passes.
+The fast lane needs no API key and no running server. Models are faked, and
+servers are driven over FastMCP's in-memory transport: real MCP messages and
+progress notifications, with no port bound. Integration tests bind ephemeral
+ports, so the suite can run beside a live stack.
 
-The doubles live in `tests/fakes.py` and are shared: a stub model, a stub
-embedder, the fake window and mesh clients, and the small factories
-(`upstream_server`, `plugin_transports`, `config_file`) that more than one test
-module needs. A test module reaching into another one for a fixture is how two
-lanes end up disagreeing about the shape of a double.
+The end-to-end lane starts the real stack as processes: the launcher, seventeen
+daemons, a configuration on disk, and a stub OpenAI-compatible provider. It
+exercises the launch order, cross-process turns, tool routing, progress
+notifications, large-output handling, and conversation restore.
+
+Shared test doubles live in `tests/fakes.py`: a stub model, a stub embedder, fake
+window and mesh clients, and factories used by more than one test module.
+
+### CI
+
+CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
+
+1. a wheel build;
+2. an assertion that the interpreter can load SQLite extensions;
+3. `ruff check` and `ruff format --check`;
+4. `pyright`;
+5. the default test lane;
+6. the end-to-end lane.
+
+## Known limitations
+
+- `cli:` entries are catalogued and discoverable, but no tool executes them yet.
+- Playbook scripts are not executed by slife2; `skill_use` returns the playbook
+  text, and the model runs any commands itself.
+- The cabinet's `file_save` does not fetch URLs, and the cabinet has no `grep`
+  search leg.
+- The model can browse the turn log with `turn_list` and `turn_read` but cannot
+  semantically search it.
+- There is no approval gate before a configuration edit, including `mcp_set`
+  with a `command:` that records a program slife2 will start.
+- An agent task may start another agent task; `agent-task.max_running` bounds
+  concurrency, not total work over time.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

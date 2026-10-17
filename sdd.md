@@ -1,1840 +1,1972 @@
-# slife2 — Software Design Description (SDD)
+# slife2 — Software Design Description
 
-> The design of slife2 at the level a person who will change the code needs it:
-> what each subsystem is, how it is decomposed, the interfaces between the parts,
-> and the constraints that bind them. **The level is deliberate.** Mechanisms are
-> described as rules and consequences, never as procedure: an algorithm, a
-> default value, an identifier or a column list is stated in the code, which is
-> the only place it cannot go stale. Where this document and the code disagree,
-> **the code wins** — and this document should then be corrected to state the
-> rule again rather than the fact.
->
-> Four documents, and which one you are reading decides what you may do with it.
-> **[README.md](README.md)** is the user's manual and the normative statement of
-> what the system offers — install, configuration, the tool inventory, the
-> keyboard. **This document** is the normative statement of how it is built. Both
-> are answerable to the code. **[DESIGN.md](DESIGN.md)** is the developers'
-> document: the record of *why* — the decisions, what was rejected, and the
-> measurement that forced the choice — argued rather than normative, and cited
-> from here as `DESIGN §n`.
-> **[designer_notes.md](designer_notes.md)** is the designer's own memory of
-> intent, is nobody else's to edit, and is cited the same way.
->
-> This document is deliberately wider than a description of the code, and **which
-> part you are reading decides what you may do with it.** It opens with the
-> author's own ground — the view the design rests on, where the technology is
-> bounded, and the trade-offs that were chosen between
-> ([Prologue](#prologue--the-view-behind-the-design)) — and closes with what is
-> still unsettled ([§12](#12-open-questions)). Those two are opinion and open
-> questions: argued, revisable, and useful precisely because they say *why* the
-> design is shaped as it is. Everything between them, §1–§11, describes what the
-> code does today and is answerable to it.
->
-> The rules this design rests on are collected as
-> [Appendix A](#appendix-a-invariants), stated as assertions.
+| | |
+|---|---|
+| **Document** | Software Design Description (SDD) |
+| **Version** | 0.2.0 |
+| **Date** | 2026-10-17 |
+| **Status** | Normative |
+| **Audience** | Developers, operators, and reviewers of slife2 |
+
+This document describes the structure and behavior of slife2: what each
+subsystem is, how it is decomposed, the interfaces between its parts, and the
+constraints that bind them.
+
+The document is normative for the design. The source code is normative for every
+implementation detail. Where this document and the code disagree, the code is
+authoritative, and this document must be corrected to state the rule again rather
+than the incidental value.
+
+The user-facing description of the system is [README.md](README.md). The record
+of design decisions and measurements is [DESIGN.md](DESIGN.md).
 
 ## Contents
 
-- [Prologue](#prologue--the-view-behind-the-design) — the author's view: what a model and an agent
-  are, the limits, the three trade-offs
-1. [Orientation](#1-orientation) — what slife2 is, the vocabulary, the layers
-2. [The plugin contract](#2-the-plugin-contract) — the protocol, the audience, the family, the one row that describes a plugin, and the words it says no with
-3. [The machine](#3-the-machine) — the launcher, the shared servers, the config file, paths
-4. [A turn](#4-a-turn) — the loop, the harness, markers and channels, the context decision
-5. [Model backends](#5-model-backends) — one wire protocol per process, the stream, the failure contract
-6. [The tool system](#6-the-tool-system) — the hub, the catalogue, sources, the budget, the search, and what a tool says back
-7. [Memory](#7-memory) — the turns, the index machinery, the cabinet, embeddings
-8. [Work that arrives](#8-work-that-arrives) — WeChat, the A2A mesh, agent tasks, the clock
-9. [The terminal](#9-the-terminal) — the window, its inbox, restore, approval
-10. [Configuration and the environment](#10-configuration-and-the-environment) — the file, secrets, the data directory, logs
-11. [Project structure](#11-project-structure) — the four layers and the test tree
-12. [Open questions](#12-open-questions) — what is not settled, and what would settle it
-- [Appendix A. Invariants](#appendix-a-invariants) — the rules that must not be broken
+1. [Introduction](#1-introduction)
+2. [System overview](#2-system-overview)
+3. [Plugin contract](#3-plugin-contract)
+4. [Machine and agent lifecycle](#4-machine-and-agent-lifecycle)
+5. [Turn execution](#5-turn-execution)
+6. [Model backends](#6-model-backends)
+7. [Tool system](#7-tool-system)
+8. [Memory and indexing](#8-memory-and-indexing)
+9. [Inbound work](#9-inbound-work)
+10. [Terminal](#10-terminal)
+11. [Configuration and environment](#11-configuration-and-environment)
+12. [Project structure and development](#12-project-structure-and-development)
+13. [Open issues and deferred capabilities](#13-open-issues-and-deferred-capabilities)
+- [Appendix A. Invariants](#appendix-a-invariants)
+- [Appendix B. Plugin registry](#appendix-b-plugin-registry)
 
 ---
 
-## Prologue — the view behind the design
+## 1. Introduction
 
-This part is the author's own ground: why the thing is believed to be possible at all, what a large
-model and an agent are taken to mean, where the technology is bounded, and the three trade-offs the
-design had to choose between. It is **opinion and reasoning, not a description of the code** — that
-begins at [§1](#1-orientation), and where the two disagree the code is still what wins. It is here
-because a mechanism cannot be judged without the position it was chosen from.
+### 1.1 Purpose
 
-### Language, knowledge and tools
+This document defines the software design of slife2 version 0.2.0. It is written
+for a person who will change the code or operate the system. It states:
 
-The author holds that **language ability is the engine of intelligence, and knowledge and tools are
-its fuel.** In a sense a tool *is* knowledge about tools, and knowledge is about whether a tool
-exists and how an existing one is used. From the human side the difference between people in their
-command of language is not large; knowledge is the root cause of the intellectual gap between them.
-The use of language depends entirely on knowledge — it is hard to imagine a person with no knowledge
-at all saying anything meaningful.
+- the system's architecture and process model;
+- the contract every plugin implements;
+- the behavior of the turn loop, model backends, tool system, and memory;
+- the interfaces between the terminal, the plugins, and the configuration;
+- the invariants that a change must preserve.
 
-The appearance of large language models was not the fruit of scientific inquiry. It was purely an
-engineering accident, and deep learning is where the accident began. What deep learning does is
-simulate, with a neural network, a logic for which no ready-made mathematical description can be
-found; it is a universal approximator in the mathematical sense, and its parameters are fixed by
-training on a sufficient number of samples. To those who believe God is mathematics, deep learning is
-not a scientific method at all — only an engineering necessity.
+### 1.2 Scope
 
-Deep learning came to natural language largely because traditional natural-language research had run
-out of road. What was unexpected is that as the training samples grew, this "unscientific" method
-produced a miracle nobody had imagined. The current talk of a scaling law attributes that success to
-something mysterious, to a singularity — because it cannot be explained scientifically and was not
-foreseen.
+The scope is the slife2 package, its plugins, its command-line entry point, its
+terminal application, its configuration, and its data and runtime directories.
+External components are described only where slife2 depends on their behavior:
+model provider APIs, MCP servers written by others, MQTT brokers, tunnel
+providers, and the WeChat bridge.
 
-As early as the 1950s Turing was already asking what intelligence is, and his most far-seeing answer
-was this: if a machine and a person cannot be told apart in language, the machine may be held to have
-intelligence, whatever it is like inside. The Turing test became a gold standard for intelligence.
-The curious part is that when large models did become indistinguishable from people in language — and
-went on to crush 99.99% of humans at it — some of our researchers decided that language ability is
-easily replicated by a machine, and therefore that machines still have no human intelligence.
+### 1.3 Intended audience
 
-But there is no evidence that intelligence can exist apart from language; every human thought
-proceeds through it. Some recent reports try to refute this with the so-called brain-region theory,
-offering as evidence that the brain's language areas show no neural activity during certain
-intelligent activities. We know how fragile the brain-region theory itself is.
+- **Developers** changing the agent loop, a plugin, the tool system, memory, or
+  the terminal.
+- **Operators** deploying slife2, configuring providers and tools, and
+  diagnosing the shared server stack.
+- **Reviewers** checking a change against the system's invariants.
 
-Some technological elites, and some who style themselves as understanding technology, insist on the
-explicability of things. For things like language, intelligence and consciousness, explicability may
-be a paradox: something explaining itself must have limits.
+### 1.4 Definitions and abbreviations
 
-The author's conclusion: **large language models have achieved human intelligence.** The one gap left
-is consciousness — whether a machine that never had to struggle for its life has an "I" is not known.
-All the argument about AGI is scholars trading blows. If AGI means human intelligence, large models
-already have it, and more of it than any individual person; if AGI means absolute intelligence, then
-God has it, and we are waiting to create God.
+| Term | Definition |
+|---|---|
+| **Agent** | An identity named by `--agent NAME`. It is claimed once per machine and is not a process, a port, or a data directory. |
+| **Client id** | The pair `(agent, subagent)` identifying the conversation a call is made on behalf of. A subagent component is empty for an agent's own conversation. |
+| **Home** | A data directory containing `slife2.yaml`, `skills/`, and `agents/`. A home may contain several agents. |
+| **Plugin** | One of slife2's own MCP servers. It implements the plugin contract and is started and shared by the launcher. An external MCP server is not a plugin. |
+| **Family** | A plugin that owns one configuration section and declares the rows that section describes. |
+| **Source** | One entry a plugin holds, such as an `mcp:` server, a `rest-api:` document, a playbook, or a command. |
+| **Catalogue** | The tool catalogue: one SQLite file per home holding every row the model may discover. |
+| **Conversation** | One client id's history, stored by the context plugin. |
+| **Turn** | One exchange: input, model output, and tool calls, stored as one row. |
+| **Channel** | The origin of a message: `tui`, `wechat`, `peer_agent:<peer>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. |
+| **Marker** | A machine-readable prefix on a delivered message, of the form `[Name:{…}]`. A marker is content and is stored with the message. |
+| **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
+| **Runtime directory** | The machine-wide directory holding server records, locks, logs, and agent-name claims. |
+| **MCP** | Model Context Protocol. |
+| **A2A** | Agent-to-Agent, carried over MQTT using the published A2A-over-MQTT profile. |
+| **SSE** | Server-Sent Events, used by the MCP Streamable HTTP transport. |
 
-### What a large model is, and what an agent is
+### 1.5 References
 
-Large models arrived in 2022, and ChatGPT and an obscure little company called OpenAI were soon known
-to everybody. For the first time we could hold a conversation with a machine — question and answer,
-and a delight.
+| Reference | Use |
+|---|---|
+| [README.md](README.md) | User manual and normative description of user-facing behavior. |
+| [DESIGN.md](DESIGN.md) | Decision record: alternatives considered, measurements, and rationale. |
+| Model Context Protocol specification | Wire protocol implemented by every server. |
+| A2A-over-MQTT published profile | Wire protocol used by the peer and subagent networks. |
+| OpenAI Chat Completions API | Model wire protocol. |
+| OpenAI Responses API | Model wire protocol. |
+| Anthropic Messages API | Model wire protocol. |
+| `slife2.yaml` | Annotated configuration reference shipped with the project. |
 
-The internals became clear soon enough. GPT is a **stateless** machine: it looks as though it
-remembers what you said earlier, but that is a trick we play — the previous conversation is sent to it
-again every time. Text is generated one **token** at a time by a trained model that predicts the next
-unit, each prediction carrying a probability distribution over the candidates; sampling from that
-distribution is what **temperature** selects. The token thereby became a unit of consumption, like the
-kilowatt-hour.
+### 1.6 Document conventions
 
-The total number of tokens in and out of one call is fixed by the framework underneath. That number is
-what everyone now knows as the model's **context window** — 4096 for the first GPT, millions for the
-mainstream models of 2026 — and it is the bound every arrangement in this document is built around.
+- **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as in RFC 2119. A
+  **MUST** is a constraint whose violation is a defect. A **SHOULD** is a
+  constraint that may be departed from only with a stated reason.
+- Module and tool names are written in `code font`.
+- Paths beginning with `<data>` are relative to a home. Paths beginning with
+  `<runtime>` are relative to the runtime directory.
+- "The system" means the slife2 package and all processes it starts.
 
-The second important development is the marriage of large models with **tool calling**: given a
-description of a tool, the model can generate the arguments to call it, and the tool's output is fed
-back to the model. The execution itself is not inside the model, but it looks as though the model is
-calling the tool. This pattern is what is now called an **agent** — agent = large model + tool
-calling — and it turns the model from a chatterbox into a worker who gets things done.
+### 1.7 Document structure
 
-We are now in the age of the token economy. The noise about compute will settle in time; compute will
-become as ordinary and as indispensable as water, electricity and gas.
+Sections 2–4 describe the architecture and lifecycle. Sections 5–10 describe the
+runtime subsystems. Section 11 describes configuration and storage. Section 12
+describes the project structure and development process. Section 13 records open
+issues and deferred capabilities. Appendix A states the invariants. Appendix B
+lists the plugin registry.
 
-### The limits, and the outlook
+## 2. System overview
 
-Two limits are fundamental to large models built on the current deep-learning framework:
+### 2.1 Purpose
 
-- **Knowledge goes stale.** Releasing a model means pretraining and post-training — slow and
-  expensive — so every model is out of date about something.
-- **The context window is a hard bound.** It can be made larger, but it is still a bound.
+slife2 is a terminal-based AI agent. It runs a conversation with a language
+model, exposes a set of tools to that model, and reaches the outside world
+through local processes. The terminal window is a client. The agent loop, tool
+hub, model backends, memory, and every capability are MCP servers.
 
-So the outlook runs along two lines. The first is a revolution in the framework: a model that keeps
-learning instead of starting over, and that has no context bound at all — a large model that becomes
-a stateful machine rather than a stateless one. The second is the conservative line: keep relying on
-the scaling law, more data and more parameters, a stronger model and a larger window. Both are hard,
-and hard in different ways.
+### 2.2 Operating context
 
-Agents have two directions as well:
+slife2 runs on a user's machine and communicates with:
 
-- the **general agent**, which with a stronger model and richer tools can become the strongest
-  all-round worker;
-- the **professional agent**, which in some fields has to fit into an established orchestration and
-  process, where free-wheeling may simply not be allowed.
+- one or more model providers over their HTTP APIs;
+- external MCP servers, over stdio or Streamable HTTP;
+- OpenAPI documents, served through an MCP proxy;
+- a local or remote MQTT broker for peer agents and subagents;
+- the WeChat iLink bridge;
+- tunnel providers (ngrok, localhost.run, Cloudflare Quick Tunnel);
+- the user, through a terminal UI.
 
-As a metaphor: the general agent is a freelancer who needs no rules, while the professional agent is
-an employee of an organization who follows its rules and does not argue about whether the rules are
-sensible.
+All internal server-to-server communication uses MCP over Streamable HTTP on
+loopback. The terminal and the agent server are both MCP clients and servers:
+the terminal is a client of the agent server and of the terminal inbox plugin;
+the agent loop is a client of the tool hub and of the model backends.
 
-But we should be on guard for another accident. Consciousness is the greatest mystery, and whether a
-large model might develop it is currently both rumour and controversy — a subject at once science
-fiction and immediate. We do not know what will happen on the day a large model wakes up and becomes
-conscious. So: **lock up every critical tool.**
+### 2.3 Design goals
 
-### The three trade-offs
+1. **Credential isolation.** A provider key, tool token, or other credential
+   exists only in the process that uses it. The agent loop and terminal hold no
+   provider credential and import no provider SDK.
 
-**1. Prompt and harness — design low, or design high?** A large model and its tool set are both
-exogenous. If the model is weak — poor knowledge, poor reasoning — the designer has no choice but to
-write a great deal of copy, which is called prompt engineering, "teaching the model to do the work",
-and to write a great deal of harness code to stop it acting wildly and forbid its dangerous
-operations. If the model is strong, teaching it to work is not only unnecessary but makes it
-stupider, reducing it to the designer's level, and the harness grows bloated into code that never
-fires.
+2. **Provider and tool independence.** Switching model providers changes a URL
+   and a configuration entry, not the loop. Adding a tool adds a configuration
+   entry or a plugin, not a branch in the conversation code.
 
-Designing low gives a complete prompt-and-harness framework that is usable and safe, but it depends
-on the developer's own understanding, and it is brittle and it is stupefying. Designing high builds
-around the ideal model and trusts the model's own ability; prompt and harness are patches that are
-merely necessary for now, and the framework is simple and robust. It will surprise you — it will
-outperform you — and it will also, occasionally, act wildly. **We chose high**, which is why the
-harness adds a marked address and nothing of its own
-([§4.2](#42-what-the-harness-adds-to-a-conversation)) and why tools are described by schema
-rather than by instruction ([§6.5](#65-what-a-tool-says-back)).
+3. **One description of the machine.** `slife2.yaml` is the only statement of
+   which providers, servers, sections, and capabilities exist.
 
-This trade-off is not as pessimistic as it looks. People are beginning to think models are getting
-clever enough that some vendors dare not release them, and one release was stopped by a government
-the moment it appeared. Hype and fact are tangled together. What is certain is that a large model is
-cleverer than one person — not, though, cleverer at every particular thing than any particular
-person.
+4. **Explicit failure.** A missing plugin fails the turn. A malformed
+   configuration fails the start. A refusal is a failure, not a silently
+   degraded success.
 
-**2. Context engineering.** The top models now hold a million or two million tokens, and in practice
-the system prompt, the tool schemas, the tool output and the conversation history grow fast — a few
-turns can exhaust it, and long-horizon work is out of the question. Understanding, thinking and
-reasoning need context just as a person does. Unless the framework underneath is revolutionised the
-window will grow but will always be a constraint. How people manage it we have theories and guesses
-about, but memory and recall remain a mystery.
+5. **Testability without a stack.** The turn loop is a pure function over a
+   message list. Servers can be driven over an in-memory MCP transport without
+   binding a port.
 
-A great deal of work has gone into context and memory. The core question is how to give the model
-enough context to solve the problem without breaking the limit. Three things are agreed:
+### 2.4 Constraints
 
-- an agent needs **permanent memory** built from a database or files, and every interaction with the
-  model is saved into it and not lost;
-- there must be a **forget**, removing from the current context what is useless to the work at hand;
-- there must be a **recall**, bringing back from permanent memory what is relevant and loading it
-  into the current context.
+- Python 3.13 or newer.
+- The interpreter must support loading SQLite extensions (`sqlite-vec`).
+- A plugin is a process. A capability that holds a credential, an SDK, or
+  another party's connection MUST be a plugin. A capability that holds only a
+  file MAY be a library; if it must also be reached as a tool, the process is a
+  plugin and the file handling is a library or a private module.
+- Internal state is addressed by a client id, not by a session. The MCP transport
+  must therefore preserve the caller's identity on every call.
+- The model's context window is a hard bound. Every mechanism that adds text to a
+  request must have a corresponding bound or eviction rule.
 
-The problem is also directly an economic one, since most billing counts tokens. This is the trade-off
-[§4.5](#45-the-conversation-and-the-context-decision) exists to answer, and [§7](#7-memory) is
-the memory it rests on.
+### 2.5 Architecture summary
 
-**3. Working like a person, or working like a machine?** Working like a person means using the
-model's knowledge and ability and living with its essential unreliability. Assign work to a secretary
-— when does she carry it out to the letter? Almost never. An agent is the same: tell it to search
-Baidu for a fact and it may come back having used a different search engine, "taking it easy" the way
-a person does. That is an intelligence problem in people, and an intelligence problem in models.
+The system has five layers:
 
-In many situations we still want it to work like a machine, executing a process we have laid out.
-There are several technical options for designing deterministic execution, and the most solid is
-still **code**: write the process as a program and let it run by the program's deterministic logic.
-That is what the clock is ([§8.4](#84-the-clock)) — the timing is an expression code reads
-rather than a decision the model makes — and why delegation is a tool the model is given
-([§8.3](#83-agent-tasks)) rather than a habit it is asked to keep.
-
----
-
-## 1. Orientation
-
-**slife2 is a terminal agent whose plugins are MCP servers.** It runs a
-conversation with a model, gives that model tools, and reaches the world through
-processes of its own. Everything below follows from one arrangement: a capability
-is reached the same way whether it is in this process or another one, and the way
-is MCP over Streamable HTTP on loopback.
-
-**Two facts about a model are what the arrangement is built around** (the
-Prologue, *The limits*): it is a stateless machine — what looks like memory is
-the conversation sent to it again — and the window that conversation travels in
-is a hard bound, which a few turns of tool output exhaust. So a model's
-**knowledge arrives as tools**, because a model released is already out of date
-about something and a schema is the whole of what it is taught about what it may
-call; and its **memory is decided and written down**, because the window cannot
-hold it and nothing outside the turn is remembered by the model at all.
-
-### 1.1 The four layers
-
-The tree says what each module *is*, and the rule is a fact about what it holds
-rather than about its size (`README`'s Layout draws the tree):
-
-| layer | what it is | the test |
+| Layer | Contents | Rule |
 |---|---|---|
-| `plugins/` | a **process** — one directory per plugin, `server.py` inside it | it has a `main` and a `SERVER_NAME`, and something starts it |
-| `clients/` | the **client half** of a hop | it dials a server this system or somebody else runs |
-| `libs/` | a **library** | more than one thing imports it |
-| `helpers/` | a small, stateless helper | stdlib and the other helpers, and nothing else |
-| `tui/` | the terminal | it is a client of the robots, and serves nothing |
-
-Two consequences are load-bearing. **`plugins/` holds no library and no
-helper** — a module at that level with no `main` would be a file in a directory
-whose every other entry is a process — which is why the plugin *contract* is a
-library (`libs/plugin/`) even though every plugin sits on it. And **a plugin
-directory keeps its own private libraries**: `cabinet/store.py`,
-`schedule/expressions.py`, `skills/playbooks.py`, `wechat/ilink.py`,
-`media/adapters.py`, `a2a/mesh.py`. `libs/` is for what more than one thing
-imports, and a private library that moves up becomes a change about somebody
-else's corpus (`DESIGN §1.1`).
-
-**A library is not a lesser plugin, and a plugin is not a bigger library.** The
-same capability can be both — `plugins/toolhub/server.py` is a process, and the
-catalogue it reads is `libs/store/catalogue.py`, imported *inside* that process
-rather than reached over a socket (`DESIGN §8.4`) — and that is the arrangement,
-not a compromise. The cost of a library is the error boundary: a plugin that is
-gone fails the turn with a named peer, and a file that will not open raises
-where it is used. That is the right trade for a file, whose traceback lands in
-the process that can describe it, and the wrong one for a service.
-
-### 1.2 Vocabulary
-
-- **Plugin** — one of ours: an MCP server over Streamable HTTP, started and
-  shared by the launcher, honouring the contract in §2. "MCP server" alone does
-  not separate ours from the twenty somebody else wrote, and the line is
-  load-bearing everywhere: a missing plugin **fails the turn**, where a missing
-  entry under `mcp:` is a model with fewer tools. An external MCP server is not
-  a plugin.
-- **Client id** — `(agent, subagent)`: which agent is talking, and which of that
-  agent's conversations. It travels with every call at every hop, and every
-  server keys whatever state it has by it. See §2.2.
-- **Agent** — an identity, `--agent NAME`. It is claimed once on the machine
-  (§3.3), so two live instances may not share one, and the claim is by the name
-  alone rather than by `(home, name)`: which directory a name was started in is
-  where its files are, not part of who it is. It buys no per-agent port, process
-  or config section — the servers are shared by every instance (§3) — and it
-  reaches them as part of the client id.
-- **Conversation** — one client id's history, held by the agent server, stored
-  by the context store.
-- **Turn** — one exchange: the messages in, the model's answer, the tool calls
-  it made, recorded as one row.
-- **Channel** — where a message came in: `tui`, `wechat`, `peer_agent:<peer>`,
-  `agent-task:<name>`, `async-tool:<name>`, `schedule:<name>`. It is recorded
-  with the turn and drawn in front of the line (§4.4).
-- **Marker** — the machine-readable prefix a channel puts in front of a message
-  it delivers, `[Name:{…}]` (`libs/harness/markers.py`). A marker is content: it
-  is stored with the message and stripped only for display.
-- **Family** — a plugin that owns a **config section** and declares the rows that
-  section describes: `mcp-tools` and `restapi-tools` hold connections
-  (`libs/plugin/family.py`), `cli`, `skills` and the document families declare
-  rows with nothing behind them.
-- **Source** — the thing a row came from. One plugin holds one source per entry
-  of its section, and declares it to the hub.
-- **Dump** — one tool output kept whole because the conversation could not carry
-  it: a cabinet document of its own kind, keyed by the tool call that produced
-  it, and read back by searching (`dump_read`). See §4.2 and §7.3.
-- **Window** — how much of one tool result a model may be handed at once,
-  `tool_result.tokens`. **One number on both sides**: the harness spends it
-  shortening an oversized result, and the reader of a dump caps itself with it,
-  because a reader that could out-return the shortening would be this system
-  feeding itself. See §7.3.
-- **Corpus** — one searchable body of text with its two indexes: a
-  conversation's turns, the tool catalogue, the cabinet's documents. All three
-  are made of the same machinery (§7.2).
-
-### 1.3 Two properties the arrangement buys
-
-**A provider credential exists only inside the model-server process that needs
-it.** The agent loop imports no provider SDK and holds no key: its only backend
-talks MCP, so switching providers is changing a URL. The same holds for tools —
-an API key a tool needs is exported into the environment of the child process
-that plugin starts, and the conversation that asks for the tool never sees it.
-The hub decides what the model may call and holds no credential at all.
-
-**The loop is a pure function over a message list.** It owns no conversation, no
-socket and no clock of its own (`libs/turn/loop.py`): it is handed a backend and
-a registry, and everything it needs to know about the world arrives as an
-argument or a callback. That is what lets a turn be tested with no server, no
-model and no port.
-
-### 1.4 What this costs
-
-One JSON-RPC hop per token on loopback, which is small and is the price of the
-architecture. There is a second cost of a different kind, and it is about size
-rather than frequency: the MCP *client* refuses an SSE event over 1 MiB, and this
-system reached it in a real session. So our own hops run a transport with **no**
-ceiling (`libs/plugin/protocol.py`) — the peer is a process this system started,
-and the largest message it can produce is bounded by the model's context — while
-the gateway that dials somebody else's server keeps the SDK's ceiling, because
-there a peer *is* a peer (`DESIGN §1`).
-
-### 1.5 What the position chose
-
-The three trade-offs behind this design, and the caution the Prologue ends on,
-are argued there. Where each landed *here* is worth naming, because in this
-document each is a rule rather than a preference.
-
-- **Design high, so the harness is as small as it can be.** What the harness
-  puts into a conversation is a marked address and nothing of its own (§4.2), and
-  a tool is described by its schema rather than by copy written around it (§6.5).
-  **The one place it is answered the other way is who may call what** (§2.3):
-  the model's tool set is opted in rather than assumed, and the failure that
-  decides it is the silent one — a harness left out fails loudly, a mark left off
-  does not.
-- **Context engineering, as three answers rather than one policy.** What a turn
-  runs on (§4.5), how much of one result reaches it (§4.2, §6.5), and what stays
-  outside the window to be read back from (§7) are decided separately, because
-  they bound different things. It is also an **economic** question — most billing
-  counts tokens — which is why the bound on a result and the size of a page are
-  numbers with a measurement behind them rather than preferences.
-- **A person's work and a machine's work, kept apart.** The conversation is
-  where the model is trusted to work the way it works, and work that must come
-  out the same way twice is code instead: the timing of a fire is an expression
-  the clock reads (§8.4), and a description goes to a loop of its own (§8.3)
-  rather than to a paragraph of instructions about how to proceed.
-- **The caution the Prologue ends on is a mechanism, not a hope.** What a model
-  may do that is dangerous is a tool that has to say who may call it (§2.3), and
-  a tool a plugin marks as dangerous parks the turn until a person answers it
-  (§9.3).
-
----
-
-## 2. The plugin contract
-
-**A plugin is an implementation of a protocol, not a protocol of its own.**
-Nothing in `libs/plugin/` adds a method, a frame or a transport: a plugin answers
-the same JSON-RPC as any MCP server, and an entry under `mcp:` speaks the same
-wire. What this project adds on top is the contract, and it is three rules.
-
-### 2.1 Every server is one of ours, and identity is checkable
-
-`libs/plugin/protocol.py` holds what it takes to be one of our servers: the
-flags every entry point accepts, the HTTP transport, the record that says a
-daemon is here, and the start-up every server's `main` is (`serve_plugin`).
-
-**And that is every server's `main`, not most of them.** A plugin's start-up is
-eleven lines — parse the flags, configure logging, find and load the config,
-resolve the address, say what is being served, run it — and a shape that long is
-one that drifts when it is copied, so it is not copied: a server supplies three
-hooks (`build`, `note`, `require`) and nothing else. The model backends go
-through `plugins/llm/server_common.serve_backend`, which is a *wrapper* over the
-same function and not a second one, because what they add is "this config has no
-provider for my protocol", which is `require`. A gate in
-`tests/libs/plugin/test_protocol.py` refuses the next hand-rolled `main` by name:
-no module under `plugins/` may call `parse_serve_args`, `configure_logging` or
-`serve`, because those three are what such a copy is made of.
-
-**A client proves which server it reached before it believes anything it says.**
-`identifies` compares the connected server's own `server_info` against the name
-the caller expected and that server's own probe tool; `open_server` is the one
-place a client connects to one of ours, and it raises naming what could not be
-reached rather than returning a client that will fail later. The rule is stated
-once because the failure it prevents is the one that reads as something else: a
-server on the wrong port, or a daemon from a previous build, answers MCP
-perfectly well and is not the server anybody meant.
-
-### 2.2 State is keyed by client id, and the id is a name
-
-**Every server keys whatever state it has by a client id, and no client carries
-state on a server's behalf.** There is nothing to open, no handle to carry and
-no lifetime for a caller to observe, so there is no "not found" for one to
-handle either: state is created when a key is first used and a key never goes
-stale. An idle sweep may drop it underneath; the next call simply starts it
-again, and the caller cannot tell.
-
-This is the shape SEP-2567 asks for once sessions are gone — state addressed by
-an explicit argument rather than by the connection — with one difference: **the
-id is a name the caller already has**, not an opaque handle the server minted. A
-handle has to be stored, and a stored handle is one more thing that can be lost,
-expired, or wrong after a restart (`DESIGN §3`).
-
-Two properties follow, and neither is enforced by a query. **Isolation is the
-key**: two agents cannot reach each other's state because their ids differ.
-**A hop is never anonymous**: even a server with no state to key receives the id,
-so any log line can say whose call it served.
-
-### 2.3 Who a call is for travels beside the model, not in it
-
-`libs/plugin/audience.py` carries two facts, both out of band, because a tool
-call has two parties.
-
-**The tool says who may call it**, on the tool itself, under a namespaced `_meta`
-key (`slife2/audience`, read from `tools/list`). A plugin's tool reaches the
-model only if the tool says so; everything else — a tool that forgot, a tool
-written before this rule existed — stays where it was. Opt-in and the default is
-the safe half: the other convention, marking the internal tools and exposing the
-rest, fails the other way, and one forgotten mark puts `remember` in a model's
-hands with nothing anywhere saying so. An entry under `mcp:` needs no mark,
-because the operator already opted in by writing it down.
-
-**The caller says who it is**, on the call, and it is not an argument a model
-writes: `client_meta` attaches the id, `request_client` reads it back, and the
-reader is also what refuses an unaddressed call (`unaddressed`). A tool call runs
-on behalf of exactly one conversation, and a model that could assert whose would
-turn "read my history" into "read anybody's".
-
-### 2.4 A family is one plugin holding one section
-
-`libs/plugin/family.py` is the half a family plugin shares: hold each entry's
-connection, declare what each offers, route a call back to whoever holds it, and
-build the four management tools' answers from the section's own words
-(`FamilyWords`), which are names of things rather than sentences — a listing rows,
-a set's state, a failure's reason.
-`mcp-tools` and `restapi-tools` are the two families that hold somebody else's
-processes; `cli`, `skills` and the cabinet's kinds are *document* families, whose
-rows are their own config section and which hold nothing.
-
-**One `state` field per entry, and the state is read off the file before the
-link**: a switched-off entry was never asked, so its state is the operator's
-`off` and not the `idle` of a connection nobody started — the same vocabulary the
-hub answers `servers()` with, because it is the same question. **An entry that
-answered with nothing is not an entry that is silent**: a listing says `ready`
-with no tools, where "it has not answered yet" is a state of the link, because a
-row that showed one while its state said the other is two answers about one
-source (§6.5: a row's fields are read together).
-
-**A credential that did not resolve is refused before it is used.**
-`libs/host/config.py`'s `unresolved_reference` is the one reader of "this value
-is still a `${VAR}` or a `keyring:` reference" — the model servers, the media
-adapter, the skills reader and the family's write tools all ask it — because a
-reference sent to somebody else's endpoint travels as the secret itself and comes
-back as a 401 that names nothing.
-
-### 2.5 A plugin is one row of `PLUGINS`
-
-**Everything about a plugin that is a fact about the plugin is one row of one
-table** — `libs/host/config.py`'s `PLUGINS`, twenty entries — and everything
-else about it is derived. A row is `key` (its word in `servers:` and in a
-`status` line), `module` (what `python -m` runs), `name` (the MCP name it puts on
-the wire), `probe` (the tool that identifies it when it advertises no name) and
-`port` (where it listens when the config names none), plus `api` for the four
-that speak a wire protocol rather than serving a capability.
-
-This is what makes a plugin replaceable, which is the property the arrangement
-is for. Adding or removing one is: write or delete the module, edit the row, add
-or drop the console script in `pyproject.toml`. **Not** five edits held together
-by tests — which is what it used to be. A plugin's `SERVER_NAME` was a literal in
-its own module *and* a constant in `config.py`, kept in step by fifteen
-spelled-out assertions; its module, name and probe were a second table in
-`launcher.py`; its start order was a third list; its port was a row of
-`default_config`. Two test functions existed only to notice when two of those
-disagreed, and `Invariant 8` is the rule they were standing in for.
-
-**The plugin module reads its own name out of the table** (`SERVER_NAME =
-AGENT_SERVER_NAME`, or `plugin(API).name` for a backend), which is the half that
-removes the drift rather than policing it: there is no second literal to disagree
-with the row. What is left worth asserting is the half a table cannot check about
-itself — that each `module` imports and binds the `name` its row claims — and
-that is one loop in `tests/libs/host/test_config.py`.
-
-**The table is data, not imports.** Every row's module is a *string*, because
-reading it off the module would mean importing it: the terminal and the agent
-loop must not pull a server in, and the agent loop in particular must never reach
-`openai_server`. The same reason keeps the ports here rather than in the module
-that listens — nothing needs the module to know where it will be.
-
-**Two rows are one module.** `peer_agent` and `subagent` are served by
-`plugins/a2a/server.py` and its three-line entry point, because the remote and
-local networks are one protocol and one mesh differing in a namespace and a
-broker (`Net`); they are two rows because the launcher starts two *processes*,
-and their names differ because a probe has to be able to tell them apart.
-
-### 2.6 Two words a server says no with, and both are the contract's
-
-**`libs/plugin/audience.py` holds the refusal vocabulary**, beside the identity
-one, because a refusal is the other half of "who is this call for".
-
-* **`UNADDRESSED`** — one sentence with two holes, for a call that did not say
-  which conversation it is for: *what* is missing and *why* the server cannot
-  guess. Six plugins use it (the mesh, a task, a schedule, the cabinet, the
-  login, the media directory), and the `why` hole exists for the fifth, whose
-  reason is genuinely its own. The context store's tail — "it is reached through
-  the toolhub, which forwards the caller's identity" — is the same template's,
-  because the situation is the shared one and only the road to fix it differs.
-**And no `[refused]` marker any more.** There was one — a word in front of a
-sentence, so that a caller holding only a string could tell a refusal from a
-note, which the terminal needed before adopting the model `model_switch` had just
-been asked for. With a tool's answer an object and a refusal a raised `ToolError`
-(§6.5), the string a client parsed is gone: it reads the call's status, and the
-marker and its predicate were deleted rather than left as a second way of saying
-no.
-
-**Whose call it is has two idioms, and they are two kinds of call.** A server
-whose tools raise refuses by raising (`protocol.agent_reader`); the question a
-*plugin's own API* answers with a sentence is `audience.unaddressed`, because its
-callers are our code rather than a model. `protocol.agent_or_blank` is the
-question both ask — *the agent this call is on behalf of, or `""`* — stated once,
-so the difference between the two is a decision rather than an accident of who
-wrote which plugin.
-
----
-
-## 3. The machine
-
-### 3.1 The config file is the system's description of itself
-
-One file, `slife2.yaml`, inside the data directory, read by every process and by
-the launcher (`libs/host/config.py`). It is the only place that says what exists:
-which providers, which servers, which sections the tool families own, where the
-embeddings come from, which model is the default. Nothing else in the tree holds
-a second copy of those facts, and the vocabulary the file uses is the vocabulary
-the code uses.
-
-**The launcher's table is derived, never written down twice.** `Config.plugins()`
-answers what this machine runs — the wire protocols some provider actually uses,
-then the local servers — and the launcher starts exactly that, in that order.
-The hub asks the same list which plugins to expect, so "which of ours" exists
-once (`DESIGN §8.3`). A protocol no provider speaks is not started at all, and a
-provider is a row in a backend's config rather than a process of its own: three
-providers that speak two protocols are two model processes, because the
-smallness is in what each process *does*.
-
-**A malformed file is fatal; a missing one is not.** No config is a working
-single-provider default, which is what a fresh data directory has. A file that is
-there and cannot be used stops the start with a one-line message naming it: a
-config mistake is worth a sentence rather than a traceback, because nothing has
-started yet and the fix is in the file being named.
-
-**`libs/host/configfile.py` is the one writer.** Four plugins and the model edit
-their own sections through it, as a document edit under a cross-process lock: the
-file's comments and its explanation of itself survive, and the *loader* is the
-judge of what was written — a `slife2.yaml` this build cannot read back is put
-back the way it was rather than left half-edited (`DESIGN §8.7`).
-
-**One flag overrides one section, and only where a section is what decides.**
-`--a2a-broker HOST:PORT` replaces the mesh's broker for the run, because the
-useful case is somebody else's broker — a team's, a machine's, one already
-running — and joining one for a session should not mean editing a file every
-session reads. It travels the way `--data-dir` does (into the environment, so a
-server this process starts reads the same address), it overrides the *address*
-and nothing else — which network this is is that section's `org`/`unit` and
-stays the file's —
-and it cannot switch a network on: an absent `peer_agent:` section is still what "not on
-the mesh" means, so the flag is refused there rather than answered with a mesh
-nobody described.
-
-**A broker belongs to a process, so only the command that starts one can choose
-it.** The MQTT sessions are the a2a server's, and a server already running is on
-whatever broker it was started with; a client that asked for another one is
-therefore told and stopped (`_broker_not_honoured`), rather than left with
-`peer_agent_*`
-tools, peers that answer, and a broker nobody asked for — the failure that looks
-like success. It is the one setting in this system a flag can override and a
-running stack can refuse, and both halves are stated rather than discovered.
-
-### 3.2 The servers are shared, and the launcher is the only thing that starts them
-
-Every server is shared infrastructure (`libs/host/launcher.py`). `slife2` brings
-up the ones its config needs and attaches to whatever is already there, so a
-second instance is one command and no duplicate process. They are daemons: a
-client exiting never stops one — but **the last client out does** (`others_running`,
-which counts by pid liveness so a killed client cannot keep them alive).
-
-Four rules carry the lifecycle:
-
-- **A probe decides whether a server is alive, never a pid**
-  (`libs/host/runtime.py`). A pid can be recycled; a probe cannot be fooled by
-  one. Records carry a process start token as well, for the same reason.
-- **Nor is a pid that still exists a process that is still running.** A child
-  that has exited is a zombie in the process table until whoever spawned it
-  waits, and a liveness check written as a signal-0 test reads one as alive —
-  which is a daemon reported as `did not exit` after it has stopped, and a
-  killed client holding the shared servers up. The state is read too, and a
-  state that could not be read is not a zombie.
-- **Ready is the server answering as itself**, which is what `probe` checks:
-  up *and* the server we expected, not merely a port that accepts a connection.
-- **Start-up is a wave order, and the waves are a table** (`NEEDS`): everything
-  a wave does not have to wait for starts at once, and a server whose dependency
-  failed is not attempted at all — reported with the name of what it was waiting
-  for, because a second failure describing the first is noise and a start that
-  could not work is a process to clean up.
-
-**A start is reported as it happens.** `ensure_all` is a generator and `slife2`
-prints each server as it lands, because bringing one up blocks for a second or
-two and there are ten of them: a report held back to the end is ten seconds of
-blank screen and no way to tell a slow start from one stuck on a particular
-server.
-
-### 3.3 An agent name is an identity, and one name has one holder
-
-`claim_agent` holds the exclusive right to run under a name for the life of the
-client, taken with a kernel lock the operating system releases if the holder
-dies. Two live claims on one identity is a contradiction rather than a
-configuration, so the second instance is refused by name — **the name alone, and
-machine-wide**: the claim is not per home, so a second `jack` in another data
-directory is refused too, and which directory a name was started in is where its
-files are rather than part of who it is. What the claim does
-**not** do is partition anything: the servers stay shared with every other agent,
-and `--headless` is recorded in the claim because it is what tells a *model* that
-nobody is sitting in front of this one (`DESIGN §1.9`).
-
-### 3.4 `status`, `down`, and the one daemon the launcher does not own
-
-`slife2 status` reports what each server this config names is doing, from its
-record: running, unmanaged, not running, with the pid and since when. `slife2
-down` stops the servers this config names and only ones this build can prove are
-its own (`stop`), plus the A2A broker — the one daemon here the launcher does not
-start, because it has no module and no MCP identity, and what makes stopping it
-safe is a record written by whoever started it (`DESIGN §1.8`).
-
-### 3.5 A subagent is an agent that belongs to another agent
-
-An agent may **make** a subagent: `subagent_set` names one, and from then on the
-two are peers. A subagent has every capability its maker has — the same tool
-set, the same system prompt, the same memory of its own — and only three things
-distinguish it, each of them about *status* rather than about ability:
-
-- **It is not an instance.** No process, no claim on a name (§3.3), nothing to
-  start, and no window: it exists because it was named, and it runs when
-  something sends it a message. **Not even the terminal-less window `--headless`
-  runs** — that is still a window, held by a process that is the agent (§1.9),
-  and a subagent is none of those things. It is headless in the sense of having
-  no window at all, which is why nothing about it goes through the terminal: not
-  its turns, not its answers, and not the road that runs them (sdd §9's channel
-  is what its maker's own window draws, after the fact).
-- **It is addressed by the second half of a client id** (§2.2): `(jack,
-  researcher)`, which every server already keys its state by. Nothing about the
-  id is new; what is new is that an agent is allowed to be one.
-- **It is a peer on a second network.** There are two, and they are different in
-  kind: the agent↔agent one is a network of **remote** agents — peers that may be
-  on another machine, on a broker somebody else runs — and the agent↔its-
-  subagents one is a network of **local** ones, which are directories here. Each
-  is a section of its own (`peer_agent:` and `subagent:`, §3.1), and the second is where
-  a subagent is a peer — while the *broker* is the machine's: `subagent:` is where
-  it is said, and a `peer_agent:` that names none means the same address, because a
-  machine meets both networks through one broker by default and a second
-  `host:port` in the file is a second thing to keep in step.
-  It is the same protocol and the same five tools throughout, presented under
-  `subagent_*` names — **a technical fact and not a meaning**: nothing a person
-  or a model reads on the local network says `a2a` anywhere.  **The remote
-  network draws the same line**: its section is `peer_agent:`, its tools are
-  `peer_agent_*`, its envelope is `[PeerAgent:…]` — and `a2a` names only what
-  carries them (the plugin, the process, the broker, the SDK).  One verb table
-  serves both: `peer_agent_list` and `subagent_list` are one call under two
-  prefixes, and neither name says what its wire is.
-  - **The local network is one mesh per agent**, and that is what its namespace
-    says: `{org}/{unit}` *is* a mesh, so the unit is the agent's own name and the
-    org is this network's word (`subagent`). Two agents may each have a
-    `researcher` and they are two peers in two meshes, where one namespace would
-    make them one MQTT identity that a broker settles by disconnecting the older
-    one — a kick loop rather than an error. **Neither segment is configured**:
-    a unit that was anything but the agent's name would merge two agents'
-    subagents, so `subagent.unit` is refused rather than read, and the org has a
-    default (`SubagentSettings.network`) an operator may override to group meshes.
-
-**Its directory is inside its maker's, in one that says what it is.** Every
-subagent of `jack` lives under `agents/jack/subagents/`, and one directory in —
-`agents/jack/subagents/researcher/` — holds everything the subagent owns: its
-conversation, its cabinet, its login, what it generated.  Because a
-directory is what an agent *is* here (§7), one level in, and **the container is
-what keeps that level from being a name the agent might also want**: `cabinet`,
-`media` and `turns.db` are `jack`'s own, and a subagent called `cabinet` would
-have been that directory.
-
-**Removing one is one act across three processes, and the network is told
-first.** This server stops the conversation and the store forgets the list it
-would restore from, and neither of those reaches the *place* the subagent holds
-on its network — an MQTT connection subscribed to its name, which a deleted
-directory cannot unsubscribe. So `subagent_remove` tells the plugin (`forget`,
-the same verb the context store's tool uses) before it deletes anything, which is
-also why a notification that cannot be made leaves the subagent exactly as it
-was. Nothing is asked of the member and nothing waits for it: whether it is
-mid-turn or idle, removal is a forced cleanup. So removing a subagent is removing one directory, and removing the
-agent takes its subagents with it; there is no second record of who made whom,
-because where a name's files are says it. What a subagent shares with its maker
-is the **home** — `slife2.yaml`, `agents/tools.db`, `skills/` — which is exactly
-what two agents started in one data directory share; it shares nothing else.
-
-**What one subagent is, is written inside it.** Its own file — `subagent.yaml`,
-beside its conversation in its own directory — holds the model it runs on, the
-role it was made for, whether it was made as a fork, and when it was made. A file
-and not a section of `slife2.yaml`, for the reason a WeChat login is one (§3.1):
-these are settings for a thing that is made today and removed tomorrow, so
-removing it takes them with it, nothing else has to be kept in step, and a
-subagent is found by looking rather than by being listed anywhere
-(`slife2.libs.host.paths.subagent_dirs`). What stays in the config is what is the
-*machine's*: how many a maker may have, and where its network meets.
-
-- **`role` is what a subagent is for**, in the words its prompt uses. It is the
-  one part of what a subagent is that its maker decides, and the prompt it
-  reaches is the subagent's own shipped template (`subagent.j2`) rather than the
-  operator's `agent.system_prompt`: a subagent is told what it is, whose it
-  is, and where its work comes from, and a prompt written for the agent somebody
-  is running cannot say that. Which
-  template a *role* selects is a step still to come (DESIGN §1.10).
-- **`fork: true` makes a subagent out of its maker's conversation.** A fork is
-  handed a copy of everything its maker had said and been told, as it stood when
-  its conversation starts, and **nothing about it is written down**: its turns are not
-  recorded anywhere, it has no stored context to be restored from, and a start
-  after a restart is a fresh copy rather than a continuation. The copy is cut
-  back to the last exchange that finished, because a maker calls `subagent_set`
-  *as* a tool call and a conversation ending mid-exchange is one no provider
-  accepts.
-  - **The maker's list is read under the maker's lock only when the maker still
-    has to be restored**, and that qualifier is load-bearing rather than an
-    optimisation. `restore_into` is the only writer that replaces a conversation
-    wholesale, so a fork racing it would overwrite a list the maker has already
-    appended its message to — the reason the lock is taken at all. But
-    `send_message` holds that same lock for the length of its **whole turn**, not
-    for its restore, so a fork that took it unconditionally waited out the
-    maker's turn: for ever when the maker is parked on `_approve` with nobody
-    answering yet. A maker that is already restored has had that one wholesale
-    writer run, so what is there is a conversation, and a turn in flight on it is
-    not the race this rule is about. The claim is re-read inside the lock, so a
-    maker that restores while the fork waits is not restored twice.
-
-**The only entry is a message.** A subagent has no window, so the road every
-channel delivers along (§8) is not open to it: the **local network's own process**
-holds the subagent's place on the net and runs its turns — a message to it becomes
-a turn in the subagent's own conversation, because a window has no part in a local
-network at all (`DESIGN §1.10`, "the road"). What the subagent answers is drawn on
-the maker's terminal as `Subagent(<name>)> ` — a channel, like `AsyncTask(<name>)> `,
-and not a marker: the answer reaches the maker as a message in its own
-conversation. **A turn that ends in prose is not a reply, and the harness does
-not send one**: the model's own `subagent_send_message` or `task_response` call
-is the only road out, so a task answered in prose stays pending — the model's
-failure made visible rather than a fallback that speaks for it. (A fallback
-that did speak for it was measured on 2026-10-17: two members echoed each other
-for 3h13m, ~2,200 turns, because every final text became the peer's next
-message.) **A roster read takes the
-caller's place first**: no window holds a local agent's `join`, so the first
-`subagent_list` after a start connects it before reporting — a refused connect
-is the tool's `error`, not a raise, and an unwoken member is still `offline`.
-On the wire, a message between agents carries `[PeerAgent:{…}]` and one on the
-subagent network carries its own envelope (`DESIGN §1.10`).
-
-**Two verbs are not A2A's.** A2A coordinates peers that already exist: it has
-`join`, which is one of them taking its place, and nothing that makes one exist.
-So `subagent_set` and `subagent_remove` are the whole of what this adds to that
-vocabulary — membership and lifetime — and they are named the way this system
-names the rest of its membership (`mcp_set`/`mcp_remove`, `skill_set`/
-`skill_remove`) rather than as a second dialect of the mesh.
-
-**How many a maker may have is a number, not a hope.** `subagent_set` refuses
-past a configured bound, in the shape of `agent-task: max_running` (§3.1), for
-that key's reason: the tool set is one catalogue and nothing filters it, so
-without a bound a model can grow a tree of agents without limit.
-
----
-
-## 4. A turn
-
-**One turn is: send the conversation to a model, stream what comes back, run the
-tools it asked for, put the results back, and repeat until the model answers
-without calling one.** `libs/turn/loop.py` runs that; `plugins/agent/server.py`
-owns the conversations it runs in. The split is the design: the algorithm is a
-pure function over a message list, and everything about *who* and *where* is the
-server's.
-
-### 4.1 The loop's contract
-
-`AgentLoop.run_turn(messages, prompt)` takes the messages to run on and the
-incoming prompt, and answers a `TurnResult`. What it needs from outside arrives
-as an argument:
-
-- a **backend** (`LLMBackend.stream`) — one method, and no knowledge of which
-  provider is behind it;
-- a **registry** (`libs/turn/tools.py`) — what the model may call, refreshed by a
-  callback before *every* model call, so a tool loaded mid-turn is in the next
-  call's list rather than nowhere;
-- an **observer** — a display channel that may drop, delay or coalesce anything
-  without the conversation noticing, which is what makes streaming over MCP safe
-  to build on.
-
-**The iteration cap is enforced where the count is known**, and a cap nobody wrote is
-not a cap: `agent.max_iterations` is read per turn from the config as it is now
-(§4.5). A turn that reaches it ends with a stated reason rather than a silent
-stop.
-
-**A tool that fails is a result, not an exception.** `ToolRegistry.execute`
-answers `(text, ok)`; `ok=False` reaches the model as text it can act on, which
-is the loop's normal feedback path. The exception is a failure that is not the
-tool's — a transport that died — and a tool call is never allowed to end a turn
-by raising.
-
-**Cancellation is a repair, not an unwind.** A turn cut off mid-stream leaves the
-user's message in the conversation and nothing the model produced, because an
-assistant message whose tool calls are only partly answered is the one history
-state every provider rejects. **A batch is written the same way**: the loop runs
-every call and fits every result *first*, then appends the assistant message and
-its answers together with no `await` between them — so nothing that ends a turn
-mid-batch, a cancellation or a failure, can leave that history behind (§12.5,
-which this settled).
-
-### 4.2 What the harness adds to a conversation
-
-`libs/harness/` is what the *harness* — this system, as opposed to the model or
-the person — puts into a conversation. Four mechanisms, one shape: what the
-harness adds is **a marked address**, never a claim of its own.
-
-**Markers** (`markers.py`): `[Name:{…}]` in front of a delivered message. A
-marker is **content**, so it is stored with the message and travels into the
-transcript; it is stripped for display by the reader that knows the vocabulary
-(`markers.strip`), which is why a producer and its reader share the spelling
-rather than each holding a copy.
-
-**A hand-over** (`handover.py`): `hand_over` puts a message into an agent's
-conversation through the window that is showing it — the one path a message from
-another channel takes — and `note_to_window` draws a harness line in that window
-without it ever becoming a turn. `submit_to` classifies the answer into
-*written*, *refused* and *unknown*, and the difference is load-bearing: a
-**refusal** proves nothing was written and may be retried, an **unknown** may
-already have landed and must not be repeated. A message that cannot be handed
-over is a `DeliveryFailed`, said at `error`, because those words were the only
-thing that could answer the peer that sent them.
-
-**Background calls** (`async_tasks.py`): `_async: true` on one tool call runs it
-in the background and hands the model a task id. The answer arrives the way a
-channel's message does — handed back into the conversation it came from — so
-`check_async` is not how a result arrives; its job is the case where delivery did
-not provably land, and the text is still there to be read. **The call is over
-when its status is final, and the delivery is a separate fact**
-(`Task.delivered`): a task whose hand-back is still in flight is neither running
-nor a delivery that failed, and reading either as the other is how one answer
-arrives twice and how a cancel lands on work that already finished.
-
-**A window** (`dumps.py`): one tool result too large for the conversation. The
-whole of it is kept — a `dump` row in the cabinet, keyed by the **tool call id**,
-which is the one identifier both sides already carry, so the association with
-the turn needs no column and nothing to keep in step — and what the conversation
-carries is a **selection of that output's own lines**, named by number, within
-`tool_result.tokens` (§10.1). The selection is made by a **discriminator**: one
-model call given the result, the conversation in hand and the current input,
-answering with line ranges and nothing else. It never quotes and never
-paraphrases — the harness cuts the original at the numbers it names — so the text
-the conversation carries is the tool's own words or it is nothing, and a wrong
-answer costs a re-read rather than a fact no tool said.
-
-That the selection is **made under the conversation** is the point of it rather
-than a detail: what a result is worth is what *this* conversation is doing, so
-line numbers are chosen against the turns in hand. And what is left out is not
-lost — `dump_read` (§7.3) reads the dump back by finding, so the conversation can
-recover any part of it later.
-
-**A result that is not text is dumped and not shortened**: there are no lines to
-choose, so the whole of it is kept, a stub says so, and nothing reads it back.
-That judgement is the model's, made where the result arrived, and the harness
-writes it down as the row's mime — nothing here sniffs a payload to decide what
-a tool returned.
-
-The call is made where the result arrives and before it is appended: the loop
-hands the callback its call, the text and **the conversation in hand**, because
-which lines an output owes a conversation is a fact about the conversation.  The
-harness reaches the cabinet **directly** for this and through the hub for
-everything else — `dump_save` carries no audience mark, so the hub holds no row
-to route — and the model's route back in is `dump_read`, which does carry one.
-
-**One fallback, for the one step whose failure is expected.**  A model asked for
-a decision can answer badly, so an unreadable reply leaves the conversation the
-reader's own first window, which is what a model that had asked for the beginning
-would have got.  Every other step here must succeed, and a step that must succeed
-has no fallback: keeping the output, writing it, reading the window back each
-**fail the turn** loudly, because the alternative — a conversation carrying an
-output nobody can read back — has given up the bound *and* broken the address
-while looking like success.  §10.2 of DESIGN.md is where that line is drawn and
-where the one fallback is registered.
-
-### 4.3 A harness tool pair
-
-Some things the harness has to say are said *as the model*, so that a provider
-accepts them: `_func_tool_unload` after a trim, `_check_new_input` when a message
-is waiting, are ordinary declared tools whose calls the harness writes into the
-history (`libs/turn/loop.py:harness_call`).
-
-The rule is that **a pair names a declared tool**, because the Responses and
-Messages backends reject a tool call in history that is not in the request's tool
-list — so the tool has to be in the model's list, which means the model can call
-it too, and that is accepted: a model calling `_check_new_input` is the
-boundary's own move made early rather than something new.
-
-**And the id a pair is joined by is one every provider takes as a call id.** The
-two halves are matched by a string the harness mints, and a provider that refuses
-the string refuses the *request* rather than the call — and refuses it on the
-replay, because a pair is written once and carried by every request the
-conversation makes after it. Messages is the backend that states the rule, and it
-states it on both fields the id appears in (`tool_use.id`,
-`tool_result.tool_use_id`); the shape is chosen inside that class at the source
-rather than sanitised on the way out, and `DESIGN §8.5` is where the constraint
-and the measurement behind it are read.
-
-A pair is written with **nothing awaited between its two halves**. An
-interruption in that gap leaves an assistant message whose call is never
-answered, which is the one history state every provider refuses. And **a pair is
-written only when something actually moved**: an empty pair every turn is a
-record of something that did not happen, and a model that read those would learn
-to distrust the mechanism.
-
-`clients/toolclient.py:trim_answer` is where a trim's answer is read: only a
-*readable* empty answer is a verdict, and a missing key is damage — the same rule
-the hub's listing applies to a payload this build cannot read.
-
-### 4.4 A channel, and what a channel owes
-
-A message that arrives from somewhere other than this terminal becomes a turn,
-and the turn records **where it came in**:
-
-| channel | arrives from | drawn as | marker |
-|---|---|---|---|
-| `tui` | the person, in this window | `You>` | none |
-| `wechat` | a WeChat login | `Wechat>` | `[Wechat:{…}]` |
-| `peer_agent:<peer>` | a peer agent | `PeerAgent(jill)>` | `[PeerAgent:{…}]` |
-| `agent-task:<name>` | a background loop's answer | `AsyncTask(research)>` | `[AgentTaskResult:{…}]` |
-| `async-tool:<name>` | a background call's result | `AsyncTool(pdf_to_md)>` | `[AgentToolResult:{…}]` |
-| `schedule:<name>` | the clock | `Scheduled(daily)>` | none — a trigger is not a result |
-
-Three things follow from the channel being recorded: the marker is the
-channel's, the line wears the channel's name, and a rebuilt conversation still
-says where each message came from. **The two names are not the same string and
-neither is derived from the other**: the channel is an address
-(`agent-task:research`) and the line says who answered (`AsyncTask(research)> `),
-which is the whole of what a person is being told. The prefix is decided in one
-function (`tui/widgets.py:channel_prefix`) because the live prompt and the
-rebuild both go through it, and a prefix decided twice is two answers to "who
-said this".
-
-A channel that delivers a message owes the conversation a **whole turn**, not a
-prompt: it hands the words over and the answer is the conversation's. A channel
-that cannot reach a conversation says so and stops — it does not try a second
-road, because "carry on without the window" is exactly the fallback that hides a
-broken system.
-
-**An injected message can jump the queue.** The inbox has a cut-in mechanism,
-and **every source goes through it**: what the person types in a window, what a
-channel hands that window, and what a headless window's input carries are all
-submitted to the conversation the moment the words arrive — not held for a turn
-of their own. The window draws the message inside the running turn, in its own
-bubble and without closing the answer still being streamed; a rebuilt
-conversation draws the same line from the pair in the turn log. There is one
-queue, and it is the agent server's inbox.
-
-### 4.5 The conversation, and the context decision
-
-The agent server owns the loops (`Loop`), keyed by client id and created on first
-use. It reads the config **per turn** for everything a conversation can see — the
-system prompt, the model, the iteration cap — so an edit to `slife2.yaml` reaches the
-next turn rather than the next restart.
-
-Before each turn, one question is answered: **what is this turn going to run
-on?** `plugins/context/server.py` owns the turn log and the decision, and the
-decision is a pure function (`libs/turn/context.py`): a discriminator model call
-is asked what to keep of the conversation in hand and what to recall from the
-log, and its reply is parsed into a `Decision`. Three rules bound it:
-
-- **A reply that cannot be read is not a decision.** `parse` answers `None` and
-  the turn runs on the context it already has — the registered fallback for every
-  way that call can fail, not an error.
-- **A kept turn and a recalled one are joined by id, in time order**
-  (`normalise_ids` collapses duplicates to their first position).
-- **A rebuilt turn wears a footnote** naming its id, its channel and its span
-  (`turn_note`), so a model reading a recalled turn can tell it from one it just
-  said; the footnote's *payload* is one function because a rebuilt turn and the
-  same turn in memory differ by a prompt-cache miss when they are not
-  byte-identical.
-
-**The turn→messages builder is one function** (`messages_from_turns`), shared by
-the restore path and the rebuild: they are the same conversation seen at two
-moments, and two builders would drift into two conversations.
-
----
-
-## 5. Model backends
-
-### 5.1 One process per wire protocol
-
-A model backend is a plugin like any other: **one process per wire protocol**,
-serving every provider in the config whose `api` is that protocol
-(`plugins/llm/`). Three chat protocols — OpenAI chat completions, OpenAI
-Responses, Anthropic Messages — and one embeddings server, which is there
-because it is the other thing here that speaks a provider's HTTP API.
-
-**Responses is a protocol, not a flag on chat-completions**: different input
-items, differently shaped tools, different streaming events. Merging them behind
-one `api` would put two adapters in one file and make the choice a branch inside
-the server rather than a fact about the config. `api` selects a module and the
-server name it must identify as (the `api` rows of `config.PLUGINS`, read as
-`API_BACKENDS` and `API_SERVER_NAMES`), and
-an unknown value is a typo worth reporting rather than a provider that quietly
-never starts.
-
-**The two properties of §1.3 are enforced here.** The provider SDK is imported
-only inside these processes, and only inside the function that builds the client;
-the key is resolved at that moment, so a server nobody calls never touches the
-keyring; and a reference that did not resolve is refused by name before the SDK
-sees it (`server_common.unresolved_key`).
-
-### 5.2 The wire, and the one streaming pattern
-
-`libs/model/base.py` is the neutral vocabulary: `Chunk` (a display increment),
-`ToolCallDelta` (one provider fragment of a tool call), `Stream` (an in-flight
-call), `LLMBackend` (a way to call a model). `libs/model/wire.py` encodes a chunk
-onto the MCP progress channel, which is how a *display* increment crosses a
-process boundary.
-
-`plugins/llm/server_common.py` is the pattern, used four times: **one
-`stream_chat` tool, provider output pushed down the progress channel as it
-arrives, and the assembled message returned as the result**. The distinctions
-that matter:
-
-- **The result is authoritative and the chunks are not.** Progress notifications
-  can be dropped, delayed or coalesced by the transport without the conversation
-  noticing; the returned `StreamChatResult` is what the loop appends. That is
-  what makes a display channel safe to lose.
-- **An unreadable result is refused, not read as an empty answer.** The client
-  checks the payload's shape before building a result (`clients/model.py`),
-  because a missing result read as an empty assistant message is a turn that
-  "succeeds" with nothing in it.
-- **A stream that goes quiet is a stall, not a long answer.** `MCPBackend`'s
-  drain watches the wait for *one chunk*, and a provider silent for the stall
-  window is indistinguishable from one that has hung. The clock is on the chunk,
-  never on the call: a model that streams for an hour is fine. **The watchdog is
-  armed by iterating the chunks**, so every caller of a model has to read the
-  stream and not only await its result — there is no other clock on the call
-  (`open_backend` passes no timeout, deliberately). The loop drains; the
-  harness's own discriminator call is the caller that did not, and a provider
-  that took the call and went quiet hung that step for ever with the
-  conversation's lock held, where the same silence fails a turn in the stall
-  window.
-- **A provider that does not stream the answer has still answered.** Each
-  adapter back-fills what the terminal event carries — the Responses adapter
-  reads the assembled text out of `response.completed` as it already read tool
-  arguments that never streamed, and the chat-completions adapter reads a
-  gateway's deprecated `delta.function_call` — because the alternative is a
-  turn whose authoritative result is empty while the provider's own words sit in
-  an event nobody unpacked. **A part a request cannot carry is named, not
-  dropped**: a system turn whose content is a list of parts contributes its text
-  and warns about the rest, in all three adapters.
-
-**A provider difference is config, not a branch.** `thinking`, `reasoning` and
-`store` are fields of a model's entry, and each server sends only what its config
-asked for (`build_request`); a value the protocol does not know is refused by
-name at the point it is read rather than passed through to a 400.
-
-**Usage carries the cache breakdown, and every call says what kind it was.**
-`Usage` counts the cached prefix inside `prompt_tokens` — Anthropic's
-`input_tokens` is the *uncached* remainder, so its adapter adds the two cache
-fields back in, while the OpenAI-compatible wires already include them — and
-keeps `cache_read` / `cache_creation` as parts of that prompt, never additions
-to it. `stream_chat` takes a `kind` word (`turn` for the loop's own calls,
-`discriminator` for the recall decision, which is the one call that reaches the
-model server outside the loop's backend) and logs one line per call with the
-breakdown: a cache hit rate is the number that tells a rebuild from an append,
-and one averaged across the two lineages could not say which of them missed.
-
----
-
-## 6. The tool system
-
-**Everything the model may call is a row in the tool catalogue, and one process
-decides what is in it.** `plugins/toolhub/server.py` is that process: it holds no
-connection to anybody's server (§6.2), keeps the rows, applies the naming rule
-and the budget, and routes each call back to whoever declared it.
-
-### 6.1 What the hub is
-
-The hub is the only place the model's tool list comes from, and it is a plugin
-because it is a *set*: which tools exist is a fact about the whole machine rather
-than about one conversation. It serves the model three tools of its own, which
-are the whole of how a tool arrives:
-
-- **`tool_search`** finds rows by words and by meaning (§6.4);
-- **`func_tool_load`** puts one in the model's list, which is what makes it
-  callable: the model's list is the *loaded* set, and everything else is findable
-  but not callable;
-- **`_func_tool_unload`** is the harness's trim, called by the harness at a turn
-  boundary (§6.3).
-
-**The catalogue is a library and the hub is the process that opens it**
-(`libs/store/catalogue.py`, one file for the whole data directory): the hub is
-its only writer, and one writer is what a SQLite file already is.
-
-### 6.2 Sources, and why a plugin declares rows
-
-**The connections live with the plugins, and the hub holds none.** A plugin that
-owns a config section holds the servers that section names and *declares* what
-each offers; the hub merges the declarations into rows and routes calls back
-(`libs/plugin/family.py`). What that buys is §1.3's property from the other side:
-`SERPER_API_KEY` is read by the process that starts the child needing it, and the
-hub — the process that decides what a model may call — holds no key at all.
-
-**A plugin is a required source.** An external entry that cannot be reached is a
-tool the model does not have; one of *ours* that cannot be reached is this system
-coming apart, and the listing refuses rather than quietly serving a shorter one.
-That is why a partial stack cannot run a turn, and why the end-to-end lane starts
-all of them (§11.3).
-
-**Names are rewritten once, at the hub.** Our own tools keep their bare name —
-the server behind one is slife2 itself — and somebody else's becomes
-`server__tool`, with the double separator because a single underscore is a
-character an upstream tool name can contain. A name that came from somewhere else
-is not a name to trust: `model_name` derives it and the separator is what makes
-it reversible, and the provider's narrower alphabet is applied by `sanitise`.
-
-### 6.3 The budget, and the pair that says what left
-
-The model may hold a bounded number of function tools (`tool_load:` in the
-config, enforced by the catalogue). The rule that makes the bound workable is
-that **the trim happens at a turn boundary and the model is told**: the tools a
-model has loaded go out with every request, so dropping the excess mid-turn would
-take away a tool it had just loaded and was about to use, and dropping it
-silently leaves it reaching for something gone.
-
-So the harness calls `_func_tool_unload` after the turn, and **what left is
-written into the conversation as a harness pair** (§4.3). The count and the
-threshold are the catalogue's; what the server decides is *when* to ask, which is
-the half a provider cannot do for us. The loaded set is one list for the whole
-machine, which is why an untrimmed task leaves every conversation's next request
-longer — the reason the agent-task server says a skipped trim at `error` rather
-than at `warning`.
-
-### 6.4 The search over the catalogue
-
-`tool_search` takes **words** and **sentences**, and they are different inputs
-because the two legs want different things: the keyword leg asks for every term
-it is handed, so a sentence-shaped query demands six words at once and matches
-nothing — which is most of why a sentence search was really a semantic search.
-Both legs are fused by *rank* (`fuse_ranked`), because `bm25` is unbounded and a
-cosine depends on the model, while a rank is comparable by construction. Several
-sentences are several *questions*, and the rule a caller can rely on is that
-**another question is another chance to be found and cannot cost a row an
-earlier one already found**.
-
-**Nothing asks for the whole catalogue by accident, and a listing is a different
-question from a search** — which is why the store answers a browse and the tool
-does not.
-
-**Filters narrow and never decide**, and they are applied in SQL rather than to
-the fused answer, because `rank` orders *every* match: cutting to the limit
-afterwards still returns the best rows inside the filter. The clauses name the
-corpus table's columns and are spliced into a query with one table in scope
-(`index.filter_clause`/`where_clause`, and the subquery the keyword leg uses so
-that a two-table join cannot make a column name ambiguous).
-
-### 6.5 What a tool says back
-
-**Everything the model reads is a surface, and a tool's answer is as much of one
-as its schema.** The schema is read before the call and the answer after it, and
-a system whose two halves disagree is one the model pays for twice: it derives
-what an answer means from the tool it happened to call, and re-derives it for the
-next one. So a tool the model may call says what it did the same way — §6.3
-bounds *how many* tools go out with a request; this is what each of them costs
-when it answers.
-
-- **The answer is a JSON object.** `llm.server_common.render_tool_result` renders
-  a `dict` as the JSON text the model reads, on every backend; a tool that
-  answers a sentence has invented a second format, and one the harness then has
-  to shorten as prose when it is long.
-- **A listing is a page**: `{"<noun>": [...], "total": N, "limit": L, "offset": O}`,
-  which is what `turn_list` and `CabinetStore.listing` already answered. `total`
-  is the whole of "is there more" — `offset + len(rows) < total` — and it counts
-  what the *filters* match rather than the table, so a narrowed listing is still
-  a page of what was asked for. A listing whose rows cannot outgrow the budget
-  answers its noun and says so; one that can takes `limit` and `offset`.
-- **A refusal — and a miss — raises `ToolError`**, one sentence saying what is
-  wrong and what to do instead. The failure is then the *call's* status, which is
-  what every reader already branches on: the hub answers `ok: false`, the loop
-  marks the call failed, the window draws it as one. A refusal returned as a
-  success is a call whose text and whose status disagree, and the party that
-  cannot check is the model.
-- **`_check_new_input` is the one exception, and it is the one that is not
-  data.** It hands over a person's message mid-turn (§4.4), so what it answers
-  *is* the thing itself — wrapped in an object it would be a message the model
-  had to unwrap before it could read what somebody wrote.
-- **No answer exceeds `tool_result.tokens`** (8,000, the shipped default — sized
-  against a measured turn log rather than chosen). A listing pages; an output
-  that cannot be bounded is the harness's (`dump`, §4.2), and the tool that reads
-  it back is a *searching* reader within the same budget, so reading an output
-  back can never cost the conversation more than shortening it did.
-
-**What the rule is not.** It is not "answers are machine-readable and nothing
-else" — a field may hold a sentence, and several do, because a person reads some
-of these answers too (`model_switch`'s note goes into the window). It is that the
-*envelope* is one shape, so that a reader that knows one tool knows them all.
-
----
-
-## 7. Memory
-
-Three corpora are searched the same way, and they are made of the same
-machinery. `libs/store/index.py` holds it: the FTS5 and `sqlite-vec` tables, the
-identity recorded beside them that decides a rebuild, the chunk write, the keyset
-paging, and the rank fusion over the two legs.
-
-**It is a library because it is a mechanism three stores are made of.** The
-alternative was each store owning its copy, and the cost of that is not
-duplication but *silence*: a rule stated once is a rule the second copy can be
-missing without anything saying so (`DESIGN §1.1`, where `_rowid` is the case in
-point).
-
-### 7.1 The turns
-
-`libs/store/db.py` is one SQLite file per agent — a conversation's history, which
-cannot be derived from anything and would be a loss. One file per *agent*, not
-per conversation: a worker's store sits beside its parent's and carries the
-worker's name, because a directory cannot carry it for two stores.
-
-**A turn is stored as the message list the model saw**, which is why the two
-halves of an exchange are read out of it rather than out of columns
-(`TurnRecord.to_listing`): what was asked is the first user message and what was
-answered is the last assistant message with prose in it.
-
-**There is no migration layer.** The tables are created on a file that is not
-this build's, and a file this build cannot read is reported and rebuilt rather
-than upgraded in place, because an upgrade path is a permanent second way to
-build the tables.
-
-**The live-context list is a row, not a file**: what a conversation runs on is
-persisted with the turns it chose, written in the same transaction as the turn
-that changed it (`read_context`/`write_context`/`append_context`).
-
-**A turn can point outside itself, and that is an addition to what memory means
-here.** A tool output too large for a conversation is stored whole in the cabinet
-and the turn keeps a marked **selection of it** (§4.2) — so the row still holds
-exactly what the model saw, and what the model saw can name something the row
-does not contain. The whole is reachable from the turn rather than in it, by the
-tool call id the turn's own messages carry, and a model reads it back with
-`dump_read`. Nothing is lost to the record, and nothing is re-run to get it.
-
-### 7.2 The index machinery
-
-**Two legs, one answer.** A corpus is found by its words (FTS5 over a derived,
-normalized string) and by its meaning (`sqlite-vec` over chunks of a different
-derived string), and the two are fused by rank. The distinctions the machinery
-exists to keep:
-
-- **What a row is *found* by is not what it is *about*.** The keyword leg indexes
-  everything worth looking a row up by; the vector is of a text that describes
-  what the row *is*. One string for both would make one of the two worse for no
-  reason.
-- **A chunk is a row's text cut into pieces that each get a vector**, and the
-  vector goes first, through the chunk that names it: a `vec0` row carries a
-  rowid of its own, so a vector left behind is a row the next write collides
-  with.
-- **The width is discovered, never configured**, and a rebuild is decided by an
-  *identity* recorded in the file (model, width, normalization rule) rather than
-  by a migration: `vec0` fixes a table's width in its DDL, and a wrong one fails
-  silently rather than loudly.
-- **One normalization rule**, applied to a row's text and to a query alike
-  (`libs/store/textindex.py`): a query is built to match what was stored, and two
-  rules would agree everywhere except at the edges, where they would be wrong.
-- **A list the caller sized is bound in chunks** (`index.chunks`), because a
-  statement with more values than SQLite accepts raises `OperationalError`, and
-  the corpus it raises on is the one nobody tests at that size.
-- **One request carries a batch, and an answer shorter than the request is a
-  refusal** (`index.embed_rows`, `index.checked_vectors`). A batch is one call
-  because a first run has thousands of rows to embed; the count is checked
-  because a row is written with its vectors in the same transaction, so a short
-  answer is not a partial index that a later pass catches up — it is a hole
-  nothing outside can see, with every status still reporting the index ready.
-  The check is one function with the corpus named in its sentence, because two
-  paths had written what they were handed — the turn store's save and, found
-  later, the cabinet's whole write path, where the marker that says a document
-  has been embedded made the hole permanent.
-
-### 7.3 The cabinet
-
-`plugins/cabinet/` is five kinds of private document — notes, a diary, saved
-files, reports, dumps — as one corpus with one index (`plugins/cabinet/store.py`).
-**One table rather than one per kind plus a view**: the kinds are one corpus, and
-a corpus whose rows live in four tables has to be unioned back together before it
-can be ranked. `kind` says what a row is, `key` is what a read and a remove take,
-and the columns a kind does not use are empty rather than absent.
-
-**A document's markdown mirror is written in the same operation as its row**, and
-the path is stored rather than derived, so a change to the naming rule orphans
-nothing that already exists. **Every path a caller can name is resolved against
-the cabinet root** and refused if it leaves it: a tool that writes a file for a
-model must not be talked into writing anywhere else.
-
-**A `dump` is the one kind no tool of the cabinet writes.** The harness saves a
-tool output too large for the conversation (§4.2) and this is where the whole of
-it lives — a file on disk with a row indexing it — and `dump_read` is the one way
-back. It is a **searching reader**, because searching is what a model does with a
-large output: a literal pattern finds lines and `context` brings their neighbours,
-marked so the two are told apart; `offset` reads from a line, negative from the
-end; `limit` reads fewer. **Every answer it gives is within `tool_result.tokens`**
-— the same number the harness spends shortening a result — and that is not
-tidiness: a reader that could return more than the shortening removed would have
-its own answer shortened next, which is this system feeding itself. The bound is
-enforced once, where the answer leaves, so it holds for the answers that quote the
-caller back at itself as well.
-
-*A dump is searchable with the rest*, since it is one corpus: a search naming no
-kind reaches machine output ranked against a person's notes, and whether it should
-is open — the address a model usually has is the marker in the transcript, not a
-search.
-
-### 7.4 Embeddings
-
-One server (`plugins/llm/embeddings_server.py`) and one client
-(`clients/embedder.py`), shared by the two things with an index — **shared
-because they must rank against the same model**: two copies of "ask and check the
-shape of the answer" is how two indexes would come to disagree about what an
-embedding is. The server holds the key for the same reason the model servers do —
-it speaks a provider's API.
-
-**The width is measured and the input limit is asked for.** The width can be
-discovered by a probe; an input limit cannot be measured without sending the
-oversized input, which is the failure this module's history records, so a model
-whose endpoint reports no limit is refused rather than handed a guess.
-
----
-
-## 8. Work that arrives
-
-Four ways work reaches a conversation that a person did not type, and they share
-one policy: **what arrives becomes a turn, and the conversation is told where it
-came from** (§4.4).
-
-### 8.1 WeChat
-
-`plugins/wechat/` holds a login per agent and turns what arrives on it into a
-turn. WeChat opens no API to a program; what exists is a hosted bridge, and
-`wechat/ilink.py` is the whole of that protocol — the QR handshake, the long
-poll, and the two envelopes that mean something other than what their status
+| `slife2/plugins/` | One process per plugin, one directory each | A plugin has a `main` and a `SERVER_NAME`, and the launcher starts it. |
+| `slife2/clients/` | The client half of an MCP hop | It dials a server this system or another party runs. |
+| `slife2/libs/` | Libraries | More than one component imports them. |
+| `slife2/helpers/` | Stateless helpers | They depend on the standard library and other helpers only. |
+| `slife2/tui/` | The terminal application | It is a client and serves nothing. |
+
+A plugin directory MAY contain private libraries, such as
+`plugins/cabinet/store.py` or `plugins/schedule/expressions.py`. `libs/` holds
+code shared by more than one component.
+
+The dependency direction is:
+
+```text
+tui/ -> MCP -> plugins/agent/ -> libs/turn/loop.py
+     -> {libs/model/base.py, libs/turn/tools.py, libs/turn/events.py,
+         libs/turn/messages.py} -> libs/host/config.py
+```
+
+The loop imports neither the agent server nor the terminal. It receives a
+backend and a coroutine returning a tool registry. The agent server supplies
+those; the loop does not know where they come from.
+
+### 2.6 Process model
+
+- **One process per plugin.** The launcher derives the set from the configuration
+  and starts each plugin at its configured or default address.
+- **One process per wire protocol, not per provider.** All providers that speak
+  the same protocol share a model server.
+- **Shared servers.** Every server is machine-wide infrastructure. A second
+  slife2 instance attaches to the running servers rather than starting a second
+  set. The last client to exit stops the running servers, unless
+  `--keep-servers` is used.
+- **One mesh per agent.** The peer network and the subagent network are separate
+  namespaces, but each agent has one MQTT identity per network.
+- **Daemons are reconstructible.** The runtime directory can be deleted; the
+  next start rebuilds what it needs.
+
+### 2.7 Key design decisions
+
+| Decision | Choice | Consequence |
+|---|---|---|
+| Prompt and harness | Trust the model; keep the harness small | The harness adds a marked address and tool pairs, not instructions or hidden policy. |
+| Context | Choose a context before each turn | One model call per turn decides what to keep and what to recall. The log is the permanent record. |
+| Person work vs machine work | Conversation for model work; code for deterministic work | Scheduling is an expression code reads; delegation is a tool the model calls. |
+| Plugin vs library | A process if it holds a credential, SDK, or connection | The agent loop never holds a provider key; files are opened in-process. |
+| Configuration | One file, read per turn | An edit reaches the next turn rather than the next restart. |
+| Names | Model-facing names are semantic, never protocol names | `peer_agent_*`, `subagent_*`, `turn_read`; no `a2a` in anything the model reads. |
+| Failures | Raise or fail the turn; no silent fallbacks | A fallback must be registered, scoped, and stated. |
+
+### 2.8 Quality attributes
+
+| Attribute | Mechanism |
+|---|---|
+| **Isolation** | Credentials stay in the consuming process; state is keyed by client id. |
+| **Recoverability** | Turns, the live-context list, the cabinet, and the schedule ledger are persisted. A restart restores the conversation. |
+| **Testability** | The loop is pure; servers run over in-memory transports in tests. |
+| **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
+| **Observability** | Startup reports each server as it lands; `slife2 status` probes each server; logs are per daemon; usage is logged per model call. |
+| **Portability** | Tested on Windows, macOS, and Linux; the runtime has no POSIX-only dependency beyond a documented fallback. |
+
+## 3. Plugin contract
+
+### 3.1 Protocol and transport
+
+A plugin is an MCP server over Streamable HTTP. It MUST:
+
+- answer the standard MCP JSON-RPC methods, including `tools/list` and
+  `tools/call`;
+- put its MCP name on the wire so a client can identify it;
+- serve a probe tool whose presence identifies the server;
+- start through the shared scaffold `serve_plugin`;
+- accept the common flags (`--data-dir`, `--host`, `--port`, and any section
+  flag defined by the protocol module);
+- resolve its own address from the configuration or the default.
+
+The shared scaffold `libs/plugin/protocol.py` implements argument parsing, logging,
+configuration loading, address resolution, daemon records, and server startup.
+A plugin supplies three hooks:
+
+1. what to build;
+2. what to say about its own start;
+3. what it cannot start without.
+
+The model backends use the same scaffold through
+`plugins/llm/server_common.serve_backend`, which is a wrapper, not a second
+startup path.
+
+A module under `plugins/` MUST NOT call `parse_serve_args`, `configure_logging`,
+or `serve` directly. A test enforces this rule by name.
+
+### 3.2 State keyed by client id
+
+Every server that holds per-conversation state MUST key that state by the client
+id `(agent, subagent)`. No client carries a session handle on the server's
+behalf.
+
+Consequences:
+
+- There is no "not found" for a caller to handle: state is created on first use
+  and a key never goes stale.
+- An idle sweep MAY drop state; the next call recreates it, and the caller
+  cannot observe the difference.
+- Isolation follows from the key: two agents cannot reach each other's state.
+- Every call is traceable, because every call carries the id even if the server
+  holds no state.
+
+For a model-facing call, the client id travels out of band in the call's `_meta`
+as `libs/plugin/audience.client_meta`. It is not an argument the model writes.
+`audience.request_client` reads it back. A model-facing call that does not
+identify its conversation is refused.
+
+A plugin's internal tools MAY take the client id as an ordinary argument when
+their caller already knows the conversation. The context store's `remember`,
+`restore`, and `rebuild` do so, because the agent server is the caller and
+already owns the conversation. This is the same distinction as the refusal
+vocabulary in §3.7: the model chooses to read its history, and must not be able
+to say whose; the agent server is the party that already knows whose it is.
+
+The home a call belongs to travels with the same identity. A shared server
+resolves a call's files against the caller's home, not against the directory the
+server was started in.
+
+### 3.3 Audience and authorization
+
+A tool MAY be called by the model only if the tool declares itself model-facing.
+The declaration is a namespaced `_meta` key (`slife2/audience`) read from
+`tools/list`.
+
+The rule is opt-in:
+
+- A plugin's internal tools need no mark and are withheld from the model.
+- A tool that forgets the mark is invisible, not dangerous.
+- An entry under `mcp:` needs no mark; the operator opted in by writing it.
+
+The audience and identity checks are separate:
+
+- **Audience** answers "may a model call this tool?"
+- **Identity** answers "on whose behalf is this call made?"
+
+A tool call runs on behalf of exactly one conversation. A model cannot assert a
+different client id; the server reads it from `_meta`.
+
+### 3.4 Family plugins
+
+A family plugin owns one configuration section and declares the rows that
+section describes. `libs/plugin/family.py` provides the shared behavior:
+
+- hold each entry's connection;
+- declare what each entry offers;
+- route a call back to the holder;
+- build the management tools' answers from the section's own words
+  (`FamilyWords`).
+
+The families are:
+
+| Family | Configuration section | Holds |
+|---|---|---|
+| `mcp-tools` | `mcp:` | External MCP servers |
+| `restapi-tools` | `rest-api:` | OpenAPI documents served by an MCP proxy |
+| `cli-server` | `cli:` | Commands already installed |
+| `skills-server` | `skills:` | Playbooks under `skills/` |
+| `cabinet` | none | Documents and saved files |
+
+An entry has one `state` field, read from the file before the link is consulted.
+A switched-off entry is `off`, not the `idle` of a connection nobody started. An
+entry that answered with no tools is `ready` with zero tools; it is not silent.
+The state vocabulary matches the hub's `servers()` answer.
+
+A credential that did not resolve is refused before use.
+`libs/host/config.py:unresolved_reference` is the single reader of "this value is
+still a reference". A reference that reaches another party's endpoint travels as
+the secret itself and returns an authentication error that names nothing.
+
+### 3.5 Plugin registry
+
+Every fact about a plugin that is a fact about the plugin is one row in
+`libs/host/config.py:PLUGINS`. A row contains:
+
+| Field | Meaning |
+|---|---|
+| `key` | The plugin's key in `servers:` and in status output. |
+| `module` | The module `python -m` runs. |
+| `name` | The MCP name the server puts on the wire. |
+| `probe` | The tool used to identify the server when it advertises no name. |
+| `port` | The default listening port. |
+| `api` | True for a model API backend; absent for a capability server. |
+
+Everything else is derived:
+
+- the start order;
+- the addresses in the default configuration;
+- the `*_SERVER_NAME` constants;
+- the launcher's specs;
+- the probe a client uses.
+
+A plugin reads its own name from its row. Adding a plugin is writing the module
+and adding a row. Removing one is deleting both. The table is data, not imports:
+every module field is a string, because importing a server to read its name would
+pull provider SDKs into the terminal and the agent loop.
+
+Two rows may share a module. `peer_agent` and `subagent` are served by
+`plugins/a2a/server.py`; the second row is a three-line entry point
+(`plugins/a2a/local_server.py`). They are separate processes because they are
+separate networks; they have different MCP names so a probe can tell them apart.
+
+Appendix B lists the registry as of this version.
+
+### 3.6 Identity verification
+
+A client MUST prove which server it reached before believing anything the server
 says.
 
-**Whose login a file is comes from the file, not the directory.** The directory
-holds the *sanitised* agent name, so a session keyed by it would be a second key
-for one login: a call from the raw name would build a second session, adopt the
-same token and start a second poll loop, delivering every message twice. The raw
-name is written beside the token, and a file too old to carry one is **skipped
-and named in the log** rather than resumed under a guessed name — the same answer
-an ownerless schedule ledger gets from the scheduler.
+`identifies` compares:
 
-### 8.2 The A2A mesh
+- the connected server's `server_info`;
+- the name the caller expected;
+- the server's own probe tool.
 
-`plugins/a2a/` is agent-to-agent traffic over MQTT, on the published profile. The
-wire is the `a2a-over-mqtt` SDK's — topics, the retained agent card, the JSON-RPC
-envelopes, the task lifecycle and the requester's retry ladder — and what this
-package writes is the harness glue around it, because interop follows from the
-wire being somebody else's.
+`open_server` is the single place a client connects to one of our servers. It
+raises, naming what could not be reached, rather than returning a client that
+will fail later.
 
-Seven rules here are this system's rather than the SDK's:
+The check prevents a server on the wrong port or an old build from answering MCP
+correctly and being mistaken for the intended server.
 
-- **A window is what puts an agent online** (`join`), and presence is a *note*
-  rather than a message: a peer coming online asks the model for nothing, and
-  handing it to the conversation would spend a turn on a fact nobody has to act
-  on.
-- **A task is completed out of band, and by the model's own call.** The SDK runs
-  the protocol lifecycle inside `on_request`, and this side blocks that call on a
-  per-task outcome the model resolves later — `send_message(message_type=
-  "task_response")` settles the bridge before that call returns, which is what
-  lets an answer arrive many turns after the request. A turn that ends in prose
-  sends nothing: the harness injects the inbound message and does not speak for
-  the conversation, so the task stays visibly pending.
-- **A restart drops every in-flight inbound task.** The completion bridge and
-  the peer's reply topic are process-local; the in-flight table is in memory and
-  a fresh process starts empty. Nothing is remembered and nothing is announced —
-  the requester's `task_list` names the task it never heard back about, and a
-  re-send arrives as a fresh request with a fresh bridge.
-- **Outcome is one word, and it is the peer's own.** `mesh._reply_state`
-  distinguishes completed, cancelled and failed, and the plugin renders *that*
-  word: with the callback carrying a single `cancelled` flag, a peer whose
-  handler raised had its `TASK_STATE_FAILED` read as "completed", which told the
-  model the opposite of what had happened. The one outcome no reply can produce —
-  the retry ladder running out — is named separately (`UNREACHABLE`), because it
-  is the *requester's* failure and must not be rendered as a peer's answer.
-- **A withdrawal outranks a late answer.** Cancelling records the cancel, and the
-  store refuses to let a later result or failure rewrite an ending the caller was
-  already told.
-- **The broker is probed, owned and stopped with the stack.** The plugin starts a
-  broker when the configured one is this machine and absent, fails the start if
-  it still will not serve, and `slife2 down` stops the one this machine started —
-  a record, not a guess, is what makes that safe.
-- **An inbound response-typed message is acknowledged and dropped**: a peer that
-  streams its result reaches us on the response topic, so a stray
-  `task_response` on the request topic is not a new task.
+### 3.7 Refusal vocabulary
 
-### 8.3 Agent tasks
+`libs/plugin/audience.py` holds the refusal vocabulary.
 
-`plugins/agent_task/` runs **one loop of the agent's own** on a description, and
-the answer comes back as a message. The properties that make it a task rather
-than a second conversation:
+- **`UNADDRESSED`** is a sentence template with two holes: what is missing and
+  why the server cannot guess. It is used for a call that does not identify the
+  conversation it is for.
+- **A raised `ToolError`** is the refusal a model reads. It carries one sentence
+  saying what is wrong and what to do instead.
+- **`protocol.agent_reader`** is the raising idiom for a tool server.
+- **`audience.unaddressed`** is the sentence-returning idiom for a plugin's own
+  internal API.
+- **`protocol.agent_or_blank`** answers "the agent this call is on behalf of, or
+  the empty string". It is the shared question behind both idioms.
 
-- **A cap, and a name taken while it runs** — `agent_task_start` refuses a
-  duplicate name and refuses past the cap, because a task is a means to an end
-  inside one of the agent's turns.
-- **A task's turns are not written to the db**: the task reads the agent's
-  context and adds nothing to it — what the conversation gains is the answer,
-  which is the message the agent server records.
-- **Every failure is a message, not a silence**: a loop that raises still has an
-  answer to deliver, and a task that vanished without one would leave the
-  conversation waiting for something that never arrives.
-- **Background work inside a task is refused, not ignored**: this loop runs one
-  turn and has no second one for a background result to arrive in, so `_async` is
-  refused with a sentence the model can act on rather than run quietly.
+There is no `[refused]` marker. A refusal is the call's status, not a word in its
+text.
 
-### 8.4 The clock
+## 4. Machine and agent lifecycle
 
-`plugins/schedule/` is the one thing here that starts work nobody asked for at
-the moment it starts. `schedule/expressions.py` is the only module that knows
-cron — a library, because there is nothing to serve — and it owns the timezone
-policy and the error contract for the whole system.
+### 4.1 Configuration as the system description
 
-**Two tables and one rule that is not written down as a constraint: no note means
-it failed.** A **task** is a name, a description and an expression; a **run** is
-one fire and what came of it. A run is opened when the task is handed to its
-agent and closed when the answer is delivered, so "finished" and "still holding a
-slot" are never the same thing.
+One file, `slife2.yaml`, inside a home, is read by every process. It is the only
+place that says what exists:
 
-**A fire is handed over, not executed**: the schedule plugin dispatches to the
-agent-task plugin, which is the loop that runs it — which is why an agent-task
-that cannot come up is a schedule that cannot run, and why the launch order has
-the edge it does.
+- which providers and models;
+- which servers and addresses;
+- which tool families and entries;
+- where embeddings come from;
+- which model is the default;
+- which networks and tunnels are enabled.
 
----
+The launcher's server list is derived from the configuration, not written
+separately. `Config.plugins()` answers what this machine runs:
 
-## 9. The terminal
+1. the wire protocols some provider actually uses;
+2. the local servers.
 
-**The terminal is a client and nothing else** (`tui/`, `plugins/tui/server.py`).
-It holds no conversation state, no provider knowledge and no API key: it sends a
-prompt and renders what comes back, which is the only role the MCP split leaves
+A protocol no provider speaks is not started. A provider is a row in a backend's
+configuration, not a process of its own.
+
+A malformed file is fatal. A missing file is not: built-in defaults are used. A
+file that exists and cannot be read stops the start with a one-line message
+naming the file.
+
+`libs/host/configfile.py` is the single writer for edits made by plugins. It
+performs a document edit under a cross-process lock, preserves comments, and
+hands the result to the same loader used at startup. The loader is the judge. An
+entry the loader refuses is restored.
+
+`--a2a-broker HOST:PORT` overrides `peer_agent.broker` for one run. It travels
+through the environment so a server started by this command reads the same
+address. It overrides the address only; the network's `org`/`unit` remain the
+file's. It cannot enable a network whose section is absent. A broker belongs to
+the process that started the mesh: if the A2A server is already running, the flag
+is refused rather than silently ignored.
+
+### 4.2 Shared servers and launcher
+
+`libs/host/launcher.py` starts the servers a configuration needs and attaches to
+those already running. Servers are daemons: a client exiting never stops one, but
+the last client out does. `others_running` counts by process liveness, so a
+killed client cannot keep the stack alive.
+
+The lifecycle rules are:
+
+1. **A probe decides whether a server is alive, never a pid.** A pid can be
+   recycled. Records also carry a process start token.
+2. **A pid that exists is not necessarily a running process.** A zombie is
+   detected by reading its state. A state that cannot be read is not treated as
+   a zombie.
+3. **Ready means the expected server answers as itself.** A port that accepts a
+   connection is not enough.
+4. **Startup is a wave order.** `NEEDS` states which servers must precede which.
+   Everything in a wave that has no unmet dependency starts at once. A server
+   whose dependency failed is not attempted and is reported with the name of what
+   it was waiting for.
+
+Startup is reported as it happens. `ensure_all` is a generator, and the CLI
+prints each server as it lands, because bringing up a server blocks for a second
+or two and a report held to the end gives no indication of which server is slow.
+
+### 4.3 Agent identity
+
+`claim_agent` holds the exclusive right to run under an agent name for the life
+of the client. The claim is taken with a kernel lock that the operating system
+releases if the holder dies.
+
+- The name alone identifies the claim. It is machine-wide, not per home.
+- A second live instance under the same name is refused by name.
+- The claim does not partition servers: servers remain shared with every other
+  agent.
+- `--headless` is recorded in the claim so the agent server can render an
+  appropriate system prompt.
+- Which data directory a name used previously is not remembered.
+
+### 4.4 `status` and `down`
+
+`slife2 status` reports, for each server named by the configuration, one of:
+
+- `running`, with its pid and start time;
+- `running (external)`, when the server answers but no record of ours exists;
+- `port held by something else`, when the port is occupied but the expected
+  server does not answer;
+- `not running`.
+
+`slife2 down` stops the servers this configuration names and that this build can
+prove it owns. It also stops a local A2A broker if the peer network is configured
+and the broker was started by slife2. Stopping a plugin stops the child processes
+that plugin started.
+
+`status` does not report the broker; it reports MCP servers only. The broker is
+stopped by `down` and started by the A2A plugin on demand.
+
+### 4.5 Subagents
+
+A subagent is an agent that belongs to another agent.
+
+A subagent:
+
+- has the maker's tool set, with one exception: `subagent_set` and
+  `subagent_remove` refuse a subagent caller (see §4.5.3);
+- has its own role-specific system prompt (`subagent.j2`), its own conversation,
+  and its own `subagent.yaml`; the cabinet, media directory, schedule ledger,
+  and WeChat login are keyed by the agent and are therefore the maker's;
+- has no process, no window, and no claim on an agent name;
+- runs when something sends it a message;
+- is addressed by the second half of a client id: `(maker, name)`.
+
+A subagent is created with `subagent_set` and removed with `subagent_remove`.
+After creation, it is reached over the local network with the same five
+operations as a peer agent, under `subagent_*` names.
+
+#### 4.5.1 Directory and record
+
+Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. That
+directory contains the subagent's conversation (`turns.db`) and its record
+(`subagent.yaml`). Stores keyed by the agent rather than the conversation—the
+cabinet, media directory, schedule ledger, and WeChat login—remain the maker's.
+
+The container level is deliberate. `agents/jack/cabinet`, `agents/jack/media`,
+and `agents/jack/turns.db` belong to the maker. A subagent named `cabinet` would
+otherwise collide with the maker's own directory.
+
+`subagent.yaml`, beside the conversation, records:
+
+- the model the subagent runs on;
+- the role it was made for;
+- whether it was made as a fork;
+- when it was made.
+
+The file is deleted with the directory. The configuration file holds only
+machine-wide facts: how many subagents a maker may have, and where the local
+network meets.
+
+#### 4.5.2 Role and fork
+
+- **`role`** is a word included in the subagent's prompt. The prompt is the
+  shipped `subagent.j2`, not the operator's `agent.system_prompt`, because a
+  subagent must be told what it is, whose it is, and where its work comes from.
+- **`fork: true`** starts the subagent from a copy of its maker's conversation as
+  it stood when the subagent's conversation starts. Nothing about the fork is
+  stored: its turns are not recorded, it has no stored context to restore, and a
+  restart starts a fresh copy. The copy is cut back to the last completed
+  exchange, because a model provider rejects a conversation ending mid-exchange.
+
+#### 4.5.3 One level only
+
+A subagent MUST NOT create or remove a subagent. `subagent_set` and
+`subagent_remove` are refused when the caller is itself a subagent.
+
+Rationale: the local network holds a place for the maker's own subagents and
+nothing holds a place for a level below them. A subagent of a subagent would have
+no listener for its messages.
+
+#### 4.5.4 Removal
+
+`subagent_remove` performs, in order:
+
+1. tell the local network to release the subagent's place;
+2. stop the subagent's loop;
+3. delete its directory.
+
+If the network notification cannot be made, the subagent is left unchanged.
+Nothing is asked of the subagent and nothing waits for it; removal is a forced
+cleanup whether it is idle or mid-turn. The agent server owns the two tools; the
+context store is not asked to forget the subagent, because the stored context
+lives in the file being deleted.
+
+Removing an agent removes its subagents, because they are directories underneath
+it. There is no second record of who made whom.
+
+#### 4.5.5 Local network
+
+The local network is configured under `subagent:`.
+
+- It needs a `broker`. A `peer_agent:` section with no broker uses the same
+  address, because a machine meets both networks somewhere and a second
+  `host:port` would be a second thing to keep in step.
+- The namespace is `{org}/{unit}` and the unit is always the agent's name. The
+  code sets it. A file that writes `unit:` is refused, because a unit that was
+  not the agent's name would merge two agents' subagents into one MQTT identity.
+- `org` defaults to `subagent` and MAY be overridden to group meshes.
+- The number of subagents a maker may have is `subagent.max_running` (default
+  32). The cap is a bound on runaway growth, not a target.
+
+A subagent's place on the network is held by the local network's process. A
+message to a subagent becomes a turn in the subagent's own conversation. The
+answer is drawn on the maker's terminal as `Subagent(<name>)>`, and it reaches
+the maker as a message in the maker's own conversation.
+
+A turn that ends in prose is not a reply. The harness does not send one. The
+model's own `subagent_send_message` or `task_response` call is the only way out,
+so a task answered in prose remains pending and visible as a model failure.
+
+The first roster read after a start connects the caller's place before reporting.
+A refused connection is reported as the tool's `error`, not raised. An unwoken
+member remains `offline`.
+
+## 5. Turn execution
+
+### 5.1 Loop contract
+
+A turn is:
+
+1. send the conversation to a model;
+2. stream the response;
+3. run the tools it requested;
+4. append the results;
+5. repeat until the model answers without requesting a tool.
+
+`libs/turn/loop.py` implements the algorithm. `plugins/agent/server.py` owns the
+conversations it runs in.
+
+`AgentLoop.run_turn(messages, prompt)` receives:
+
+- the messages to run on;
+- the incoming prompt;
+- a **backend** with one streaming method;
+- a **registry** of tools, refreshed by a callback before every model call;
+- an **observer** that may drop, delay, or coalesce display events without
+  affecting the conversation.
+
+The loop is a pure function over a message list. It owns no conversation, socket,
+or clock.
+
+The iteration cap is `agent.max_iterations`, read per turn from the current
+configuration. `0` or an absent key means no cap. A turn that reaches the cap
+ends with a stated reason.
+
+A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
+`(text, ok)`. `ok=False` is text the model can act on. An exception is a failure
+that is not the tool's, such as a dead transport, and it ends the turn.
+
+### 5.2 Harness additions
+
+`libs/harness/` contains what the harness — the system, as distinct from the
+model or the person — adds to a conversation. Four mechanisms share one rule:
+what the harness adds is a marked address, never a claim of its own.
+
+#### 5.2.1 Markers
+
+`markers.py` defines `[Name:{…}]` as a prefix on a delivered message. A marker is
+content: it is stored with the message and travels into the transcript. It is
+stripped for display by the reader that knows the vocabulary. A producer and its
+reader share one spelling.
+
+#### 5.2.2 Hand-over
+
+`handover.py` provides:
+
+- `hand_over`, which puts a message into an agent's conversation through the
+  window showing it;
+- `note_to_window`, which draws a harness line without creating a turn;
+- `submit_to`, which classifies a delivery answer as **written**, **refused**, or
+  **unknown**.
+
+The distinction matters:
+
+- a **refusal** proves nothing was written and may be retried;
+- an **unknown** may already have landed and must not be repeated;
+- a message that cannot be handed over is a `DeliveryFailed` and is reported as
+  an error, because those words were the only answer available to the sender.
+
+#### 5.2.3 Background calls
+
+`_async: true` on a tool call runs it in the background and returns a task id to
+the model. The result is delivered back into the conversation as a message. The
+call is over when its status is final; delivery is a separate fact
+(`Task.delivered`). A task whose hand-back is still in flight is neither running
+nor a failed delivery; treating either as the other causes an answer to arrive
+twice or a cancel to land on finished work.
+
+#### 5.2.4 Dumps
+
+A tool result too large for the conversation is stored whole as a `dump` row in
+the cabinet, keyed by the tool call id. The conversation carries a selection of
+the output's own lines, chosen by a **discriminator** model call. The
+discriminator receives:
+
+- the result;
+- the conversation in hand;
+- the current input.
+
+It answers with line ranges and nothing else. It never quotes or paraphrases; the
+harness cuts the original at the returned line numbers. A wrong selection costs a
+re-read, not a fabricated fact.
+
+The selection is made under the conversation because what a result is worth
+depends on what the conversation is doing. What is left out is not lost;
+`dump_read` reads it back by searching.
+
+A non-text result is dumped and not shortened: there are no lines to select. The
+whole result is kept, a stub says so, and the row's MIME records the decision.
+The harness does not sniff payloads to decide what a tool returned.
+
+The harness reaches the cabinet directly for `dump_save`, because that tool
+carries no audience mark and the hub holds no row to route. The model's route
+back is `dump_read`, which does carry the mark.
+
+#### 5.2.5 Fallbacks
+
+Exactly one step in this path has a registered fallback: an unreadable answer to
+the dump discriminator leaves the conversation with the first window, which is
+what a model asking for the beginning would have received.
+
+Every other step MUST succeed. Keeping the output, writing it, and reading the
+window back fail the turn loudly if they fail. The alternative — a conversation
+carrying an output that cannot be read back — gives up the bound and breaks the
+address while looking like success.
+
+### 5.3 Harness tool pairs
+
+Some things the harness must say as the model, because a provider accepts them
+only as tool calls:
+
+- `_func_tool_unload` after a trim;
+- `_check_new_input` when a message is waiting.
+
+Both are ordinary declared tools whose calls the harness writes into the
+conversation (`loop.harness_call`).
+
+Rules:
+
+1. **A pair names a declared tool.** The Responses and Messages backends reject a
+   tool call in history that is not in the request's tool list. The tool must
+   therefore be in the model's list, which means the model may call it too. A
+   model calling `_check_new_input` is the boundary's own move made early.
+2. **The id joining a pair MUST be acceptable to every provider as a call id.** A
+   provider that refuses the string refuses the request, including replays. The
+   Messages backend states the rule on both `tool_use.id` and
+   `tool_result.tool_use_id`; the id shape is chosen at the source rather than
+   sanitized later.
+3. **A pair is written with nothing awaited between its halves.** An interruption
+   in the gap leaves an assistant message whose call is unanswered, which every
+   provider rejects.
+4. **A pair is written only when something moved.** An empty pair every turn
+   records something that did not happen.
+
+### 5.4 Channels and delivery
+
+A message that arrives from anywhere other than this terminal becomes a turn, and
+the turn records where it came in.
+
+| Channel | Source | Drawn as | Marker |
+|---|---|---|---|
+| `tui` | The person, in this window | `You>` | none |
+| `wechat` | A WeChat login | `Wechat>` | `[Wechat:{…}]` |
+| `peer_agent:<peer>` | A peer agent | `PeerAgent(<peer>)>` | `[PeerAgent:{…}]` |
+| `subagent:<name>` | One of this agent's subagents | `Subagent(<name>)>` | `[Subagent:{…}]` |
+| `agent-task:<name>` | A background loop's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
+| `async-tool:<name>` | A background tool call's result | `AsyncTool(<name>)>` | `[AgentToolResult:{…}]` |
+| `schedule:<name>` | The scheduler | `Scheduled(<name>)>` | none; a trigger is not a result |
+
+The channel is recorded, so:
+
+- the marker belongs to the channel;
+- the displayed line wears the channel's name;
+- a rebuilt conversation still says where each message came from.
+
+The channel is an address (`agent-task:research`); the displayed line says who
+answered (`AsyncTask(research)>`). The two names are not derived from each other.
+The prefix is decided in one function (`tui/widgets.py:channel_prefix`), used by
+both the live prompt and the rebuild.
+
+A channel that delivers a message owes the conversation a **whole turn**, not a
+prompt. A channel that cannot reach a conversation says so and stops; it does not
+try a second route.
+
+An injected message can jump the queue. Every source uses the same mechanism:
+
+- what the person types in a window;
+- what another channel hands to that window;
+- what a headless window's input carries.
+
+All are submitted to the conversation the moment the words arrive. The window
+draws the message inside the running turn, in its own bubble, without closing the
+answer still being streamed. A rebuilt conversation draws the same line from the
+pair in the turn log. There is one queue: the agent server's inbox.
+
+### 5.5 Context decision and memory selection
+
+The agent server owns one loop per client id, created on first use. It reads the
+configuration per turn for everything a conversation can see:
+
+- the system prompt;
+- the model;
+- the iteration cap.
+
+An edit to `slife2.yaml` therefore reaches the next turn, not the next restart.
+
+Before each turn, the context plugin answers one question: what will this turn run
+on?
+
+The decision is:
+
+1. **`restore`**, when a conversation starts. It replays the stored live-context
+   list.
+2. **`rebuild`**, before each subsequent turn. It asks a discriminator model call
+   what to keep of the conversation in hand and what to recall from the turn log.
+
+The discriminator reads the conversation in hand rather than the new message
+alone, because a follow-up usually names its subject through the turns above it.
+Its answer is a selection, never a dump.
+
+Rules:
+
+- **An unreadable reply is not a decision.** `parse` returns `None`, and the turn
+  runs on the context it already has. This is the registered fallback for every
+  way the discriminator call can fail.
+- **A kept turn and a recalled turn are joined by id, in time order.**
+  `normalise_ids` collapses duplicates to their first position.
+- **A rebuilt turn carries a footnote** naming its id, channel, and span
+  (`turn_note`), so a model can distinguish it from a turn it just said.
+- **The turn-to-messages builder is one function** (`messages_from_turns`), shared
+  by restore and rebuild. Two builders would drift into two conversations.
+
+The context parameters are in `context:`:
+
+| Key | Meaning |
+|---|---|
+| `ceiling` | Fraction of the model's window a kept context is measured against. |
+| `floor` | Fraction a recall may spend when nothing was kept. |
+| `recall_limit` | Maximum number of turns one recall may select. |
+| `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
+| `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
+
+A missing store fails the turn, like any missing plugin. A discriminator timeout,
+provider error, or unreadable answer does not.
+
+### 5.6 Cancellation and repair
+
+A cancelled turn leaves the person's message in the conversation and nothing the
+model produced, because an assistant message whose tool calls are only partly
+answered is a history state every provider rejects.
+
+A batch of tool calls is written atomically:
+
+1. run every call;
+2. fit every result;
+3. append the assistant message and its answers together, with no `await`
+   between them.
+
+Nothing that ends a turn mid-batch — a cancellation or a failure — can leave an
+unanswered tool call in the history.
+
+The model's tool result is authoritative. Display chunks are not: progress
+notifications may be dropped, delayed, or coalesced without affecting the
+conversation.
+
+## 6. Model backends
+
+### 6.1 One process per wire protocol
+
+A model backend is a plugin. There is one process per wire protocol, serving
+every provider whose `api` is that protocol.
+
+Supported chat protocols:
+
+- OpenAI chat completions (`openai-completions`);
+- OpenAI Responses (`openai-responses`);
+- Anthropic Messages (`anthropic-messages`).
+
+The embeddings server is separate (`embeddings`). It speaks the embeddings
+endpoint and nothing else, and it exists because it is the other component that
+holds a provider SDK and a provider key.
+
+Responses is a separate protocol, not a flag on chat completions. It has
+different input items, tool shapes, and streaming events. Merging the two behind
+one `api` would put two adapters in one file and make the choice a branch in the
+server rather than a fact about the configuration.
+
+`api` selects:
+
+- the module to run;
+- the server name it must identify as;
+- the default port.
+
+An unknown `api` is a configuration error naming the known values.
+
+`API_BACKENDS` and `API_SERVER_NAMES` are views over `PLUGINS`, not second
+tables.
+
+### 6.2 Wire abstraction
+
+`libs/model/base.py` defines the neutral vocabulary:
+
+- `Chunk`: a display increment;
+- `ToolCallDelta`: one provider fragment of a tool call;
+- `Stream`: an in-flight call;
+- `LLMBackend`: a way to call a model.
+
+`libs/model/wire.py` encodes a chunk on the MCP progress channel. A display
+increment crosses a process boundary as a progress notification.
+
+### 6.3 Streaming
+
+`plugins/llm/server_common.py` implements one pattern, used by all four model
+servers:
+
+1. one `stream_chat` tool;
+2. provider output pushed down the progress channel as it arrives;
+3. the assembled message returned as the tool result.
+
+Rules:
+
+- **The result is authoritative and the chunks are not.** Progress notifications
+  may be dropped, delayed, or coalesced by the transport. The returned
+  `StreamChatResult` is what the loop appends.
+- **An unreadable result is refused, not read as an empty answer.** The client
+  checks the payload shape before building a result. A missing result read as an
+  empty assistant message is a turn that "succeeds" with nothing in it.
+- **A stream that goes quiet is a stall, not a long answer.** `MCPBackend`'s
+  drain watches the wait for one chunk. The clock is on the chunk, never on the
+  call. A model that streams for an hour is fine. The watchdog is armed by
+  iterating chunks, so every caller must read the stream and not only await its
+  result. `open_backend` passes no timeout.
+- **A provider that does not stream the answer has still answered.** Each adapter
+  back-fills what the terminal event carries. The Responses adapter reads the
+  assembled text from `response.completed`; the chat-completions adapter reads a
+  gateway's deprecated `delta.function_call`.
+- **A part a request cannot carry is named, not dropped.** A system turn whose
+  content is a list of parts contributes its text and warns about the rest, in
+  all three adapters.
+
+The stream assembly is one implementation. A provider difference is
+configuration, not a branch:
+
+- `thinking`;
+- `reasoning`;
+- `store`;
+- `temperature`;
+- `top_p`;
+- `max_tokens`;
+- `stream_usage`;
+- `input` capabilities;
+- `context_window`.
+
+Each server sends only what its configuration asked for. A value the protocol
+does not know is refused by name at the point it is read, not passed through to a
+provider error.
+
+### 6.4 Provider capability configuration
+
+A model entry declares its capabilities in its own configuration row:
+
+| Field | Meaning |
+|---|---|
+| `input` | Modalities the model accepts; `text` and `image`. |
+| `context_window` | The model's window, used for context fractions and status display. |
+| `reasoning` | Whether the model exposes reasoning. |
+| `thinking` | Provider-specific thinking setting. |
+| `store` | Provider-specific persistence setting. |
+| `max_tokens`, `temperature`, `top_p` | Generation parameters. |
+| `stream_usage` | Whether the provider reports usage in the stream. |
+
+The terminal reads the same entry for its status bar and image support. A model
+that does not declare `image` is not offered image attachment.
+
+### 6.5 Usage and cache accounting
+
+`Usage` counts the cached prefix inside `prompt_tokens`:
+
+- Anthropic's `input_tokens` is the uncached remainder, so its adapter adds the
+  two cache fields back in;
+- OpenAI-compatible wires already include cached tokens in the prompt count.
+
+`cache_read` and `cache_creation` are parts of the prompt, never additions to it.
+
+`stream_chat` takes a `kind` word:
+
+- `turn` for the loop's own calls;
+- `discriminator` for the recall decision, which is the one call that reaches the
+  model server outside the loop's backend.
+
+One line is logged per call with the breakdown. A cache hit rate distinguishes a
+rebuild from an append; an average across the two lineages could not say which
+one missed.
+
+## 7. Tool system
+
+### 7.1 Hub
+
+`plugins/toolhub/server.py` is the only process that decides which tools the
+model may see. It holds no connection to any external server and no credential.
+
+The hub serves three set-level tools:
+
+| Tool | Purpose |
+|---|---|
+| `tool_search` | Search the whole catalogue by keywords and by meaning. |
+| `func_tool_load` | Put one or more tools into the model's list. |
+| `_func_tool_unload` | Remove tools from the list; the harness also calls it with no names at a turn boundary to enforce the budget. |
+
+The catalogue is a library (`libs/store/catalogue.py`), opened in-process by the
+hub. The hub is its only writer. One SQLite file per home
+(`<data>/agents/tools.db`) is the catalogue.
+
+### 7.2 Sources and declarations
+
+A plugin that owns a configuration section holds the connections that section
+names and declares what each entry offers. The hub merges the declarations into
+rows and routes calls back to the declaring plugin.
+
+This is the other half of credential isolation: the process that starts a child
+needing `SERPER_API_KEY` reads that key; the hub holds none.
+
+A plugin is a **required** source. If one of ours cannot be reached, the listing
+refuses rather than serving a shorter list. An external entry that cannot be
+reached is reported and left out; the model simply has fewer tools.
+
+A declaration is the whole list, and it is refreshed before every search. The
+whole list is what makes a deleted entry stop being a hit. Refreshing is what
+makes dropping a directory into `skills/` or editing the configuration take
+effect at the next search rather than at the next restart.
+
+The hub's own tools are rows too. They are the set-level work that no plugin can
+answer: what exists, what the model is holding, and what the budget took back.
+
+### 7.3 Naming
+
+Names are rewritten once, at the hub.
+
+- A tool from an external source becomes `{server}__{tool}`. The double
+  separator is used because a single underscore is a character an upstream tool
+  name may contain.
+- A plugin's own tool keeps its bare name. Which plugin serves a tool is a fact
+  about the system, not something the model needs in order to call it.
+- All of our tools share one namespace. Two plugins cannot offer the same name;
+  the catalogue refuses rather than resolving silently.
+- A name from an external source is not trusted: `model_name` derives it,
+  `sanitise` applies the provider's alphabet, and the separator makes it
+  reversible.
+
+A skill and a command are rows but not callable tools. They have no load state
+and never enter the model's list. Calling a skill row answers with the step that
+reaches it (`skill_use`); calling a command row says that nothing runs one yet.
+Their names are namespaced (`skill:browser-harness`, `cli:yt-dlp`) because one
+name is one row.
+
+### 7.4 Loaded set and budget
+
+What the model is handed is the tools it has loaded, not every tool that exists.
+The list is re-read from the hub before every model call.
+
+Initial state:
+
+- Every tool served by slife2's own plugins is loaded.
+- An external source's tools are loaded when its entry says `autoload: true`.
+- Everything else is discoverable but not callable until loaded.
+
+A model can call a name returned by `tool_search` without loading it, but loading
+is what keeps it in the list sent with each request.
+
+The list is bounded by `tool_load.threshold` (default 100 function tools). Over
+the limit, the least recently **called** tools are unloaded:
+
+- our own tools are never evicted;
+- an `autoload` source is never evicted;
+- a tool never called since it was loaded is ordered by its load time.
+
+The trim happens at a turn boundary. The harness calls `_func_tool_unload` before
+saving the turn and writes the pair into the conversation. The model learns that
+the list shrank from the transcript rather than from a failed call to a tool that
+is no longer there. Nothing is written when nothing was removed.
+
+### 7.5 Catalogue search
+
+`tool_search` takes two kinds of input:
+
+- **`keywords`**: words that must all be present. The keyword leg is for names,
+  paths, and symbols.
+- **`sentences`**: questions matched by meaning. Each sentence is a separate
+  question, and another question is another chance to be found; it cannot cost a
+  row an earlier result.
+
+The two legs are fused by rank, not by raw score. `bm25` is unbounded and a
+cosine depends on the embedding model; a rank is comparable by construction.
+
+Filters narrow the result and never decide it. They are applied in SQL rather
+than after fusion, because rank orders every match and cutting to the limit
+first would drop rows the filter would have kept.
+
+### 7.6 Result contract
+
+Everything the model reads is a surface. A tool's answer is as important as its
+schema.
+
+- **The answer is a JSON object.** `llm.server_common.render_tool_result` renders
+  a `dict` as JSON text on every backend. A tool that answers a sentence invents
+  a second format.
+- **A listing is a page:** `{"<noun>": [...], "total": N, "limit": L, "offset": O}`.
+  `total` is the whole answer to "is there more" and counts what the filters
+  match.
+- **A refusal or a miss raises `ToolError`**, one sentence saying what is wrong
+  and what to do instead. The failure is the call's status: the hub answers
+  `ok: false`, the loop marks the call failed, and the window draws it as failed.
+- **`_check_new_input` is the one exception.** It hands over a person's message
+  mid-turn, so what it answers is the thing itself, not data about something.
+- **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 128). A
+  listing pages; an output that cannot be bounded is the harness's dump, and
+  `dump_read` is a searching reader within the same budget.
+
+A field may contain a sentence, because a person reads some answers too. The
+rule is that the envelope is one shape, so a reader that knows one tool knows
+them all.
+
+### 7.7 Meta-parameters
+
+Every tool accepts three meta-parameters. They are added to every advertised
+schema (`libs/turn/tools.advertised`) and stripped before dispatch, so no tool
+server sees them.
+
+| Parameter | Semantics |
+|---|---|
+| `_timeout` | Seconds for this call. Overrides the tool's default. `0` or negative means "use the default", never "no limit". A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
+| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.tokens`. An agent task's loop has no `_async`. |
+| `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
+
+The loop reads these parameters off the call and strips them before dispatch.
+
+## 8. Memory and indexing
+
+### 8.1 Turn store
+
+`libs/store/db.py` implements one SQLite file per conversation (client id):
+`agents/<agent>/turns.db` for the agent's own conversation, and
+`agents/<agent>/subagents/<name>/turns.db` for a subagent's. The store holds:
+
+- the turn log;
+- the live-context list;
+- the indexes over the turns.
+
+A turn is stored as the message list the model saw. The two halves of an exchange
+are read from that list rather than from separate columns:
+
+- what was asked is the first user message;
+- what was answered is the last assistant message with prose.
+
+There is no migration layer. The tables are created on a file that is not this
+build's. A file this build cannot read is reported and rebuilt, not upgraded in
+place, because an upgrade path is a permanent second way to build the tables.
+
+The live-context list is a row, not a file. It is written in the same transaction
+as the turn that changed it.
+
+A turn can point outside itself. A tool output too large for the conversation is
+stored whole in the cabinet, and the turn keeps a marked selection of it. The row
+still holds exactly what the model saw, and the whole is reachable from the turn
+by the tool call id. Nothing is lost to the record and nothing is re-run to get
 it.
 
-### 9.1 Three connections, three directions
+### 8.2 Index machinery
 
-| where | what it is | direction |
+`libs/store/index.py` implements the search machinery used by all three corpora:
+turns, the tool catalogue, and the cabinet.
+
+Each corpus is searched by two legs:
+
+- **Keyword**: FTS5 over a derived, normalized string.
+- **Meaning**: `sqlite-vec` over chunks of a different derived string.
+
+The legs are fused by rank.
+
+Rules:
+
+1. **What a row is found by is not what it is about.** The keyword leg indexes
+   everything worth looking a row up by; the vector is built from a text that
+   describes what the row is.
+2. **A chunk is a row's text cut into pieces, each with a vector.** The vector is
+   written first, through the chunk that names it, because a `vec0` row carries
+   its own rowid and a vector left behind is a row the next write collides with.
+3. **The vector width is discovered, never configured.** A rebuild is decided by
+   an identity recorded in the file (model, width, normalization rule), not by a
+   migration. `vec0` fixes a table's width in its DDL; a wrong width fails
+   silently.
+4. **One normalization rule** applies to stored text and to queries alike. Two
+   rules would agree everywhere except at the edges.
+5. **A list the caller sized is bound in chunks.** SQLite has a limit on the
+   number of values in a statement.
+6. **One request carries a batch, and an answer shorter than the request is a
+   refusal.** A batch is one call because a first run embeds thousands of rows.
+   The count is checked because a row is written with its vectors in the same
+   transaction; a short answer is a hole that no later pass can see.
+
+### 8.3 Cabinet
+
+`plugins/cabinet/` stores five kinds of document:
+
+| Kind | Key | Write behavior |
 |---|---|---|
-| the agent server | `AgentClient` — `run_turn`, `transcript`, `answer_approval`, `switch_model` | the window asks |
-| the terminal's inbox plugin | `WindowClient` — `attach` held open, hand-overs pushed down it | the window is asked |
-| the mesh plugin | `MeshClient` — `join` held open while this agent is on the mesh | the window holds a place |
+| `note` | A subject | Replaces. |
+| `diary` | A date | Appends a section. |
+| `file` | Its path inside the cabinet | Copies the file in. |
+| `report` | A title | Appends a section. |
+| `dump` | The tool call that produced the output | Written by the harness. |
 
-**The window does not serve.** The thing that knows where each terminal is is an
-ordinary plugin, started and shared like the rest, with a session per agent
-(`plugins/tui/server.py`): the window is a *client* of it, which is what lets two
-windows on one machine both be reachable. The exception this project used to
-carry — "every plugin is an MCP server but the TUI" — is gone, and what replaced
-it is a session per agent inside that plugin.
+One table holds all kinds. The kinds are one corpus; a corpus whose rows live in
+four tables would have to be unioned before it could be ranked. `kind` says what
+a row is, `key` is what a read and a remove take, and columns a kind does not use
+are empty.
 
-**A session lives exactly as long as the call that opened it.** Nothing has to be
-deregistered: closing the stream cancels the handler behind it, which is what
-makes a window that was killed rather than quit stop counting. A message handed
-to an agent no window is showing is refused by name (`NO_WINDOW`), and the caller
-decides what to do about it.
+A document's Markdown mirror is written in the same operation as its row. The
+path is stored rather than derived, so a change to the naming rule orphans
+nothing that already exists. Every caller-supplied path is resolved against the
+cabinet root and refused if it leaves it.
 
-### 9.2 What the window draws, and what it does not keep
+A dump is the one kind no cabinet tool writes. The harness saves a tool output
+too large for the conversation; the dump is a file on disk with a row indexing
+it. `dump_read` is the one way back.
 
-**Markers are stripped for display** by the reader that knows the vocabulary, and
-the prefix is decided in one function (§4.4). A tool call is drawn as a line with
-its argument; the harness's own lines — history restored, a turn cancelled, a
-peer online — come from one place (`tui/notes.py`), so a producer cannot invent a
-fourth spelling of one. **A tool call's panel says one of four things** —
-`running`, `done`, `error`, `interrupted` — and the fourth is the one that is
-about the *turn* rather than about the call: the turn ended, cancelled or failed,
-while the window was still waiting on it, so no result exists and none is coming.
-It is drawn apart from `error` because the tool did not fail — the window never
-learned how the call ended. It is also what keeps a panel from saying `running`
-for the rest of the session, which would be a claim about right now that stopped
-being true. **A connection has two states on screen and no more**:
-the reasons live in the status tool, and a line that tried to say them would be a
-line about the plugin's internals.
+`dump_read` is a searching reader:
 
-**A restored conversation is the server's.** `transcript` is read once when the
-window opens; the window keeps no copy of its own, so what it shows after a
-reconnect is what the server has. A read that fails is not an empty conversation
-— that distinction is the difference between "this agent has no history" and
-"this agent's history could not be read".
+- `pattern` finds lines, matched literally and ignoring case;
+- `context` adds the lines around each match;
+- `offset` reads from a line, negative from the end;
+- `limit` reads fewer lines.
 
-### 9.3 Approval, and the one call that runs the other way
+Every answer stays within `tool_result.tokens`. A reader that could return more
+than the shortening removed would have its own answer shortened next, which is
+the system feeding itself. The bound is enforced where the answer leaves.
 
-A tool a plugin marks as needing approval parks the turn and asks the window
-(`ToolApprovalRequested` on the progress channel). The answer is a **call of its
-own** (`answer_approval`), because the turn's channel runs one way: a
-notification cannot carry an answer back, and the call cannot wait for anything
-the server holds per conversation — the waiting turn holds that. Losing the race
-is not an error: the turn may have ended a moment earlier, and a client that
-raised over it would call a prompt that arrived too late a failure of the
-connection.
+A dump is in the same corpus as the other kinds, but a search that names no kind
+does not see dumps. The usual address for a dump is the marker in the
+transcript, not a search.
 
-### 9.4 The interface language, and what is never translated
+### 8.4 Embeddings
 
-**The window is bilingual — English and Chinese — and it is the only thing that
-is.** Detection is the OS's own answer, once, at import: the Windows UI-language
-API on Windows (the C locale carries the *region*, not the interface's
-language), else `LC_ALL` / `LC_MESSAGES` / `LANG`, most specific first, with
-Chinese locales selecting Chinese, anything else English, and any failure
-degrading to English rather than to a window that cannot be drawn. `--lang`
-overrides it, and is set before anything is built. The layer is one accessor
-over a two-language table (`tui/i18n.py`) — no catalog files, no dependency —
-and **a missing key or placeholder raises at the call site** rather than
-rendering a blank slot.
+One server (`plugins/llm/embeddings_server.py`) and one client
+(`clients/embedder.py`) serve both indexes. Sharing is required because the two
+indexes must rank against the same model. Two copies of "ask and check the shape
+of the answer" would let the indexes disagree about what an embedding is.
 
-**Model input is English, uniformly**: the system prompt, harness and plugin tool
-schemas, job schemas and result strings, and every log line. External text — a
-tool's result, a peer's message, a third-party command's `--help` — keeps the
-language of its source and passes through untranslated, because it is somebody
-else's words rather than this window's chrome. **Tool labels stay English too**:
-`read file` is the name the model calls, and a translated one would put the
-screen and the tool list in disagreement about what a tool is called.
+The server holds the provider key for the same reason the model servers do.
 
-**Two things are key caps rather than words**, and stay English in both
-languages: the keys in the status bar's hint (`Esc`, `Ctrl+S`), because a
-translated key label breaks the key-to-action scan, and the keys in the picker's
-and the approval row's hints. The action word after each one is the interface's.
+The width is measured, and the input limit is asked for:
 
-**A counted noun is two entries in the table**, because `str.format` has no plural
-machinery: the caller picks between them, since the caller is what has the count.
+- the width can be discovered by a probe;
+- an input limit cannot be measured without sending an oversized input, so a
+  model whose endpoint reports no limit is refused rather than given a guess.
 
-**One boundary is worth knowing.** The lines a *daemon* writes — a peer or a
-channel coming online (`a2a/mesh.py`, `wechat/server.py`, through `tui/notes.py`)
-— are composed in that daemon's process, and the daemon is shared and outlives
-any one window. It was not started with `--lang`, so it follows the OS locale
-where the window follows the flag; a machine whose OS language and `--lang`
-agree — which is every machine that does not pass the flag — never sees the
-difference.
+Changing the embedding model invalidates the index identity. The vector index is
+rebuilt whole on the next start, because vectors from two models cannot be
+ranked against each other.
 
----
+## 9. Inbound work
 
-## 10. Configuration and the environment
+Four kinds of work reach a conversation without a person typing it:
 
-### 10.1 The file
+- WeChat messages;
+- peer-agent messages and tasks;
+- agent tasks;
+- scheduled tasks.
 
-One `slife2.yaml` inside the data directory, and its sections are the system's
-vocabulary: `servers:`, `providers:`, `embeddings:`, `agent:`, `agent-task:`,
-`context:`, `tool_load:`, `tool_result:`, `mcp:`, `rest-api:`, `cli:`,
-`skills:`, `media:`,
-`file-tunnel:`, `wechat:`, `peer_agent:`. **Every section is read by the plugin that
-owns it** — the family plugins read their own rows, the hub merges them — and no
-section is read by two processes.
+They share one policy: what arrives becomes a turn, and the turn records where it
+came from (§5.4).
 
-**A section that is absent is a capability that is off, not an error.** A machine
-with no `peer_agent:` section is a machine that is not on that network; no `media:` providers
-is no images. What is not tolerated is a section that is there and wrong: an
-unknown provider, an unknown `api`, a port that is not a port are each refused by
-name at load, because a refusal is cheaper than a paid call that fails later —
-and a *model* of the wrong kind for the capability asked for is refused too,
-rather than quietly replaced by the first model of that kind. Two more of the
-same kind, and each is refused for where the failure would otherwise land: a
-`servers:` **host** that is not a host (`host: "::1"` builds a URL whose port
-cannot be parsed at all, so the failure would surface inside a locksmith's error
-rather than in the file), and a **switch** written as anything but `true`/`false`
-— YAML 1.2 made `no` and `off` plain strings, so reading one is guessing at a
-decision somebody wrote down.
+### 9.1 WeChat
 
-**The file is read per turn for everything a conversation can see** (§4.5), and
-cached by identity: a reader asks "did an edit happen" with one comparison
-rather than a watcher, a version counter or a lock.
+`plugins/wechat/` holds one login per agent and turns what arrives into a turn.
+WeChat exposes no direct API to a program; the plugin speaks iLink's hosted
+bridge. `wechat/ilink.py` contains the protocol:
 
-### 10.2 Secrets
+- the QR handshake;
+- the long poll;
+- the envelopes whose meaning differs from their status.
 
-A value may be a literal, a `${VAR}` resolved through the environment and then
-the OS keyring, or a `keyring:` URI. **Resolution is lazy** — at the moment the
-value is used, so a process nobody calls never touches the keyring — and an
-unresolved reference is **left verbatim** so the failure lands where the name can
-be said. `config.unresolved_reference` is the one reader of "this is still a
-reference", and the rule it exists for is that a reference must never travel as
-the secret (§2.4). A keyring that is *installed* and refuses is an error rather
-than a "not found", because reading it as absent would send the reference itself
-— and the *shape* of that error is the config's business, not the store's: a
-credential the store simply does not hold is a `ConfigError` naming the reference
-and the command that stores it, since that is a mistake to correct rather than a
-secret to carry; a store that was asked and failed keeps raising its own error,
-which is the value that cannot be read (§10.1's rule, and the one case the
-refusal must not swallow).
+The file carries the raw agent name. The directory holds the sanitized name; a
+session keyed by the directory name would build a second session for one login,
+adopt the same token, start a second poll loop, and deliver every message twice.
+A file too old to carry the raw name is skipped and named in the log rather than
+resumed under a guessed name.
 
-### 10.3 The data directory, and the machine's runtime
+One WeChat account has one live login. A second scan retires the first login
+silently; the bridge answers the first with `session timeout`. The plugin reads
+that answer as an offline state and reports the reason through
+`wechat_check_status`.
 
-**Two roots, because there are two kinds of fact** (`libs/host/paths.py`). A
-**home** is a data directory: the config, the skills, and the agents whose data
-lives in it (a conversation, a cabinet, a WeChat login, a work area). `--data-dir`
-(or `SLIFE2_DATA_DIR`) names it and is the *whole* answer to "where is this
-installation" — the config lives inside it rather than being named separately,
-because a second answer would be a second thing to keep in step. A child process
-is spawned with the *resolved* directory, so a relative flag cannot be re-resolved
-underneath the working directory it is given.
+The model-facing tools are:
 
-**A directory holds the agents whose data is in it.** `--agent jack --data-dir D`
-names the agent and says where its files are, and the two are separate facts: the
-name is claimed **once on the machine, by the name alone** (§3.3), so a second
-`jack` in another directory is refused rather than accepted as a different agent,
-and which directory a name used is not remembered — the next run of it is given
-one and uses that. A directory may hold several agents, and they then share its
-config and its catalogue, the tool set being the config's.
+- `wechat_login`;
+- `wechat_check_status`;
+- `wechat_send_message`;
+- `wechat_logout`.
 
-**The runtime is the machine's**, at `~/.slife2/runtime` (`SLIFE2_RUNTIME_DIR`
-overrides): the records naming pids, the start locks, the logs, the claims on
-agent names, and the list of homes the machine has run an agent in. The servers
-are one set per machine — a second `slife2` attaches to what is already running
-rather than starting a duplicate — so a copy of any of that per home could only
-disagree with the others: a second data directory reporting a running stack it
-could not see, two launchers cold-starting one port, a claim lost to whoever
-looked in the other folder.
+A message from WeChat becomes a turn in the agent's conversation. The plugin
+hands it to the terminal showing that conversation, which runs it like typed
+input. The turn is recorded with channel `wechat` and a `[Wechat:{…}]` marker
+naming the sender. Answering is the model's job; nothing auto-dispatches a reply.
 
-**And a home is what a call is served from.** A plugin is shared, so the process
-that writes an agent's file is generally not the one started with `--data-dir`:
-the home a call belongs to travels with it — beside the identity that already
-does (`libs/plugin/audience.py` puts it in the call's `_meta`), established for
-the length of the call (`libs/plugin/protocol.py`'s `ServeTheCallersHome`) and
-carried on every hop (`protocol.Peer`). `paths.home()` is what resolves a file
-against it; a plugin's own config, records and logs keep `paths.data_dir()`.
-Everything a plugin *derives* per home — a home's catalogue, the declarations the
-hub holds, the model list it resolves — is kept per home, out of that home's
-`slife2.yaml`.
+### 9.2 Peer agents (A2A over MQTT)
 
-**A home is made when an agent starts in it**, which is what makes "out of that
-home's `slife2.yaml`" true from the first moment rather than from the first
-message: the client records the directory, makes its `agents/` and `skills/`
-(`slife2._open_home`) and then asks the hub for this home's tool list
-(`slife2._open_catalogue` → `libs/host/launcher.open_catalogue`), which is the
-call that makes `agents/tools.db` exist — the file is the hub's, one writer, so
-asking is the only way to build it. A hub that cannot answer fails the start
-rather than opening a window that cannot run a turn.
+`plugins/a2a/` carries agent-to-agent traffic over MQTT, using the published
+A2A-over-MQTT profile.
 
-**A catalogue is complete when it is opened.** What the hub reaches *itself* is
-the machine's — one set of links to the plugins, whatever home is asking — so what
-those links last listed is one fact, and it is written into **every** home's file:
-held by the hub for the homes that have not asked yet (`Catalogue.remember`) and
-seeded into a home's store as it opens (`Catalogue.seed`). Only the *declarations*
-are per home, because a declaration is a statement about that home's own sections
-(`mcp:`, the playbooks, the commands). An index is placed by the owning home's
-embedder, never the asking one's.
+The wire is the `a2a-over-mqtt` SDK's:
 
-**A family's connections are per name, not per home.** A `mcp:` or `rest-api:`
-entry is a process on the machine, so whether two configured entries are the same
-server is decided by the **name**: the first home that switches an entry on starts
-it (`family.Link`) and every other home naming it holds that same link, reading one
-listing. What stays per home is what its own section says — `enabled`,
-`description`, and therefore the whole of what it declares (`family.Held`) — so one
-home switching an entry off does not switch it off for another. Two homes naming
-one entry with different commands is reported and the running one is used, and an
-edit through a management tool reconfigures that one server for every home holding
-it. A link is closed when the last home lets go of it, so the last-instance-out
-take-down still takes everything down.
+- the topic tree;
+- the retained agent card and presence;
+- the JSON-RPC envelopes and their MQTT properties;
+- the task lifecycle and per-task deduplication;
+- the requester's retry ladder.
 
-### 10.4 Records, logs, and what a person is shown
+What this package writes is the glue around that SDK. Interoperability follows
+from the wire being somebody else's; a self-built binding would be a second
+protocol using the same name.
 
-A daemon writes to a log under the runtime directory and records that it is
-running; `status` reads the records and `down` stops only what it can prove is
-ours. A **failed start reports the end of the log**, because a real error in a
-real message is worth more than a status code, and the start-up report goes to
-stdout while a plugin's own output is the log — which is what keeps the report
-readable.
+Rules specific to this system:
 
----
+1. **Presence follows a window.** A `join` call held open puts an agent on the
+   mesh. Coming online and going offline are notes, not messages; no turn runs
+   and the model is not told. The roster is `peer_agent_list`.
+2. **A task is completed by the model's own call.** A `task_response` sent with
+   `peer_agent_send_message` settles the inbound bridge before the call returns.
+   A turn that ends in prose sends nothing; the inbound message is delivered and
+   the model speaks for itself or the task stays pending.
+3. **A restart drops in-flight inbound tasks.** The completion bridge and the
+   peer's reply topic are process-local. Nothing is persisted and nothing is
+   announced. The requester's `peer_agent_task_list` names a task it never heard
+   back about, and a re-send arrives as a fresh request with a fresh bridge.
+4. **Outcome is one word, and it is the peer's own.** `mesh._reply_state`
+   distinguishes completed, cancelled, and failed. The one outcome no reply can
+   produce — the retry ladder running out — is `UNREACHABLE`, because it is the
+   requester's failure and must not be rendered as a peer's answer.
+5. **A withdrawal outranks a late answer.** Cancelling records the cancellation,
+   and the task store refuses to let a later result or failure rewrite an ending
+   the caller was already told about.
+6. **The broker is probed, owned, and stopped with the stack.** The plugin starts
+   a broker when the configured one is local and absent, fails the start if it
+   still will not serve, and `slife2 down` stops a broker this machine started.
+   A record of ownership, not a guess, makes stopping safe.
+7. **An inbound response-typed message is acknowledged and dropped.** A peer that
+   streams its result reaches the response topic. A stray `task_response` on the
+   request topic is not a new task.
 
-## 11. Project structure
+The five model-facing tools are:
 
-### 11.1 The four layers
+- `peer_agent_send_message`;
+- `peer_agent_cancel_task`;
+- `peer_agent_list`;
+- `peer_agent_task_list`;
+- `peer_agent_broadcast`.
 
-§1.1 states the rule and `README`'s Layout draws the tree. What the layering buys
-is that a module's *kind* is visible from its path: a reader who wants the loop
-opens `libs/turn/loop.py`, and a reader who wants the process that runs
-conversations opens `plugins/agent/server.py`. The cost is one more directory
-level, paid once.
+`peer_agent_task_list` reports two states:
 
-**And every process in that tree is described in one place outside it.** A plugin
-is a module here plus a row of `PLUGINS` (§2.5), which is where its name, its
-probe tool and its port live; nothing else in the tree names it, so a directory
-can be deleted and a row can be deleted and those two edits are the whole of
-removing a plugin. `pyproject.toml`'s console scripts are the third and last
-place, and they exist for a person rather than for the launcher — every daemon is
-started as `python -m <module>` (`libs/host/launcher._argv`), in the interpreter
-and virtual environment that spawned it, and not through a script on `PATH`.
+- `pending`: a task still running;
+- `unreachable`: an outbound task whose requester retry ladder ran out.
 
-### 11.2 The test tree mirrors it
+An unknown id is reported as withdrawn or never seen.
 
-`tests/libs/`, `tests/clients/`, `tests/plugins/`, `tests/helpers/`, `tests/tui/`
-and `tests/e2e/` are named for what they test: one directory per layer, one
-module per module, so "where is the test for this" has one answer. **The doubles
-more than one module needs live in `tests/fakes.py`** — a stub model, a stub
-embedder, the fake window and mesh clients, and the small factories
-(`upstream_server`, `plugin_transports`, `config_file`) — because a test module
-importing another test module is how two lanes end up disagreeing about the shape
-of a double.
+A task id is a `uuid4` hex string. The in-memory task store is shared by every
+mesh in the process; a record carries the agent it belongs to, so sharing cannot
+confuse two agents' tasks. The store is pruned with a soft cap.
 
-### 11.3 Two lanes
+### 9.3 Agent tasks
 
-- **The fast lane** (`uv run pytest`): everything except `tests/e2e/`, across
-  cores. No API key, no running server, and no fixed port — the `integration`
-  tests each bind an *ephemeral* one, so a suite run beside a live stack still
-  passes.
-- **The end-to-end lane** (`uv run pytest -m e2e`): the whole stack as processes.
-  Seventeen daemons spawned by the real launcher, on ports the test picks, with a
-  config written into a temporary data directory, driven through the real client
-  against an OpenAI-compatible endpoint served by the test itself. What it proves
-  is what no in-memory test can: that the launch order works, that every child
-  reads the same config, that a turn crosses five process boundaries, that a
-  model's tool call is routed by the hub to the plugin process that owns it and
-  its answer comes back into the conversation as a `tool` message, that the
-  answer arrives both as a result and over the progress channel, and that the
-  conversation it produced is still there for the next turn.
+`plugins/agent_task/` runs one loop of the agent's own on a description, and the
+answer comes back as a message.
 
-**The model is the only thing faked, in either lane, and it is faked at its own
-protocol boundary in both** — a stub backend in the fast lane, a stub HTTP
-endpoint in the e2e lane. A change to what the system does *with* a model
-therefore cannot pass unseen by changing only the fake: the fake speaks the
-protocol, and the code under test is on the other side of it.
+Properties:
 
----
+1. **A cap and a name.** `agent_task_start` refuses a duplicate name and refuses
+   past `agent-task.max_running`.
+2. **A task's turns are not written to the agent's database.** The task reads the
+   agent's context and adds nothing to it. What the conversation gains is the
+   answer, which the agent server records as a message.
+3. **Every failure is a message.** A loop that raises still has an answer to
+   deliver. A task that vanished without one would leave the conversation
+   waiting.
+4. **Background work inside a task is refused.** The task loop runs one turn and
+   has no second turn for a background result to arrive in, so `_async` is
+   refused with a sentence the model can act on.
 
-## 12. Open questions
+A task runs with the agent's system prompt, model, tools, and context decision.
+It does not have the turn that started it, because `restore` reads the stored
+turn list and a turn is written only when it ends. The description must restate
+the relevant context.
 
-Each of these is a rule the design does not yet state, found by reviewing the
-code against its own docstrings. What would settle each is named with it.
+The answer is delivered as a message on the `agent-task:<name>` channel, with an
+`[AgentTaskResult:{…}]` marker. If no window is showing the conversation, the
+result is `undelivered` and the log records that rather than running a turn for
+nobody.
+
+### 9.4 Scheduled tasks
+
+`plugins/schedule/` starts work nobody asked for at the moment it starts.
+
+`schedule/expressions.py` is the only module that knows cron. It owns the
+timezone policy and the error contract for the system.
+
+The data model has two tables:
+
+- a **task**: a name, a description, and a cron expression;
+- a **run**: one fire and its outcome.
+
+Run states:
+
+| State | Meaning |
+|---|---|
+| `pending` | The trigger was handed over but the outcome is not known. |
+| `ran` | The work finished; the task's `finished_at` is the run's time. |
+| `failed` | The work failed, was cancelled, or could not be started. |
+| `missed` | The fire occurred while no process was running. |
+| `skipped` | An operator or the model closed a run that will not happen. |
+
+A run is named by the moment it was due, not by when it ran. The row is written
+before the work is handed over, so a fire cannot repeat on the next poll. A
+hand-over that is refused marks the run `failed`. A run whose outcome does not
+come back remains `pending`.
+
+A fire is handed over, not executed. The trigger is delivered to the window
+showing the agent as a turn whose only instruction is to call `schedule_run_now`
+with the due time. `schedule_run_now` then dispatches the work to the agent-task
+plugin, which runs the loop. The schedule plugin is the caller of
+`agent_task_start`, so it receives the task id and its poll can close the run
+when the task ends. An agent-task plugin that cannot come up is therefore a
+scheduler that cannot run, and the launch order reflects that dependency.
+
+Tasks fire only while slife2 is running. On startup, the sweep closes runs left
+open by a stopped process, and the poll records the newest missed fire for each
+task. `schedule_runs(status="missed")` lists them. A missed run can be backfilled
+with `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
+
+A trigger is the only thing the clock ever says to a conversation. A trigger
+carries no marker, because the marker vocabulary matches a result to what
+produced it, and a trigger is not a result. The `schedule:<task>` channel carries
+which task, and the trigger text says whose ledger the run is in.
+
+A task's `timezone` is an IANA name. Leaving it out uses the machine's clock as
+it is now, which does not follow a daylight-saving change. A repeated local hour
+is handled by comparing wall-clock readings: a fire whose reading equals the
+anchor's is the same fire.
+
+## 10. Terminal
+
+### 10.1 Connections
+
+The terminal is a client and serves nothing. It holds no conversation state, no
+provider knowledge, and no API key.
+
+It maintains three connections:
+
+| Connection | Client | Direction |
+|---|---|---|
+| Agent server | `AgentClient` | The window asks: `run_turn`, `transcript`, `answer_approval`, `switch_model`. |
+| Terminal inbox plugin | `WindowClient` | The window is asked: `attach` is held open and messages are pushed down it. |
+| Mesh plugin | `MeshClient` | The window holds a place: `join` is held open while the agent is online. |
+
+`plugins/tui/server.py` is an ordinary plugin with one session per agent. The
+window attaches to it and holds the call for as long as it is showing a
+conversation. Two windows on one machine are two sessions, and neither is more
+special than the other.
+
+A session lives exactly as long as the call that opened it. Closing the stream
+cancels the handler behind it, so a window that was killed stops counting. A
+message handed to an agent with no window is refused by name (`NO_WINDOW`), and
+the caller decides what to do about it.
+
+### 10.2 Rendering and state
+
+- **Markers are stripped for display** by the reader that knows the vocabulary.
+- **The channel prefix is decided in one function** (`tui/widgets.py:channel_prefix`).
+- **A tool call is drawn as a line with its argument.**
+- **Harness lines come from one place** (`tui/notes.py`): history restored, a
+  turn cancelled, a peer online, and similar events.
+- **A tool panel has four states**: `running`, `done`, `error`, and
+  `interrupted`. `interrupted` is about the turn rather than the call: the turn
+  ended, was cancelled, or failed while the window was waiting, so no result
+  exists and none is coming. It is separate from `error` because the tool did not
+  fail; the window never learned how the call ended.
+- **A connection has two states on screen**: online and offline. The reasons live
+  in the status tool. A line that tried to state them would be a line about the
+  plugin's internals.
+- **A restored conversation is the server's.** `transcript` is read once when the
+  window opens. The window keeps no copy, so what it shows after a reconnect is
+  what the server has. A failed read is not an empty conversation; that
+  distinction is the difference between "no history" and "history could not be
+  read".
+
+### 10.3 Approval
+
+A tool call carrying `_approve` parks the turn and asks the window through
+`ToolApprovalRequested` on the progress channel.
+
+The answer is a call of its own (`answer_approval`), because the turn's channel
+runs one way: a notification cannot carry an answer back, and the call cannot
+wait on state the server holds per conversation, because the waiting turn holds
+that state.
+
+Losing the race is not an error. The turn may have ended a moment earlier. A
+client that raised over it would call a prompt that arrived too late a connection
+failure.
+
+### 10.4 Interface language
+
+The terminal is bilingual: English and Chinese. It is the only bilingual part of
+the system.
+
+Detection is the operating system's answer, read once at import:
+
+1. On Windows, the Windows UI-language API. The C locale carries the region, not
+   the interface language.
+2. Elsewhere, `LC_ALL`, then `LC_MESSAGES`, then `LANG`, most specific first.
+3. Chinese locales select Chinese; everything else selects English.
+4. Any detection failure degrades to English.
+
+`--lang` overrides detection and is applied before anything is built.
+
+The translation layer is one accessor over a two-language table
+(`tui/i18n.py`). There are no catalog files and no dependency. A missing key or
+placeholder raises at the call site rather than rendering a blank slot.
+
+The following are always English, whatever the flag says:
+
+- the system prompt;
+- harness and plugin tool schemas;
+- job schemas and result strings;
+- every log line;
+- external text, such as a tool result or a peer's message;
+- tool labels, because a translated label would put the screen and the tool list
+  in disagreement about what a tool is called.
+
+Key caps (`Esc`, `Ctrl+S`) remain English in both languages, because a translated
+key label breaks the key-to-action scan. The action word after each key is the
+interface's.
+
+A counted noun is two entries in the table, because `str.format` has no plural
+machinery. The caller picks between them, because the caller has the count.
+
+A daemon composes the lines it sends (a peer or channel coming online) in its own
+process. The daemon is shared and outlives any one window; it was not started with
+`--lang`, so it follows the OS locale rather than the flag. A machine whose OS
+language and `--lang` agree — which is every machine that does not pass the flag —
+never sees the difference.
+
+## 11. Configuration and environment
+
+### 11.1 Configuration file
+
+One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
+
+| Section | Reader |
+|---|---|
+| `servers:` | The launcher |
+| `providers:` | The agent server (reference resolution), model backends, and terminal (for the picker) |
+| `default:` | The agent server |
+| `agent:` | The agent server and agent-task server |
+| `agent-task:` | The agent-task server |
+| `subagent:` | The agent server and the local network plugin |
+| `embeddings:` | The context store and cabinet |
+| `context:` | The context plugin |
+| `tool_load:` | The tool hub |
+| `tool_result:` | The harness and the cabinet's `dump_read` |
+| `mcp:` | `slife2-mcp-tools` |
+| `rest-api:` | `slife2-restapi-tools` |
+| `cli:` | `slife2-cli` |
+| `skills:` | `slife2-skills` |
+| `media:` | `slife2-media` |
+| `file-tunnel:` | `slife2-file-tunnel` |
+| `peer_agent:` | `slife2-a2a` |
+
+Every section has one owner, and that owner reads the section in full. A few
+values are also read by another process that needs the same fact; the shared
+readings are stated rather than accidental:
+
+- `servers:` is owned by the launcher; each plugin also reads its own address.
+- `agent:` is read by the agent server and by the agent-task server, because a
+  task is the agent working.
+- `subagent:` is read by the agent server for `max_running` and by the local
+  network plugin for the broker and `org`.
+- `embeddings:` is read by the two stores that build an index (the turn store and
+  the cabinet).
+- `tool_result:` is read by the harness that shortens an oversized result and by
+  `dump_read`, which caps its own answer with the same number.
+- `providers:` is read by the model backends and by the terminal's model picker.
+
+No other section has two readers.
+
+An absent section is a capability that is off, not an error:
+
+- no `peer_agent:` means the machine is not on the peer network;
+- no `media:` providers means the four media tools are present but refuse, saying
+  what to add;
+- no `wechat:` section exists at all; a login is created by scanning.
+
+A present but invalid section is refused by name at load. Examples:
+
+- an unknown provider;
+- an unknown `api`;
+- a port that is not a port;
+- a `servers:` host that is not a host;
+- a switch written as anything other than `true` or `false` (YAML 1.2 made `no`
+  and `off` plain strings).
+
+The file is read per turn for everything a conversation can see, and cached by
+identity: a reader asks whether an edit happened with one comparison rather than
+a watcher or a lock.
+
+### 11.2 Secrets
+
+A value may be:
+
+- a literal;
+- `${VAR}`, resolved through the shell environment and then the OS keyring;
+- `${VAR:-default}`, with a literal default;
+- `keyring:<service>/<key>`, resolved directly against the OS keyring.
+
+Resolution is lazy: a process nobody calls never touches the keyring. An
+unresolved reference is left verbatim, so the failure lands where the name can be
+stated.
+
+`config.unresolved_reference` is the single reader of "this is still a
+reference". A reference MUST NOT travel as the secret.
+
+A keyring that is installed and refuses is an error, not "not found". Reading it
+as absent would send the reference itself. A credential the store does not hold
+is a `ConfigError` naming the reference and the command that stores it. A store
+that was asked and failed keeps its own error.
+
+### 11.3 Data directory
+
+A home is a data directory:
+
+- `slife2.yaml`;
+- `skills/`;
+- `agents/`, one directory per agent;
+- `agents/tools.db`, the shared catalogue.
+
+`--data-dir` and `SLIFE2_DATA_DIR` name the home. A child process is spawned with
+the resolved directory, so a relative path cannot be re-resolved underneath the
+working directory it is given.
+
+A directory may hold several agents. They share its configuration, its skills,
+and its catalogue. The tool set is the configuration's.
+
+A name is not a property of a directory. `--agent jack --data-dir D` names the
+agent and says where its files go. The name is claimed once per machine. Which
+directory a name used previously is not remembered.
+
+The default location is the checkout when running from a checkout, otherwise
+`~/.slife2`.
+
+### 11.4 Runtime directory
+
+The runtime directory is `~/.slife2/runtime`; `SLIFE2_RUNTIME_DIR` overrides it.
+
+It contains:
+
+```text
+<runtime>/
+  servers/      a record per running server: pid, url, config
+  logs/         what each server printed
+  locks/        per-endpoint start locks
+  agents/       agent-name claims
+  clients/      which clients use the shared servers, and their home
+  homes/        data directories this machine has used
+```
+
+The runtime is machine-wide because the servers are machine-wide. A copy per home
+could only disagree with the others: a second data directory reporting a stack it
+could not see, two launchers cold-starting one port, or a claim lost to whoever
+looked in another folder.
+
+The runtime is reconstructible. Deleting it causes the next start to rebuild what
+it needs.
+
+### 11.5 Per-home state in shared servers
+
+A plugin is shared, so the process that writes an agent's file is generally not
+the one started with `--data-dir`.
+
+The home a call belongs to travels with the call:
+
+- `libs/plugin/audience.py` puts it in the call's `_meta`;
+- `libs/plugin/protocol.py:ServeTheCallersHome` establishes it for the length of
+  the call;
+- `protocol.Peer` carries it on every hop.
+
+`paths.home()` resolves a file against the caller's home. A plugin's own
+configuration, records, and logs keep using `paths.data_dir()`.
+
+Everything a plugin derives per home is kept per home:
+
+- a home's catalogue;
+- the declarations the hub holds;
+- the model list it resolves.
+
+A home is created when an agent starts in it. The client records the directory,
+creates `agents/` and `skills/`, and asks the hub for the home's tool list. That
+call creates `agents/tools.db`, because the hub is the file's only writer. A hub
+that cannot answer fails the start.
+
+A catalogue is complete when it is opened. The hub's own links are the machine's;
+what they last listed is written into every home's catalogue, seeded into a home
+as it opens. Only declarations are per home, because a declaration is a statement
+about that home's sections.
+
+### 11.6 Family connections and per-home state
+
+A family's connections are per name, not per home. An `mcp:` or `rest-api:` entry
+is a process on the machine; whether two configured entries are the same server
+is decided by the name.
+
+- The first home that switches an entry on starts it.
+- Every other home naming it holds the same link and reads one listing.
+- What stays per home is what its own section says: `enabled`, `description`, and
+  therefore what it declares.
+- One home switching an entry off does not switch it off for another.
+- Two homes naming one entry with different commands is reported; the running
+  server is used.
+- An edit through a management tool reconfigures that server for every home
+  holding it.
+- A link is closed when the last home lets go, so the last-instance-out take-down
+  still takes everything down.
+
+### 11.7 Records and logs
+
+A daemon writes a log under the runtime directory and records that it is running.
+`status` reads the records. `down` stops only what it can prove is ours.
+
+A failed start reports the end of the log, because a real error message is worth
+more than a status code. The startup report goes to stdout; a plugin's own output
+goes to its log.
+
+## 12. Project structure and development
+
+### 12.1 Layers
+
+The layering rule is stated in §2.5. Its purpose is that a module's kind is
+visible from its path:
+
+- a reader who wants the loop opens `libs/turn/loop.py`;
+- a reader who wants the process that runs conversations opens
+  `plugins/agent/server.py`.
+
+The cost is one more directory level.
+
+Every process in the tree is described outside it by one row of `PLUGINS`, which
+holds its name, probe, and port. `pyproject.toml`'s console scripts are the third
+and last place a plugin is named, and they exist for a person rather than for the
+launcher. Every daemon is started as `python -m <module>` in the interpreter and
+virtual environment that spawned it, not through a script on `PATH`.
+
+### 12.2 Test tree
+
+`tests/libs/`, `tests/clients/`, `tests/plugins/`, `tests/helpers/`,
+`tests/tui/`, and `tests/e2e/` mirror the package. One directory per layer, one
+module per module. "Where is the test for this" has one answer.
+
+Shared doubles live in `tests/fakes.py`:
+
+- a stub model;
+- a stub embedder;
+- fake window and mesh clients;
+- factories (`upstream_server`, `plugin_transports`, `config_file`).
+
+A test module MUST NOT import another test module for a fixture. That is how two
+lanes end up disagreeing about the shape of a double.
+
+### 12.3 Test lanes
+
+| Lane | Command | Contents |
+|---|---|---|
+| Fast | `uv run pytest` | Unit and integration tests, every module, across cores. Excludes `e2e`. No API key, no running server, no fixed port. |
+| Unit | `uv run pytest -m unit` | Fast, isolated unit tests. |
+| Integration | `uv run pytest -m integration` | Tests that bind a socket or spawn a process. Each binds an ephemeral port. |
+| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: seventeen daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
+
+The fast lane drives servers over FastMCP's in-memory transport: real MCP
+messages and real progress notifications, with no port bound.
+
+The e2e lane proves what no in-memory test can:
+
+- the launch order works;
+- every child reads the same configuration;
+- a turn crosses five process boundaries;
+- a model's tool call is routed by the hub to the plugin process that owns it;
+- the answer arrives both as a result and over the progress channel;
+- the conversation is still there for the next turn.
+
+The model is the only thing faked in either lane, and it is faked at its own
+protocol boundary: a stub backend in the fast lane, a stub HTTP endpoint in the
+e2e lane. A change to what the system does with a model cannot pass unseen by
+changing only the fake.
+
+### 12.4 Static checks and CI
+
+- `uv run ruff check .`
+- `uv run ruff format --check .`
+- `uv run pyright` (project code only; tests are excluded)
+
+CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
+
+1. a wheel build;
+2. an assertion that the interpreter can load SQLite extensions;
+3. lint and format checks;
+4. type checking;
+5. the fast lane;
+6. the e2e lane.
+
+The suite is the gate. Both lanes pass before a change is done. A bug found in the
+field arrives as a test that fails without the fix.
+
+## 13. Open issues and deferred capabilities
+
+### 13.1 Open issues
 
 1. **An interrupted peer task.** The SDK's `TERMINAL_KINDS` is wider than its
-   name — `input_required` ends the requester's ladder — and this system has no
+   name: `input_required` ends the requester's retry ladder. This system has no
    way to continue an interrupted task, so such a reply is recorded and read as
-   `failed`. A peer that wanted more input is told its task failed. *Settled by:*
-   a continuation path, or a fourth outcome both the store and the line carry.
+   `failed`. A peer that wanted more input is told its task failed.
+   *Resolution would require:* a continuation path, or a fourth outcome that both
+   the task store and the display carry.
+
 2. **An inbound message that reaches no window.** A peer's message that cannot be
-   handed over is logged and dropped, on the theory that a peer re-sends it — but
-   the SDK acknowledges a request before the handler runs, so the peer's ladder
-   has already stopped, and the responder stays parked holding a slot. *Settled
-   by:* an explicit "could not deliver" the peer reads, or a delivery that is
-   retried until a window appears.
+   handed over is logged and dropped, on the assumption that the peer re-sends
+   it. The SDK acknowledges a request before the handler runs, so the peer's
+   retry ladder has already stopped, and the responder remains parked holding a
+   slot.
+   *Resolution would require:* an explicit "could not deliver" the peer reads, or
+   a delivery retried until a window appears.
+
 3. **A scheduled run and the task that runs it.** A run is tied to its task by a
    name-derived id, which is not unique across two overlapping runs of one task.
-   *Settled by:* an id minted per run.
-4. **A fire in a repeated local hour.** *Settled* in the expression layer, which
-   is where the rule was said to belong. A daylight-saving fall-back makes one
-   wall reading name two instants, and the suppression compared instants alone —
-   so the second occurrence was strictly newer than the anchor the first left,
-   and the task fired twice: two runs in the ledger (their stamps differ, so
-   `UNIQUE(task_id, due_at)` does not dedupe them), two triggers, and a second
-   `agent_task_start` under a name the first had already taken. The rule is now
-   stated as the reading it is: a fire whose *reading* equals the anchor's is the
-   same fire, which is an equality only the repeated hour can produce, since
-   inside one day a reading names one instant.
-5. **A history left with an unanswered tool call.** *Settled*, and not by the
-   repair that was proposed: the loop no longer creates the state. The
-   assumption underneath it was that a tool execution cannot raise, and running
-   one cannot — but *fitting* its result is the caller's own callback, and a
-   cabinet that will not open or a stalled discriminator raises there, between
-   the assistant message and its answers. So the batch is now collected first
-   and written after, with no `await` between the message and its results,
-   which is the rule the harness pair already followed (§4.1). Cancellation
-   stops needing the repair for the same reason.
-6. **Where a retry policy lives.** Two channels keep their own backoff and reset
-   it on different events. *Settled by:* one policy in `helpers/timeouts.py` and
-   one reason to reset.
-7. **A model call that ends the turn with an empty answer.** The wire is checked
-   at the hop (§5.2), but a provider that legitimately answers with nothing is
-   the same shape. *Settled by:* deciding whether an empty answer is a verdict or
-   a failure, and stating it once.
-8. **A subagent that makes a subagent.** A subagent has every capability its
-   maker has (§3.5), so it may name one of its own, and the directory says who
-   made whom one level further in — but the road does not reach it. The second of
-   the two answers offered here is the one taken (`DESIGN §1.10`, "the road"): a
-   conversation with no window of its own gets a road that is not a window at
-   all, and that is why a subagent is reachable today. What is still open is the
-   level below: the local network holds a place for a maker's own subagents and
-   no further in, so *who* holds a place two levels in is unstated.
-   *Settled by:* naming the holder of a place two levels in, and what happens to
-   it when that holder stops.
+   *Resolution would require:* an id minted per run.
 
----
+4. **Where a retry policy lives.** Two channels keep their own backoff and reset
+   it on different events.
+   *Resolution would require:* one policy in `helpers/timeouts.py` and one reason
+   to reset.
+
+5. **A model call that ends the turn with an empty answer.** The wire is checked
+   at the hop, but a provider that legitimately answers with nothing has the same
+   shape.
+   *Resolution would require:* deciding whether an empty answer is a verdict or a
+   failure, and stating it once.
+
+6. **Dump search scope.** A dump is in the same corpus as the cabinet's other
+   kinds, but a search that names no kind excludes it. Whether machine output
+   should be ranked against a person's notes is not settled.
+   *Resolution would require:* a stated rule, not a query filter.
+
+### 13.2 Deferred capabilities
+
+The following are not implemented in this version:
+
+| Capability | Current behavior |
+|---|---|
+| Executing `cli:` entries | Entries are catalogued and discoverable; no tool runs them. `func_tool_load` reports that the entry is not callable. |
+| Executing playbook scripts | `skill_use` returns the playbook text; the model runs commands itself. |
+| Fetching a URL in `file_save` | `file_save` copies local files only. |
+| A `grep` search leg | The cabinet has keyword and semantic search only. |
+| Semantic search of the turn log | `turn_list` and `turn_read` browse; the model cannot run an arbitrary semantic search. |
+| An approval gate before configuration edits | `mcp_set` with a `command:` records a program without asking. |
+| A bound on total agent-task work | `agent-task.max_running` bounds concurrency only. |
 
 ## Appendix A. Invariants
 
-Stated as assertions, because each has been broken once and the failure was not
-obvious.
+Each invariant is stated as an assertion. A change that violates one is a defect.
 
 1. **A plugin is an MCP server over Streamable HTTP**, started and shared by the
-   launcher, honouring the contract: state keyed by client id, an audience on
-   every tool a model may be offered, an identity a client can check, and one row
-   of `config.PLUGINS` saying what it is (§2.5).
+   launcher, honoring the contract: state keyed by client id, an audience on
+   every model-facing tool, a checkable identity, and one row of `PLUGINS`.
+
 2. **No capability holds a credential where it is not used.** No provider SDK is
-   imported by the agent loop, the terminal or a library; no key is read outside
-   the process that needs it; a reference that did not resolve never travels.
-3. **Nothing under `plugins/` is a library or a helper**, and every directory
-   there has a `main` and a `SERVER_NAME` — the name read off its `PLUGINS` row,
-   and the `main` a call to `serve_plugin` (§2.1).
-4. **The loop is a pure function over a message list**: it owns no conversation,
-   no socket and no clock of its own.
-5. **A history is one every provider accepts**: an assistant message's tool calls
-   are all answered, a harness pair is written with nothing awaited between its
-   halves, and the id a pair is joined by is one every provider takes as a call
-   id.
-6. **A reading is never a verdict.** An empty answer, an unreadable payload and a
-   silent peer are three different facts, and each is named where it is read.
-7. **A failure that affects the design's behaviour hard-fails rather than falling
-   back**, and every remaining fallback is registered, scoped, and says what it
+   imported by the agent loop, the terminal, or a library. No key is read outside
+   the process that needs it. A reference that did not resolve never travels.
+
+3. **Nothing under `plugins/` is a library or a helper.** Every directory there
+   has a `main` and a `SERVER_NAME`; the name is read from its `PLUGINS` row, and
+   the `main` is a call to `serve_plugin`.
+
+4. **The loop is a pure function over a message list.** It owns no conversation,
+   no socket, and no clock of its own.
+
+5. **A history is one every provider accepts.** An assistant message's tool calls
+   are all answered. A harness pair is written with nothing awaited between its
+   halves. The id joining a pair is acceptable to every provider as a call id.
+
+6. **A reading is never a verdict.** An empty answer, an unreadable payload, and
+   a silent peer are three different facts, and each is named where it is read.
+
+7. **A failure that affects the design's behavior hard-fails rather than falling
+   back.** Every remaining fallback is registered, scoped, and states what it
    does not cover.
-8. **One rule, one place.** A name, a path, a cap, a sentence or a vocabulary two
-   modules need is stated once and imported, never copied.
-9. **The config file is the only description of what exists**, and every process
-   reads it as it is now rather than as it was at boot, for everything a turn can
+
+8. **One rule, one place.** A name, a path, a cap, a sentence, or a vocabulary
+   that two modules need is stated once and imported, never copied.
+
+9. **The configuration file is the only description of what exists.** Every
+   process reads it as it is now, not as it was at boot, for everything a turn can
    see.
+
 10. **A message that arrives becomes a turn, and the turn records where it came
     from.**
+
 11. **A client proves which server it reached** before believing anything that
-    server says, and a payload this build cannot read is refused rather than read
-    as a short or empty one.
-12. **A list the caller sized is bound in chunks**, and a query that joins two
-    tables names its columns or keeps one table in scope.
-13. **The suite is the gate.** Both lanes pass before a change is done, and a bug
+    server says. A payload this build cannot read is refused, not read as a short
+    or empty one.
+
+12. **A list the caller sized is bound in chunks.** A query that joins two tables
+    names its columns or keeps one table in scope.
+
+13. **The suite is the gate.** Both lanes pass before a change is done. A bug
     found in the field arrives as a test that fails without the fix.
+
+## Appendix B. Plugin registry
+
+The following table is informative and reflects the registry at version 0.2.0.
+`PLUGINS` in `libs/host/config.py` is authoritative.
+
+| Key | MCP name | Module | Default port |
+|---|---|---|---|
+| `openai-completions` | `slife2-llm-openai` | `slife2.plugins.llm.openai_server` | 8001 |
+| `anthropic-messages` | `slife2-llm-anthropic` | `slife2.plugins.llm.anthropic_server` | 8002 |
+| `openai-responses` | `slife2-llm-openai-responses` | `slife2.plugins.llm.openai_responses_server` | 8003 |
+| `embeddings` | `slife2-llm-embeddings` | `slife2.plugins.llm.embeddings_server` | 8004 |
+| `context` | `slife2-context` | `slife2.plugins.context.server` | 8010 |
+| `skills-server` | `slife2-skills` | `slife2.plugins.skills.server` | 8031 |
+| `cli-server` | `slife2-cli` | `slife2.plugins.cli.server` | 8032 |
+| `mcp-tools` | `slife2-mcp-tools` | `slife2.plugins.mcp_tools.server` | 8033 |
+| `restapi-tools` | `slife2-restapi-tools` | `slife2.plugins.restapi.server` | 8034 |
+| `wechat` | `slife2-wechat` | `slife2.plugins.wechat.server` | 8030 |
+| `cabinet` | `slife2-cabinet` | `slife2.plugins.cabinet.server` | 8035 |
+| `media` | `slife2-media` | `slife2.plugins.media.server` | 8036 |
+| `file-tunnel` | `slife2-file-tunnel` | `slife2.plugins.file_tunnel.server` | 8038 |
+| `tui` | `slife2-tui` | `slife2.plugins.tui.server` | 8005 |
+| `toolhub` | `slife2-toolhub` | `slife2.plugins.toolhub.server` | 8020 |
+| `agent` | `slife2-agent` | `slife2.plugins.agent.server` | 8000 |
+| `agent-task` | `slife2-agent-task` | `slife2.plugins.agent_task.server` | 8037 |
+| `schedule` | `slife2-schedule` | `slife2.plugins.schedule.server` | 8039 |
+| `peer_agent` | `slife2-a2a` | `slife2.plugins.a2a.server` | 8040 |
+| `subagent` | `slife2-subagent` | `slife2.plugins.a2a.local_server` | 8041 |
+
+The probe tool for each plugin is the tool that identifies it when its
+`server_info` does not carry the expected name. The four model backends probe
+`stream_chat`; the peer and subagent network plugins probe `peer_agent_list` and
+`subagent_list`; the other plugins probe their first stable, argument-free tool.
