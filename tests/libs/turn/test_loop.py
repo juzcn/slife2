@@ -26,12 +26,13 @@ import slife2.libs.harness.async_tasks as async_tasks
 from slife2.libs.harness.async_tasks import cancel_async
 from slife2.libs.model.base import Chunk, ToolCallDelta
 from slife2.libs.turn.events import (
+    MessageCutIn,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
 )
-from slife2.libs.turn.loop import AgentLoop
+from slife2.libs.turn.loop import AgentLoop, AutoCall
 from slife2.libs.turn.messages import (
     Message,
     StreamChatResult,
@@ -213,7 +214,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     )
     harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
 
-    def auto() -> str | None:
+    def auto() -> AutoCall | None:
         """Asked at the top of *every* iteration; delivers once, on the second.
 
         The gate is the caller's, and it is the cheap half of v1's split: whether
@@ -223,7 +224,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
         nonlocal delivered
         if backend.calls and not delivered:
             delivered = True
-            return "_check_new_input"
+            return AutoCall("_check_new_input", channel="tui", receipt="submission-1")
         return None
 
     observer = ListObserver()
@@ -253,6 +254,14 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     assert call.id.startswith("_harness_check_new_input_")
     assert (answered.role, answered.tool_call_id) == ("tool", call.id)
     assert answered.content == "the second message"
+    # The channel rides the tool message as display metadata — the turn log
+    # keeps it so a rebuilt line wears the right bubble — and the loop echoes
+    # both it and the submission's receipt on one event.  That event is the
+    # display's whole account of a message that arrived mid-turn.
+    assert answered.channel == "tui"
+    assert [e for e in observer.events if isinstance(e, MessageCutIn)] == [
+        MessageCutIn(text="the second message", channel="tui", receipt="submission-1")
+    ]
 
     # The model's next request carries it — which is the only reason the pair is
     # written at all — and nothing pretended the call was the model's.

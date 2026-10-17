@@ -38,10 +38,10 @@ from typing import Any
 from slife2.libs.turn.context import turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tools import is_harness
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness
 from slife2.tui import notes
 from slife2.tui.i18n import t
-from slife2.tui.widgets import ChatView
+from slife2.tui.widgets import WINDOW_CHANNEL, ChatView
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     "restored 0 turns" would be inventing an event out of one.
 
     **A row the screen cannot read is dropped, not fatal — and said twice.**
-    `restore` is awaited before a queued message is taken off its queue
+    `restore` is awaited before a submission's turn is drawn
     (`slife2.tui.app._drain`), so an exception out of here does not merely lose
     the history — it kills the worker that runs turns, leaves the window saying
     "working" with the message still counted as queued, and never runs or shows
@@ -109,11 +109,15 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # The results are collected first because they arrive *after* the call that
     # asked for them — a tool panel is opened by an assistant message and
     # completed by a tool message further down — so one walk cannot both open a
-    # panel and know what to put in it.
-    results: dict[str, str] = {}
+    # panel and know what to put in it.  Each result carries its message's
+    # channel because a cut-in's line wears the bubble the message arrived on.
+    results: dict[str, tuple[str, str]] = {}
     for message in messages:
         if message.get("role") == "tool" and message.get("tool_call_id"):
-            results[str(message["tool_call_id"])] = _text(message.get("content"))
+            results[str(message["tool_call_id"])] = (
+                _text(message.get("content")),
+                str(message.get("channel") or ""),
+            )
 
     # When the question was asked, and what every line of this turn is stamped
     # with.  The completed side is only the assistant's, and slife2's assistant
@@ -166,14 +170,10 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
 
 
 def _draw_answer(
-    chat: ChatView, message: dict[str, Any], results: dict[str, str]
+    chat: ChatView, message: dict[str, Any], results: dict[str, tuple[str, str]]
 ) -> None:
     """One assistant message — its reasoning, its answer, its tool panels."""
-    calls = [
-        ToolCall.from_wire(raw)
-        for raw in message.get("tool_calls") or []
-        if _drawn(raw)
-    ]
+    calls = [ToolCall.from_wire(raw) for raw in message.get("tool_calls") or []]
     answer = _text(message.get("content"))
     thinking = _text(message.get("thinking"))
 
@@ -197,7 +197,19 @@ def _draw_answer(
             chat.append_text(answer)
 
     for call in calls:
-        _draw_tool(chat, call, results.get(call.id, ""))
+        text, channel = results.get(call.id, ("", ""))
+        if call.name == CHECK_NEW_INPUT:
+            # **The one harness call a rebuild draws.**  The pair is how a
+            # message that arrived mid-turn entered the conversation, and the
+            # tool's answer is the message's own words.  `add_cut_in` keeps the
+            # turn open, exactly as the live event does, so the answer that
+            # follows this pair streams under the line rather than replacing it.
+            # The channel is the one `Message.to_record` kept: a record from
+            # before that field reads as this window's own, which is the only
+            # speaker a missing channel can honestly be.
+            chat.add_cut_in(text, channel=channel or WINDOW_CHANNEL)
+        elif not is_harness(call.name):
+            _draw_tool(chat, call, text)
 
 
 def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
@@ -226,29 +238,6 @@ def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
         # which leaves the duration off the header rather than claiming none.
         0,
     )
-
-
-def _drawn(raw: dict[str, Any]) -> bool:
-    """Whether a stored call is one the transcript draws.
-
-    **Today: only the model's own calls.**  The harness tools
-    (`slife2.libs.turn.tools`'s word, and the mark is `is_harness`) are in the record — the
-    model's list carries them, which is what makes the pair legal — and nothing
-    draws them, live or rebuilt.  Live because the auto-invoke raises no event;
-    here because of this filter.
-
-    **The two are hidden for different reasons, and only one of them is a
-    decision.**  `_func_tool_unload` is bookkeeping: its result is a sentence
-    about the model's own tool list, and a panel for it would be noise.
-    `_check_new_input` carries something a *person* said — DESIGN.md §9 defers
-    drawing it.  So what is missing there is not a line to delete but a widget: a
-    line that shows a user message **without closing the open turn**, since
-    `ChatView.add_user` sets `_turn_open = False` and would drop the rest of the
-    answer being streamed.  Deleting this filter alone would draw it as a tool
-    panel, which is the one thing it is not.
-    """
-    function = raw.get("function") or {}
-    return not is_harness(str(function.get("name") or ""))
 
 
 def _text(content: Any) -> str:

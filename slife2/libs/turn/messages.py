@@ -142,6 +142,18 @@ class Message:
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: Tool turns only — which call this is the result of.
     tool_call_id: str | None = None
+    #: Where the message came in on, for the turns the harness wrote rather than
+    #: the model.
+    #:
+    #: **Display metadata, and the one field here that a provider never sees.**
+    #: A message that cut into a running turn is written as a tool pair, and the
+    #: tool result carries the words but not the channel they arrived on; the
+    #: line a rebuilt transcript draws for that pair needs the channel to wear
+    #: the right bubble, so it rides the message.  `to_wire` deliberately omits
+    #: it — the model's request has no such field — and `to_record` is what
+    #: keeps it in the turn log.  Empty for every message that did not cut in,
+    #: which is every message a model or a person wrote.
+    channel: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """Render as the message our own hop carries.
@@ -175,6 +187,21 @@ class Message:
             payload["tool_call_id"] = self.tool_call_id
         return payload
 
+    def to_record(self) -> dict[str, Any]:
+        """The stored shape: the wire's, plus the metadata only a reader needs.
+
+        **One method rather than a second writer in the turn log.**  The store
+        is handed messages as dicts (`slife2.plugins.agent.server.record`), and
+        a display field added at that call site would be a second answer to what
+        a message is — on the path that has to agree with the live list exactly.
+        So the wire stays the model's shape and this adds what the record keeps
+        beyond it; a field that is not display metadata belongs on neither.
+        """
+        payload = self.to_wire()
+        if self.channel:
+            payload["channel"] = self.channel
+        return payload
+
     @classmethod
     def from_wire(cls, raw: dict[str, Any]) -> Message:
         """Rebuild from the message our own hop carries.
@@ -195,6 +222,7 @@ class Message:
             thinking=str(raw.get("thinking") or ""),
             tool_calls=tool_calls,
             tool_call_id=raw.get("tool_call_id"),
+            channel=str(raw.get("channel") or ""),
         )
 
 

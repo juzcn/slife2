@@ -961,9 +961,14 @@ that cannot reach a conversation says so and stops — it does not try a second
 road, because "carry on without the window" is exactly the fallback that hides a
 broken system.
 
-**An injected message can jump the queue.** The inbox has a cut-in mechanism, and
-a message that takes it is drawn by nobody: the window is not what delivered it,
-and a line about it would be a line about a turn that had not happened yet.
+**An injected message can jump the queue.** The inbox has a cut-in mechanism,
+and **every source goes through it**: what the person types in a window, what a
+channel hands that window, and what a headless window's input carries are all
+submitted to the conversation the moment the words arrive — not held for a turn
+of their own. The window draws the message inside the running turn, in its own
+bubble and without closing the answer still being streamed; a rebuilt
+conversation draws the same line from the pair in the turn log. There is one
+queue, and it is the agent server's inbox.
 
 ### 4.5 The conversation, and the context decision
 

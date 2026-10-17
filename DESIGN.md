@@ -2099,12 +2099,22 @@ avoided:
   what the turn's own caller got, with `injected` true. A turn that produced no
   result — cancelled or failed — writes nothing, and the message then runs its
   own turn, which is the only reason the field can be `None`.
-  **And no screen draws it.** The pair is in the record and in every request the
-  model makes afterwards, so the conversation has it either way — but the live
-  transcript is rendered from `TurnEvent`s and an auto-invoked call raises none
-  (v1 routes around the tool-execution path), and a rebuilt one filters
-  `_`-prefixed calls out by name. Drawing it is §9's, and it is three changes
-  rather than one, which is why it is named there instead of half-built here.
+  **And it is drawn inside the turn that took it.** The pair is in the record and
+  in every request the model makes afterwards, so the conversation has it either
+  way; the live transcript needs a line for it, and the loop raises
+  `MessageCutIn` when it writes the pair — the tool's own answer, the channel
+  the message arrived on, and the submitting window's receipt. The window draws
+  it without closing the open turn (`ChatView.add_cut_in`), so the answer still
+  streaming continues underneath, and a rebuilt transcript draws the same line
+  from the pair: `_check_new_input` is the one harness call `restore` renders,
+  and `Message.to_record` keeps the channel on the tool message so the bubble is
+  the one the live line wore.
+  **One rule for every source.** A submission is sent to the agent server the
+  moment it arrives — typing, a channel's hand-over, a headless window's input —
+  and the server's inbox is the only queue. The window's local order is the
+  *display's* order and nothing else; a message it used to hold until the running
+  turn ended was a message it had decided could not cut in, which made the one
+  caller a person can see the only one excluded from the mechanism.
 - **Cancellation repair**, which the plan called the sharpest correctness edge in
   the system and which statelessness had deleted. A cancelled turn can leave an
   assistant message whose tool calls are only partly answered, and *that* list is
@@ -4181,13 +4191,6 @@ deferred work would be waiting for something nobody is building.
   markdown would keep that property — it is a rendering pass, not a markup one —
   but it is a taste decision about the transcript rather than a gap in the
   system, and nobody has asked for it.
-- **Drawing a message that cut in.** §3 has the behaviour — a message that
-  arrives mid-turn is handed to that turn as a tool pair and is in the record
-  from then on — and nothing draws it. Closing it is three changes: an event, an
-  exception in `tui/restore.py:_is_harness`'s filter, and a line that shows a
-  user message **without closing the open turn** (`ChatView.add_user` sets
-  `_turn_open = False`, and reusing it would drop the rest of a streamed answer).
-  Removing the filter alone would draw somebody's words as a tool panel.
 - **Delta coalescing.** One progress notification per token. The seam is
   `ProgressObserver`.
 - **The pass behind the ceiling.** §5.1's *selection* makes the context bounded
@@ -4279,10 +4282,9 @@ deferred work would be waiting for something nobody is building.
   model's: a conversation can start an agent task, ask about it, list it and stop
   it, and nothing draws one. A window has no line for a task that is running and
   no key that stops one, so a person's only lever is to ask the model — which is
-  the shape §1.2 rejects everywhere else. Drawing one is the same three changes
-  §9's cut-in entry names — an event, `tui/restore.py`'s `_is_harness` filter,
-  and a line that does not close the open turn — plus a read of the task
-  registry, which no window has.
+  the shape §1.2 rejects everywhere else. Drawing one is the shape the cut-in
+  line now has — an event, a line that does not close the open turn, and the
+  rebuild's own half — plus a read of the task registry, which no window has.
 - **A bound on total agent-task work.** `agent-task: max_running` bounds how many
   run at once, and nothing bounds how many run over time: a task may start a
   task, and each one is a full loop. `agent_task_list` and `agent_task_cancel`

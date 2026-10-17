@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from fastmcp import Client
@@ -77,6 +78,23 @@ def answer_of(result: Any) -> str:
         "answer with words",
         data if data is not None else getattr(result, "content", None),
     )
+
+
+@dataclass(frozen=True)
+class TurnReply:
+    """What one submission was answered with, and by whose turn.
+
+    `text` is the authoritative answer, as it always was.  `injected` is the
+    half the window could not previously see: **whether this submission ran a
+    turn of its own or was folded into one that was already running.**  A folded
+    submission produces no events — the absorbing turn's stream carries them —
+    so a window that waited for events to open a block would show a person's
+    message with no answer, and one that always opened a block would draw the
+    same answer twice.  The server says which, and this is where it arrives.
+    """
+
+    text: str
+    injected: bool = False
 
 
 class AgentClient(Protocol):
@@ -140,13 +158,21 @@ class AgentClient(Protocol):
         *,
         channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
-    ) -> str:
+        receipt: str = "",
+    ) -> TurnReply:
         """Run a turn, calling `on_event` as it goes.
 
-        Returns the final assistant text, which is authoritative — `on_event`
-        is a display channel and its events may be dropped or delayed.  A reply
-        without it is not an answer, and it raises rather than returning `""`,
-        which the window would draw as a question with no answer and no error.
+        Returns the final assistant text and whether a running turn took this
+        message instead of this call running one.  The text is authoritative —
+        `on_event` is a display channel and its events may be dropped or
+        delayed.  A reply without it is not an answer, and it raises rather than
+        returning `""`, which the window would draw as a question with no answer
+        and no error.
+
+        `receipt` is the window's own id for this submission.  The server echoes
+        it on a `MessageCutIn` event when a running turn folds the message in, so
+        the window can match that delivery to the request it answered; it is
+        absent for every caller that does not draw.
 
         `channel` is where the message came in on.  The window passes its own for
         what the person typed, and something else when it is running a message
@@ -362,7 +388,8 @@ class MCPAgentClient:
         *,
         channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
-    ) -> str:
+        receipt: str = "",
+    ) -> TurnReply:
         if self._client is None:
             raise ConnectionError("not connected")
 
@@ -399,6 +426,11 @@ class MCPAgentClient:
             payload["model"] = self._model
         if images:
             payload["images"] = images
+        # Absent for a caller that does not draw, and for the server it means
+        # exactly that: there is nobody to echo the receipt to.  One key fewer
+        # than sending `""` and no second spelling to read back.
+        if receipt:
+            payload["receipt"] = receipt
 
         try:
             result = await self._client.call_tool(
@@ -438,7 +470,12 @@ class MCPAgentClient:
         text = payload.get("text") if isinstance(payload, dict) else None
         if not isinstance(text, str):
             raise _unreadable("answer the turn", payload)
-        return text
+        # **A folded reply is not a missing one**, and the flag travels with the
+        # text for the same reason the text is read here rather than from the
+        # events: the window has to know whether to open a block, and no event
+        # can tell it when there are none.
+        injected = bool(payload.get("injected")) if isinstance(payload, dict) else False
+        return TurnReply(text=text, injected=injected)
 
 
 class WindowClient(Protocol):

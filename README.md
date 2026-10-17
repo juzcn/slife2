@@ -536,10 +536,13 @@ and the message's own words into the running turn — v1's *cut-in*, always on �
 what you say while the agent is working reaches it inside the turn it arrived in
 rather than one turn later. Like the trim, it is a tool pair: it is in the record
 and in every request that follows, and the model reads it as something that
-arrived while it was working. **No screen shows it yet.** That is a deferred
-display decision rather than a half-built mechanism — the transcript draws from
-events and this call raises none, and a rebuilt one skips `_`-prefixed calls by
-name (DESIGN.md §9) — and the conversation has it either way.
+arrived while it was working. **The window draws it inside the open turn** — the
+message's own words, in its own bubble, without closing the answer still being
+streamed — and a rebuilt conversation draws the same line from the pair in the
+turn log. **Every source follows that one rule**: typing in the window, a message
+handed over by another channel, and a headless window's input are all submitted
+to the conversation immediately; the agent server's inbox is the only queue, and
+the loop decides where the next iteration boundary is.
 
 ### How a plugin contributes
 

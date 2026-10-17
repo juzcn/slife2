@@ -5,19 +5,23 @@ Four things here are worth knowing before changing them:
 1. **The MCP client is created in `on_mount`, never in `__init__`.**  Its anyio
    task group has to live in the app's event loop, and `__init__` runs before
    there is one.
-2. **Submissions queue, and only one turn is in flight at a time.**  The loop on
-   the server would accept them concurrently and run them in order, but the
-   *transcript* could not: a turn's last delta and its result travel on one
-   response while the next turn's first delta travels on another, and nothing
-   orders those two arrivals.  Sending one at a time makes the transcript's
-   order a property of the code rather than of a race — and it also means the
-   client's timeout measures a turn rather than a wait, which is what a timeout
-   should measure.  What the server's own inbox is for is the *other* caller:
-   any peer that sends to a busy loop is queued there and never loses its turn.
-3. **Every event is stamped with the turn it belongs to.**  Textual delivers
-   events as queued messages, so a delta from the turn that just finished can be
-   handled after the *next* turn's block is already open — and land in it.  The
-   ticket is what makes that a dropped fragment instead of a wrong transcript.
+2. **Every submission is sent at once; the server's inbox is the only queue.**
+   The window used to hold messages until the running turn ended, because two
+   turns' event streams could not be ordered into one transcript. That made the
+   window the one caller excluded from the agent server's cut-in mechanism: a
+   message typed here could not reach the running turn, while a peer's could.
+   Now every message — typed, handed over by a channel, from a headless window —
+   is submitted immediately, and the server's lock orders the turns while its
+   inbox holds a message for the running turn's next iteration boundary. What
+   the window keeps is only the *display's* order: one block at a time, in
+   submission order, and a message the running turn folded in is drawn by the
+   cut-in event inside that turn rather than as a block of its own.
+3. **Every event is stamped with the submission it belongs to.**  Textual
+   delivers events as queued messages, so a delta from the turn that just
+   finished can be handled after the *next* turn's block is already open — and
+   land in it.  The ticket is what makes that a held event or a dropped fragment
+   instead of a wrong transcript; the flush before a turn is declared over is
+   what makes "finished" mean its events have been applied.
 4. **`ctrl+c` cancels the running turn, never the queue.**  The message the user
    is still waiting on must not go with the one they gave up on.  With no turn
    running it quits, because a user cannot stop a runaway turn otherwise.  It is
@@ -48,8 +52,11 @@ in here would be a second rule for a question the prompt already answers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -62,6 +69,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import DEFAULT_AGENT, Config
 from slife2.libs.turn.events import (
     ContextChosen,
+    MessageCutIn,
     TextDelta,
     ThinkingDelta,
     ToolApprovalRequested,
@@ -78,6 +86,7 @@ from slife2.tui.client import (
     MCPMeshClient,
     MCPWindowClient,
     MeshClient,
+    TurnReply,
     WindowClient,
 )
 from slife2.tui.i18n import t
@@ -108,6 +117,44 @@ class TurnEventMessage(TextualMessage):
         self.ticket = ticket
         self.event = event
         super().__init__()
+
+
+class EventsFlushed(TextualMessage):
+    """A marker posted after a turn's events, so the renderer can wait for them.
+
+    Textual's queue is FIFO, so a message posted after every event of a turn is
+    handled after them.  That is the one ordering the display needs and the one
+    it cannot get from the response's own task wakeup: the response and the
+    progress notifications are separate deliveries on one connection.
+    """
+
+    def __init__(self, done: asyncio.Future[None]) -> None:
+        self.done = done
+        super().__init__()
+
+
+@dataclass
+class _Submission:
+    """One message on its way into the conversation, and the window's account of it.
+
+    **The send is the submission.**  The task starts the moment the words arrive,
+    whether or not a turn is running: the agent server's inbox is the one queue,
+    and a message that reaches it while a turn runs is folded in at that turn's
+    next iteration boundary.  What is left here is only the *display's* state —
+    which submission's turn is on screen, and whether the running turn has
+    already drawn this one as a cut-in.
+    """
+
+    ticket: int
+    prompt: str
+    channel: str
+    task: asyncio.Task[TurnReply] | None = None
+    #: This submission's line is on screen — either its own turn opened it, or a
+    #: `MessageCutIn` carrying its receipt did while another turn was running.
+    #: The second case means its call produces no events and must not open a
+    #: second block; `TurnReply.injected` is what says whether an answer is still
+    #: owed.
+    drawn: bool = False
 
 
 def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
@@ -308,14 +355,20 @@ class SlifeApp(App[None]):
         #: second caller waits for the first and then finds the flag set, which
         #: is the ordering `_ensure_connected` promises — see `_restore`.
         self._restoring = asyncio.Lock()
-        #: Messages waiting for their turn, oldest first, each with the channel
-        #: it came in on.  **Typing is not the only way in**: a message handed
-        #: over by another channel lands here too (`deliver`), which is what makes
-        #: a WeChat message the same thing as one typed here.  A message is added
-        #: to the transcript when its turn starts rather than on arrival, so the
-        #: transcript stays a faithful record of the turns that happened, in the
-        #: order they happened.
-        self._queue: list[tuple[str, str]] = []
+        #: Every submission still owed a place in the transcript, oldest first.
+        #:
+        #: **This is a *display* order, not a send queue.**  Each entry's call is
+        #: already in flight — the agent server's lock and inbox order the turns,
+        #: and a message that arrives while one runs is folded into it — so what
+        #: this list decides is only which block the window draws next.  The
+        #: dict holds the same entries by ticket; `_order` is the order they
+        #: have to be drawn in.
+        self._submissions: dict[int, _Submission] = {}
+        self._order: deque[int] = deque()
+        #: The id the next submission is given.  **It is the server's receipt
+        #: too** (`slife2.tui.client.TurnReply`): a `MessageCutIn` echoes it back
+        #: so the window can tell which submission the running turn took.
+        self._next_ticket = 0
         self._worker: Worker[None] | None = None
         self._draining = False
         #: The worker serving the control surface, held so unmounting stops it.
@@ -323,17 +376,30 @@ class SlifeApp(App[None]):
         #: The worker holding this agent's place on the mesh, held for the same
         #: reason and with the same consequence: cancelling it is the departure.
         self._held_mesh: Worker[None] | None = None
-        #: The running turn, as its own task so that cancelling one leaves the
-        #: queue alone.  Cancelling the worker would take the queue with it.
-        #: It resolves to the turn's answer, which the queue applies before the
-        #: next turn opens a block.
-        self._turn: asyncio.Task[str] | None = None
+        #: The submission whose turn the window is drawing, as its own task so
+        #: that cancelling it leaves the queue alone.  Cancelling the worker
+        #: would take the queue with it.  It resolves to the server's reply,
+        #: which is what says whether this message ran a turn of its own.
+        self._turn: asyncio.Task[TurnReply] | None = None
         #: Whether the cancellation in flight was ours.  Without it there is no
         #: way to tell "the user stopped this turn" from "the app is closing",
         #: and they want opposite handling.
         self._interrupting = False
-        #: Which turn's events the transcript is currently accepting.
-        self._ticket = 0
+        #: Which submission's events the transcript is currently accepting.  A
+        #: later ticket's event is held until the display reaches it; an earlier
+        #: one's is a tail of a turn that is over and is dropped.
+        self._render_ticket: int | None = None
+        #: Events that arrived before their submission's block was open.  A
+        #: turn of its own can only start after the previous one ends, so the
+        #: tail of a turn is ordinary — but the *delivery* of those events and
+        #: the response that ends the previous turn travel on different halves
+        #: of one connection, and nothing orders them.
+        self._held: dict[int, list[TurnEvent]] = {}
+        #: The highest ticket whose turn is over.  A late event at or below it
+        #: is a tail of a finished turn and is dropped; the flush before every
+        #: finalisation is what makes that a statement about events already
+        #: applied rather than about a race.
+        self._last_finished = 0
         self._context_tokens = 0
 
     def compose(self) -> ComposeResult:
@@ -512,13 +578,46 @@ class SlifeApp(App[None]):
     def deliver(self, text: str, channel: str) -> None:
         """Take a message from another channel, to run as if it were typed.
 
-        **The whole of the pass-through**: it joins the same queue, is run by the
-        same drain as one turn among others, and is drawn by the same call — so
-        nothing downstream knows or cares that a person typed it somewhere else.
-        The channel travels with it, and that is what the bubble and the turn's
-        own record are made of.
+        **The whole of the pass-through**: it is submitted exactly where a
+        person's own typing is, so the agent server's inbox is its queue too —
+        and a message that arrives while a turn runs is folded into that turn
+        like any other.  The channel travels with it, and that is what the
+        bubble and the turn's own record are made of.
+
+        **Nothing is held back for the transcript.**  The window used to queue
+        hand-overs until the running turn ended, on the argument that two turns'
+        event streams could not be ordered; the server's lock orders the turns,
+        and its inbox is the cut-in path.  Holding a message here was holding it
+        out of the conversation it was addressed to.
         """
-        self._queue.append((text, channel))
+        self._submit(text, channel)
+
+    def _submit(self, text: str, channel: str) -> None:
+        """Put one message on its way, and put it in the display's order.
+
+        **The call starts here, not when its turn comes up.**  That is the whole
+        change that makes cut-in uniform: the server appends to its inbox before
+        it takes the lock, so a message submitted while a turn is running is
+        available to that turn's next iteration boundary.  A window that waited
+        to send was a window that had decided, on everyone else's behalf, that
+        the message could not cut in.
+
+        The task runs immediately and the window awaits it in arrival order
+        (`_drain`), so the transcript still reads as the conversation happened
+        while the sends overlap.  A folded submission's call produces no events;
+        its line was drawn by the cut-in, and its reply says so.
+        """
+        self._next_ticket += 1
+        ticket = self._next_ticket
+        entry = _Submission(ticket, text, channel)
+        self._submissions[ticket] = entry
+        self._order.append(ticket)
+        # The receipt is the ticket, spelled as the wire's string.  Unique for
+        # the life of this window, which is all the match has to be.
+        entry.task = asyncio.create_task(
+            self._send(text, ticket, channel, receipt=str(ticket)),
+            name=f"turn-{ticket}",
+        )
         self._start_draining()
         self._refresh_status()
 
@@ -654,12 +753,10 @@ class SlifeApp(App[None]):
 
     async def on_history_input_submitted(self, message: HistoryInput.Submitted) -> None:
         self.query_one(HistoryInput).remember(message.text)
-        self._queue.append((message.text, WINDOW_CHANNEL))
-        self._start_draining()
-        self._refresh_status()
+        self._submit(message.text, WINDOW_CHANNEL)
 
     def _start_draining(self) -> None:
-        """Be the one worker that runs queued turns, if there is not one already.
+        """Be the one worker that draws submitted turns, if there is not one already.
 
         The flag rather than the worker's state: `run_worker` returns before the
         worker has started, so a second submission in the same tick would see a
@@ -671,9 +768,21 @@ class SlifeApp(App[None]):
         self._worker = self.run_worker(self._drain(), group="turn", exit_on_error=False)
 
     async def _drain(self) -> None:
-        """Run queued turns, one at a time, until the queue is empty."""
+        """Draw submissions in the order they were sent, one turn at a time.
+
+        **The sends are already in flight; this only applies them.**  The agent
+        server owns the only turn queue — a lock and an inbox — so what is left
+        here is the transcript's order.  A block opens when the display reaches
+        a submission, and a submission the running turn folded in has no block
+        of its own: its line was drawn by the cut-in event, inside the turn that
+        took it, and its reply says `injected` so no answer is drawn twice.
+
+        A submission whose call is still waiting on the server's lock therefore
+        waits here too, which is what the status bar counts.  Nothing is held
+        back on the wire — that was the defect this replaces.
+        """
         try:
-            while self._queue:
+            while self._order:
                 # **Connected — and therefore restored — before anything is
                 # mounted.**  On a cold start this is where the connect
                 # happens, and `_restore` draws the conversation this name
@@ -683,65 +792,98 @@ class SlifeApp(App[None]):
                 # sets "connected" before it reads, so this is the call that
                 # keeps a prompt typed in that gap below the whole history.
                 await self._ensure_connected()
-                # Taken off the queue *before* it runs, so the count in the
-                # status bar is what is still waiting rather than including the
-                # turn the user is already watching.
-                prompt, channel = self._queue.pop(0)
-                self._ticket += 1
-                ticket = self._ticket
-                # The channel is the caller's, and `add_user` is what turns it
-                # into a bubble and unwraps a marker for a line that came in on
-                # somebody else's (`slife2.tui.widgets`).
-                self._transcript.add_user(prompt, channel=channel)
-                # The reader's own message owns the view: sending it goes to
-                # the end and re-arms following, however far up they had read.
-                # `add_user` follows the tail like every other mount, and that
-                # does nothing for a reader who is not at it — so a message sent
-                # from up in the history would be written below the fold.
-                self._transcript.jump_to_tail()
+                ticket = self._order[0]
+                entry = self._submissions[ticket]
+                assert entry.task is not None
+                self._render_ticket = ticket
+                self._turn = entry.task
+                if not entry.drawn:
+                    # Its own line.  The channel is the caller's, and `add_user`
+                    # is what turns it into a bubble and unwraps a marker for a
+                    # line that came in on somebody else's
+                    # (`slife2.tui.widgets`).
+                    self._transcript.add_user(entry.prompt, channel=entry.channel)
+                    # The reader's own message owns the view: sending it goes to
+                    # the end and re-arms following, however far up they had
+                    # read.  `add_user` follows the tail like every other mount,
+                    # and that does nothing for a reader who is not at it — so a
+                    # message sent from up in the history would be written below
+                    # the fold.
+                    self._transcript.jump_to_tail()
+                    entry.drawn = True
                 # **Nothing is read out of the prompt here.**  The `@path`
                 # markers a person types are resolved by the *agent server* now,
                 # which is what lets every caller attach an image and not only
                 # this terminal (`slife2.libs.turn.attachments`).  The prompt goes as it was
                 # written, markers and all — and the picture arrives by way of
                 # `attach_image`, whose answer names it.
+                #
+                # Opened even when the line came from a cut-in: a message that
+                # was folded into a turn which then failed runs a turn of its
+                # own, and its answer has to land in a block.  A block is created
+                # by the first thing that has something to put in it, so an
+                # injected reply leaves nothing behind.
                 self._transcript.begin_assistant()
+                # Events that arrived before this block was the display's are
+                # applied now, in the order the turn produced them.
+                self._replay(ticket)
                 # **The task before the refresh, so the bar can see it.**  The
                 # bar's "working" comes from `_turn` being set, and a refresh
                 # that ran first would find it `None` and draw an idle bar — for
                 # the whole turn, since nothing else refreshes until it ends.
-                self._turn = asyncio.create_task(self._send(prompt, ticket, channel))
                 self._refresh_status()
                 try:
-                    final = await self._turn
+                    reply = await entry.task
                 except asyncio.CancelledError:
                     if not self._interrupting:
                         raise
-                    # **The cancelled turn's ticket is retired here, not left for
-                    # the next turn to move past.**  Its events can still be in
-                    # the pump — a delta the client posted as it unwound — and
-                    # the ticket still matched, so they were accepted.
+                    # **Everything posted before this point is applied before
+                    # the turn is declared over.**  A cancelled turn's ticket is
+                    # retired below, so an event still in the pump would be
+                    # dropped — and `[cancelled]` is the last thing it is owed.
+                    await self._flush_events()
+                    if not entry.drawn:
+                        self._transcript.add_user(entry.prompt, channel=entry.channel)
+                        entry.drawn = True
                     # `append_text` is guarded by `_turn_open`, which the
                     # `ends_turn` below clears, but `add_tool_start` is guarded
                     # by neither: a late `ToolCallStarted` mounted a panel under
-                    # `[cancelled]`, as though the turn had gone on.  Retiring it
-                    # now is what the next turn's own bump does for the tail of
-                    # the turn before it — the cancel just does it early.
-                    self._ticket += 1
+                    # `[cancelled]`, as though the turn had gone on.  Retiring
+                    # the ticket before the next entry does the same for the
+                    # turn's tail — the cancel just does it early.
+                    self._finish_entry(ticket)
                     self._transcript.add_note(notes.cancelled(), ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
-                    # The same retirement the cancel branch makes, for the same
-                    # reason: a turn that is over has no business mounting
-                    # anything, and a `ToolCallStarted` still in the pump would
-                    # mount a panel under the line below — where `settle_tools`
-                    # has already been and gone, so it would say "running" for
-                    # the rest of the session.  A failed turn is as over as a
-                    # cancelled one.
-                    self._ticket += 1
+                    # The same flush and retirement the cancel branch makes, for
+                    # the same reason: a turn that is over has no business
+                    # mounting anything, and a `ToolCallStarted` still in the
+                    # pump would mount a panel under the line below — where
+                    # `settle_tools` has already been and gone, so it would say
+                    # "running" for the rest of the session.
+                    await self._flush_events()
+                    self._finish_entry(ticket)
+                    # A turn that died before its first event still had a
+                    # message; draw it now so the error has a subject.
+                    if not entry.drawn:
+                        self._transcript.add_user(entry.prompt, channel=entry.channel)
+                        entry.drawn = True
                     self._transcript.add_error(str(exc))
                 else:
-                    self._transcript.finish_assistant(final)
+                    # **The reply is the authority on whether this message ran a
+                    # turn of its own.**  A folded message produces no events at
+                    # all — the absorbing turn's stream carried them — so the
+                    # display cannot infer it from the event channel, which may
+                    # also be dropped.  `injected` is the server's own answer to
+                    # exactly this question.
+                    await self._flush_events()
+                    # Opened above for the possibility that this message owned a
+                    # turn; an injected reply has nothing to put in it, and
+                    # `finish_assistant("")` leaves no block — it only closes
+                    # the turn state the entry opened.
+                    self._transcript.finish_assistant(
+                        "" if reply.injected else reply.text
+                    )
                 finally:
                     self._interrupting = False
                     self._turn = None
@@ -753,14 +895,58 @@ class SlifeApp(App[None]):
                     # than in the two branches because it is a fact about *every*
                     # ending, including the next one somebody adds.
                     self._transcript.settle_tools()
+                    if ticket in self._submissions:
+                        self._finish_entry(ticket)
                     self._refresh_status()
         finally:
             self._draining = False
+            self._render_ticket = None
 
-    async def _send(self, prompt: str, ticket: int, channel: str) -> str:
-        """Run one turn and return its authoritative answer.
+    def _finish_entry(self, ticket: int) -> None:
+        """Retire one submission: its turn is over and its events are no longer wanted.
 
-        The answer is returned rather than posted so the queue can apply it
+        `_last_finished` is what `on_turn_event_message` compares against, and
+        it is a high-water mark rather than a set: submissions are drawn in
+        order, so everything at or below it is over.  That is what keeps a late
+        fragment of a turn (`TextDelta` after the result, a tool call that was
+        already answered) out of the next turn's block — the module docstring's
+        ticket rule, which no longer needs a ticket *counter* because the
+        submission's own id is the ticket.
+        """
+        self._last_finished = ticket
+        with contextlib.suppress(ValueError):
+            self._order.popleft()
+        self._submissions.pop(ticket, None)
+        self._held.pop(ticket, None)
+
+    def _replay(self, ticket: int) -> None:
+        """Apply the events that arrived before this submission's block opened."""
+        for event in self._held.pop(ticket, []):
+            self._apply(event)
+
+    async def _flush_events(self) -> None:
+        """Wait until every event posted before this call has been applied.
+
+        **A notification and the response that ends its turn travel on one
+        connection but arrive as two things**: the event is posted to Textual's
+        pump and the response resolves the awaited call, and nothing orders the
+        two task wakeups.  The turn's line, its answer and `[cancelled]` are all
+        written from the pump, so a renderer that finalised an entry on the
+        response alone could retire the ticket while the event was still queued
+        — and then drop it as a late fragment of a finished turn.  Posting a
+        marker after them and waiting for it is the ordering Textual already
+        promises (its queue is FIFO), asked for once.
+        """
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.post_message(EventsFlushed(done))
+        await done
+
+    async def _send(
+        self, prompt: str, ticket: int, channel: str, *, receipt: str
+    ) -> TurnReply:
+        """Run one turn and return the server's reply.
+
+        The reply is returned rather than posted so the queue can apply it
         before the next turn opens a block.  Ordering against the deltas is the
         ticket's job, not the message queue's.
 
@@ -782,22 +968,54 @@ class SlifeApp(App[None]):
             prompt,
             lambda event: self._on_event(ticket, event),
             channel=channel,
+            receipt=receipt,
         )
 
     def _on_event(self, ticket: int, event: TurnEvent) -> None:
-        """Called by the client for every progress event.  Does not touch widgets."""
+        """Called by the client for every progress event.  Does not touch widgets.
+
+        **The one piece of state that is set here rather than in the pump**, and
+        it is set here because the two races meet at it: a cut-in delivered
+        while another turn runs has to be known to the display *before* the
+        absorbing turn's response lets the renderer move past that turn.  The
+        flag says only which submission's line the event accounts for; the
+        widget work stays in the pump.
+        """
+        if isinstance(event, MessageCutIn) and event.receipt.isdigit():
+            submission = self._submissions.get(int(event.receipt))
+            if submission is not None:
+                submission.drawn = True
         self.post_message(TurnEventMessage(ticket, event))
 
     # --- message handlers (the only places widgets are mutated) --------------
 
+    def on_events_flushed(self, message: EventsFlushed) -> None:
+        if not message.done.done():
+            message.done.set_result(None)
+
     def on_turn_event_message(self, message: TurnEventMessage) -> None:
         # Late fragments of a turn that is over.  Dropping them is what keeps
         # one turn's tail out of the next turn's block — see the module
-        # docstring.
-        if message.ticket != self._ticket:
+        # docstring.  The flush before every finalisation is what makes "over"
+        # mean everything it posted has already been applied.
+        if message.ticket <= self._last_finished:
             return
-        event = message.event
+        if message.ticket != self._render_ticket:
+            # A turn of its own can only start after the previous one ends, but
+            # its notifications and that previous turn's response are separate
+            # wakeups.  Held, not dropped, and replayed when its block opens.
+            self._held.setdefault(message.ticket, []).append(message.event)
+            return
+        self._apply(message.event)
+
+    def _apply(self, event: TurnEvent) -> None:
+        """One event, applied to the transcript."""
         match event:
+            case MessageCutIn(text=text, channel=channel):
+                # A message that jumped the queue, drawn inside the turn that
+                # took it: the line belongs here and the turn stays open, so the
+                # answer still arriving continues underneath it.
+                self._transcript.add_cut_in(text, channel=channel)
             case ContextChosen(kept=kept, recalled=recalled):
                 # The discriminator's answer, and the only sight of it there is:
                 # one model call decides what the turn runs on, it is the most
@@ -1074,8 +1292,11 @@ class SlifeApp(App[None]):
             connected=self._connected,
             agent=self._agent,
             model=self._model_label,
-            busy=self._turn is not None or bool(self._queue),
-            queued=len(self._queue),
+            busy=self._turn is not None or bool(self._submissions),
+            # What is still waiting rather than including the turn being
+            # watched: a submission whose line is already on screen — its own or
+            # a cut-in's — is not queued any more.
+            queued=sum(1 for entry in self._submissions.values() if not entry.drawn),
             context_tokens=self._context_tokens,
             context_window=self._context_window,
             thinking=self._thinking,

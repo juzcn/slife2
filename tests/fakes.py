@@ -30,6 +30,7 @@ from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
 from slife2.plugins.tui.server import NOTE, Handover
+from slife2.tui.client import TurnReply
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -160,6 +161,9 @@ class FakeAgentClient:
         #: The images sent with each prompt, so a test can assert the attachment
         #: reached the client rather than only that the file was read.
         self.images: list[list[str]] = []
+        #: The receipt each prompt was sent with, so a test can prove a window
+        #: that draws a cut-in asks the server to echo the id it will match.
+        self.receipts: list[str] = []
         #: What `switch_model` was asked for, in order, so a test can prove the
         #: picker's choice reached the server rather than only that the picker
         #: closed.
@@ -233,7 +237,8 @@ class FakeAgentClient:
         *,
         channel: str = WINDOW_CHANNEL,
         images: list[str] | None = None,
-    ) -> str:
+        receipt: str = "",
+    ) -> TurnReply:
         """Run one scripted turn, keeping the real client's contract.
 
         Two halves of that contract matter to the TUI and neither is obvious, so
@@ -241,14 +246,20 @@ class FakeAgentClient:
         reach for a client it no longer has), and a turn that fails for any
         reason other than a refusal drops it — which is what `run_turn`'s own
         `except` does, and what the app's retry is built on.
+
+        The reply is a `TurnReply`, because the app draws on whether a running
+        turn folded this message in.  A scripted turn runs its own, so the flag
+        is false; a test that wants the other half injects the cut-in event and
+        returns `TurnReply(answer, injected=True)`.
         """
         if not self.connected:
             raise ConnectionError("not connected")
         self.prompts.append(prompt)
         self.channels.append(channel)
         self.images.append(images or [])
+        self.receipts.append(receipt)
         try:
-            return self._respond(prompt, on_event)
+            return TurnReply(self._respond(prompt, on_event))
         except ToolError:
             # The server answered and refused *this* turn; the link is fine.
             raise

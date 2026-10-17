@@ -9,14 +9,14 @@ is answered while the window that is watching shows nothing.
 
 **Two things reach a window, and they are two kinds of hand-over.**  The first is
 a *message*: it goes *to the window* and becomes the one thing a window already
-knows how to handle — something the person typed.  It lands in the same queue
-(`slife2.tui.app`), is run as the same kind of turn, and wears the same bubble —
-which is the whole of the design, and the reason there is no second display path
-anywhere in this system.  The second is a *note*: a line the harness has to say
-and nobody has to answer — a peer came online, a turn was cancelled — so it is
-drawn where every such line is drawn (`ChatView.add_note`, `slife2.tui.notes`)
-and the conversation never learns of it.  Same stream, same acknowledgement,
-one branch at the far end.
+knows how to handle — something the person typed.  It is submitted to the
+conversation the moment the window takes it, exactly as the person's own typing
+is (`slife2.tui.app`), and it is drawn either as its own turn or — when it
+arrives while a turn is running — as a line inside that turn.  The second is a
+*note*: a line the harness has to say and nobody has to answer — a peer came
+online, a turn was cancelled — so it is drawn where every such line is drawn
+(`ChatView.add_note`, `slife2.tui.notes`) and the conversation never learns of
+it.  Same stream, same acknowledgement, one branch at the far end.
 
 **This is a plugin, and the window is a client of it.**  It used to be the one
 server here that was not: the window served it in-process, on a `tui:` section
@@ -468,9 +468,10 @@ def build_server(_config: Config | None = None) -> FastMCP:
     async def submit(agent: str, text: str, channel: str) -> None:
         """Hand an agent's window a message to treat as something the person typed.
 
-        The words go into the window's own queue, so they are run in the order it
-        has already been handed things, one turn at a time, and the answer appears
-        in the transcript as any other turn's does.
+        The window submits it to the conversation immediately — not behind a
+        queue of its own — so a message that arrives while a turn is running is
+        folded into that turn at its next iteration boundary, and its answer
+        appears in the transcript as any other turn's does.
 
         **Returning is the acknowledgement**, and it is the *write*: when this
         returns, the words are on their way down the stream that window is

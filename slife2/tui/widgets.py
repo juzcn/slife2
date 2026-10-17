@@ -504,6 +504,48 @@ class ChatView(VerticalScroll):
         # scoped to the turn that used it, so an id reused later cannot reach the
         # earlier panel and the map cannot outlive the turn it belongs to.
         self._tools.clear()
+        self._user_line(text, moment, footnote, channel)
+
+    def add_cut_in(
+        self,
+        text: str,
+        moment: datetime | str | None = None,
+        channel: str = WINDOW_CHANNEL,
+    ) -> None:
+        """A message that arrived mid-turn, drawn inside the turn that took it.
+
+        **It is a user line and it does not close the turn.**  `add_user` is the
+        only other writer of this shape, and it ends the turn (`_turn_open =
+        False`) and forgets the open panels (`_tools.clear()`), because it opens
+        a new one.  A cut-in belongs to the turn already running: the answer
+        still arriving has to land in the block below this line, and the tool
+        panels that turn opened are still addressable.  So this closes the
+        current *block* — the text run that ended when the message arrived — and
+        nothing else.
+
+        **Why this exists at all.**  A cut-in is written into the conversation as
+        a harness tool pair, so a display with no vocabulary for it could only
+        draw a tool panel (which it is not) or nothing (which is what the
+        transcript did while this was deferred, DESIGN.md §9).  The words are
+        already in the record; this is the line that says so while they arrive.
+        """
+        self._close_block()
+        self._user_line(text, moment, "", channel)
+
+    def _user_line(
+        self,
+        text: str,
+        moment: datetime | str | None,
+        footnote: str,
+        channel: str,
+    ) -> None:
+        """The one rendering of a message somebody sent.
+
+        `add_user` and `add_cut_in` differ only in what they do to the turn
+        around this line; the line itself is one function so the bubble, the
+        marker strip and the timestamp cannot come to two answers about the same
+        channel.
+        """
         if not is_own_channel(channel):
             text = strip_marker(text, *MARKERS)
         line = Text()

@@ -25,6 +25,7 @@ import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD
 from slife2.libs.turn.events import (
     ContextChosen,
+    MessageCutIn,
     TextDelta,
     ThinkingDelta,
     ToolApprovalRequested,
@@ -34,7 +35,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.tui.app import SlifeApp, TurnEventMessage
-from slife2.tui.client import MCPAgentClient
+from slife2.tui.client import MCPAgentClient, TurnReply
 from slife2.tui.theme import GLYPHS, PALETTE
 from slife2.tui.widgets import (
     AssistantMessage,
@@ -638,11 +639,13 @@ async def test_a_running_tool_says_running() -> None:
     """
     started = asyncio.Event()
 
-    async def calls_then_hangs(prompt, on_event, *, channel="tui", images=None):
+    async def calls_then_hangs(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "1"}))
         started.set()
         await asyncio.sleep(30)
-        return ""
+        return TurnReply("")
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = calls_then_hangs  # type: ignore[method-assign]
@@ -844,12 +847,14 @@ async def test_a_streaming_turn_does_not_drag_a_reader_back_to_the_tail() -> Non
     arrived = asyncio.Event()
     release = asyncio.Event()
 
-    async def streams_in_two(prompt, on_event, *, channel="tui", images=None):
+    async def streams_in_two(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         on_event(TextDelta(SCROLLABLE))
         arrived.set()
         await release.wait()
         on_event(TextDelta("\nand more"))
-        return SCROLLABLE + "\nand more"
+        return TurnReply(SCROLLABLE + "\nand more")
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = streams_in_two
@@ -973,7 +978,11 @@ def stored(
     """
     return {
         "turn_id": turn_id,
-        "messages": [message.to_wire() for message in messages],
+        # `to_record`, because that is what the turn log is written with: the
+        # wire's message plus the display metadata it does not carry (a cut-in's
+        # channel).  A fixture built from `to_wire` would prove a rebuilt
+        # transcript works on a shape the server never stores.
+        "messages": [message.to_record() for message in messages],
         "created_at": asked,
         "completed_at": None,
         "channel": channel,
@@ -1349,6 +1358,51 @@ async def test_a_restored_tool_panel_opens_and_shows_what_it_returned() -> None:
     assert "Result" in expanded
     assert "42" in expanded
     assert "e = 6*7" in expanded
+
+
+async def test_a_restored_cut_in_is_a_message_not_a_tool_panel() -> None:
+    """A message that jumped the queue is a person's line, live and rebuilt.
+
+    The pair is in the turn log because that is how a mid-turn message enters
+    the conversation, but what it carries is something somebody said.  The
+    record keeps the channel on the tool message (`Message.to_record`), so the
+    rebuilt line wears the bubble the live one wore — and the harness call itself
+    is not drawn as a tool, which it never was.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="start"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="_harness_check_new_input_1",
+                        name="_check_new_input",
+                        arguments={},
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content="and this",
+                tool_call_id="_harness_check_new_input_1",
+                channel="wechat",
+            ),
+            Message(role="assistant", content="both answered"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+
+    assert "Wechat> and this" in text
+    assert "_check_new_input" not in text, "the harness call is not a tool panel"
+    assert panels == []
+    assert text.index("You> start") < text.index("Wechat> and this")
+    assert text.index("Wechat> and this") < text.index("both answered")
 
 
 async def test_a_restored_result_reads_like_a_live_one() -> None:
@@ -1922,7 +1976,9 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
     """A terminal where you cannot stop a runaway turn is not usable."""
     started = asyncio.Event()
 
-    async def never_finishes(prompt, on_event, *, channel="tui", images=None):
+    async def never_finishes(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         # `images` is keyword-only on the real client, so a stand-in that
         # omitted it would fail on every call rather than never finishing —
         # which is a different test.
@@ -1972,11 +2028,13 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
     """
     started = asyncio.Event()
 
-    async def streams_then_hangs(prompt, on_event, *, channel="tui", images=None):
+    async def streams_then_hangs(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         on_event(TextDelta("partial"))
         started.set()
         await asyncio.sleep(30)
-        return "never"
+        return TurnReply("never")
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = streams_then_hangs  # type: ignore[method-assign]
@@ -1988,7 +2046,8 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
             timeout=2,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
         await pilot.pause()
-        ticket = app._ticket
+        ticket = app._render_ticket
+        assert ticket is not None
 
         await pilot.press("escape")
         await pilot.pause()
@@ -2028,11 +2087,13 @@ async def test_a_tool_panel_still_running_is_settled_by_the_cancel() -> None:
     """
     started = asyncio.Event()
 
-    async def calls_then_hangs(prompt, on_event, *, channel="tui", images=None):
+    async def calls_then_hangs(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         on_event(ToolCallStarted("c1", "slow_tool", {"path": "x"}))
         started.set()
         await asyncio.sleep(30)
-        return "never"
+        return TurnReply("never")
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = calls_then_hangs  # type: ignore[method-assign]
@@ -2044,7 +2105,8 @@ async def test_a_tool_panel_still_running_is_settled_by_the_cancel() -> None:
             timeout=2,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
         await pilot.pause()
-        ticket = app._ticket
+        ticket = app._render_ticket
+        assert ticket is not None
         panel = app.query_one(ToolCallWidget)
         assert "running" in panel.plain_text(), "the call is in flight to begin with"
 
@@ -2089,7 +2151,9 @@ async def test_a_tool_panel_still_running_is_settled_by_the_failure() -> None:
     started = asyncio.Event()
     fail = asyncio.Event()
 
-    async def calls_then_fails(prompt, on_event, *, channel="tui", images=None):
+    async def calls_then_fails(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         on_event(ToolCallStarted("c1", "slow_tool", {}))
         started.set()
         await fail.wait()
@@ -2105,7 +2169,8 @@ async def test_a_tool_panel_still_running_is_settled_by_the_failure() -> None:
             timeout=2,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
         await pilot.pause()
-        ticket = app._ticket
+        ticket = app._render_ticket
+        assert ticket is not None
 
         fail.set()
         await pilot.pause()
@@ -2498,7 +2563,9 @@ async def test_a_selection_keeps_ctrl_c_off_a_running_turn() -> None:
     """
     started = asyncio.Event()
 
-    async def never_finishes(prompt, on_event, *, channel="tui", images=None):
+    async def never_finishes(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         started.set()
         await asyncio.sleep(30)
         return "never"
@@ -2538,13 +2605,15 @@ async def test_a_second_prompt_waits_and_both_are_answered() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_then_fast(prompt, on_event, *, channel="tui", images=None):
+    async def slow_then_fast(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
         if prompt == "alpha":
             started.set()
             await release.wait()
         answer = f"answer to {prompt}"
         on_event(TextDelta(answer))
-        return answer
+        return TurnReply(answer)
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = slow_then_fast  # type: ignore[method-assign]
@@ -2577,17 +2646,108 @@ async def test_a_second_prompt_waits_and_both_are_answered() -> None:
         assert "queued" not in status(app)
 
 
+async def test_a_second_prompt_is_sent_while_the_first_turn_runs() -> None:
+    """The window does not hold the message; the server's inbox does.
+
+    This is the defect the whole arrangement exists to fix: a message typed
+    while a turn ran used to sit in the window until the turn *ended*, so the
+    one caller the person can see was the only one whose messages could not cut
+    in.  The proof is the client's own call list: `beta` has been handed to the
+    server before `alpha` has been released.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    sent: list[tuple[str, str]] = []
+
+    async def slow_then_fast(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
+        sent.append((prompt, receipt))
+        if prompt == "alpha":
+            started.set()
+            await release.wait()
+        answer = f"answer to {prompt}"
+        on_event(TextDelta(answer))
+        return TurnReply(answer)
+
+    client = FakeAgentClient(answering("unused"))
+    client.run_turn = slow_then_fast  # type: ignore[method-assign]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "alpha")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await submit(pilot, "beta")
+        await pilot.pause()
+
+        # Sent, not queued: both calls are in flight on the server's side, and
+        # each names itself so a cut-in can be matched back to the submission.
+        assert sent == [("alpha", "1"), ("beta", "2")]
+
+        release.set()
+        await settle(pilot, app)
+
+
+async def test_a_cut_in_is_drawn_inside_the_running_turn_and_answered_once() -> None:
+    """The one display rule for a folded message: a line, not a second turn.
+
+    `beta`'s call produces no events of its own — the server folded it into
+    `alpha`'s turn and said so on *that* stream, with `receipt` naming which
+    submission it took.  The line is drawn under the answer still being written,
+    the block stays open, and `beta`'s `injected` reply draws no second answer.
+    """
+    started = asyncio.Event()
+    cut_in = asyncio.Event()
+
+    async def fold_beta_in(prompt, on_event, *, channel="tui", images=None, receipt=""):
+        if prompt == "alpha":
+            started.set()
+            await cut_in.wait()
+            # Exactly what the agent server emits when its inbox hands a
+            # waiting message to the running turn: the words, the channel, and
+            # the receipt of the submission it answered.
+            on_event(MessageCutIn(text="beta", channel="tui", receipt="2"))
+            on_event(TextDelta("answer to both"))
+            return TurnReply("answer to both")
+        # The folded caller: no events, the absorbing turn's answer, and the
+        # flag that says it ran no turn of its own.
+        cut_in.set()
+        return TurnReply("answer to both", injected=True)
+
+    client = FakeAgentClient(answering("unused"))
+    client.run_turn = fold_beta_in  # type: ignore[method-assign]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "alpha")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await submit(pilot, "beta")
+        await settle(pilot, app)
+
+        text = shown(app)
+        assert text.index("You> alpha") < text.index("You> beta")
+        assert text.index("You> beta") < text.index("answer to both")
+        assert text.count("answer to both") == 1, "one turn answered both messages"
+        assert "beta" not in status(app), "a folded message is not still queued"
+
+
 async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
     """Ctrl+C stops one turn.  The messages behind it are still wanted."""
     started = asyncio.Event()
 
-    async def first_hangs(prompt, on_event, *, channel="tui", images=None):
+    async def first_hangs(prompt, on_event, *, channel="tui", images=None, receipt=""):
         if prompt == "alpha":
             started.set()
             await asyncio.sleep(30)
         answer = f"answer to {prompt}"
         on_event(TextDelta(answer))
-        return answer
+        return TurnReply(answer)
 
     app = make_app(answering("unused"))
     app._client_factory().run_turn = first_hangs  # type: ignore[method-assign]

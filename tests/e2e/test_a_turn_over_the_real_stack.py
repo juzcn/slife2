@@ -515,7 +515,8 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     finally:
         await client.close()
 
-    assert answer == ANSWER
+    assert answer.text == ANSWER
+    assert answer.injected is False
     assert events[0] == "ContextChosen", events
     assert "TextDelta" in events and events[-1] == "TurnFinished"
     assert stack["provider"].chats == 2, stack["provider"].calls
@@ -617,7 +618,7 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     finally:
         await client.close()
 
-    assert answer == "Noted.", provider.calls
+    assert answer.text == "Noted.", provider.calls
     # Step by step, so a turn that took a different number of calls says which
     # one it took rather than failing on a total.
     assert provider.chats == 3, [len(call) for call in provider.calls]

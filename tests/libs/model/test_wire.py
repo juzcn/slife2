@@ -18,6 +18,7 @@ from slife2.libs.turn.events import (
     NULL_OBSERVER,
     PREVIEW_CHARS,
     ContextChosen,
+    MessageCutIn,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -54,6 +55,12 @@ EVENTS = [
         max_iterations=30,
     ),
     ToolCallStarted(call_id="c2", name="now"),
+    # A message that arrived mid-turn, with the receipt the window matches back
+    # to the submission it answered, and one from another caller without one:
+    # both shapes travel, and the absent receipt is the empty string rather
+    # than a guessed id.
+    MessageCutIn(text="and another thing", channel="tui", receipt="7"),
+    MessageCutIn(text="from a peer", channel="peer_agent:jill", receipt=""),
     ToolCallFinished(
         call_id="c1",
         name="calc",

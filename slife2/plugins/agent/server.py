@@ -149,11 +149,11 @@ from slife2.libs.turn.events import (
     TurnObserver,
     encode,
 )
-from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
+from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.prompt import render as render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.libs.turn.tools import Tool, ToolRegistry
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +333,9 @@ def _current_input(messages: Sequence[Message]) -> str:
 #: Being declared is not enough for it to survive: `slife2.libs.store.db` admits
 #: `_`-prefixed names to the model's list only from its own set, and
 #: `slife2.plugins.toolhub.server.ALWAYS_LOADED` is what stops the model unloading a name its
-#: own history refers to.  Both spellings are this string.
-CHECK_NEW_INPUT = "_check_new_input"
+#: own history refers to.  Both spellings are this string, and the string itself
+#: lives in `slife2.libs.turn.tools.CHECK_NEW_INPUT` because the display that
+#: rebuilds a transcript reads it too.
 
 #: The tool an image comes in by.  **The model calls it**, which is the whole
 #: mechanism: somebody writes a path in a sentence and the model attaches it.  v1
@@ -458,6 +459,15 @@ class Pending:
     #: reads this unless `result` is set, so its emptiness is not a branch —
     #: `result` is still the one field that says whether anything folded this in.
     model: str = ""
+    #: The submitting client's own id for this message, echoed on the
+    #: `MessageCutIn` event when a running turn takes it.
+    #:
+    #: **Opaque here and load-bearing there.**  A window that submits a message
+    #: while a turn is running has to know whether that message was folded in or
+    #: ran its own turn — its call produces no events in the first case — and
+    #: the receipt is what makes that an identity rather than a guess at the
+    #: words.  The server never reads it.
+    receipt: str = ""
 
 
 @dataclass
@@ -1405,7 +1415,7 @@ def build_server(
         return await remember_turn(
             loop.agent,
             loop.subagent,
-            [message.to_wire() for message in outcome.messages],
+            [message.to_record() for message in outcome.messages],
             outcome.result,
             model=recorded_model(loop, outcome),
             channel=item.channel,
@@ -1847,7 +1857,7 @@ def build_server(
         list the model is still sent.  The `finally` comments say the rest.
         """
 
-        def auto_invoke() -> str | None:
+        def auto_invoke() -> AutoCall | None:
             """The tool to call at this iteration boundary, or `None` — v1's cut-in.
 
             **Cheap, and it decides only *whether*.**  The name it returns is
@@ -1856,6 +1866,13 @@ def build_server(
             never builds a message.  What it answers is one question — has
             anything arrived for this conversation — and the answer is a queue
             that is almost always empty.
+
+            **The head's channel and receipt go with the name** because the loop
+            is what writes the pair and raises the event, and neither field is
+            recoverable later: the channel is the line a rebuilt transcript
+            needs, and the receipt is how the window that submitted the message
+            stops waiting for a turn of its own.  Nothing is popped here, so a
+            boundary that delivers nothing leaves no pair behind.
 
             **A message with images is not folded in**, and this is the one
             refusal: a tool result carries text, so delivering one would drop
@@ -1868,7 +1885,14 @@ def build_server(
             """
             if not loop.inbox:
                 return None
-            return None if loop.inbox[0].images else CHECK_NEW_INPUT
+            waiting = loop.inbox[0]
+            if waiting.images:
+                return None
+            return AutoCall(
+                CHECK_NEW_INPUT,
+                channel=waiting.channel,
+                receipt=waiting.receipt,
+            )
 
         snapshot = len(loop.messages)
         outcome.started_at = now()
@@ -2799,6 +2823,7 @@ def build_server(
         images: list[str] | None = None,
         channel: str = "",
         watched: bool = False,
+        receipt: str = "",
     ) -> dict[str, Any]:
         """Say something to a conversation and get that turn's answer.
 
@@ -2867,6 +2892,11 @@ def build_server(
                 which is the right answer for a channel with nobody behind it
                 (WeChat, a scheduled task, another agent) and for every client
                 that has not been taught to draw a prompt.
+            receipt: The caller's own opaque id for this submission.  It is
+                echoed on the `MessageCutIn` event whenever a running turn takes
+                the message, so a caller that can draw one (the window) can tell
+                a folded message from one that ran its own turn.  Never read by
+                this server, and absent for every caller that does not ask.
 
         Returns:
             `text` (the final answer), `usage`, `iterations`, `stop_reason`, the
@@ -2898,6 +2928,7 @@ def build_server(
             images=list(images or []),
             channel=channel,
             watched=watched,
+            receipt=receipt,
         )
         loop.inbox.append(item)
         outcome = Outcome()

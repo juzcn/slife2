@@ -26,6 +26,7 @@ from slife2.libs.harness.dumps import Compress
 from slife2.libs.model.base import Chunk, LLMBackend
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
+    MessageCutIn,
     TextDelta,
     ThinkingDelta,
     ToolCallFinished,
@@ -107,6 +108,27 @@ def harness_call(name: str) -> ToolCall:
         name=name,
         arguments={},
     )
+
+
+@dataclass(frozen=True)
+class AutoCall:
+    """A tool the harness wants called at an iteration boundary, and its receipt.
+
+    **The one thing `auto` returns**, so that the caller decides *whether*
+    something arrived (cheaply, without a call) and the loop decides how it is
+    written down.  `name` is the tool; the loop runs it out of the registry the
+    last request advertised, so the answer in the pair is the tool's own.
+
+    `channel` and `receipt` describe the *message* the call delivers rather than
+    the tool: the loop writes the channel onto the pair's tool message (display
+    metadata a rebuild reads, never a wire field) and echoes both on the
+    `MessageCutIn` event.  They are empty for a call that delivers no message,
+    which today is no call at all — `auto` is the cut-in's way into the loop.
+    """
+
+    name: str
+    channel: str = ""
+    receipt: str = ""
 
 
 @dataclass(frozen=True)
@@ -214,7 +236,7 @@ class AgentLoop:
         user: str | list[dict[str, Any]],
         observer: TurnObserver = NULL_OBSERVER,
         *,
-        auto: Callable[[], str | None] | None = None,
+        auto: Callable[[], AutoCall | None] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
 
@@ -230,10 +252,10 @@ class AgentLoop:
         message would be a second place that knows it.
 
         **The auto-invoke.**  `auto` is asked at the top of every iteration for
-        the name of a tool the *harness* wants called — v1's cut-in — and the
-        call is then made the way the model's own calls are made: through
-        `self._tools`, the registry whose `specs` went out with the last
-        request.  So the name
+        an `AutoCall` — the name of a tool the *harness* wants called, v1's
+        cut-in — and the call is then made the way the model's own calls are
+        made: through `self._tools`, the registry whose `specs` went out with the
+        last request.  So the name
         routes the same way, the caller's identity rides the same way, and the
         text written into the pair is **the tool's own answer** rather than
         something written beside it.  `trim_tools` is the other half of this and
@@ -246,9 +268,13 @@ class AgentLoop:
         sequence for every provider.  A bare user message in the middle of one is
         a 400 from several of them.
 
-        `auto` returns a name or `None`, which is v1's split: the caller decides
-        *whether* something arrived — cheaply, without a call — and this decides
-        nothing about tools at all.  The registry is what knows a name.
+        `auto` returns an `AutoCall` or `None`, which is v1's split: the
+        caller decides *whether* something arrived — cheaply, without a call —
+        and this decides nothing about tools at all.  The registry is what knows
+        a name.  The call's channel is written onto the pair as display
+        metadata and both halves are echoed on `MessageCutIn`, so there is one
+        answer to "what arrived, and for whom" whether a reader looks at the
+        live stream or at the turn log.
 
         **Three arguments the model may add to any call.**  `_timeout`, `_async`
         and `_approve` are read off every call and stripped before dispatch, so
@@ -303,14 +329,36 @@ class AgentLoop:
             # it was written for.  Here the registry returns a failure as text
             # (`ToolRegistry.execute` never raises), so there is no such case:
             # everything that can come back is an answer.
-            if auto is not None and (name := auto()) is not None:
-                call = harness_call(name)
+            if auto is not None and (wanted := auto()) is not None:
+                call = harness_call(wanted.name)
                 text, _ok = await self._tools.execute(call)
                 messages.append(
                     Message(role="assistant", content=None, tool_calls=[call])
                 )
                 messages.append(
-                    Message(role="tool", content=text, tool_call_id=call.id)
+                    Message(
+                        role="tool",
+                        content=text,
+                        tool_call_id=call.id,
+                        # Display metadata, persisted with the turn and never
+                        # sent to a provider (`Message.to_record`): the line a
+                        # rebuilt transcript draws for this pair wears the
+                        # bubble of the channel the message came in on.
+                        channel=wanted.channel,
+                    )
+                )
+                # **Said after the pair is written**, so a screen is told about
+                # a message the conversation already holds.  It carries the
+                # tool's own answer, and the receipt the submitting window
+                # matches back to the request it made — no screen may infer
+                # "it was folded in" from an event it could lose.
+                await self._emit(
+                    observer,
+                    MessageCutIn(
+                        text=text,
+                        channel=wanted.channel,
+                        receipt=wanted.receipt,
+                    ),
                 )
             # The tool list goes with the call, so it is asked for with the
             # call.  `specs` is read after this and never cached across

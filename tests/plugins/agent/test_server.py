@@ -56,7 +56,7 @@ from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX
-from slife2.libs.turn.events import TurnEvent, decode
+from slife2.libs.turn.events import MessageCutIn, TurnEvent, decode
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.plugins.agent.server import (
     ATTACH_IMAGE,
@@ -949,6 +949,58 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     assert "user:two" not in prompts_seen(backend, 1)
     # ...and it never became a turn of its own: two model calls, one turn.
     assert len(backend.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
+    context,
+) -> None:
+    """The event is the display's one account of a message that jumped the queue.
+
+    It carries the words — the tool's own answer — the channel the message
+    arrived on, and the receipt its submitter chose.  The window needs all three
+    and can derive none of them: it has no event of its own for a folded message,
+    and matching by the words would confuse two people who said the same thing.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn("answered together"),
+    )
+    hub_client, server = wired(backend, context)
+    seen: list[TurnEvent] = []
+
+    async def on_progress(progress, total, message):
+        event = decode(message or "")
+        if event is not None:
+            seen.append(event)
+
+    async with hub_client:
+        async with Client(server) as first_client:
+            first = asyncio.create_task(
+                first_client.call_tool(
+                    "send_message",
+                    {"agent": DEFAULT_AGENT, "prompt": "one"},
+                    progress_handler=on_progress,
+                )
+            )
+            await wait_for_streams(backend)
+            second = asyncio.create_task(
+                send(
+                    server,
+                    "two",
+                    channel="wechat",
+                    receipt="window-7",
+                )
+            )
+            await asyncio.sleep(0.05)
+            await asyncio.gather(first, second)
+
+    cut_ins = [event for event in seen if isinstance(event, MessageCutIn)]
+    assert cut_ins == [
+        MessageCutIn(text="two", channel="wechat", receipt="window-7"),
+    ]
 
 
 @pytest.mark.asyncio

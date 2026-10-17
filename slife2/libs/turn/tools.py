@@ -72,8 +72,10 @@ The middle two do line up with the mark for the tools the harness writes *pairs*
 with — a pair has to name a tool the request declares, so those names are in the
 model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
-tool and is protected the same way; `_check_new_input` is one, and is drawn by
-nothing at all today, for a reason that has nothing to do with who calls it.
+tool and is protected the same way; `_check_new_input` is one, and it is the
+harness tool a screen *does* draw — as the message somebody sent, live
+(`MessageCutIn`) and rebuilt (`slife2.tui.restore`), because what the pair carries is a
+person's words rather than the machinery's.
 
 **And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
 are read off every call and stripped before dispatch — the one part of this
@@ -163,6 +165,15 @@ HARNESS_PREFIX = "_"
 #: each used to carry its own copy of the string: a rename on one side would
 #: have been a trim that stopped working with a log line and nothing else.
 FUNC_TOOL_UNLOAD = "_func_tool_unload"
+
+#: The cut-in's tool, by name.
+#:
+#: **Spelled here for `FUNC_TOOL_UNLOAD`'s reason, and one more reader.**  Three
+#: places hold this string now: the agent server serves it, the loop writes the
+#: pair under it, and the display that rebuilds a transcript recognises it so a
+#: message that cut in is drawn as a person's line rather than as a tool panel.
+#: A second spelling would be a rename that left one of the three behind.
+CHECK_NEW_INPUT = "_check_new_input"
 
 
 def is_harness(name: str) -> bool:

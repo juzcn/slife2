@@ -1115,12 +1115,12 @@ class Wechat:
         """Hand one message over to the window showing this agent's conversation.
 
         **The window and not the agent server**, and that is the whole of what
-        makes a message sent from a phone visible in the terminal: it goes into
-        the same queue the person's own typing goes into and is run as the same
-        kind of turn, so the line, the answer and the record are the ones that
-        window already draws (`slife2.tui.app`).  What the terminal does with it —
-        one turn at a time, in arrival order — is the one inbox everything this
-        system takes goes into.
+        makes a message sent from a phone visible in the terminal: the window
+        submits it exactly as it submits the person's own typing, so the line,
+        the answer and the record are the ones that window already draws
+        (`slife2.tui.app`).  A message that arrives while the window is drawing
+        a turn cuts into that turn, like any other source; the agent server's
+        inbox is the one queue, and it orders the turns.
 
         **The agent is named, and that is what makes this work with more than one
         window open.**  It used to be implicit in the address, which is one per

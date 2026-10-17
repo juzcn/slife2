@@ -152,6 +152,30 @@ class ToolCallFinished:
 
 
 @dataclass(frozen=True)
+class MessageCutIn:
+    """A message that arrived while the turn was running, and was handed to it.
+
+    **One event, and every source of a mid-turn message goes through it** — the
+    person typing in a window, a channel handing one over, a peer.  The loop
+    emits it when it writes the `_check_new_input` pair, so the words here are
+    the tool's own answer rather than something written beside it: the screen
+    can no more invent what a person said than the model can.
+
+    `channel` is where the message came in on, unchanged from the `Pending` it
+    waited in, so the line wears the same bubble a turn of its own would.
+
+    `receipt` is the submission's own opaque id, echoed back by the server for
+    the one reader that has to match a delivery to the request it answered: the
+    window that submitted it.  Empty for a message from another caller — that
+    caller has its own stream and this event is not for it.
+    """
+
+    text: str
+    channel: str = ""
+    receipt: str = ""
+
+
+@dataclass(frozen=True)
 class TurnFinished:
     """The turn ended.  `text` is the final answer, and is authoritative.
 
@@ -181,6 +205,7 @@ TurnEvent = (
     | ToolCallStarted
     | ToolApprovalRequested
     | ToolCallFinished
+    | MessageCutIn
     | TurnFinished
 )
 
@@ -274,6 +299,16 @@ def encode(event: TurnEvent) -> str:
                 "n": result_chars,
                 "ms": elapsed_ms,
             }
+        case MessageCutIn(text=text, channel=channel, receipt=receipt):
+            payload = {
+                "t": "cut_in",
+                "d": text,
+                "c": channel,
+                # Omitted when there is nobody to match it to.  The receipt is
+                # the submitting window's, and a message from any other caller
+                # has none.
+                **({"r": receipt} if receipt else {}),
+            }
         case TurnFinished(text, usage, last_usage, iterations, stop_reason):
             payload = {
                 "t": "done",
@@ -350,6 +385,15 @@ def decode(message: str) -> TurnEvent | None:
                 result_preview=str(payload.get("d") or ""),
                 result_chars=int(payload.get("n") or 0),
                 elapsed_ms=int(payload.get("ms") or 0),
+            )
+        case "cut_in" if isinstance(payload.get("d"), str):
+            return MessageCutIn(
+                text=payload["d"],
+                # Absent reads as the stream's own default, which is the honest
+                # answer for a build that predates the field: the words are the
+                # message, and where they came from is a display detail.
+                channel=str(payload.get("c") or ""),
+                receipt=str(payload.get("r") or ""),
             )
         case "done":
             return TurnFinished(
