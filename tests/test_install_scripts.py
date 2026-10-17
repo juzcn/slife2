@@ -1,7 +1,7 @@
 """The installer scripts, without running an install.
 
 These are static and helper-level checks: the shell parses, the PowerShell
-parses, the dependency table covers everything the effective configuration
+parses, the requirement helper covers everything the effective configuration
 names, and the config seeder never overwrites a live file.  Nothing here
 installs a package, elevates, or touches a real home.
 """
@@ -17,7 +17,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-MANIFEST = SCRIPTS / "dependencies.tsv"
 HELPER = SCRIPTS / "install_helper.py"
 SHELL = SCRIPTS / "install.sh"
 POWERSHELL = SCRIPTS / "install.ps1"
@@ -36,7 +35,7 @@ def _commands(text: str) -> list[str]:
 
 
 def test_installer_files_exist() -> None:
-    for path in (SHELL, POWERSHELL, BATCH, MANIFEST, HELPER):
+    for path in (SHELL, POWERSHELL, BATCH, HELPER):
         assert path.is_file(), path
         assert path.stat().st_size > 0, path
 
@@ -69,15 +68,24 @@ def test_powershell_syntax() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_no_global_upgrade_or_cleanup() -> None:
-    """The scripts may only touch the packages they name.
-
-    Lines that mention a package manager are checked; comments and help text
-    are not commands.  `brew upgrade <formula>` and `dnf ... upgrade <pkg>` are
-    allowed because they name their target; the forbidden forms do not.
-    """
+def test_no_elevation_or_system_package_manager() -> None:
+    """The installers remain user-level: no root, no system package manager."""
     forbidden = (
-        "winget upgrade --all",
+        "sudo",
+        "winget",
+        "runas",
+        "add-windowscapability",
+        "remove-windowscapability",
+    )
+    for path in (SHELL, POWERSHELL):
+        text = path.read_text(encoding="utf-8").lower()
+        for phrase in forbidden:
+            assert phrase not in text, f"{path.name}: {phrase}"
+
+
+def test_no_global_upgrade_or_cleanup() -> None:
+    """The scripts may only touch the packages they name."""
+    forbidden = (
         "brew upgrade --all",
         "brew cleanup",
         "brew autoremove",
@@ -106,55 +114,9 @@ def test_python_sync_keeps_user_packages() -> None:
     shell = SHELL.read_text(encoding="utf-8")
     powershell = POWERSHELL.read_text(encoding="utf-8")
     assert "uv sync --upgrade --inexact" in shell
-    assert "uv sync --locked --inexact" in shell
-    assert "'--inexact'" in powershell
-    assert "uv sync --upgrade" in powershell  # in the comment/plan wording is fine
+    assert "uv sync --upgrade --inexact" in powershell
     assert "uv venv --clear" not in shell
     assert "uv venv --clear" not in powershell
-
-
-def _manifest_rows() -> list[list[str]]:
-    rows = []
-    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        rows.append(line.split("\t"))
-    return rows
-
-
-def test_manifest_is_well_formed() -> None:
-    rows = _manifest_rows()
-    assert rows, "the manifest has no rows"
-    allowed_installers = {
-        "uv",
-        "uv-python",
-        "provided",
-        "mqtt",
-        "download",
-        "node",
-        "system",
-        "uv-tool",
-    }
-    seen: set[str] = set()
-    for row in rows:
-        assert len(row) == 4, row
-        executable, _tool, installer, _verify = row
-        assert executable not in seen, f"duplicate executable: {executable}"
-        seen.add(executable)
-        assert installer in allowed_installers, row
-    for required in (
-        "uv",
-        "uvx",
-        "python",
-        "python3",
-        "mosquitto",
-        "cloudflared",
-        "npx",
-        "ssh",
-        "yt-dlp",
-        "browser-harness",
-    ):
-        assert required in seen, required
 
 
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
@@ -166,15 +128,24 @@ def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_manifest_covers_the_effective_configuration() -> None:
+def test_requirements_cover_the_shipped_configuration() -> None:
     result = _requirements(ROOT)
     assert result.returncode == 0, result.stderr
     named = {
         line.split("\t", 1)[0] for line in result.stdout.splitlines() if line.strip()
     }
-    missing = named - {row[0] for row in _manifest_rows()}
-    assert not missing, f"the manifest has no row for: {sorted(missing)}"
-    assert {"mosquitto", "cloudflared", "ssh", "npx", "uvx", "yt-dlp"} <= named
+    assert {
+        "uv",
+        "python",
+        "python3",
+        "mosquitto",
+        "cloudflared",
+        "ssh",
+        "npx",
+        "uvx",
+        "yt-dlp",
+        "browser-harness",
+    } <= named
 
 
 def test_requirements_report_unknown_commands_with_their_source(

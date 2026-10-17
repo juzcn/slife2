@@ -160,14 +160,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 `scripts\install.cmd` also starts the installer. A source directory uses its own
-`slife2.yaml`, `.venv`, and `.install-state.tsv`.
+`slife2.yaml` and `.venv`.
 
 | Option | Meaning |
 |---|---|
 | `--dry-run` | Report the planned actions. |
-| `--no-upgrade` | Install missing dependencies only. |
-| `--yes` | Skip the confirmation prompt. |
-| `--help` | Show usage, options, and exit codes. |
+| `--help` | Show usage and options. |
 
 To uninstall:
 

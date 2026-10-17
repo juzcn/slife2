@@ -148,15 +148,13 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-`scripts\install.cmd` 也可以启动安装。源码目录使用自己的 `slife2.yaml`、
-`.venv` 和 `.install-state.tsv`。
+`scripts\install.cmd` 也可以启动安装。源码目录使用自己的 `slife2.yaml` 和
+`.venv`。
 
 | 选项 | 含义 |
 |---|---|
 | `--dry-run` | 报告计划执行的操作。 |
-| `--no-upgrade` | 仅安装缺失的依赖。 |
-| `--yes` | 跳过确认提示。 |
-| `--help` | 显示用法、选项和退出码。 |
+| `--help` | 显示用法和选项。 |
 
 卸载：
 
