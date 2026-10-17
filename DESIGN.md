@@ -905,10 +905,11 @@ rows. What it holds is a credential and a live conversation per agent, which is
 the plugin side of the plugin/library table, and nothing else. Its four tools
 are its own model-facing tools.
 
-A login is per agent and stored in `agents/<agent>/wechat.yaml`. The file
-carries the raw agent name because the directory carries the sanitized one; a
-session keyed by the directory name would be a second key for one login, adopt
-the same token twice, and deliver every message twice.
+A login is per agent and stored in `agents/<agent>/wechat.yaml`. A subagent has
+none: WeChat is an external identity, and a subagent is internal to its maker.
+The file carries the raw agent name because the directory carries the sanitized
+one; a session keyed by the directory name would be a second key for one login,
+adopt the same token twice, and deliver every message twice.
 
 One WeChat account has one live login. Scanning the account for a second agent
 retires the first login; the bridge answers it with `session timeout`, a
@@ -933,8 +934,9 @@ wire being somebody else’s; a self-built binding would be a second protocol
 wearing the name.
 
 The agent name is the MQTT client id and the last segment of the request topic.
-Two processes answering to one name trade the session back and forth, and every
-task sent to it runs twice. So:
+A subagent is not on this network: it has no external identity, and its only
+network is the local one under its maker. Two processes answering to one name
+trade the session back and forth, and every task sent to it runs twice. So:
 
 - one mesh per agent;
 - a second live instance under one name is refused before joining;
@@ -1107,8 +1109,9 @@ A subagent:
 - has its own conversation and its own `subagent.yaml`;
 - owns its cabinet and media directory if it is not a fork; a fork shares the
   maker’s, because it is a temporary copy of the maker’s conversation;
-- shares the maker’s schedule ledger and WeChat login, because a scheduled
-  trigger is delivered to a window and a login is per account;
+- has no independent external identity: no WeChat login and no peer-agent
+  membership; it is reached only on the local subagent network;
+- shares the maker’s schedule ledger, because scheduling stays with the agent;
 - has no process, window, or name claim;
 - is addressed by `(maker, name)`.
 

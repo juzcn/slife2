@@ -187,11 +187,11 @@ def database_path(agent: str, subagent: str = "") -> Path:
     because a subagent is an agent that belongs to whoever made it rather than a
     means to an end inside one of that agent's turns. Its conversation and its
     `subagent.yaml` record are its own, and a non-fork subagent's cabinet and
-    media live beside them; a fork shares the maker's cabinet and media. The
-    schedule ledger and WeChat login remain the maker's. Who lays the directory
-    out is `slife2.libs.host.paths.agent_dir`, and this function is one line
-    because of it: the layout belongs in one place, and the file name in
-    another.
+    media live beside them; a fork shares the maker's cabinet and media. A
+    subagent has no external identity: the schedule ledger and WeChat login stay
+    with the maker. Who lays the directory out is
+    `slife2.libs.host.paths.agent_dir`, and this function is one line because of
+    it: the layout belongs in one place, and the file name in another.
     """
     return agent_dir(agent, subagent) / TURNS_DB
 

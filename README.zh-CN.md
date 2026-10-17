@@ -640,7 +640,8 @@ Markdown 文件（`notes/`、`diary/`、`reports/`），无需 slife2 即可打�
 职责：没有任何东西会自动派发回答。模型使用 peer 和 marker 中的 `context_token`
 调用 `wechat_send_message`。轮次运行期间，对方会看到“正在输入”提示。
 
-每个 agent 单独登录，有自己的文件和轮询循环。plugin 是一个共享进程。
+每个 agent 单独登录，有自己的文件和轮询循环。subagent 没有微信登录：微信是
+对外身份，而 subagent 是其创建者的内部成员。plugin 是一个共享进程。
 
 ### Agent 任务
 
@@ -719,7 +720,8 @@ agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己�
 
 每个 agent 有一张 mesh，因为 agent 名称就是 MQTT client id 和请求主题的最后
 一段。同一台机器上的两个 agent 是两个 peer。一个 agent 从两个地方被访问时，
-会在加入之前被名称冲突检查拒绝。
+会在加入之前被名称冲突检查拒绝。subagent 不在这张网上：它没有对外身份，只能
+通过其创建者的本地 subagent 网络访问。
 
 在线状态作为 harness 行绘制，而不是轮次：`[⚡ jill online]`。花名册可通过
 `peer_agent_list` 获取。窗口持有 `join` 调用期间，agent 就在 mesh 上；
@@ -749,9 +751,10 @@ peer_agent:
 ### Subagent
 
 subagent 是属于另一个 agent 的 agent。它拥有创建者的工具集、自己的角色系统
-提示词和自己的对话，但没有进程、没有窗口，也不占用 agent 名称。它在有消息发送
-给它时运行。它的两个成员管理工具 `subagent_set` 和 `subagent_remove` 会拒绝
-subagent 调用者。
+提示词和自己的对话，但没有进程、没有窗口，也不占用 agent 名称。它也没有独立的
+对外身份：没有微信登录，也不在 peer agent 网络上。它只通过本地 subagent 网络
+被访问，在有消息发送给它时运行。它的两个成员管理工具 `subagent_set` 和
+`subagent_remove` 会拒绝 subagent 调用者。
 
 subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建后，它通过
 本地网络使用与 peer agent 相同的五个操作访问，名称为 `subagent_*`：
@@ -768,8 +771,8 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db` 和
 `subagent.yaml`。记录保存其模型、角色、fork 状态和创建时间。非 fork 的
 subagent 还拥有自己的文件柜和媒体目录，就在自己的目录下；fork 共享创建者的
-文件柜和媒体，因为它是创建者对话的临时副本。定时账本和微信登录仍属于创建者：
-定时触发要投递到窗口，而微信登录按账号保存。树只到一层：subagent 不能创建或
+文件柜和媒体，因为它是创建者对话的临时副本。微信和 peer agent 网络属于 agent，
+不属于 subagent；定时任务也留在 agent 上。树只到一层：subagent 不能创建或
 移除 subagent，因为本地网络只为其创建者自己的 subagent 保留位置，再下一层
 没有位置。
 

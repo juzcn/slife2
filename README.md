@@ -709,8 +709,9 @@ auto-dispatches an answer. The model calls `wechat_send_message` with the peer
 and the `context_token` from the marker. While the turn runs, the other person
 sees a typing indicator.
 
-Each agent logs in separately and has its own file and poll loop. The plugin is
-one shared process.
+Each agent logs in separately and has its own file and poll loop. A subagent
+does not: WeChat is an external identity, and a subagent is internal to its
+maker. The plugin is one shared process.
 
 ### Agent tasks
 
@@ -799,7 +800,8 @@ was sent, using the `task_id` from the marker. The direction is carried by
 There is one mesh per agent, because the agent name is the MQTT client id and the
 last segment of the request topic. Two agents on one machine are two peers. An
 agent reached from two places is refused by the name-collision check before it
-joins.
+joins. A subagent is not on this network: it has no external identity and is
+reached only through its maker's local subagent network.
 
 Presence is drawn as a harness line, not a turn: `[⚡ jill online]`. The roster is
 available through `peer_agent_list`. An agent is on the mesh while a window holds
@@ -834,7 +836,9 @@ request.
 
 A subagent is an agent that belongs to another agent. It has the maker's tool
 set, its own role-specific system prompt, and its own conversation, but no
-process, no window, and no claim on an agent name. It runs when something sends
+process, no window, and no claim on an agent name. It also has no independent
+external identity: no WeChat login and no presence on the peer-agent network. It
+is reached only on the local subagent network, and it runs when something sends
 it a message. Its two membership tools, `subagent_set` and `subagent_remove`,
 refuse a subagent caller.
 
@@ -855,9 +859,9 @@ A subagent lives in `agents/<maker>/subagents/<name>/`, with its own `turns.db`
 and `subagent.yaml`. The record holds its model, role, fork status, and creation
 time. A non-fork subagent also owns its cabinet and media directory, under its
 own directory. A fork shares the maker's cabinet and media, because it is a
-temporary copy of the maker's conversation. The schedule ledger and WeChat login
-remain the maker's: a scheduled trigger is delivered to a window, and a WeChat
-login is per account. The tree stops at one level: a subagent cannot create or
+temporary copy of the maker's conversation. WeChat and the peer-agent network
+belong to the agent, not the subagent; scheduling also stays with the agent. The
+tree stops at one level: a subagent cannot create or
 remove a subagent, because the local network holds a place for the maker's own
 subagents and nothing holds a place for a level below them.
 

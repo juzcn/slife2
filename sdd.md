@@ -536,9 +536,11 @@ A subagent:
   `subagent_remove` refuse a subagent caller (see §4.5.3);
 - has its own role-specific system prompt (`subagent.j2`), its own conversation,
   and its own `subagent.yaml`; a non-fork subagent also owns its cabinet and
-  media directory, while a fork shares the maker's; the schedule ledger and
-  WeChat login remain the maker's;
+  media directory, while a fork shares the maker's;
 - has no process, no window, and no claim on an agent name;
+- has no independent external identity: no WeChat login and no peer-agent
+  membership; it is reached only on the local subagent network;
+- shares the maker's schedule ledger, because scheduling stays with the agent;
 - runs when something sends it a message;
 - is addressed by the second half of a client id: `(maker, name)`.
 
@@ -551,9 +553,9 @@ operations as a peer agent, under `subagent_*` names.
 Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. That
 directory contains the subagent's conversation (`turns.db`) and its record
 (`subagent.yaml`). A non-fork subagent also has its own `cabinet/` and `media/`
-there; a fork uses the maker's cabinet and media. The schedule ledger and WeChat
-login remain the maker's, because a scheduled trigger is delivered to a window
-and a WeChat login is per account.
+there; a fork uses the maker's cabinet and media. A subagent has no external
+identity of its own: WeChat and the peer-agent network belong to the agent, and
+scheduling stays with the agent too.
 
 The container level is deliberate. `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker. A subagent named `cabinet` would
@@ -1300,8 +1302,9 @@ came from (§5.4).
 ### 9.1 WeChat
 
 `plugins/wechat/` holds one login per agent and turns what arrives into a turn.
-WeChat exposes no direct API to a program; the plugin speaks iLink's hosted
-bridge. `wechat/ilink.py` contains the protocol:
+A subagent has no login of its own: WeChat is an external identity, and a
+subagent is internal to its maker. WeChat exposes no direct API to a program;
+the plugin speaks iLink's hosted bridge. `wechat/ilink.py` contains the protocol:
 
 - the QR handshake;
 - the long poll;
@@ -1333,7 +1336,9 @@ naming the sender. Answering is the model's job; nothing auto-dispatches a reply
 ### 9.2 Peer agents (A2A over MQTT)
 
 `plugins/a2a/` carries agent-to-agent traffic over MQTT, using the published
-A2A-over-MQTT profile.
+A2A-over-MQTT profile. Its remote instance is the peer network of agents; a
+subagent is not a member of it. A subagent exists only on the local instance,
+under its maker.
 
 The wire is the `a2a-over-mqtt` SDK's:
 
