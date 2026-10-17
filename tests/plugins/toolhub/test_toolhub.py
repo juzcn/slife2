@@ -167,6 +167,26 @@ async def call(hub: Client, name: str, arguments: dict[str, Any] | None = None):
     return result.data
 
 
+async def wait_until_ready(hub: Client, name: str, *, timeout: float = 15.0) -> None:
+    """Wait until a configured source has answered with its tool list.
+
+    **`list_tools` deliberately does not wait for a server that is still
+    starting** — that bound is what keeps an `npx` install out of a turn — so a
+    test that wants the real process path has to wait for the source itself.
+    Without this a load can run while the child is still coming up, fail with
+    "not answering", and the next `list_tools` then omits a tool the test
+    expected to be loaded.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        answer = await hub.call_tool("servers", {})
+        rows = answer.data["servers"]
+        if any(row["name"] == name and row["state"] == "ready" for row in rows):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{name} was not ready within {timeout}s")
+
+
 #: A transport that is never looked at, and the marker it hands back, for the
 #: tests that fake the client — `Client` is what turns a transport into a
 #: connection, and those tests replace `Client`.
@@ -2643,8 +2663,17 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
             "skill_set_enabled",
         }
 
+        # The child is a real process. `list_tools` starts its connect and does
+        # not wait for it, so the load below has to be given a source that has
+        # answered — otherwise it fails with "not answering" and the next list
+        # omits the tool for a reason the test never checked.
+        await wait_until_ready(client, "spawned")
+
         loaded = await call(client, "func_tool_load", {"names": ["spawned__greet"]})
         assert loaded["ok"] is True
+        payload = json.loads(loaded["text"])
+        assert payload["loaded"] == ["spawned__greet"], payload
+        assert payload["failed"] == [], payload
 
         # One iteration later, without a new turn: the list is rebuilt before every
         # model call, so loading takes effect inside the same turn.
