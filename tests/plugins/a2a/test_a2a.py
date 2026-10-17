@@ -99,6 +99,7 @@ from slife2.plugins.a2a.server import (
     Session,
     _drain,
     _wire,
+    a2a_marker,
     a2a_message_type,
     announce_orphans,
     build_server,
@@ -167,19 +168,43 @@ def test_the_marker_carries_from_and_not_agent_name() -> None:
 def test_the_marker_reads_its_own_type_back() -> None:
     """The writer and the reader are one pair, so the vocabulary stays one list."""
     for kind in A2A_TYPES:
-        assert a2a_message_type(marker(REMOTE, PEER, TASK, kind)) == kind
+        assert a2a_message_type(marker(REMOTE, PEER, TASK, kind), REMOTE) == kind
 
 
 def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
     """A peer may put anything in the payload; the set is what this build knows."""
     assert (
-        a2a_message_type('[PeerAgent:{"from": "jill", "type": "invented"}] hi') is None
+        a2a_message_type('[PeerAgent:{"from": "jill", "type": "invented"}] hi', REMOTE)
+        is None
     )
-    assert a2a_message_type("no marker here") is None
-    assert a2a_message_type("[PeerAgent:{not json] hi") is None
-    assert a2a_message_type('[PeerAgent:["a", "list"]] hi') is None
+    assert a2a_message_type("no marker here", REMOTE) is None
+    assert a2a_message_type("[PeerAgent:{not json] hi", REMOTE) is None
+    assert a2a_message_type('[PeerAgent:["a", "list"]] hi', REMOTE) is None
     # A bracket that never closes is a torn row: nothing is read out of it.
-    assert a2a_message_type('[PeerAgent:{"from": "jill"') is None
+    assert a2a_message_type('[PeerAgent:{"from": "jill"', REMOTE) is None
+
+
+def test_the_marker_reads_its_whole_payload_back() -> None:
+    """The task id rides the same envelope as the type.
+
+    `_drain` needs the id to complete the task a member's turn answered without
+    a tool call, and the type alone does not carry it.  One reader for the
+    payload is what keeps the type reader and the id reader from spelling the
+    same envelope twice.
+    """
+    text = marker(LOCAL, PEER, TASK, "task_request")
+    assert a2a_marker(text, LOCAL) == {
+        "from": PEER,
+        "type": "task_request",
+        "task_id": TASK,
+    }
+    # **The two meshes are independent, envelopes included.**  The local
+    # envelope read with the remote word is not a marker, and a reader that
+    # guessed its network would make the task look like a message nobody owes
+    # an answer.
+    assert a2a_marker(text, REMOTE) is None, "the remote reader read a local envelope"
+    assert a2a_marker("no marker here", LOCAL) is None
+    assert a2a_marker('[Subagent:["a", "list"]] hi', LOCAL) is None
 
 
 def test_the_channel_names_the_peer() -> None:
@@ -1115,7 +1140,7 @@ async def test_an_inbound_task_arrives_marked_and_on_the_peers_channel(
     assert handed["text"] == f"{marker(REMOTE, PEER, TASK)}write me a poem"
     # The type is readable back off it, which is what a receiver needs to know
     # whether it owes a completion.
-    assert a2a_message_type(handed["text"]) == "task_request"
+    assert a2a_message_type(handed["text"], REMOTE) == "task_request"
 
 
 @pytest.mark.asyncio
@@ -1126,7 +1151,7 @@ async def test_a_bare_message_is_marked_task_less(window: Window) -> None:
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "message"
+    assert a2a_message_type(text, REMOTE) == "message"
     assert '"task_id"' not in text
 
 
@@ -1140,7 +1165,7 @@ async def test_a_peer_withdrawal_is_a_message_and_not_a_control_signal(
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "cancel_task"
+    assert a2a_message_type(text, REMOTE) == "cancel_task"
     assert "withdrew this task" in text
     assert window.handed[-1]["channel"] == f"peer_agent:{PEER}"
 
@@ -1152,7 +1177,7 @@ async def test_a_broadcast_arrives_as_an_event(window: Window) -> None:
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "broadcast"
+    assert a2a_message_type(text, REMOTE) == "broadcast"
     assert text.endswith("the build is green")
 
 
@@ -1284,7 +1309,7 @@ async def test_an_outbound_result_is_pushed_back_wearing_its_task_id(
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "task_response"
+    assert a2a_message_type(text, REMOTE) == "task_response"
     assert f'"task_id": "{TASK}"' in text
     assert "completed async task" in text
     assert "the poem" in text
@@ -1343,7 +1368,7 @@ async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "task_response"
+    assert a2a_message_type(text, REMOTE) == "task_response"
     assert f'"task_id": "{unacked}"' in text, "the id the model was given is here"
     assert "never reached" in text
     assert "never acknowledged" in text
@@ -1573,7 +1598,7 @@ async def test_a_teardown_that_ends_a_send_tells_the_conversation(
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
-    assert a2a_message_type(text) == "task_response"
+    assert a2a_message_type(text, REMOTE) == "task_response"
     assert f'"task_id": "{TASK}"' in text, "the id the model was given is here"
     assert "never reached" in text, "it must not read as a peer's answer"
     assert "mesh went down while this was still being sent" in text
@@ -1797,18 +1822,27 @@ async def writer_until(
     done: Callable[[], bool],
     *,
     window: Window | None = None,
+    agent: AgentServer | None = None,
 ) -> None:
     """Run the writer until *done*, and cancel it the way the lifespan does.
 
     `drain_until_idle` is the wrong tool for a retry: a notice that came back
     "nothing was written" leaves the queue while it waits, so an empty queue is
-    not the end of the story — which is the whole point of the retry.
+    not the end of the story — which is the whole point of the retry.  It is
+    also the wrong tool for a turn whose side effect is what the test waits
+    for: the queue is empty as soon as the item is dequeued, and the turn runs
+    after that.  Waiting on the effect is what makes the assertion about the
+    turn rather than about how loaded the machine was.
+
+    `agent` is the peer a member's turn needs; `window` is the peer an agent's
+    delivery needs.  A test that needs neither passes neither.
     """
     task = asyncio.create_task(
         _drain(
             session,
             default_config(),
             window.client if window else None,
+            agent.client if agent else None,
         )
     )
     deadline = (  # timeouts: the value this test is built around, not a budget
@@ -2891,6 +2925,141 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
     assert (
         tmp_path / "agents" / AGENT / "subagents" / "tester" / "inbound.yaml"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_members_turn_answer_completes_the_task_it_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_server: AgentServer
+) -> None:
+    """**The answer a turn wrote is the task's answer, even without a tool call.**
+
+    Measured live: a task that says "answer in exactly three lines" makes the
+    member end its turn with prose and no `subagent_send_message`, and the
+    sender's task stayed `pending` for ever while its window waited for words
+    the member had already written.  `_drain` now completes the bridge with the
+    turn's own text, so the sender's conversation — and the main agent's TUI —
+    receives it on the one road a reply has.
+    """
+    completed: list[tuple[str, str, bool]] = []
+
+    def complete_task(
+        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
+    ) -> str:
+        completed.append((task_id, result, cancelled))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
+    session = local_member(tmp_path)
+    session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
+    await writer_until(session, lambda: bool(completed), agent=agent_server)
+
+    assert completed == [(TASK, f"{AGENT}/tester did it", False)], (
+        "the turn's answer did not complete the task it was given"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_member_that_sent_its_own_reply_is_not_answered_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A tool call is the answer; the final text is not a second one.**
+
+    `Session.replied_to` is read before and after the turn, and a turn that
+    sent something is left alone.  Without that, every ordinary answer would
+    arrive twice — once as the tool's `task_response`, once as the turn's text.
+    """
+    completed: list[tuple[str, str, bool]] = []
+
+    def complete_task(
+        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
+    ) -> str:
+        completed.append((task_id, result, cancelled))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
+    session = local_member(tmp_path)
+    turned = False
+
+    async def run_and_reply(*args: Any, **kwargs: Any) -> str:
+        nonlocal turned
+        session.note_reply(AGENT)
+        turned = True
+        return "already answered"
+
+    monkeypatch.setattr(a2a_server, "run_turn", run_and_reply)
+    session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
+    await writer_until(session, lambda: turned)
+
+    assert completed == [], "a turn that sent its own reply was answered again"
+
+
+@pytest.mark.asyncio
+async def test_a_task_less_message_is_answered_with_the_turns_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_server: AgentServer
+) -> None:
+    """A message has no bridge to complete, so its answer is sent as a message.
+
+    The same rule, one road over: the member's turn text leaves the member's
+    own mesh for the peer it came from, and the peer's drain hands it to the
+    window exactly as it would a `subagent_send_message` call.
+    """
+    sent: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def send_message(
+        self: A2AMesh, agent: str, message: str, **kwargs: Any
+    ) -> str:
+        sent.append((agent, message, kwargs))
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+    session = local_member(tmp_path)
+    session.mesh.on_inbound_task(AGENT, "hello", "", kind="message")
+    await writer_until(session, lambda: bool(sent), agent=agent_server)
+
+    assert sent == [(AGENT, f"{AGENT}/tester did it", {"message_type": "message"})], (
+        "the turn's text did not go back to the sender as a message"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_reply_is_counted_for_the_peer_it_went_to(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The counter `_drain` reads is written where the reply goes out.
+
+    Only a member's own send counts (`mine` non-empty): the maker speaking is
+    not a turn `_drain` answers for.  And it is counted per target, because a
+    message to a sibling is not an answer to the sender whose task is open.
+    """
+    counted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        Session,
+        "note_reply",
+        lambda self, peer: counted.append((self.subagent, peer)),
+    )
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": AGENT, "message": "done", "message_type": "message"},
+                meta=client_meta(AGENT, "tester"),
+            )
+
+    assert counted == [("tester", AGENT)], (
+        "the member's explicit reply was not counted for its target"
+    )
 
 
 @pytest.mark.asyncio

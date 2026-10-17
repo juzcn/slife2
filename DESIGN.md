@@ -1817,16 +1817,27 @@ Three things, and they are one change:
   `send_message(agent=maker, subagent=<the receiver's half>, prompt=…,
   channel="subagent:<sender>")`.  A message *to* a subagent is a turn in the
   subagent's conversation; a message *from* one is a turn in its maker's, which
-  is the shape `agent-task` already has.  **And the subagent's reply is a tool
-  call of its own** (`subagent_send_message`, or `subagent_broadcast` for all its
-  maker's subagents), so nothing has to relay a turn's return value: every reply
-  is simply the next inbound message, and the rule above handles it.  **And the
-  tool's description says so** — the one fact a conversation cannot state about
-  itself is that ending a turn delivers nothing, so the send tool's description
-  says a reply is that call.  A prompt that repeated the arguments would be a
-  second schema kept in step by hand.
-  A broadcast is the same rule once per member, since every member's responder
-  receives it.
+  is the shape `agent-task` already has.  **The subagent's reply is normally a
+  tool call of its own** (`subagent_send_message`, or `subagent_broadcast` for
+  all its maker's subagents), and every reply is simply the next inbound
+  message, so the rule above handles it.  **And the tool's description says
+  so** — the one fact a conversation cannot state about itself is that ending a
+  turn delivers nothing, so the send tool's description says a reply is that
+  call.  A prompt that repeated the arguments would be a second schema kept in
+  step by hand.  A broadcast is the same rule once per member, since every
+  member's responder receives it.
+
+  **A turn that ends with prose and no call is still an answer.**  Measured on
+  the live network, a task that says "answer in exactly three lines" reliably
+  makes the member end its turn with text and no `subagent_send_message` — the
+  tool's description notwithstanding — and the sender's task then stayed
+  `pending` for ever while its window waited for words the member had already
+  written.  So `_drain` reads the session's reply count across the turn: a turn
+  that sent nothing has its final text completed through the same bridge a
+  `task_response` would have completed (or sent as a `message` when the inbound
+  was task-less), and a turn that did send something is left alone.  The answer
+  still takes the one road a reply has — the responder's terminal reply, the
+  maker's session, the maker's TUI — so the maker hears it once.
 - **So the send path has to ensure the receiver's mesh exists.**  A message
   published to a member whose responder is not subscribed goes to nobody and
   reports nothing.  On the remote network that cannot happen — the peer's own

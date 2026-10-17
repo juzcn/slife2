@@ -763,8 +763,11 @@ a turn in the subagent's own conversation, because a window has no part in a loc
 network at all (`DESIGN §1.10`, "the road"). What the subagent answers is drawn on
 the maker's terminal as `Subagent(<name>)> ` — a channel, like `AsyncTask(<name>)> `,
 and not a marker: the answer reaches the maker as a message in its own
-conversation. On the wire, a message between agents carries `[PeerAgent:{…}]` and
-one on the subagent network carries its own envelope (`DESIGN §1.10`).
+conversation. **A turn that ends without a reply call is still an answer**: its
+final text completes the task (or is sent as the message), so the maker is not
+left waiting for words the member already wrote. On the wire, a message between
+agents carries `[PeerAgent:{…}]` and one on the subagent network carries its own
+envelope (`DESIGN §1.10`).
 
 **Two verbs are not A2A's.** A2A coordinates peers that already exist: it has
 `join`, which is one of them taking its place, and nothing that makes one exist.
