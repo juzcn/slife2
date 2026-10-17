@@ -430,12 +430,20 @@ def translate(event: Any) -> list[ProviderEvent]:
             # prefix is reported in two fields of its own, and a gateway with
             # prompt caching on would otherwise undercount the prompt by the
             # whole of it — silently, because the number still looks plausible.
+            # The two fields keep their own counts as well, because the whole
+            # point of reading this gateway's usage is to see how much of that
+            # prompt the cache served — and `Usage`'s rule is that the cache
+            # fields are parts of `prompt_tokens`, not additions to it.
+            cache_creation = read_int(usage, "cache_creation_input_tokens")
+            cache_read = read_int(usage, "cache_read_input_tokens")
             events.append(
                 Chunk(
                     usage=Usage(
                         prompt_tokens=read_int(usage, "input_tokens")
-                        + read_int(usage, "cache_creation_input_tokens")
-                        + read_int(usage, "cache_read_input_tokens")
+                        + cache_creation
+                        + cache_read,
+                        cache_read=cache_read,
+                        cache_creation=cache_creation,
                     )
                 )
             )

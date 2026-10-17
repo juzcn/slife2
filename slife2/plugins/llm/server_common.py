@@ -660,6 +660,7 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         ctx: Context,
         agent: str = "",
         subagent: str = "",
+        kind: str = "",
     ) -> dict[str, Any]:
         """Stream one chat completion.
 
@@ -686,14 +687,34 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 for one agent's usage, can say *whose* call was served rather than
                 leaving every hop anonymous.
             subagent: Which of that agent's conversations, empty for its own.
+            kind: What sort of call this is — `turn` for the loop's own model
+                calls (a compaction call included: it is the turn's own work),
+                `discriminator` for the recall decision, the one call that
+                reaches this server outside the loop's backend.  Nothing is
+                keyed on it; it is the word the usage line is read by, because
+                the two are separate prompt lineages and a cache-hit ratio that
+                averaged them could not say which one was missing.
         """
-        logger.debug(
-            "stream_chat %s/%s for %s",
+        result = await stream_chat_impl(streamer, provider, messages, tools, model, ctx)
+        # **One line per model call, with the cache breakdown on it.**  The
+        # usage is the only place a provider's prefix cache shows itself — the
+        # conversation pays for the miss either way — so the numbers a hit rate
+        # is computed from are logged where they are final, next to the two
+        # facts that make them comparable: whose call it was, and what kind.
+        usage = result.get("usage") or {}
+        logger.info(
+            "stream_chat %s/%s for %s kind=%s prompt=%d cache_read=%d "
+            "cache_creation=%d completion=%d",
             provider,
             model,
             f"{agent}/{subagent}" if subagent else agent or "(unstated)",
+            kind or "(unstated)",
+            int(usage.get("prompt_tokens") or 0),
+            int(usage.get("cache_read") or 0),
+            int(usage.get("cache_creation") or 0),
+            int(usage.get("completion_tokens") or 0),
         )
-        return await stream_chat_impl(streamer, provider, messages, tools, model, ctx)
+        return result
 
     return mcp
 

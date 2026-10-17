@@ -214,10 +214,23 @@ def test_stream_chat_result_round_trips() -> None:
         text="answer",
         tool_calls=(ToolCall(id="c1", name="calc", arguments={"e": "1+1"}),),
         thinking="eight times eight is sixty-four",
-        usage=Usage(5, 6),
+        usage=Usage(5, 6, cache_read=4, cache_creation=1),
         stop_reason="tool_calls",
     )
     assert StreamChatResult.from_wire(result.to_wire()) == result
+
+
+def test_usage_keeps_the_cache_breakdown_out_of_the_total() -> None:
+    """The cache fields are *parts of* the prompt, not tokens on top of it.
+
+    Every provider counts a cached prefix inside its own prompt count, so a
+    `total_tokens` that added the breakdown would bill the prompt twice — and
+    the loop accumulates these with `+`, which makes the double count add up
+    across a turn's calls.
+    """
+    usage = Usage(prompt_tokens=10, completion_tokens=2, cache_read=7, cache_creation=3)
+    assert usage.total_tokens == 12
+    assert Usage.from_wire(usage.to_wire()) == usage
 
 
 def test_reasoning_rides_our_wire_and_comes_back() -> None:

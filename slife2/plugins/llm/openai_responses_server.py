@@ -570,11 +570,17 @@ def _usage_event(response: Any) -> list[ProviderEvent]:
     raw = getattr(response, "usage", None)
     if raw is None:
         return []
+    # The cached prefix is a *detail* on this wire, and the two fields are the
+    # same breakdown the chat-completions adapter reads — parts of the input,
+    # not additions to it (`slife2.libs.turn.messages.Usage` states the rule).
+    details = getattr(raw, "input_tokens_details", None)
     return [
         Chunk(
             usage=Usage(
                 prompt_tokens=read_int(raw, "input_tokens"),
                 completion_tokens=read_int(raw, "output_tokens"),
+                cache_read=read_int(details, "cached_tokens"),
+                cache_creation=read_int(details, "cache_write_tokens"),
             )
         )
     ]

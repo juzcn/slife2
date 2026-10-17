@@ -172,6 +172,10 @@ async def _ask_model(
             "model": settings.model,
             "agent": agent,
             "subagent": subagent,
+            # The model server's usage line says whose call it served and what
+            # kind: this one is the recall decision, and reading it apart from
+            # the turn's own calls is the whole reason the word travels.
+            "kind": "discriminator",
             "tools": [],
             "messages": asked,
         },

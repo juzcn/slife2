@@ -225,6 +225,52 @@ def test_openai_usage_only_chunk() -> None:
     assert (chunk.usage.prompt_tokens, chunk.usage.completion_tokens) == (3, 4)
 
 
+def test_openai_cached_prompt_tokens_are_read_from_details() -> None:
+    """The standard spelling: the cached prefix is a detail of the prompt.
+
+    `cached_tokens` is already inside `prompt_tokens` on this wire, so the
+    breakdown is a part of the prompt and not a second count — the same rule
+    `Usage` states for all three adapters.
+    """
+    event = _oa(
+        choices=[],
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+            "prompt_tokens_details": {
+                "cached_tokens": 7,
+                "cache_write_tokens": 2,
+            },
+        },
+    )
+    (chunk,) = openai_translate(event)
+    assert chunk.usage is not None
+    assert (chunk.usage.prompt_tokens, chunk.usage.completion_tokens) == (10, 4)
+    assert (chunk.usage.cache_read, chunk.usage.cache_creation) == (7, 2)
+
+
+def test_openai_reads_deepseek_top_level_cache_hit_tokens() -> None:
+    """DeepSeek reports the same fact under its own name, at the top level.
+
+    The SDK keeps a field it does not model in `model_extra`, so `getattr`
+    answers — measured against `openai` 3.24.
+    """
+    event = _oa(
+        choices=[],
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+            "prompt_cache_hit_tokens": 7,
+            "prompt_cache_miss_tokens": 3,
+        },
+    )
+    (chunk,) = openai_translate(event)
+    assert chunk.usage is not None
+    assert chunk.usage.cache_read == 7
+
+
 def test_openai_usage_on_a_chunk_that_also_carries_a_choice() -> None:
     """DeepSeek's shape, and the reason usage is read before the choices branch.
 
@@ -374,6 +420,10 @@ def test_anthropic_cached_prompt_tokens_are_counted() -> None:
 
     assert chunk.usage is not None
     assert chunk.usage.prompt_tokens == 11 + 900 + 4000
+    # And the two fields keep their own counts, because how much of that prompt
+    # the cache served is the question the numbers are read for.
+    assert chunk.usage.cache_creation == 900
+    assert chunk.usage.cache_read == 4000
 
 
 def test_anthropic_output_tokens_are_a_running_total() -> None:
@@ -698,7 +748,7 @@ def test_responses_completion_carries_usage_and_a_stop_reason() -> None:
                 "input_tokens": 3,
                 "output_tokens": 4,
                 "total_tokens": 7,
-                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 1},
                 "output_tokens_details": {"reasoning_tokens": 0},
             }
         )
@@ -708,6 +758,7 @@ def test_responses_completion_carries_usage_and_a_stop_reason() -> None:
         3,
         4,
     )
+    assert (usage_chunk.usage.cache_read, usage_chunk.usage.cache_creation) == (2, 1)
     assert finish == Finish(stop_reason="stop")
 
 
@@ -1487,15 +1538,20 @@ async def test_stream_chat_accumulates_usage_across_chunks() -> None:
     server = build_llm_server(
         name="t",
         streamer=scripted(
-            Chunk(text="x", usage=Usage(prompt_tokens=11)),
-            Chunk(text="y", usage=Usage(completion_tokens=22)),
+            Chunk(text="x", usage=Usage(prompt_tokens=11, cache_read=7)),
+            Chunk(text="y", usage=Usage(completion_tokens=22, cache_creation=3)),
             Finish("stop"),
         ),
     )
     result, _ = await call_stream_chat(
         server, messages=[{"role": "user", "content": "hi"}], tools=[], model="m"
     )
-    assert result.data["usage"] == {"prompt_tokens": 11, "completion_tokens": 22}
+    assert result.data["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 22,
+        "cache_read": 7,
+        "cache_creation": 3,
+    }
 
 
 @pytest.mark.asyncio

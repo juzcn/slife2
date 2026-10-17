@@ -336,12 +336,31 @@ def _reasoning(delta: Any) -> str:
 
 
 def _usage(raw: Any) -> Usage | None:
-    """Read token counts off a usage object, or None when there is not one."""
+    """Read token counts off a usage object, or None when there is not one.
+
+    **The cache breakdown is read from wherever the gateway puts it**, and the
+    two spellings are one fact.  OpenAI-compatible servers report the cached
+    prefix as `prompt_tokens_details.cached_tokens` (and, where the gateway
+    prices a write, `cache_write_tokens`); DeepSeek reports the same number at
+    the top level as `prompt_cache_hit_tokens`.  The SDK keeps a field it does
+    not model in `model_extra`, where `getattr` still answers — measured
+    against `openai` 3.24.
+
+    `cached_tokens` is already inside `prompt_tokens` on this wire, so the
+    breakdown is recorded as `Usage`'s own rule says: parts, not additions.
+    """
     if raw is None:
         return None
+    details = getattr(raw, "prompt_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0)
+    written = int(getattr(details, "cache_write_tokens", 0) or 0)
+    if not cached:
+        cached = int(getattr(raw, "prompt_cache_hit_tokens", 0) or 0)
     return Usage(
         prompt_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
         completion_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+        cache_read=cached,
+        cache_creation=written,
     )
 
 

@@ -129,6 +129,11 @@ class MCPBackend:
                     "model": self._model,
                     "agent": self._key[0],
                     "subagent": self._key[1],
+                    # `turn` is this backend's one caller — the loop's own work,
+                    # including a result the harness had to compact.  A call kept
+                    # apart from it is the recall discriminator's, which reaches
+                    # the model server through the context plugin.
+                    "kind": "turn",
                     "messages": [m.to_wire() for m in messages],
                     "tools": [t.to_wire() for t in tools],
                 },

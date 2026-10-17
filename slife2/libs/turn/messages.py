@@ -266,10 +266,24 @@ class Usage:
 
     Frozen and addable so the loop can accumulate a turn's usage with `+=`
     without a mutable accumulator threaded through the streaming code.
+
+    **`cache_read` and `cache_creation` are parts of `prompt_tokens`, not
+    additions to it.**  Every provider that reports them counts the cached
+    prefix inside its own prompt count — Anthropic's `input_tokens` is the
+    *uncached* remainder, so its adapter adds the two cache fields back in;
+    OpenAI-compatible wires already include them — and this class keeps that
+    same rule so a total is the whole prompt either way.  `total_tokens`
+    therefore stays prompt + completion, and the two cache fields are the
+    breakdown a cache-hit ratio is computed from.  A provider that reports
+    neither leaves both zero.
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    #: Prompt tokens served from the provider's prefix cache.
+    cache_read: int = 0
+    #: Prompt tokens the provider wrote to its prefix cache on this call.
+    cache_creation: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -279,12 +293,16 @@ class Usage:
         return Usage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
+            cache_read=self.cache_read + other.cache_read,
+            cache_creation=self.cache_creation + other.cache_creation,
         )
 
     def to_wire(self) -> dict[str, int]:
         return {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "cache_read": self.cache_read,
+            "cache_creation": self.cache_creation,
         }
 
     @classmethod
@@ -293,6 +311,8 @@ class Usage:
         return cls(
             prompt_tokens=int(raw.get("prompt_tokens") or 0),
             completion_tokens=int(raw.get("completion_tokens") or 0),
+            cache_read=int(raw.get("cache_read") or 0),
+            cache_creation=int(raw.get("cache_creation") or 0),
         )
 
 

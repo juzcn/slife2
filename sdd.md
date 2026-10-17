@@ -1078,6 +1078,17 @@ that matter:
 asked for (`build_request`); a value the protocol does not know is refused by
 name at the point it is read rather than passed through to a 400.
 
+**Usage carries the cache breakdown, and every call says what kind it was.**
+`Usage` counts the cached prefix inside `prompt_tokens` — Anthropic's
+`input_tokens` is the *uncached* remainder, so its adapter adds the two cache
+fields back in, while the OpenAI-compatible wires already include them — and
+keeps `cache_read` / `cache_creation` as parts of that prompt, never additions
+to it. `stream_chat` takes a `kind` word (`turn` for the loop's own calls,
+`discriminator` for the recall decision, which is the one call that reaches the
+model server outside the loop's backend) and logs one line per call with the
+breakdown: a cache hit rate is the number that tells a rebuild from an append,
+and one averaged across the two lineages could not say which of them missed.
+
 ---
 
 ## 6. The tool system
