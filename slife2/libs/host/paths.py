@@ -72,9 +72,8 @@ installation on one machine share one set of daemons.
 
 **The homes are listed, and that list is how a shared daemon finds them.**  No
 server holds a registry of agents: the schedule plugin finds a home's ledgers by
-walking its `agents/`, the WeChat plugin its logins, the mesh its inbound
-ledgers — and each of those walks is per home, so a daemon serving two homes
-has to be able to name them.  `register_home` is a client saying which home it
+walking its `agents/`, the WeChat plugin its logins — and each of those walks is
+per home, so a daemon serving two homes has to be able to name them.  `register_home` is a client saying which home it
 is in, `known_homes` is a daemon reading the list, and a home a process was
 itself started in counts whether or not anybody registered it.
 
@@ -408,9 +407,8 @@ def register_home(root: Path | None = None) -> Path:
     **Written by a client, read by a daemon, and never removed.**  A shared
     server serves every home on the machine, and the only way it can find the
     ones it is not currently talking to is to be told: the schedule plugin walks
-    the ledgers of each home, the WeChat plugin its logins and the mesh its
-    inbound ledgers, and a schedule that fires while nobody is watching is the
-    whole point of having one.  So an entry outlives the client that wrote it —
+    the ledgers of each home and the WeChat plugin its logins, and a schedule
+    that fires while nobody is watching is the whole point of having one.  So an entry outlives the client that wrote it —
     a home whose directory is gone is skipped by `known_homes` — and the file's
     name is the digest of the path rather than the path, which is a directory
     tree and not a name.
@@ -449,10 +447,10 @@ def _write_atomically(path: Path, text: str) -> None:
     lets a `ValueError` out by design: a record it cannot read is a file to look
     at, not a home that is not there (`DESIGN.md` §10.1).  So a daemon walking
     the registry in that window — the context store's lifespan pass
-    (`turn_dbs`), the scheduler's poll (`schedule_dbs`), the mesh's announce,
-    WeChat's resume — read an empty file and its `json.loads("")` failed its
-    *start-up* pass, which is a server the launcher reports as FAILED and an
-    exit 2 on a first start, over a file that was never damaged, only in flight.
+    (`turn_dbs`), the scheduler's poll (`schedule_dbs`), WeChat's resume — read
+    an empty file and its `json.loads("")` failed its *start-up* pass, which is
+    a server the launcher reports as FAILED and an exit 2 on a first start, over
+    a file that was never damaged, only in flight.
 
     Written beside the target and renamed onto it, which is what every other
     bookkeeping file in this codebase does (`slife2.libs.host.runtime._write_json_atomic`)
@@ -561,22 +559,18 @@ _SCHEDULE_DB = "schedule.db"
 
 
 class Ledger(NamedTuple):
-    """One agent's ledger file — a schedule's or a mesh's — **and the home it
-    belongs to**.
+    """One agent's schedule ledger — **and the home it belongs to**.
 
     The pair travels together because the walker is the only thing that knows
     the second half: it comes from `known_homes`, and a caller handed a bare path
     could only guess it back out of the directory layout.  That is not a
-    convenience.  A shared scheduler fires *every* home's ledgers and a shared
-    mesh announces the orphans in every home's (`schedule_dbs`,
-    `a2a_inbound_paths`), and everything either does with one — dispatching the
-    run, handing the trigger to a window, opening the file the task's completion
-    bridge lives in, handing the notice to a conversation — has to be done **in
-    that ledger's home**, because a home is a property of the request in front of
-    a shared process (`in_home`) rather than of the process.  Dropping it here is
-    what let a task written in one home be fired at another home's conversation,
-    and a peer's message for another home's agent be announced or re-opened in
-    the daemon's own — the failure this type exists to make unspellable.
+    convenience.  A shared scheduler fires *every* home's ledgers
+    (`schedule_dbs`), and everything it does with one — dispatching the run,
+    handing the trigger to a window — has to be done **in that ledger's home**,
+    because a home is a property of the request in front of a shared process
+    (`in_home`) rather than of the process.  Dropping it here is what let a task
+    written in one home be fired at another home's conversation — the failure
+    this type exists to make unspellable.
     """
 
     home: Path
@@ -620,76 +614,6 @@ def schedule_db(agent: str) -> Path:
     return agent_dir(agent) / _SCHEDULE_DB
 
 
-def a2a_inbound_paths(ledger: str) -> list[Ledger]:
-    """Every agent's *ledger* on this machine — one network's, not both — each
-    with the home it is in.
-
-    **The same mechanism `schedule_dbs` is, and it is a walk for the same
-    reason**: a ledger is a file per agent and there is no registry of agents to
-    read instead.  What a start does with what it finds is
-    `slife2.plugins.a2a.server.announce_ledgers` — a peer is still owed an answer, and
-    the model is the only party who can give one — which is why the file is worth
-    a walk and why it is **not** an enrollment list: an agent is on the mesh
-    while a window is showing it, not because it once spoke
-    (`slife2.plugins.a2a.server.join`), and every home's for the reason
-    `schedule_dbs` walks every home's.
-
-    **Each with its home, and that half is what the walk is for.**  A session is
-    built out of what is found here, and building one opens *this* file and gives
-    the mesh a home to hand messages over in — so a bare path left the caller to
-    rebuild the home it came from, and the only thing it could rebuild it from
-    was the ambient one.  That is the daemon's own, which is a different file:
-    another home's orphan was announced to nobody while a stray empty ledger was
-    written in the daemon's home, and the session cached under that agent's bare
-    name then answered the other home's window with it (`session_of`).
-
-    **The name is the caller's, and it is `Net.ledger`'s** — this walk reads the
-    ledgers of the network the caller is serving and never the other one's.  One
-    name for both networks (which is what this was) meant the process serving
-    the *remote* mesh walked up the file the *local* one was holding bridges in,
-    and told the model a live task could not be completed.
-    """
-    return [
-        Ledger(home=root, path=path)
-        for root in known_homes()
-        for path in sorted((root / "agents").glob(f"*/{ledger}"))
-    ]
-
-
-def a2a_inbound_path(agent: str, ledger: str, subagent: str = "") -> Path:
-    """One conversation's ledger for one network: `<agent>/<ledger>`, or
-    `<agent>/subagents/<subagent>/<ledger>`.
-
-    What it holds is the inbound tasks *this mesh* is holding a completion
-    bridge for, which is what lets a *restart* tell its orphans from ids it has
-    never seen (`slife2/plugins/a2a/inbound_store.py`).  Beside `turns.db` and
-    `wechat.yaml` for §5's reason — an agent's state is a directory — and YAML
-    for v1's, which is the format this file has always had: an entry in it is a
-    peer still owed a reply, so it is a document rather than one long line.
-
-    `ledger` is `Net.ledger`, and it is required rather than defaulted because
-    the default would be a second spelling of one network's name in a module
-    that has no business knowing which network is calling.  **It is a path
-    relative to the agent's own directory**, which is how a network says where
-    its files live: the remote one is a name (`inbound.yaml`, beside `turns.db`), and
-    the subagent one is inside `subagents/` — the directory that network *is*,
-    so the same word names the network's file and the members it holds.
-
-    **The second half is the client id's, and it is the layout rather than a
-    label**: a subagent is a peer on the local network, so it has a mesh of its
-    own with a responder of its own (`slife2.plugins.a2a.mesh`), and *that*
-    mesh's bridges are what its ledger records.  Both halves go to `agent_dir`,
-    which is where the nesting is written down once — so a member's ledger is
-    inside the member's own directory, and removing the subagent takes the file
-    that only its mesh could read.  **A member takes the ledger's file name and
-    not its path**: it is already inside `subagents/`, which is where the path
-    was pointing.
-    """
-    if subagent:
-        return agent_dir(agent, subagent) / Path(ledger).name
-    return agent_dir(agent) / ledger
-
-
 #: The directory an agent's subagents live in, under the agent's own — spelt once
 #: because two functions lay paths down with it (`agent_dir`, `turn_dbs`) and one
 #: walks them (`subagent_dirs`).  **The name is the relationship and the reason
@@ -712,7 +636,7 @@ def subagent_file(agent: str, subagent: str) -> Path:
     registry of subagents for the reason there is none of agents
     (`schedule_dbs`): an agent's subagents *are* the directories under
     `subagents/`, and what says which of them are subagents is a file in each —
-    the way `wechat.yaml` says a login and `inbound.yaml` says an answer is owed.
+    the way `wechat.yaml` says a login.
 
     **And the container is what the blast radius rests on.**  A directory without
     this file is not a subagent's, which used to be the only thing keeping

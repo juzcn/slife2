@@ -112,7 +112,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.host.paths import SUBAGENTS_DIR, home
+from slife2.libs.host.paths import home
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -237,28 +237,6 @@ class Net:
     marker: str
     #: What the window calls a line from this network's sender.
     bubble: str
-    #: **The inbound ledger this network's process owns**, as a path under an
-    #: agent's own directory (`slife2.libs.host.paths.a2a_inbound_path`).  One
-    #: file per network — a *path* rather than a bare name because a network says
-    #: where its files live, and the two sides of this system differ there: the
-    #: remote network's is beside `turns.db`, and a subagent network's is inside
-    #: `subagents/`, the directory that network *is*.
-    #:
-    #: **`inbound.yaml`, on both networks, and the name says what the file is**
-    #: rather than what carries it: the inbound tasks this process is holding a
-    #: completion bridge for.  The two are told apart by where they are, not by a
-    #: second spelling of the network in the filename.
-    #:
-    #: One file per network at all, rather than a shared one, because the file
-    #: records something process-local: the completion bridges *this* mesh is
-    #: holding.  Both networks are served by one module and both are started on a
-    #: machine that configures both, so one file between them meant each process
-    #: reading the other's live pending tasks as a dead predecessor's orphans and
-    #: rewriting the whole file from its own memory — a task announced as
-    #: unanswerable while its bridge was answering, and a task added by one
-    #: process erased by the other's next save, which is the one fact the file
-    #: exists to keep.
-    ledger: str
     #: Whether every agent of this network meets its peers in one namespace.
     #: True for the remote network — a room somebody shares — and false for a
     #: subagent network, where the mesh is the agent's (`namespace`, which is
@@ -339,7 +317,6 @@ REMOTE = Net(
     channel="peer_agent",
     marker="[PeerAgent:",
     bubble="PeerAgent",
-    ledger="inbound.yaml",
 )
 
 #: The local network: an agent and the subagents it made, which are directories
@@ -369,11 +346,6 @@ LOCAL = Net(
     channel="subagent",
     marker="[Subagent:",
     bubble="Subagent",
-    # Inside the container rather than beside the remote network's file, and that
-    # is the network's own statement about itself: `subagents/` holds everything
-    # this network has — the maker's own ledger, and one directory per subagent
-    # (see `Net.ledger`).
-    ledger=f"{SUBAGENTS_DIR}/inbound.yaml",
     # One mesh per agent: see `Net.namespace`.
     shared_namespace=False,
 )

@@ -2,8 +2,8 @@
 
 Everything here runs without a broker, and that is a statement about where the
 seams are rather than a compromise.  `A2AMesh.__init__` builds topics, a card and
-a ledger and dials nothing — `connect()` is the only thing that touches the
-network — so a real mesh object can be wired to its callbacks and driven by
+the in-flight table and dials nothing — `connect()` is the only thing that touches
+the network — so a real mesh object can be wired to its callbacks and driven by
 calling those callbacks, which is exactly what the MQTT reader would do with a
 message in hand.  The wire itself is the SDK's and is not re-tested here; what
 this file tests is the harness glue around it, which is the part this project
@@ -13,10 +13,10 @@ The window and the agent server are recorders, as they are in `test_schedule.py`
 what is under test is *what this plugin hands over* — the marker, the channel, and
 which of `slife2.libs.harness.handover`'s three answers it was handed.
 
-**What is not faked is the ledger.**  A real YAML file on the isolated data
-directory, because the properties under test are exactly those: a restart tells
-its orphans from ids it has never seen, a retry revives a task, and an answered
-peer stops being a debt.
+**The inbound side is in memory, and that is the restart rule.**  A bridge dies
+with the process that held it, so a fresh mesh starts with none; a peer that is
+still waiting re-sends, and the re-send is a fresh request with a fresh bridge.
+Nothing is written down and nothing is announced.
 """
 
 from __future__ import annotations
@@ -51,15 +51,10 @@ from slife2.libs.host.config import (
     net_settings,
 )
 from slife2.libs.host.paths import (
-    a2a_inbound_path,
-    a2a_inbound_paths,
-    home,
     in_home,
-    register_home,
     subagent_file,
 )
 from slife2.libs.host.runtime import read_record
-from slife2.libs.host.statefile import reader as read_state_yaml
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.a2a import broker
 from slife2.plugins.a2a import server as a2a_server
@@ -87,8 +82,6 @@ from slife2.plugins.a2a.server import (
     FORGET,
     JOIN,
     MAX_QUEUED,
-    ORPHAN_PEER,
-    ORPHAN_RETRIES,
     PEER_BROADCAST,
     PEER_CANCEL_TASK,
     PEER_LIST,
@@ -101,20 +94,12 @@ from slife2.plugins.a2a.server import (
     _wire,
     a2a_marker,
     a2a_message_type,
-    announce_orphans,
     build_server,
     channel_for,
     marker,
 )
 from slife2.plugins.a2a.task_store import TaskStore, get_store
 from slife2.tui.client import MCPMeshClient
-
-#: Which inbound ledger these tests use.  **A ledger is one file per network**
-#: (`Net.ledger`), because what it records is the completion bridges one mesh is
-#: holding — so every call that opens or names one says which.  The remote
-#: network's is what these tests drive unless one says otherwise; the split
-#: itself is `test_each_network_keeps_its_own_ledger`.
-LEDGER = REMOTE.ledger
 
 pytestmark = pytest.mark.unit
 
@@ -362,7 +347,7 @@ def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     silence, which loses a peer's result and leaves the conversation that asked
     waiting for an answer that had already arrived.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     corr = "corr-pruned"
     mesh._corr_to_task[corr] = TASK
     mesh._sends[TASK] = _OutboundSend(TASK, PEER, "session", "{}")
@@ -416,7 +401,7 @@ async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
     `_withdrawn` beside them use.  The class is where the cap is stated now, so
     the assertion is on the class: a plain dict here is the drift coming back.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     assert isinstance(mesh._pending, FIFOCache)
     assert isinstance(mesh._corr_to_task, FIFOCache)
 
@@ -436,60 +421,27 @@ async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
     assert list(mesh._corr_to_task) == ["c2", "c3"]
 
 
-# ── the ledger, and the restart it exists for ───────────────────────────────
+# ── the in-flight table ─────────────────────────────────────────────────────
 
 
-def test_an_inbound_task_is_written_down_and_taken_back_out() -> None:
-    store = InboundStore.open(AGENT, LEDGER)
+def test_an_inbound_task_is_tracked_until_it_leaves_the_responder() -> None:
+    store = InboundStore()
     store.add(TASK, PEER)
-    assert [t.task_id for t in store.stale()] == []
-    # On disk, with the owner named — the directory holds the sanitised name.
-    raw = json.loads(json.dumps(_read_yaml(a2a_inbound_path(AGENT, LEDGER))))
-    assert raw["agent"] == AGENT
-    assert TASK in raw["pending"]
-    assert raw["pending"][TASK]["peer"] == PEER
+    assert [t.task_id for t in store.pending()] == [TASK]
+    assert store.pending()[0].peer == PEER
 
     store.drop(TASK)
-    assert _read_yaml(a2a_inbound_path(AGENT, LEDGER))["pending"] == {}
+    assert store.pending() == []
 
 
-def test_a_restart_tells_its_orphans_from_ids_it_has_never_seen() -> None:
-    """The whole reason this file exists: the bridge died with the process."""
-    first = InboundStore.open(AGENT, LEDGER)
-    first.add(TASK, PEER)
-
-    second = InboundStore.open(AGENT, LEDGER)
-    orphans = second.stale()
-    assert [t.task_id for t in orphans] == [TASK]
-    assert orphans[0].peer == PEER
-    # And it is offered to the model as an id that can never be completed.
-    assert second.stale_entry(TASK) is not None
-    assert second.stale_entry("never-seen") is None
-
-
-def test_a_retry_revives_a_task_its_predecessor_dropped() -> None:
-    """A peer that re-sends the same task id re-registers the bridge."""
-    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-    second = InboundStore.open(AGENT, LEDGER)
-    assert second.stale() != []
-    second.add(TASK, PEER)
-    assert second.stale() == []
-
-
-def test_answering_a_peer_clears_what_that_peer_is_owed() -> None:
-    """A plain message is the only reply an orphan can still get, so it pays the
-    debt — and only that peer's, because the others are still waiting."""
-    first = InboundStore.open(AGENT, LEDGER)
-    first.add(TASK, PEER)
-    first.add("other", "someone-else")
-
-    # A set, not a list: the two arrived inside the same second, so the
-    # oldest-first ordering the notice uses has nothing to order them by.
-    store = InboundStore.open(AGENT, LEDGER)
-    assert {t.task_id for t in store.stale()} == {"other", TASK}
-
-    store.clear_stale_peer(PEER)
-    assert [t.task_id for t in store.stale()] == ["other"]
+def test_a_restart_starts_with_no_inbound_tasks() -> None:
+    """**The restart rule is the map, not a file.**  A bridge died with the
+    process that held it, so a fresh process holds nothing and announces
+    nothing; a peer that is still waiting re-sends, and the re-send arrives as
+    a fresh request with a fresh bridge.
+    """
+    InboundStore().add(TASK, PEER)  # the predecessor's instance
+    assert InboundStore().pending() == []
 
 
 def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) -> None:
@@ -501,9 +453,6 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     answer that arrived is in the conversation, so it is not listed either — the
     send table drops a task the moment its terminal reply routes.
     """
-    with in_home(tmp_path):
-        InboundStore.open(AGENT, LOCAL.ledger, "tester").add("stale-1", PEER)
-
     session = local_member(tmp_path, subagent="tester")
     mesh = session.mesh
     mesh._sends["sent-1"] = _OutboundSend("sent-1", PEER, "session", "{}")
@@ -515,8 +464,6 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     rows = mesh.open_tasks()
 
     assert [(r["task_id"], r["direction"], r["status"]) for r in rows] == [
-        # A predecessor's — oldest, and the one status that can never finish.
-        ("stale-1", "received", "stale"),
         ("sent-1", "sent", "pending"),
         ("owed-1", "received", "pending"),
     ]
@@ -524,187 +471,16 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     assert "message-1" not in {r["task_id"] for r in rows}, "a message is not a task"
 
 
-def test_completing_an_orphan_is_refused_with_the_reply_that_still_works() -> None:
-    """The three ways an id can be unknown need three different sentences, and
-    the orphan's is the one a model cannot work out for itself: no result can
-    ever complete it, so the answer is a plain message instead."""
-    from slife2.plugins.a2a.mesh import A2AMesh
-
-    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-    mesh = A2AMesh(
-        default_config().peer_agent, AGENT, LEDGER
-    )  # opens the ledger: TASK → stale
-
-    orphan = mesh.complete_task(TASK, "too late")
-    assert "arrived before this process started" in orphan
-    assert f"Answer {PEER} with message_type='message'" in orphan
-
-    # A withdrawal is the second: the id is real and was handed to the model, so
-    # "check the marker" would send it re-reading a correct marker.
+def test_completing_an_unknown_id_is_refused_with_the_sentence_that_fits() -> None:
+    """A withdrawal is a real id the model was handed, so "check the marker"
+    would send it re-reading a correct marker; a typo means re-read it.  A task
+    a *previous* process held is deliberately not a third case — this process
+    never saw it, and the peer's own `task_list` is where that loss is visible.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     mesh._note_withdrawn("withdrawn-id", PEER)
     assert "was withdrawn by jill" in mesh.complete_task("withdrawn-id", "x")
-
-    # And a genuine typo is the third.
     assert "unknown task_id" in mesh.complete_task("never-seen", "x")
-
-
-def test_a_ledger_without_an_owner_belongs_to_nobody() -> None:
-    """The `agent:` key is the whole reason the directory name is not trusted."""
-    orphan = a2a_inbound_path(AGENT, LEDGER)
-    orphan.parent.mkdir(parents=True, exist_ok=True)
-    orphan.write_text("pending: {}\nstale: {}\n", encoding="utf-8")
-    assert InboundStore.at(orphan) is None
-
-
-def test_the_ledger_is_how_a_shared_process_finds_the_agents_it_serves() -> None:
-    InboundStore.open(AGENT, LEDGER)
-    InboundStore.open("someone-else", LEDGER)
-    found = {InboundStore.at(one.path).agent for one in a2a_inbound_paths(LEDGER)}  # type: ignore[union-attr]
-    assert found == {AGENT, "someone-else"}
-
-
-def test_each_network_keeps_its_own_ledger() -> None:
-    """**One agent, two networks, two files** — and neither reads the other's.
-
-    Both networks are served by this one module and a machine may configure
-    both, so one shared file meant the process serving the local mesh opened the
-    *remote* mesh's file and read its live `pending` tasks as a dead
-    predecessor's orphans — telling the model that a task whose bridge was
-    answering could never be completed — and then rewrote the whole file from
-    its own memory, erasing whatever the other process had added since.  That
-    last part is the one fact the file exists to keep: a peer is owed an answer.
-
-    Two files rather than a guard, because of what the file records: the
-    completion bridges *this* mesh is holding, which is process-local by
-    construction and invisible to the other process — no liveness check can tell
-    one process's live task from another's orphan when neither can see the
-    other's bridges.
-    """
-    InboundStore.open(AGENT, REMOTE.ledger).add(TASK, PEER)
-
-    # The local network's process starts.  Its ledger is its own, so the remote
-    # mesh's task is not an orphan it may announce as unanswerable.
-    InboundStore.open(AGENT, LOCAL.ledger)
-    theirs = _read_yaml(a2a_inbound_path(AGENT, LOCAL.ledger))
-    assert theirs["pending"] == {} and theirs["stale"] == {}, "its own file, empty"
-
-    # ...and that save left the remote one's task exactly where it was.
-    ours = _read_yaml(a2a_inbound_path(AGENT, REMOTE.ledger))
-    assert TASK in ours["pending"], "the other network's task survived"
-
-    assert REMOTE.ledger != LOCAL.ledger
-    assert {one.path.name for one in a2a_inbound_paths(LOCAL.ledger)} == {
-        Path(LOCAL.ledger).name
-    }
-    assert {one.path.name for one in a2a_inbound_paths(REMOTE.ledger)} == {
-        REMOTE.ledger
-    }
-
-
-def test_the_ledger_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each `add` is a whole-file write with an fsync, so the cap is turned down
-    rather than the writes being made 200 times: the property is the trimming,
-    and the number is asserted rather than exercised."""
-    monkeypatch.setattr("slife2.plugins.a2a.inbound_store._MAX_ENTRIES", 5)
-
-    store = InboundStore.open(AGENT, LEDGER)
-    for index in range(9):
-        store.add(f"task{index}", PEER)
-    assert len(_read_yaml(a2a_inbound_path(AGENT, LEDGER))["pending"]) == 5
-    # The oldest went, because the newest is the one still owed an answer.
-    assert store._pending.get("task0") is None
-    assert store._pending.get("task8") is not None
-
-
-def _read_yaml(path: Path) -> dict:
-    """The ledger as it is on disk, read the way the plugin reads it."""
-    return read_state_yaml().load(path.read_text(encoding="utf-8"))
-
-
-def test_a_damaged_ledger_is_refused_rather_than_read_as_empty() -> None:
-    """**The write after the read is what makes the loss permanent.**
-
-    A corrupt file was logged and answered with an empty store, and the very
-    next save wrote that empty store over it — so the evidence was consumed
-    with the data.  What it held is the one thing the file exists for: the peers
-    a previous process died owing an answer, which then went neither answered
-    nor reported (DESIGN.md §10.1).  The read raises naming the file instead,
-    and because it runs before `open`'s write, nothing is overwritten.
-    """
-    path = a2a_inbound_path(AGENT, LEDGER)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    damaged = "agent: jack\npending: {\n"  # a flow mapping that never closes
-    path.write_text(damaged, encoding="utf-8")
-
-    with pytest.raises(ValueError, match="could not be read"):
-        InboundStore.open(AGENT, LEDGER)
-
-    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
-
-
-def test_a_ledger_section_that_is_not_a_mapping_is_refused_rather_than_read_as_empty() -> (
-    None
-):
-    """**The same loss as the file-level read, one level down** (DESIGN.md §10.1).
-
-    A section that was not a mapping read as `{}`, and the next `_save` wrote
-    that empty section back — so a peer a previous process died owing an answer
-    was dropped from a file whose whole purpose is to remember it.  The section
-    is refused instead, naming the section and the file.
-    """
-    path = a2a_inbound_path(AGENT, LEDGER)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    damaged = "agent: jack\npending:\n  - not-a-mapping\nstale: {}\n"
-    path.write_text(damaged, encoding="utf-8")
-
-    with pytest.raises(ValueError, match="pending"):
-        InboundStore.open(AGENT, LEDGER)
-
-    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
-
-
-def test_a_ledger_entry_that_is_not_a_mapping_is_refused_rather_than_dropped() -> None:
-    """**An entry that cannot be read is damage, not an absent entry.**
-
-    A non-mapping row was dropped with no word, and the next `_save` wrote the
-    section without it (DESIGN.md §10.1) — the orphaned peer vanished from the
-    one record of the reply it is still owed.  The row is named instead.
-    """
-    path = a2a_inbound_path(AGENT, LEDGER)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    damaged = f"agent: jack\npending:\n  {TASK}: not-a-mapping\nstale: {{}}\n"
-    path.write_text(damaged, encoding="utf-8")
-
-    with pytest.raises(ValueError, match=TASK):
-        InboundStore.open(AGENT, LEDGER)
-
-    assert path.read_text(encoding="utf-8") == damaged, "the evidence survived"
-
-
-def test_a_ledger_write_that_failed_is_findable_rather_than_whispered(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """**This file is the only line between an orphaned task and one never seen**
-    (§1.8), so a write that does not land costs exactly the fact the next
-    process would have read.  It is still not the caller's failure — a turn must
-    not fail over a bookkeeping write — so what changes is where it goes: an
-    error naming the file, which is the only place an operator will see it.
-    """
-    store = InboundStore.open(AGENT, LEDGER)
-    path = a2a_inbound_path(AGENT, LEDGER)
-    before = path.read_text(encoding="utf-8")
-
-    def refuse(src: Any, dst: Any) -> None:
-        raise OSError("the disk is full")
-
-    monkeypatch.setattr(os, "replace", refuse)
-    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.inbound_store")
-    store.add(TASK, PEER)
-
-    assert path.read_text(encoding="utf-8") == before, "the write did land"
-    assert any(str(path) in record.getMessage() for record in caplog.records), (
-        "the task that was never written down left nothing for an operator"
-    )
 
 
 # ── the outbound task store ─────────────────────────────────────────────────
@@ -1082,7 +858,7 @@ def wired(window: Window | None = None) -> Session:
     session = Session(
         agent=AGENT,
         net=REMOTE,
-        mesh=A2AMesh(default_config().peer_agent, AGENT, LEDGER),
+        mesh=A2AMesh(default_config().peer_agent, AGENT),
     )
     _wire(session)
     return session
@@ -1394,7 +1170,7 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
         def __init__(self, **kwargs: Any) -> None:
             raise OSError("the broker refused the probe connection")
 
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     monkeypatch.setattr("slife2.plugins.a2a.mesh.aiomqtt.Client", Refusing)
 
     with pytest.raises(RuntimeError, match="name probe"):
@@ -1413,7 +1189,7 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     hears, against a broker this process cannot publish to at all.  The warning
     names the task and which rung it was on.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     send = _OutboundSend("task-a-retry-that-failed", PEER, "session", "{}")
 
     async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
@@ -1475,7 +1251,7 @@ async def test_a_publish_that_never_left_is_not_a_rung_of_the_ladder(
     are asserted: the send is still there when the link returns, and the rungs
     it then spends are its own.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     send = _OutboundSend("task-the-link-was-down-for", PEER, "session", "{}")
     published: list[str] = []
     down = 4
@@ -1534,7 +1310,7 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     async def the_name_is_taken() -> str:
         return "another A2A instance holds the name"
 
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
     monkeypatch.setattr(mesh, "_probe_own_name", the_name_is_taken)
     send = _OutboundSend("task-in-flight-over-a-reconnect", PEER, "session", "{}")
     mesh._sends[send.task_id] = send
@@ -1647,7 +1423,7 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
     the clause below, written to log exactly this class of failure, could never
     see one.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
 
     def bug(_msg: Any) -> None:
         raise AttributeError("a body with no 'result' at all")
@@ -1857,139 +1633,6 @@ async def writer_until(
 
 
 @pytest.mark.asyncio
-async def test_the_orphan_notice_is_queued_rather_than_sent_from_the_start() -> None:
-    """The ledger is read at the start; the hand-over is the writer's job.
-
-    Asserted as the *absence* of a submission, because that is the difference
-    that matters: a notice awaited where it is found is this plugin's readiness
-    spent on another plugin's turn.
-    """
-    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-    session = wired()
-
-    announce_orphans(session)
-
-    text, peer, what, retries, note = session.queue.get_nowait()
-    assert session.queue.empty(), "one notice, and nothing else on the queue"
-    assert peer == ORPHAN_PEER
-    assert channel_for(REMOTE, peer) == f"{CHANNEL}:{ORPHAN_PEER}"
-    assert what == "1 orphaned inbound task(s)"
-    assert TASK in text and PEER in text
-    # The tool it tells the model to reply with is *this* network's; the subagent
-    # network's half of that is `test_the_orphan_notice_names_the_tool_this_
-    # network_has`, and the name it used to spell was this one.
-    assert REMOTE.tool(SEND_MESSAGE) in text
-    # It is a message for the model to act on, not a line for a window to draw.
-    assert note is False
-    # It carries the retries, and it is the only message that does: everything
-    # a peer sent is posted with none.
-    assert retries == ORPHAN_RETRIES
-
-
-@pytest.mark.asyncio
-async def test_the_orphan_notice_lands_on_the_channels_the_window_draws_alone() -> None:
-    """The queue is what delivers it, and the bubble is `PeerAgent(orphans)> `."""
-    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-    window = Window()
-    async with Client(window.mcp) as client:
-        window.client = client
-        session = wired()
-        announce_orphans(session)
-        await drain_until_idle(session, window=window)
-
-    # Once, and once only: the retries it carries are for a hand-over that came
-    # back "nothing was written", and this one landed.
-    assert len(window.handed) == 1
-    handed = window.handed[-1]
-    assert handed["channel"] == f"{CHANNEL}:{ORPHAN_PEER}"
-    assert handed["agent"] == AGENT
-    # The one reply an orphan can still get, and the peer it is owed to.
-    assert "message" in handed["text"] and PEER in handed["text"]
-
-
-@pytest.mark.asyncio
-async def test_a_notice_that_reached_nothing_is_offered_again(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A refused delivery licenses a second attempt for this plugin's own
-    notice, and only for that.
-
-    The fake is the cold start exactly: a window that is not showing that
-    conversation, so the hand-over is refused and provably wrote nothing.  A
-    peer's message has the peer behind it — a peer that gets no answer sends the
-    task again, and a second copy of its words is worse than a late one — while
-    an orphan notice is a debt nobody else knows about, so it is the one thing
-    here that tries again.
-    """
-    monkeypatch.setattr(_T.timeouts.pacing, "orphan_retry", 0.01)
-    # The hand-over's own patience, which every attempt of it pays: three tries
-    # at this pace is what an orphan notice waits through.
-    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
-    monkeypatch.setattr(a2a_server, "ORPHAN_RETRIES", 2)
-    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
-
-    def attempts(peer: str) -> int:
-        return sum(
-            1
-            for record in caplog.records
-            if f"peer={peer} " in record.getMessage()
-            and record.getMessage().startswith("a2a_delivery_unreachable")
-        )
-
-    refusing = Window(refuse=True)
-    async with Client(refusing.mcp) as window_client:
-        refusing.client = window_client
-        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-        session = wired()
-        announce_orphans(session)
-        session.post("a peer's own message", PEER, "a message from jill")
-
-        await writer_until(
-            session,
-            lambda: attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1,
-            window=refusing,
-        )
-
-    # The first attempt and every retry it was given, and no more than that.
-    assert attempts(ORPHAN_PEER) == a2a_server.ORPHAN_RETRIES + 1
-    # The peer's message: offered once.  A peer re-sends its own task when it
-    # gets no answer, and a second copy of its words is worse than a late one.
-    assert attempts(PEER) == 1
-    assert refusing.handed == []
-
-
-@pytest.mark.asyncio
-async def test_a_notice_the_writer_cannot_judge_is_not_offered_again(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A call that did not come back stops it, retries or not.
-
-    A stream that died says nothing either way about whether the words landed,
-    and a notice arriving twice is how a conversation is told twice about a debt
-    it may already have paid.  The refusal path retries; this one may not, and
-    the test is the same in both cases: the queue is empty afterwards.
-    """
-    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
-    dying = Window(broken=True)
-    async with Client(dying.mcp) as client:
-        dying.client = client
-        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-        session = wired()
-        announce_orphans(session)
-
-        await writer_until(
-            session,
-            lambda: any(
-                "was not repeated" in record.getMessage() for record in caplog.records
-            ),
-            window=dying,
-        )
-
-    assert "was not repeated" in caplog.records[-1].getMessage()
-    assert session.queue.empty(), "a call that may have landed is not put back"
-
-
-@pytest.mark.asyncio
 async def test_the_queue_is_bounded_so_a_peer_cannot_grow_this_process() -> None:
     session = wired()
     for index in range(MAX_QUEUED + 5):
@@ -1998,126 +1641,6 @@ async def test_the_queue_is_bounded_so_a_peer_cannot_grow_this_process() -> None
     # The oldest went, which is the one whose moment has most likely passed.
     first = session.queue.get_nowait()
     assert first[0] != f"{marker(REMOTE, PEER, None, 'message')}message 0"
-
-
-# ── the start, and what it must not leak ────────────────────────────────────
-#
-#  The start-up work runs inside the guarded region, so a start that fails
-#  *after* one agent's session exists still hands it back.  What leaks otherwise
-#  is a `_drain` writer running with nothing watching it — one per ledger — for
-#  the life of a process somebody then restarts.
-
-
-@pytest.mark.asyncio
-async def test_a_start_that_fails_after_building_a_session_still_tears_down(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The `finally` used to guard only the `yield`, so a start that raised on
-    its way to it left every built session running: its writer, and — when a
-    start still joined the mesh as well — a pair of MQTT connections and a
-    retained *online* card nobody would retire."""
-    InboundStore.open(AGENT, LEDGER).add(TASK, PEER)  # a ledger, and an orphan in it
-    left: list[str] = []
-
-    async def connect(self: Any) -> None:
-        self._connected = True
-
-    async def disconnect(self: Any) -> None:
-        left.append(self.agent_name)
-
-    def boom(*args: Any, **kwargs: Any) -> str:
-        raise RuntimeError("the orphan template will not render")
-
-    monkeypatch.setattr(A2AMesh, "connect", connect)
-    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
-    monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
-    # The failure the defect names: an orphan notice whose template will not
-    # render, reached with the agent's session already built.
-    monkeypatch.setattr(a2a_server, "render", boom)
-
-    config = default_config()
-    object.__setattr__(config, "peer_agent", settings())
-    mcp = build_server(config, source=lambda: config, connecting=True)
-
-    with pytest.raises(RuntimeError, match="will not render"):
-        async with Client(mcp):
-            pass
-
-    # The session was handed back — disconnected, and its writer cancelled with
-    # it.  Nothing here joined the mesh on the way (that is a window's call now),
-    # so the disconnect is the teardown's own, which is the half that still has
-    # to run.
-    assert left == [AGENT]
-
-
-@pytest.mark.asyncio
-async def test_another_homes_orphan_is_announced_in_that_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """**The walk finds every home's ledger, and the announcement has to be that
-    home's too.**
-
-    One process serves every home, and the walk that finds the ledgers spans
-    them all — but the session built out of what it finds was keyed by the agent
-    name alone and built in the ambient home, so a start in home A that found
-    home B's `jack` ledger did four wrong things at once: its mesh opened a
-    *different* file (`<A>/agents/jack/inbound.yaml`, usually absent, which is why
-    the notice was empty), the notice about B's peer — who is still owed an
-    answer — was handed to A's conversation, a stray empty ledger was written
-    in A, and the session cached under `jack` was the one B's own window then
-    joined: B's agent came online on the broker with A's ambient home behind it,
-    and every inbound task was handed over in A.
-
-    So this asserts the two halves that are visible from outside: the notice is
-    delivered at all, and the home it is delivered in is the ledger's.
-    """
-    other = tmp_path / "other-home"
-    with in_home(other):
-        InboundStore.open(AGENT, LEDGER).add(TASK, PEER)
-    register_home(other)
-
-    #: What `hand_over` would have been called with, and the home it would have
-    #: been called *in* — which is what decides the conversation it reaches
-    #: (`client_meta` stamps `paths.home()` on the call the window receives).
-    said: list[dict[str, str]] = []
-
-    async def recorded(
-        config: Any,
-        agent: str,
-        text: str,
-        channel: str,
-        *,
-        what: str,
-        window_client: Any = None,
-    ) -> None:
-        said.append(
-            {"agent": agent, "channel": channel, "text": text, "home": str(home())}
-        )
-
-    monkeypatch.setattr(a2a_server, "hand_over", recorded)
-    monkeypatch.setattr(a2a_server, "ensure_broker", lambda cfg: "already listening")
-
-    config = default_config()
-    object.__setattr__(config, "peer_agent", settings())
-    mcp = build_server(config, source=lambda: config, connecting=True)
-
-    async with Client(mcp):
-        deadline = (  # timeouts: the value this test is built around, not a budget
-            asyncio.get_running_loop().time() + 5.0
-        )  # timeouts: the value this test is built around, not a budget
-        while not said:
-            if asyncio.get_running_loop().time() > deadline:
-                raise AssertionError("the orphan notice was never handed over")
-            await asyncio.sleep(0.01)
-
-    assert said[0]["home"] == str(other), "the notice was handed over in another home"
-    assert said[0]["agent"] == AGENT
-    assert TASK in said[0]["text"] and PEER in said[0]["text"]
-    # And the daemon's own home is not where the ledger was opened: an agent
-    # named in another home's ledger leaves nothing behind here.
-    assert not (home() / "agents" / AGENT).exists(), (
-        "a session for another home's agent wrote its ledger into this one"
-    )
 
 
 # ── the plugin: what it offers, and to whom ─────────────────────────────────
@@ -2651,7 +2174,7 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     session = Session(
         agent=AGENT,
         net=REMOTE,
-        mesh=A2AMesh(default_config().peer_agent, AGENT, LEDGER),  # opens the ledger
+        mesh=A2AMesh(default_config().peer_agent, AGENT),
     )
 
     session.hold(WINDOW)
@@ -2803,7 +2326,7 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     X completed async task" over the cancellation the model had already been
     given.
     """
-    mesh = A2AMesh(default_config().peer_agent, AGENT, LEDGER)
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
 
     async def no_publish(*args, **kwargs) -> None:
         return None
@@ -2910,7 +2433,6 @@ def local_member(
             mesh=A2AMesh(
                 replace(member, org=org, unit=unit),
                 maker,
-                LOCAL.ledger,
                 subagent=subagent,
             ),
             subagent=subagent,
@@ -2963,11 +2485,6 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
         }
     ], "the turn did not reach the member's own conversation"
     assert window.handed == [], "a subagent's message is not a window's"
-    # And it is filed where the member lives: the bridges this mesh holds are the
-    # member's, so its ledger is inside its own directory (`a2a_inbound_path`).
-    assert (
-        tmp_path / "agents" / AGENT / "subagents" / "tester" / "inbound.yaml"
-    ).exists()
 
 
 @pytest.mark.asyncio
@@ -3389,32 +2906,6 @@ async def test_a_members_own_roster_lists_it_once(
     names = [card["agent_name"] for card in answer.data["agents"]]
     assert names == ["tester", "tester2"], "the asker is its own first row, once"
     assert answer.data["agent_name"] == "tester"
-
-
-@pytest.mark.asyncio
-async def test_the_orphan_notice_names_the_tool_this_network_has(
-    tmp_path: Path,
-) -> None:
-    """**A reply tool is named in the reader's own words.**
-
-    The notice tells a model the one reply an orphaned task can still get, and it
-    spelled `peer_agent_send_message` on *both* networks — so a reader on the subagent
-    network was told to call a tool it was never handed (`subagent_*` is what it
-    has), and the same line taught it the name of the mechanism.  One template,
-    one hole, and the plugin fills it from the session it is posting for — the
-    same reason the tool descriptions are built per network
-    (`describe_tool`).
-    """
-    with in_home(tmp_path):
-        InboundStore.open(AGENT, LOCAL.ledger, "tester").add(TASK, PEER)
-    session = local_member(tmp_path)
-
-    announce_orphans(session)
-
-    text, peer, what, retries, note = session.queue.get_nowait()
-    assert "subagent_send_message" in text
-    assert "a2a" not in text.lower(), "the mechanism is not the network's name"
-    assert TASK in text and PEER in text
 
 
 @pytest.mark.asyncio

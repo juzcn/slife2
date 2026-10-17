@@ -33,13 +33,7 @@ run as a turn in its own conversation (`run_turn`).  So the five queues become
 queues were doing for the harness: they kept arrival order, and they kept a mesh
 callback from blocking the MQTT reader loop.
 
-That queue carries the plugin's *own* message as well as the mesh's — the orphan
-notice (§1.8), which is the one thing here that nobody asked for and the one
-thing whose delivery this plugin repeats, for the reason it has no peer behind
-it: a peer re-sends its task when it gets no answer, so nothing a peer sent is
-ever offered twice.
-
-**And it carries a second kind of thing, which is not a message at all.**  A
+**It carries a second kind of thing, which is not a message at all.**  A
 presence transition — a peer arriving, a peer going — is a *note*: the window
 draws it and nothing else happens, no turn is run and the conversation never
 learns of it.  v1 kept presence out of the inbox for the same reason (its TUI had
@@ -48,21 +42,24 @@ ask for is `peer_agent_list`, and a peer that wants to be answered sends a task.
 One queue, one writer, two kinds — because arrival order is worth keeping across
 both.
 
-**Who is on the mesh is a window, not a ledger.**  v1's plugin *was* its agent's
-process, so being up and being online were the same fact.  A shared process has
-to decide, and reading it off `agents/<agent>/inbound.yaml` — the record of inbound
-tasks a process died holding — made it mean "has spoken at least once, ever": a
-card for a conversation nobody was having, and none for the window somebody had
-just opened.  So the mesh is joined by `join` for as long as a window holds that
-call, and by an `a2a_*` call for as long as the task it started may be answered.
-That ledger is still the plugin's own file, and the orphan notice is still its
-job; it is just no longer an enrollment list.
+**Who is on the mesh is a window.**  v1's plugin *was* its agent's process, so
+being up and being online were the same fact.  A shared process has to decide,
+and reading it off a file of past work made it mean "has spoken at least once,
+ever": a card for a conversation nobody was having, and none for the window
+somebody had just opened.  So the mesh is joined by `join` for as long as a
+window holds that call, and by an `a2a_*` call for as long as the task it
+started may be answered.
+
+**A restart drops the inbound tasks the previous process was holding**, and that
+is a closed loop rather than a loss: their bridges died with it, so nothing can
+complete them — but the *requester* re-sends a task it never heard back about,
+and the re-send arrives as a fresh request with a fresh bridge.  The harness
+stores nothing and announces nothing; a peer's own `task_list` is where a task
+still waiting is visible, and where it can cancel or re-send.
 
 Two things v1 had here are deliberately absent.  `__check` has no port: v2 has no
 `system_health` and no `__`-prefixed tools at all, and what it reported is now
-`peer_agent_list`' answer, which is where a model would look anyway.  And the
-orphan reminder is no longer a line in a per-turn prompt — there is no per-turn
-prompt — so it is a message handed over once, at the start that found it.
+`peer_agent_list`' answer, which is where a model would look anyway.
 
 **And the broker is started rather than merely probed**, which is the one place
 this port contradicts v1's own rule and is the operator's call rather than a
@@ -104,7 +101,7 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import a2a_inbound_paths, home, in_home, subagent_dirs
+from slife2.libs.host.paths import home, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -114,10 +111,8 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
-from slife2.libs.turn.prompt import render
 from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
-from slife2.plugins.a2a.inbound_store import InboundStore
 from slife2.plugins.a2a.mesh import (
     A2AMesh,
     AgentCard,
@@ -237,27 +232,6 @@ A2A_TYPES = (
 #: process without limit.  Past it the *oldest* waiting message is dropped, which
 #: is the one whose moment has most likely passed.
 MAX_QUEUED = 500
-
-#: The template the orphan notice is rendered from.  Machinery rather than
-#: something an operator writes, like `schedule.j2`, so it is asked for by bare
-#: name and is the shipped one.
-ORPHAN_TEMPLATE = "a2a_orphans.j2"
-
-#: What the orphan notice is handed over as — and **it is not a peer.**  The name
-#: is the second half of the channel `channel_for` builds (`peer_agent:orphans`), which
-#: the window draws on its own (`PeerAgent(orphans)> `) rather than as somebody
-#: speaking, and the writer's log line names it the same way.
-ORPHAN_PEER = "orphans"
-
-#: How long the writer waits before offering an orphan notice again, and how many
-#: times it will.  **The first attempt is expected to fail**, and not because
-#: anything is broken: a notice is handed over at a start whose peers cannot run
-#: a turn yet — the hub waits for every plugin, so it is up *after* this one
-#: (`slife2.libs.host.launcher.NEEDS`) — and the delay is what lets the peers the turn
-#: needs arrive underneath it.  Tens of seconds is what the launcher's own waves
-#: cost, so the count is generous against that and still a bound: a notice nobody
-#: can receive is not a reason to keep saying it.
-ORPHAN_RETRIES = 30
 
 #: What a call that does not say which agent it is for is told.  A shared process
 #: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
@@ -471,7 +445,6 @@ class Session:
         text: str,
         peer: str,
         what: str,
-        retries: int = 0,
         *,
         note: bool = False,
     ) -> None:
@@ -481,24 +454,21 @@ class Session:
         delivery that has to wait is a delivery that stops the mesh reading.
         Overflow drops the oldest waiting message rather than the newest.
 
-        `retries` is how many further times the writer may offer this one after a
-        hand-over that came back "nothing was written", and it is zero for
-        everything a peer sent: a peer re-sends a task itself when it gets no
-        answer, and a second copy of its message is worse than a late one.  The
-        orphan notice is the one message with no peer behind it, so its delivery
-        is this plugin's to repeat (`_drain`).
+        **Nothing is retried here.**  Everything on this queue has a peer behind
+        it, and a peer re-sends a task itself when it gets no answer; a second
+        copy of its message is worse than a late one.
 
         `note` says this line is the harness's rather than anybody's: the writer
         draws it in the window that is showing this agent and goes no further
-        (`slife2.libs.harness.handover.note_to_window`), so it is never a turn, never stored,
-        and never retried.
+        (`slife2.libs.harness.handover.note_to_window`), so it is never a turn and never
+        stored.
         """
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.queue.get_nowait()
             logger.warning("a2a_delivery_overflow dropped=1 peer=%s", peer)
         with contextlib.suppress(asyncio.QueueFull):
-            self.queue.put_nowait((text, peer, what, retries, note))
+            self.queue.put_nowait((text, peer, what, note))
 
 
 async def _hold_open(ctx: Context) -> None:
@@ -832,8 +802,7 @@ async def _drain(
     message that reached no conversation has not been answered — and the one
     party who can do something about that is the peer, which is why the line
     says whose message it was.  Nothing is softened into a state here: this
-    plugin has no ledger to write it into and no right to claim the work
-    happened.
+    plugin has no record of its own and no right to claim the work happened.
 
     **A member's turn is delivered to its conversation, and the harness does
     not speak for the member.**  The inbound message becomes a turn there
@@ -845,15 +814,6 @@ async def _drain(
     ~2,200 turns over 3h13m of "received / I will not send any more messages".
     The harness injects what arrived; it does not answer for the member.
 
-    **The retry below is this plugin's own notices, and the count is the queue
-    item's.**  An orphan notice is a message this process owes a peer about work
-    its predecessor died holding: nobody will re-send it, and the window may be
-    attaching right now, so it gets another attempt after `orphan_retry` — which
-    is the delay that makes the wait worth having, and the notice goes to the
-    *back* of the queue so everything that arrived meanwhile is handed over
-    first, in arrival order.  A peer's message carries zero, because a peer that
-    wants it again can send it again.
-
     **A message that cannot be delivered must not take the writer with it.**
     This task is one per member for the life of the process and nothing watches
     it until shutdown, so a raise escaping the loop is silent and permanent:
@@ -862,7 +822,7 @@ async def _drain(
     failure is logged and dropped, and the loop goes on to the next.
     """
     while True:
-        text, peer, what, retries, note = await session.queue.get()
+        text, peer, what, note = await session.queue.get()
         try:
             if note:
                 if session.subagent:
@@ -936,9 +896,6 @@ async def _drain(
                     len(text),
                     exc,
                 )
-                if retries > 0:
-                    await asyncio.sleep(_T.timeouts.pacing.orphan_retry)
-                    session.post(text, peer, what, retries=retries - 1)
         except asyncio.CancelledError:
             # `shutdown` cancels this writer; a cancellation is not a
             # delivery failure and must reach the awaiting task as one.
@@ -951,8 +908,8 @@ async def _drain(
             # was never handed over, for the life of the process, while the
             # mesh still looked connected and the model simply never heard
             # anything.  One message that could not be rendered or handed
-            # over is dropped — a peer re-sends its own task, and the notice
-            # has its retries — and the next one is read.
+            # over is dropped — a peer re-sends its own task — and the next one
+            # is read.
             #
             # **A member's turn that failed reaches here too**, and that is the
             # honest answer for it: the message was received and its turn did not
@@ -964,46 +921,6 @@ async def _drain(
                 describe((session.agent, session.subagent)),
                 peer,
             )
-
-
-def announce_orphans(session: Session) -> None:
-    """Queue the notice about the inbound tasks this agent's predecessor died holding.
-
-    **This is the one thing this plugin says that nobody asked for**, and v1 said
-    it differently: the orphan list rode every turn's prompt, so the model could
-    not miss it.  There is no per-turn prompt here, so the same information is
-    handed over once, on the channel the window draws as its own bubble — the
-    peer is waiting, and a task nobody can complete is a debt the agent has to be
-    told about to pay.
-
-    **Queued, and not handed over from where the orphan is found.**  Both halves
-    of that are paid for rather than defensive.  The start that finds an orphan
-    is a start whose peers cannot run a turn yet — a turn's first step is the
-    hub, and the hub waits for every plugin, so it is up *after* this one
-    (DESIGN.md §4) — so a hand-over awaited here is lost by construction; and
-    when it is not lost it is worse, because the turn it runs takes as long as a
-    model takes, and the deadline judging *this* plugin is the launcher's
-    `_T.timeouts.ready.plugin_start` (90 s by default).  Queued, the notice
-    rides the one writer every arrival already takes (`_drain`), which is this
-    session's own machinery, and the retries it carries are what let it outlast
-    the launcher's start-up instead of dying of it.
-
-    A `task_response` for any of these is refused by the mesh, so the notice
-    names the one reply that still works — **and it is named in this network's
-    words**: one module serves both, and the tool a maker replies with is
-    `peer_agent_send_message` while the one a subagent replies with is
-    `subagent_send_message`.  The notice used to spell the remote one, so half
-    its readers were told to call a tool they do not have.
-    """
-    orphans = session.mesh.stale_inbound()
-    if not orphans:
-        return
-    session.post(
-        render(ORPHAN_TEMPLATE, tasks=orphans, send=session.net.tool(SEND_MESSAGE)),
-        ORPHAN_PEER,
-        f"{len(orphans)} orphaned inbound task(s)",
-        retries=ORPHAN_RETRIES,
-    )
 
 
 def build_server(
@@ -1062,7 +979,7 @@ def build_server(
 
         **Nothing dials from here.**  A mesh is built rather than connected
         (`session_of`), and the mesh's own `connect` is what joins — so building
-        one for a name that never joins is a ledger file and a card, not a
+        one for a name that never joins is a card and an in-flight table, not a
         connection.
         """
         found = mesh_settings()
@@ -1070,7 +987,6 @@ def build_server(
         return A2AMesh(
             replace(found, org=org, unit=unit),
             maker,
-            net.ledger,
             subagent=subagent,
         )
 
@@ -1103,26 +1019,21 @@ def build_server(
         `slife2.plugins.tui.server.Windows` exist to prevent, and here it cost the mesh
         itself: the session's writer ran in whichever home the *first* caller was
         in, so every message found for the second home's agent was handed to the
-        first home's conversation, and the mesh's own ledger was opened there — a
-        file that either does not exist or says something else
-        (`announce_ledgers`).  The second half is the same argument one level in:
-        on the local network two agents may each have a `researcher`, and a
+        first home's conversation.  The second half is the same argument one level
+        in: on the local network two agents may each have a `researcher`, and a
         table keyed by the member's name alone would answer one with the other's
         mesh — one MQTT identity for two agents' subagents.
 
         *root* is the home the caller means, and it is what the mesh and the
         writer resolve their files in.  A caller inside a served call passes
         nothing and gets the ambient home, which `slife2.libs.plugin.protocol.serve`
-        has already made the caller's; the startup walk passes the home each
-        ledger was *found* in.
+        has already made the caller's.
 
         Built rather than connected, and the difference is the whole of what
-        enrollment means here: building writes the member's ledger
-        (`InboundStore.open`), which is the record of the *inbound tasks a
-        process died holding* — a fact about work already received, not a claim
-        about who is here now.  What connects is `join` (a window is showing the
-        agent), the first `a2a_*` call that needs the mesh, or a message to a
-        subagent, which gives it its place before publishing (`place_for`).
+        enrollment means here: building joins nothing.  What connects is `join`
+        (a window is showing the agent), the first `a2a_*` call that needs the
+        mesh, or a message to a subagent, which gives it its place before
+        publishing (`place_for`).
         """
         where = root or home()
         found = sessions.get((str(where), agent, subagent))
@@ -1324,62 +1235,37 @@ def build_server(
         for peer in sorted(membership(agent)):
             await connected(agent, MEMBER, peer)
 
-    async def announce_ledgers(config_now: Config) -> None:
-        """Tell the model about what a previous process died holding.
+    def start_broker(config_now: Config) -> None:
+        """Bring the mesh's broker up, or refuse the start.
 
-        **The ledger is the orphan record, and that is all it is.**  It used to
-        be read here as an enrollment list too — a start joined the mesh as every
-        agent that had ever made an `a2a_*` call — and that made an agent's
-        presence depend on having spoken once and then last forever: a card for a
-        conversation nobody was having, which is the thing `slife2.libs.host.paths` says
-        the ledger must not become.  What puts an agent on the mesh is a window
-        showing it (`join`); what this does is the other half of the file's job,
-        which no window can do for it — a peer is still owed an answer, and the
-        only party who can give one is the model, at a start that is *not* the
-        one that received the task.
+        A machine whose config says `peer_agent:` has said it wants the mesh, so
+        an absent broker is a missing dependency rather than a preference.  One
+        that will not serve raises out of the lifespan — this plugin failing to
+        start, which is `slife2` refusing to start rather than handing the model
+        five tools attached to nothing (`slife2/plugins/a2a/broker.py`).
 
-        The broker is asked about first, and it is the one thing not tolerated:
-        a machine whose config says `peer_agent:` has said it wants the mesh, so an
-        absent broker is a missing dependency rather than a preference.
+        **Nothing else happens at start.**  Nothing joins the mesh (a window does
+        that, `join`), and nothing is announced: a restart has no inbound bridges
+        of its own, and a peer that never heard back about a task re-sends it —
+        which arrives as a fresh request with a fresh bridge, so the loop closes
+        without the harness remembering anything.
         """
-        # **The broker, before any of it.**  One is started if it can be, and one
-        # that will not serve raises out of the lifespan — which is this plugin
-        # failing to start, which is `slife2` refusing to start rather than
-        # handing the model five tools attached to nothing
-        # (`slife2/plugins/a2a/broker.py`).
         logger.info("a2a_broker %s", ensure_broker(config_now.peer_agent))
-
-        for ledger in a2a_inbound_paths(net.ledger):
-            store = InboundStore.at(ledger.path)
-            if store is None:
-                logger.warning("a2a_ledger_without_an_owner path=%s", ledger.path)
-                continue
-            # Queued rather than sent from here: this start's peers cannot run a
-            # turn yet — a turn's first step is the hub, and the hub waits for
-            # every plugin, so it is up *after* this one — see `announce_orphans`,
-            # which is also where the retries come from.  The session is built,
-            # not connected: the notice needs the agent's queue and its writer,
-            # and being on the mesh is not what a notice is for.
-            #
-            # **In the home the ledger was found in**, which is the half the walk
-            # is for: the notice is about work *that* home's peer is owed, and
-            # the session it goes to opens its mesh on that home's file and hands
-            # over in that home (`session_of`).
-            announce_orphans(session_of(store.agent, root=ledger.home))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        """Start the broker, and announce what the last process left owed.
+        """Bring the broker up — the one start-up fact that is not a window's.
 
         **Nothing joins the mesh here, and that is the change this port needed.**
-        v1's plugin *was* its agent's process, so coming up meant coming online; a
-        shared process has no such moment, and reading one out of the ledgers made
-        presence mean "has spoken at least once, ever" — a card for a conversation
-        nobody was having, and none at all for the window somebody had just
-        opened.  So what a start does is the half no window can do for it: the
-        broker is brought up, and every ledger's orphans are handed to the model.
-        An agent comes onto the mesh when a window shows it (`join`), which is
-        also the only thing that takes it off again.
+        v1's plugin *was* its agent's process, so coming up meant coming online;
+        a shared process has no such moment.  What puts an agent on the mesh is a
+        window showing it (`join`), and an `a2a_*` call for as long as the task
+        it started may be answered.
+
+        **And nothing is announced.**  A restart starts with no inbound bridges —
+        they died with the previous process — so there is nothing here to finish.
+        The party that can close a task nobody answered is the peer that sent it:
+        its `task_list` names it, and a re-send arrives as a fresh request.
 
         On shutdown every mesh disconnects, which publishes the offline card that
         retires the names this process was holding rather than leaving cards
@@ -1387,15 +1273,14 @@ def build_server(
 
         **The start-up work is inside the guard, and that is the point of the
         guard.**  A start that fails halfway — the broker comes up, one agent's
-        session is built, and the next step raises (a template that will not
-        render, a ledger path that will not read) — would otherwise leave that
+        session is built, and the next step raises — would otherwise leave that
         session's `_drain` writer running with nothing watching it.  The `finally`
         is what hands those back, so it has to be entered *before* the first
         session exists rather than after the last one succeeded.
         """
         try:
             if connecting and mesh_settings().configured:
-                await announce_ledgers(live())
+                start_broker(live())
             yield {}
         finally:
             for session in sessions.values():
@@ -1763,14 +1648,14 @@ def build_server(
         to poll; this is not a poll.**  It answers a different question, and the
         one the model cannot answer from memory: *what did I start and never
         hear back about, and what was I asked and still owe?*  A conversation
-        that has been compacted, a process that restarted, an answer that
-        arrived as a message nobody matched to its id — each leaves a task open
-        that nothing else names.
+        that has been compacted, or an answer that arrived as a message nobody
+        matched to its id, each leaves a task open that nothing else names.
 
         It reads the two tables the send and receive paths already keep, so it
         costs no model call and dials nothing (`A2AMesh.open_tasks`): `_sends`
-        is what has not terminaled, and the ledger is what is owed — pending
-        bridges, and a previous process's orphans as 'stale'.
+        is what has not terminaled, and the in-flight table is what is owed.
+        Both are this process's; a restart starts with none, and a peer that is
+        still waiting is the one that re-sends.
 
         `member` rather than `peer`, because one word is true of both directions
         and this network's members are not the remote network's peers.
@@ -1901,11 +1786,9 @@ _TOOL_TEXTS: dict[str, str] = {
         '"direction": "sent"|"received", "status": …, "since": …}}`, and `member`\n'
         "is the name the task is with — what `{send}` and `{cancel}` address.\n"
         "\n"
-        "`status` is 'pending' for a task still running, 'unreachable' for one you\n"
-        "sent that was never acknowledged — a late answer can still arrive, so\n"
-        "check before sending it again — and 'stale' for a task a previous process\n"
-        "died holding: it can never be completed, so answer that member with a\n"
-        "plain message.\n"
+        "`status` is 'pending' for a task still running, or 'unreachable' for one\n"
+        "you sent that was never acknowledged — a late answer can still arrive, so\n"
+        "check before sending it again.\n"
         "\n"
         "An answer that already arrived is not listed; it is in this conversation."
     ),

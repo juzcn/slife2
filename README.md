@@ -1051,9 +1051,8 @@ actually being there — a peer that watched the agent arrive watches it leave,
 with nothing to send. `slife2 --headless` holds that same call with no window at
 all, which is what an unattended machine wants. One `peer_agent_*` call joins its
 agent too and keeps it: what follows a send is a reply the agent is waiting for.
-The ledger at `<data>/agents/<agent>/inbound.yaml` is *not* the enrollment — what
-it records is the inbound tasks a process died holding, which is what a restart
-needs to tell an orphan from an id it has never seen.
+There is no persisted inbound record: the in-flight tasks are in memory, and a
+restart starts with none.
 
 **The broker is started for you if it is not there, and stopped when you are
 done**, which is where this departs from v1. Left out, `peer_agent.broker` is the
@@ -1079,11 +1078,11 @@ peer_agent:
   unit: default          # told apart by these
 ```
 
-**A restart orphans every task that was in flight**, because the completion
-bridge and the peer's reply topic both lived in the process that died. The ledger
-draws the line between those and ids never seen, and the agent is **told once**,
-at the start that found them, so it can answer each peer with a plain message —
-the only reply those tasks can still get. **Omit the `peer_agent:` section
+**A restart drops every task that was in flight**, because the completion
+bridge and the peer's reply topic both lived in the process that died. Nothing
+is remembered or announced: a peer that is still waiting sees the task in its
+own `peer_agent_task_list` (or the subagent's `subagent_task_list`) and re-sends
+it, which arrives as a fresh request. **Omit the `peer_agent:` section
 entirely** to stay off that network: a machine that should not be on it is a machine where nobody
 writes one.
 
@@ -1107,15 +1106,10 @@ and a home is what `--data-dir` names:
                                    (the search index) inside
       media/                       what it generated
       wechat.yaml                  its WeChat login (~24h, written on a scan)
-      inbound.yaml                 the peer network's ledger: the inbound tasks
-                                   whose completion bridge this process holds
       subagents/                   what this agent made with `subagent_set`,
                                    one directory each
-        inbound.yaml               the same ledger for the subagent network —
-                                   which is a second process and a second file,
-                                   and the directory that network *is*
         <name>/                    the subagent: its own conversation, cabinet,
-                                   media, ledgers and record
+                                   media and record
 ```
 
 **Nothing inside an agent's directory repeats its name** — the directory says

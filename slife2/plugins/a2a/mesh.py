@@ -414,8 +414,8 @@ class MeshResponder(Responder):
             )
             # Recorded only now — a MESSAGE / stray TASK_RESPONSE reaches the
             # early returns above and must NOT be tracked as an inbound task
-            # (nothing will ever complete it, so it would be reported stale
-            # forever after the next restart).
+            # (nothing will ever complete it, so it would sit in `task_list`
+            # as a debt nobody can pay).
             self._mesh._note_inbound(task_id, request.sender or "unknown")
             try:
                 cancelled, result = await waiter.wait()
@@ -564,25 +564,15 @@ class A2AMesh:
     :meth:`list_agents`, :meth:`complete_task`.
     """
 
-    def __init__(
-        self, config: A2ASettings, agent: str, ledger: str, *, subagent: str = ""
-    ) -> None:
+    def __init__(self, config: A2ASettings, agent: str, *, subagent: str = "") -> None:
         """*agent* and *subagent* are the client id this mesh is one member of.
 
         **The whole id, because a member is the second half of one.**  The name
         it answers as is `subagent or agent` — that is the MQTT client id, the
         request topic's last segment and our card's name — and the pair is what
-        its ledger is filed under (`InboundStore.open`), so a subagent's file
-        lives in the subagent's own directory rather than beside its maker's.
-        Empty for an agent's own mesh, which is every caller but the local
-        network's.
-
-        *ledger* is `Net.ledger` — which network's inbound file this mesh owns.
-
-        A parameter rather than read off the section, because which network this
-        is is not a fact about the settings: both networks are configured out of
-        the same shape and are served by this one class, and the ledger is one
-        file per network (`Net.ledger`).
+        its in-flight table belongs to: a member's bridges are its own, so two
+        subagents (or a subagent and its maker) never share one.  Empty for an
+        agent's own mesh, which is every caller but the local network's.
         """
         self._config = config
         self._topics = TopicSpace(
@@ -608,12 +598,10 @@ class A2AMesh:
             output_modes=["text/plain"],
             extensions=[{_INSTANCE_EXT: self._instance}],
         )
-        #: Inbound tasks awaiting a result — persisted, per agent, so a
-        #: restarted process can tell the ones its predecessor died holding
-        #: (which can never be completed) from ids it has simply never seen.
-        #: The client id's, not `agent_name`'s: a member's bridges are its own
-        #: and its file lives inside its own directory.
-        self._inbound = InboundStore.open(agent, ledger, subagent)
+        #: Inbound tasks awaiting a result — in memory, per mesh.  A restart
+        #: starts empty: the bridge died with the process, so there is nothing
+        #: left to complete and nothing to carry forward.
+        self._inbound = InboundStore()
         self._responder = MeshResponder(
             agent_id=self.agent_name,
             mqtt=self._mqtt_cfg,
@@ -1444,12 +1432,6 @@ class A2AMesh:
             sender=self.agent_name,
             variables={"message_type": message_type},
         )
-        if message_type == "message":
-            # A plain message is the ONLY reply an orphaned task can still
-            # get (see :meth:`_unresolvable`) — answering the peer settles
-            # whatever inbound work this process' predecessor died holding,
-            # so the orphan notice drops it.
-            self._inbound.clear_stale_peer(agent)
         record = message_type == "task_request"
         if record:
             get_store().record_send(task_id, agent)
@@ -1556,13 +1538,15 @@ class A2AMesh:
         So an answer that arrived is not here; it is in the conversation, where
         the model already read it.
 
-        **Three statuses, and each is a different thing to do.**  `pending` is a
+        **Two statuses, and each is a different thing to do.**  `pending` is a
         task still running.  `unreachable` is an outbound one whose requester
         ladder ran out with no acknowledgement — a late answer can still arrive,
-        so re-sending without checking is the mistake (`_deliver`).  `stale` is
-        an inbound one a *previous* process died holding: it can never be
-        completed, and the only answer left is a plain message
-        (`InboundStore.stale`).
+        so re-sending without checking is the mistake (`_deliver`).
+
+        **A restart has no open tasks of its own.**  The inbound bridges died
+        with the previous process, so this process starts with none; a peer
+        still waiting is visible on *its* side, where `task_list` names what it
+        sent and never heard back about, and where it can cancel or re-send.
 
         `member` rather than the marker's `from`: a sent task's counterpart is
         the one it went to and a received one's is the one it came from, and
@@ -1571,7 +1555,7 @@ class A2AMesh:
         (`send.record` false) is a conversation and not a task, so it is not
         listed.
 
-        Pure state read: nothing here dials, and nothing writes a ledger.
+        Pure state read: nothing here dials and nothing is written down.
         """
         rows: list[dict] = []
         for task_id, send in self._sends.items():
@@ -1596,16 +1580,6 @@ class A2AMesh:
                     "direction": "received",
                     "status": "pending",
                     "since": task.since,
-                }
-            )
-        for stale in self._inbound.stale():
-            rows.append(
-                {
-                    "task_id": stale.task_id,
-                    "member": safe_name(stale.peer),
-                    "direction": "received",
-                    "status": "stale",
-                    "since": stale.since,
                 }
             )
         return sorted(rows, key=lambda row: row["since"] or "")
@@ -1643,26 +1617,15 @@ class A2AMesh:
     def _unresolvable(self, task_id: str) -> str:
         """Why a completion attempt found no bridge to resolve.
 
-        An id this process never registered is one of three very different
-        things, and they need different answers.  A *typo* means re-read the
-        marker.  A task **orphaned by a restart** can never be completed by
-        anyone: its bridge died with the process that held it, and so did the
-        peer's reply topic — which is read off the inbound request's MQTT
-        properties and is not reconstructible.  The only reply that peer can
-        still receive is a plain message, so say exactly that instead of
-        leaving the model to find the fallback by trial and error.  A task
-        **withdrawn by its sender** is the third: the id is real and the model
-        was handed it, so "check the marker" would send it re-reading a marker
-        that is correct.
+        Two ids this process does not hold need different answers.  A *typo*
+        means re-read the marker.  A task **withdrawn by its sender** is the
+        other: the id is real and the model was handed it, so "check the marker"
+        would send it re-reading a marker that is correct.  A task a *previous*
+        process held is deliberately not a third case — a restart drops those
+        bridges and carries nothing forward, so the id is simply one this
+        process never saw (the peer's own `task_list` is where the loss is
+        visible, and where it can cancel or re-send).
         """
-        orphan = self._inbound.stale_entry(task_id)
-        if orphan is not None:
-            return (
-                f"Error: task_id {task_id!r} arrived before this process "
-                f"started — its reply path died with the previous one, so no "
-                f"result can complete it now. Answer {orphan.peer} with "
-                f"message_type='message' instead (drop this task_id)."
-            )
         withdrawn_by = self._withdrawn.get(task_id)
         if withdrawn_by is not None:
             return (
@@ -1674,8 +1637,3 @@ class A2AMesh:
             f"Error: unknown task_id {task_id!r} — no inbound task with that "
             f"id is awaiting a result. Check the [PeerAgent:...] marker's task_id."
         )
-
-    def stale_inbound(self) -> list[dict]:
-        """Inbound tasks orphaned by a restart, oldest first — announced to the
-        model until their peers are answered."""
-        return [t.as_dict() for t in self._inbound.stale()]

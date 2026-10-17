@@ -698,7 +698,7 @@ distinguish it, each of them about *status* rather than about ability:
 **Its directory is inside its maker's, in one that says what it is.** Every
 subagent of `jack` lives under `agents/jack/subagents/`, and one directory in —
 `agents/jack/subagents/researcher/` — holds everything the subagent owns: its
-conversation, its cabinet, its ledger, its login, what it generated.  Because a
+conversation, its cabinet, its login, what it generated.  Because a
 directory is what an agent *is* here (§7), one level in, and **the container is
 what keeps that level from being a name the agent might also want**: `cabinet`,
 `media` and `turns.db` are `jack`'s own, and a subagent called `cabinet` would
@@ -1372,7 +1372,7 @@ for one login: a call from the raw name would build a second session, adopt the
 same token and start a second poll loop, delivering every message twice. The raw
 name is written beside the token, and a file too old to carry one is **skipped
 and named in the log** rather than resumed under a guessed name — the same answer
-an ownerless ledger gets from the schedule and A2A plugins.
+an ownerless schedule ledger gets from the scheduler.
 
 ### 8.2 The A2A mesh
 
@@ -1382,16 +1382,24 @@ envelopes, the task lifecycle and the requester's retry ladder — and what this
 package writes is the harness glue around it, because interop follows from the
 wire being somebody else's.
 
-Six rules here are this system's rather than the SDK's:
+Seven rules here are this system's rather than the SDK's:
 
 - **A window is what puts an agent online** (`join`), and presence is a *note*
   rather than a message: a peer coming online asks the model for nothing, and
   handing it to the conversation would spend a turn on a fact nobody has to act
   on.
-- **A task is completed out of band.** The SDK runs the protocol lifecycle inside
-  `on_request`, and this side blocks that call on a per-task outcome the model
-  resolves later — which is what lets an answer arrive many turns after the
-  request.
+- **A task is completed out of band, and by the model's own call.** The SDK runs
+  the protocol lifecycle inside `on_request`, and this side blocks that call on a
+  per-task outcome the model resolves later — `send_message(message_type=
+  "task_response")` settles the bridge before that call returns, which is what
+  lets an answer arrive many turns after the request. A turn that ends in prose
+  sends nothing: the harness injects the inbound message and does not speak for
+  the conversation, so the task stays visibly pending.
+- **A restart drops every in-flight inbound task.** The completion bridge and
+  the peer's reply topic are process-local; the in-flight table is in memory and
+  a fresh process starts empty. Nothing is remembered and nothing is announced —
+  the requester's `task_list` names the task it never heard back about, and a
+  re-send arrives as a fresh request with a fresh bridge.
 - **Outcome is one word, and it is the peer's own.** `mesh._reply_state`
   distinguishes completed, cancelled and failed, and the plugin renders *that*
   word: with the callback carrying a single `cancelled` flag, a peer whose

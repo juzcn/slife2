@@ -243,8 +243,6 @@ class Pacing:
     #: A fire whose due time is within this of "now" is freshly due; older, it
     #: was missed while slife2 was down.
     miss_grace: float = 120.0
-    #: One agent task's answer being redelivered after a channel refused it.
-    orphan_retry: float = 10.0
     #: How often a tunnel child is checked for life, and the delay before a
     #: spawn that failed is tried again.
     tunnel_health: float = 30.0

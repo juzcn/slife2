@@ -1394,15 +1394,13 @@ that appears afterwards takes the mesh down rather than fighting for the id, and
 card on the name's own topic, which would overwrite the survivor's card and
 leave it advertising as offline to every peer.
 
-**And a session is one `(home, agent)`, because a ledger, a card and a window are
-per home.**  A shared daemon serves every home on the machine (`known_homes`), so
-the walk that finds each mesh ledger finds it *in* one — `paths.Ledger`, the pair
-`schedule_dbs` returns and `a2a_inbound_paths` returns for the same reason — and
-the session key is that pair rather than the agent name, with each session's
-writer running inside `in_home` for its whole life.  Keying by the name alone was
-the defect `schedule` had one section over: a peer's message for *another* home's
-`jack` was delivered in this home, where the window refused it, and the orphan
-notice was built against a ledger that was empty.  What has not changed is the
+**And a session is one `(home, agent)`, because a card and a window are per
+home.**  A shared daemon serves every home on the machine (`known_homes`), so an
+agent's session is keyed by the home it was addressed in rather than the agent
+name alone, with each session's writer running inside `in_home` for its whole
+life.  Keying by the name alone was the defect `schedule` had one section over: a
+peer's message for *another* home's `jack` was delivered in this home, where the
+window refused it.  What has not changed is the
 broker's own answer to two homes' `jack`s: a name is an identity there (§4), the
 collision machinery above refuses the second, and the correct outcome is the
 refusal rather than the second silently attaching to the first one's mesh.
@@ -1426,22 +1424,21 @@ open for its life, so the connection, the retained card and the last will all
 end at the moment somebody stops looking, and a peer that watched it arrive
 watches it leave.  That is `attach`'s contract on the same window's inbox,
 reused because it answers the same question — is anybody there? — and it is why
-`resume` announces orphaned tasks and joins nothing.  A machine with nobody at a
-terminal is the case that question has a second answer for: `slife2 --headless`
-is that same window, holding the same call, with nothing drawn (§1.9).
+a start joins nothing.  A machine with nobody at a terminal is the case that
+question has a second answer for: `slife2 --headless` is that same window,
+holding the same call, with nothing drawn (§1.9).
 
-**The ledger is not the enrollment, and using it as one was the mistake.**  It
-is tempting — the file at `agents/<agent>/inbound.yaml` is already a per-agent record
-— but what it records is the *inbound tasks a process died holding*, which is a
-fact about work already received.  Read as an enrollment list it made presence
-mean "has spoken at least once, ever": a card on the broker for a conversation
-nobody was having, none at all for the window somebody had just opened, and a
-permanent one for every agent that had ever called a tool.  Comparing against
-`agents/` would be worse in exactly the way the old rule was meant to avoid.
-A tool call still joins its agent lazily and keeps it — what follows a send is a
-reply the agent is waiting for, so an agent with a task outstanding *is*
-reachable, and that reason is never given back because nothing here knows when
-the last reply arrived.
+**There is no persisted inbound record to mistake for enrollment.**  The
+in-flight table is in memory, per mesh, and a restart starts empty: the bridge
+died with the process, and a peer that is still waiting re-sends — the re-send
+is a fresh request with a fresh bridge.  An earlier build kept a per-agent
+`inbound.yaml` so a start could announce what its predecessor died holding; that
+notice could not settle anything (the only reply left was a plain message, which
+does not complete the peer's task either), and it made a file of past work look
+like a list of who is here.  A tool call still joins its agent lazily and keeps
+it — what follows a send is a reply the agent is waiting for, so an agent with a
+task outstanding *is* reachable, and that reason is never given back because
+nothing here knows when the last reply arrived.
 
 **The plugin delivers its own turns, and the drain tool was the seam.**  v1's
 harness polled `__a2a_drain_incoming` once a second and injected what it found
@@ -1468,30 +1465,19 @@ that said only "agent" would leave open which of the two agents is which — the
 very confusion `from` exists to prevent.  The payload survives the port for the
 reason `[Wechat:{…}]`'s keys do.
 
-**A restart orphans every inbound task, and the agent is told.**  The completion
-bridge and the peer's reply topic are both process-local — the latter is read off
-the inbound request's own MQTT properties and never leaves it — so a task in
-flight when a process dies can never be completed by anyone.  The ledger is the
-line between *orphaned* and *never seen*: written on arrival, removed on
-departure, so what a fresh process finds is exactly what its predecessor died
-holding.  v1 rode that list on every turn's prompt; there is no per-turn prompt
-here, so it is **one message handed over at the start that found it**, naming the
-one reply those tasks can still get — a plain message to the peer.
-
-**And it is queued rather than sent from there, which is a repair.** The start
-that finds an orphan is a start whose peers cannot run a turn yet: a turn's first
-step is the hub, the hub waits for every plugin (§4), so it is up *after* this
-one. A notice handed over on the spot is therefore lost by construction — and one
-that is not lost is worse, because the hand-over falls through to the agent
-server, that call runs a whole turn, and the deadline judging *this* plugin is
-ninety seconds against the turn's six hundred. So it goes onto the session's own
-queue, the one writer every arrival already takes, and it carries a retry:
-`False` — the one answer that proves nothing reached the conversation — puts it
-back, and `None` does not. Nothing a *peer* sent is ever offered twice, because a
-peer re-sends its own task when it gets no answer; a notice has nobody behind it,
-which is exactly why its delivery is this plugin's to repeat. That this plugin
-says something nobody asked for is the point rather than a lapse: the peer is
-waiting.
+**A restart drops every inbound task, and the peer is the one who re-sends.**
+The completion bridge and the peer's reply topic are both process-local — the
+latter is read off the inbound request's own MQTT properties and never leaves
+it — so a task in flight when a process dies can never be completed by anyone.
+The in-flight table is in memory and starts empty, which is the whole of the
+restart rule: nothing is remembered and nothing is announced. The party who can
+close the loop is the requester: its `task_list` names the task it sent and
+never heard back about, and a re-send arrives as a fresh request with a fresh
+bridge. An earlier build kept a `stale` record and gave the model a notice
+naming a plain message as the only reply those tasks could still get — but a
+plain message does not complete the requester's task either, so the notice
+could only apologize, not settle, and it was the harness speaking for a
+conversation it could not finish (§1.10).
 
 **Everything else the mesh delivers is a message too, with one exception, and
 that exception is presence.**  A task request is marked and answerable, an
@@ -2268,9 +2254,8 @@ first turn reaches both the hub and the store: the edge the other way would clos
 a cycle, and what makes leaving it out safe is that the agent server does nothing
 until a caller arrives — and a caller arrives either from a window, which exists
 only once the last wave is done, or from a plugin that is already waiting on the
-hub. The one exception is named where it lives: `a2a` hands over its orphan
-notice at its *own* start-up, before any of that is true, and it is the reason
-that notice's delivery is retried rather than attempted once (§1.8).
+hub. Nothing runs a turn at start-up: `a2a`'s own start only brings its broker
+up, which waits on nothing (§1.8).
 
 On top of that sits one piece of bookkeeping: each client registers itself, and
 the **last one out** stops the servers. Without it, the daemon rule would mean an

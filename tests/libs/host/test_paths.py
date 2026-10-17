@@ -13,11 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from slife2.libs.host.config import REMOTE
 from slife2.libs.host.paths import (
     DATA_ENV_VAR,
     RUNTIME_ENV_VAR,
-    a2a_inbound_paths,
     agent_dir,
     agents_dir,
     catalogue_db,
@@ -326,11 +324,11 @@ def test_a_home_is_registered_without_ever_truncating_the_record(
 
 
 def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The three files a shared plugin finds its agents by, per home.
+    """The two files a shared plugin finds its agents by, per home.
 
     Each is a walk of `agents/` because there is no registry of agents; with two
     homes there are two of each, and a daemon that walked only its own would
-    never fire the other's schedules, resume its logins or answer its peers.
+    never fire the other's schedules or resume its logins.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
     other = tmp_path / "other"
@@ -339,7 +337,6 @@ def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
         jack.mkdir(parents=True)
         (jack / "turns.db").write_bytes(b"")
         (jack / "schedule.db").write_bytes(b"")
-        (jack / "inbound.yaml").write_text("tasks: []\n", encoding="utf-8")
     register_home(other)
 
     assert [path.parent.parent.parent.name for path in turn_dbs()] == ["mine", "other"]
@@ -349,13 +346,6 @@ def test_the_walks_span_every_home(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
     found = schedule_dbs()
     assert [one.path.parent.parent.parent.name for one in found] == ["mine", "other"]
     assert [one.home.name for one in found] == ["mine", "other"]
-    # One network's, by name: the walk the remote mesh does, which must not pick
-    # up the local network's file for the same agent (`Net.ledger`).  Each comes
-    # with its home too, for `schedule_dbs`' reason: what is built out of one
-    # opens *that* file and hands its notice over in that home.
-    walked = a2a_inbound_paths(REMOTE.ledger)
-    assert [one.path.parent.parent.parent.name for one in walked] == ["mine", "other"]
-    assert [one.home.name for one in walked] == ["mine", "other"]
 
 
 def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
