@@ -55,7 +55,7 @@ from __future__ import annotations
 #: break that (add one import here, above this line) and the daemon start-up dies
 #: with "cannot import name `__version__`", in a file nobody was editing.
 #: Defined first, there is no order to get wrong.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import sys
@@ -79,8 +79,6 @@ from slife2.libs.host.paths import (
     register_home,
     skills_dir,
 )
-
-__version__ = "0.1.0"
 
 #: The subcommands, and what happens when none is named.
 _RUN = "run"

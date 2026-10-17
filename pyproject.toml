@@ -1,6 +1,6 @@
 [project]
 name = "slife2"
-version = "0.1.0"
+version = "0.2.0"
 description = "Terminal-based AI agent — slife v2, a clean-slate rebuild"
 readme = "README.md"
 license = { text = "MIT" }
