@@ -184,11 +184,11 @@ def database_path(agent: str, subagent: str = "") -> Path:
     argument DESIGN.md §5 makes for agents, applied one level down.
 
     **A subagent's store is its own directory**, `agents/<agent>/subagents/<subagent>/`,
-    because a subagent owns more than a conversation: it is an agent that
-    belongs to whoever made it rather than a means to an end inside one of that
-    agent's turns, so what it writes — this file, and the cabinet and the rest
-    that land beside it — is a directory someone can remove in one operation.
-    Who lays that directory out is `slife2.libs.host.paths.agent_dir`, and this
+    because a subagent is an agent that belongs to whoever made it rather than a
+    means to an end inside one of that agent's turns. Its conversation and its
+    `subagent.yaml` record are its own; the cabinet, media directory, schedule
+    ledger and WeChat login are keyed by the agent and remain the maker's. Who
+    lays the directory out is `slife2.libs.host.paths.agent_dir`, and this
     function is one line because of it: the layout belongs in one place, and the
     file name in another.
     """
