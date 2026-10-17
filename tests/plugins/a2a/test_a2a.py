@@ -3078,15 +3078,22 @@ async def test_a_members_turn_that_failed_is_logged_and_not_carried_on(
         failed.client = client
         session = local_member(tmp_path)
         session.mesh.on_inbound_task(AGENT, "this one fails", TASK)
+
+        def said() -> bool:
+            return any(
+                "a2a_delivery_failed" in record.getMessage()
+                and f"{AGENT}/tester" in record.getMessage()
+                for record in caplog.records
+            )
+
         with caplog.at_level(logging.ERROR, logger="slife2.plugins.a2a.server"):
-            await drain_until_idle(session, agent=failed)
+            # The turn's failure is the thing waited for; an empty queue only
+            # says the item was dequeued, and the fake agent server's round trip
+            # can outlast `drain_until_idle`'s one-pass grace under load.
+            await writer_until(session, said, agent=failed)
 
     assert len(failed.turns) == 1, "the turn was not attempted"
-    assert any(
-        "a2a_delivery_failed" in record.getMessage()
-        and f"{AGENT}/tester" in record.getMessage()
-        for record in caplog.records
-    ), "a member's turn that failed left no trace naming its conversation"
+    assert said(), "a member's turn that failed left no trace naming its conversation"
 
 
 @pytest.mark.asyncio
