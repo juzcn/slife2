@@ -20,6 +20,7 @@ import asyncio
 import logging
 from typing import Any
 
+import httpx2
 from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
@@ -92,8 +93,26 @@ class RemoteEmbedder:
         nothing worth embedding": they would keep no vector at all, and the hole
         in the index would be silent.  The count is the part a caller cannot
         recover from, so it is the part that fails.
+
+        **A read on an already-closed connection is retried once.**  The client
+        keeps its connection for the life of the process, and the server is free
+        to close an idle keep-alive connection between two catalogue merges —
+        which is what a busy start-up produces: the first listings embed while
+        the connection is fresh, then `agent-task` and `schedule` start (they
+        wait for the hub), and their listings are the first request after an
+        idle gap.  The failure is a `ReadError` with an empty message; the
+        client discards the dead connection, so the retry opens a new one.
+        Embedding is idempotent, which is what makes the repeat safe.  A second
+        failure is a server that is really gone and reaches the caller as before.
         """
-        payload = tool_payload(await self._client.call_tool("embed", {"texts": texts}))
+        try:
+            payload = tool_payload(
+                await self._client.call_tool("embed", {"texts": texts})
+            )
+        except (httpx2.ReadError, httpx2.RemoteProtocolError):
+            payload = tool_payload(
+                await self._client.call_tool("embed", {"texts": texts})
+            )
         vectors = payload.get("vectors")
         if not isinstance(vectors, list) or len(vectors) != len(texts):
             answered = len(vectors) if isinstance(vectors, list) else "no"
