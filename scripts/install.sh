@@ -285,7 +285,7 @@ install_node() {
 }
 
 install_cloudflared() {
-    local arch
+    local arch tmp
     case "$(uname -m)" in
         x86_64|amd64) arch=amd64 ;;
         aarch64|arm64) arch=arm64 ;;
@@ -293,10 +293,18 @@ install_cloudflared() {
     esac
     mkdir -p "$HOME/.local/bin"
     say "  downloading cloudflared"
-    curl -fL --progress-bar -o "$HOME/.local/bin/cloudflared" \
+    # **Download beside the destination and rename it into place.**  Writing
+    # over a `cloudflared` that is running fails with ETXTBSY ("Text file
+    # busy"), and the file-tunnel plugin keeps one running while an install can
+    # legitimately happen.  A rename replaces the name, not the running inode;
+    # the old process finishes on the old file and the next start reads the new
+    # one.
+    tmp=$(mktemp "$HOME/.local/bin/.cloudflared.XXXXXX") || return 1
+    curl -fL --progress-bar -o "$tmp" \
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" \
-        || return 1
-    chmod +x "$HOME/.local/bin/cloudflared"
+        || { rm -f "$tmp"; return 1; }
+    chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$HOME/.local/bin/cloudflared" || { rm -f "$tmp"; return 1; }
     refresh_path
 }
 

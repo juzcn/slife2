@@ -268,6 +268,88 @@ install_mosquitto
     )
 
 
+def test_cloudflared_upgrade_replaces_a_running_binary(tmp_path: Path) -> None:
+    """A running `cloudflared` may not be written over, only replaced by name.
+
+    The file-tunnel plugin keeps one running, and an install runs beside it.
+    `curl -o` on that path fails with ETXTBSY ("Text file busy"); downloading
+    to a temporary file and renaming it into place leaves the running inode
+    alone.  The fake curl writes to the `-o` target, so the old shape fails the
+    way the real one did.
+    """
+    if sys.platform != "linux":
+        pytest.skip("ETXTBSY is the Linux behaviour this pins")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(
+        stub_bin / "curl",
+        """\
+#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '#!/bin/sh\\necho new-cloudflared\\n' > "$out"
+""",
+    )
+
+    home = tmp_path / "home"
+    binaries = home / ".local" / "bin"
+    binaries.mkdir(parents=True)
+    running = binaries / "cloudflared"
+    shutil.copyfile("/bin/sleep", running)
+    running.chmod(0o755)
+    process = subprocess.Popen([str(running), "30"])
+
+    try:
+        match = re.search(
+            r"^install_cloudflared\(\) \{.*?^\}$",
+            SHELL.read_text(encoding="utf-8"),
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match, "install_cloudflared is missing from install.sh"
+        function_file = tmp_path / "function.sh"
+        function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+
+        harness = tmp_path / "harness.sh"
+        harness.write_text(
+            """\
+set -u
+say() { :; }
+refresh_path() { :; }
+. "$FUNCTION_FILE"
+install_cloudflared
+""",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [bash, str(harness)],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{stub_bin}:{os.environ['PATH']}",
+                "FUNCTION_FILE": str(function_file),
+            },
+        )
+    finally:
+        process.kill()
+        process.wait()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "new-cloudflared" in running.read_text(encoding="utf-8")
+    assert running.stat().st_mode & 0o111, "the replacement is executable"
+    assert not list(binaries.glob(".cloudflared.*")), "no temporary file is left"
+
+
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(HELPER), "require", "--home", str(home)],
