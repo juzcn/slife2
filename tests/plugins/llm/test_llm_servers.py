@@ -2484,7 +2484,7 @@ def test_the_matching_protocol_serves_every_provider_of_it(
     (mcp, address, _args) = served[0]
     # The address is the one the *protocol* listens on, not the provider's — a
     # provider has no address of its own.
-    assert address.url == "http://127.0.0.1:8001/mcp"
+    assert address.url == "http://127.0.0.1:24001/mcp"
     # And it is this server, by the name a client checks it by.
     assert mcp.name == openai_server.SERVER_NAME
 
@@ -2517,7 +2517,7 @@ def test_responses_is_served_on_its_own_port(tmp_path, monkeypatch) -> None:
     """A third protocol gets a third address, keyed by the `api` it speaks.
 
     Sharing a port with the chat-completions server is the mistake this
-    catches: both are "openai", and both would be reachable at :8001 if the
+    catches: both are "openai", and both would be reachable at :24001 if the
     registry keyed them by anything but the protocol.
     """
     from slife2.libs.plugin import protocol
@@ -2530,5 +2530,5 @@ def test_responses_is_served_on_its_own_port(tmp_path, monkeypatch) -> None:
 
     assert openai_responses_server.main([]) == 0
     (mcp, address, _args) = served[0]
-    assert address.url == "http://127.0.0.1:8003/mcp"
+    assert address.url == "http://127.0.0.1:24003/mcp"
     assert mcp.name == openai_responses_server.SERVER_NAME

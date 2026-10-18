@@ -386,9 +386,9 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     still unchecked.**
 
     `ServerSettings.url` writes the address as `host:port` with nothing around
-    it, so `host: "::1"` built `http://::1:8010/mcp` — and that is not a URL
-    whose port can be read: `urlsplit("http://::1:8010/mcp").port` raised
-    `ValueError: Port could not be cast to integer value as ':1:8010'` out of
+    it, so `host: "::1"` built `http://::1:24010/mcp` — and that is not a URL
+    whose port can be read: `urlsplit("http://::1:24010/mcp").port` raised
+    `ValueError: Port could not be cast to integer value as ':1:24010'` out of
     `start_lock`, in the start-up loop, after some servers were already up.
     `host: 0.0.0.0/x` is the same mistake from the other side: the path moves
     into the address and the port is gone.
@@ -476,7 +476,7 @@ def test_the_terminal_is_a_server_now(tmp_path) -> None:
     address is the port it always had, and a config can move it.
     """
     assert "tui" in slife2.libs.host.config.LOCAL_SERVERS
-    assert slife2.libs.host.config.default_config().server("tui").port == 8005
+    assert slife2.libs.host.config.default_config().server("tui").port == 24005
 
     moved = load(write(tmp_path, "servers:\n  tui:\n    port: 9005\n"))
     assert moved.server("tui").url == "http://127.0.0.1:9005/mcp"
@@ -907,7 +907,7 @@ def test_wsl_mirrored_networking_moves_every_port(
 ) -> None:
     """Windows is the native side; the WSL instance is the one that moves.
 
-    Mirrored mode makes the two loopbacks one, so a WSL stack on 8000/1883 is
+    Mirrored mode makes the two loopbacks one, so a WSL stack on 24000/1883 is
     visible to — and silently reused by — the Windows launcher.  The shift is
     applied in the config loader, which is what makes every server process
     resolve the same addresses: a client reads its peers from this config, not
@@ -917,15 +917,15 @@ def test_wsl_mirrored_networking_moves_every_port(
 
     config = load(write(tmp_path, NETWORKS))
 
-    assert config.port_offset == 1000
-    assert config.server("agent").port == 9000
-    assert config.agent.server.url == "http://127.0.0.1:9000/mcp", (
+    assert config.port_offset == 100
+    assert config.server("agent").port == 24100
+    assert config.agent.server.url == "http://127.0.0.1:24100/mcp", (
         "the window connects to the same shifted agent the launcher starts"
     )
-    assert config.server("toolhub").port == 9020
-    assert config.server("embeddings").port == 9004
-    assert config.subagent.network.broker_port == 2883
-    assert config.peer_agent.broker_port == 2883
+    assert config.server("toolhub").port == 24120
+    assert config.server("embeddings").port == 24104
+    assert config.subagent.network.broker_port == 1983
+    assert config.peer_agent.broker_port == 1983
 
 
 def test_wsl_port_offset_overrides_the_default(
@@ -936,7 +936,7 @@ def test_wsl_port_offset_overrides_the_default(
     config = load(write(tmp_path, "wsl_port_offset: 250\n" + NETWORKS))
 
     assert config.port_offset == 250
-    assert config.server("agent").port == 8250
+    assert config.server("agent").port == 24250
     assert config.subagent.network.broker_port == 2133
 
 
@@ -948,16 +948,16 @@ def test_zero_wsl_port_offset_disables_the_shift(
     config = load(write(tmp_path, "wsl_port_offset: 0\n" + NETWORKS))
 
     assert config.port_offset == 0
-    assert config.server("agent").port == 8000
+    assert config.server("agent").port == 24000
     assert config.subagent.network.broker_port == 1883
 
 
 def test_the_offset_is_ignored_outside_wsl_mirrored(tmp_path) -> None:
     """The key is about WSL's shared loopback, not a general port knob."""
-    config = load(write(tmp_path, "wsl_port_offset: 1000\n" + NETWORKS))
+    config = load(write(tmp_path, "wsl_port_offset: 100\n" + NETWORKS))
 
     assert config.port_offset == 0
-    assert config.server("agent").port == 8000
+    assert config.server("agent").port == 24000
     assert config.subagent.network.broker_port == 1883
 
 
@@ -969,12 +969,12 @@ def test_a_remote_broker_is_not_moved_by_the_offset(
     config = load(
         write(
             tmp_path,
-            "wsl_port_offset: 1000\n"
+            "wsl_port_offset: 100\n"
             "peer_agent:\n  broker: {host: mq.example.test, port: 1883}\n",
         )
     )
 
-    assert config.server("agent").port == 9000
+    assert config.server("agent").port == 24100
     assert config.peer_agent.broker_port == 1883
 
 
@@ -1122,7 +1122,7 @@ def test_a_disabled_entry_is_configured_but_not_connected(tmp_path) -> None:
 
 
 def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:
-    assert default_config().server("toolhub").port == 8020
+    assert default_config().server("toolhub").port == 24020
     with pytest.raises(ConfigError, match="not a server this system runs"):
         load(write(tmp_path, "servers:\n  nonsense: {port: 9}\n"))
 

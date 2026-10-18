@@ -254,34 +254,34 @@ slife2 [COMMAND] [OPTIONS]
 
 | 可执行文件 | server | 默认端口 |
 |---|---|---|
-| `slife2-agent` | agent 主循环与对话 | 8000 |
-| `slife2-llm-openai` | OpenAI 兼容 chat completions | 8001 |
-| `slife2-llm-anthropic` | Anthropic Messages | 8002 |
-| `slife2-llm-openai-responses` | OpenAI Responses | 8003 |
-| `slife2-llm-embeddings` | embeddings | 8004 |
-| `slife2-tui` | 终端收件箱，每个 agent 一个会话 | 8005 |
-| `slife2-context` | 轮次日志与上下文决策 | 8010 |
-| `slife2-toolhub` | 工具目录与模型工具清单 | 8020 |
-| `slife2-wechat` | 微信登录与消息 | 8030 |
-| `slife2-skills` | playbook 与 `skill_use` | 8031 |
-| `slife2-cli` | `cli:` 节 | 8032 |
-| `slife2-mcp-tools` | `mcp:` 节 | 8033 |
-| `slife2-restapi-tools` | `rest-api:` 节 | 8034 |
-| `slife2-cabinet` | 笔记、日记、文件、报告、dump | 8035 |
-| `slife2-media` | 图片、视频、语音、转写 | 8036 |
-| `slife2-agent-task` | 后台 agent 任务 | 8037 |
-| `slife2-file-tunnel` | 本地文件的公开 HTTPS URL | 8038 |
-| `slife2-schedule` | 定时任务及其账本 | 8039 |
-| `slife2-a2a` | 基于 MQTT 的 peer agent 网络 | 8040 |
+| `slife2-agent` | agent 主循环与对话 | 24000 |
+| `slife2-llm-openai` | OpenAI 兼容 chat completions | 24001 |
+| `slife2-llm-anthropic` | Anthropic Messages | 24002 |
+| `slife2-llm-openai-responses` | OpenAI Responses | 24003 |
+| `slife2-llm-embeddings` | embeddings | 24004 |
+| `slife2-tui` | 终端收件箱，每个 agent 一个会话 | 24005 |
+| `slife2-context` | 轮次日志与上下文决策 | 24010 |
+| `slife2-toolhub` | 工具目录与模型工具清单 | 24020 |
+| `slife2-wechat` | 微信登录与消息 | 24030 |
+| `slife2-skills` | playbook 与 `skill_use` | 24031 |
+| `slife2-cli` | `cli:` 节 | 24032 |
+| `slife2-mcp-tools` | `mcp:` 节 | 24033 |
+| `slife2-restapi-tools` | `rest-api:` 节 | 24034 |
+| `slife2-cabinet` | 笔记、日记、文件、报告、dump | 24035 |
+| `slife2-media` | 图片、视频、语音、转写 | 24036 |
+| `slife2-agent-task` | 后台 agent 任务 | 24037 |
+| `slife2-file-tunnel` | 本地文件的公开 HTTPS URL | 24038 |
+| `slife2-schedule` | 定时任务及其账本 | 24039 |
+| `slife2-a2a` | 基于 MQTT 的 peer agent 网络 | 24040 |
 
-subagent 网络由同一个模块在 8041 端口提供，通过
+subagent 网络由同一个模块在 24041 端口提供，通过
 `python -m slife2.plugins.a2a.local_server` 启动；它没有单独的命令行脚本。
 
 **在 WSL2 的 `networkingMode=mirrored` 模式下，WSL 实例会把这些端口整体偏移
-1000**（agent 9000、toolhub 9020、本机 MQTT broker 2883）。mirrored 模式让
+100**（agent 24100、toolhub 24120、本机 MQTT broker 1983）。mirrored 模式让
 Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，会被 Windows
 实例发现并静默复用。Windows 侧保持文档中的默认端口。偏移量由 WSL 的
-`slife2.yaml` 里的 `wsl_port_offset` 控制：默认 1000，设为 `0` 可关闭，
+`slife2.yaml` 里的 `wsl_port_offset` 控制：默认 100，设为 `0` 可关闭，
 在非 WSL mirrored 环境中该键会被忽略。
 
 ## 使用终端界面

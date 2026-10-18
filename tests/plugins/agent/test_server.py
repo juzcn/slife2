@@ -1723,7 +1723,7 @@ async def test_opening_a_loop_fails_when_the_context_store_is_gone(
 
     The store here is a URL nothing is listening on, which is what a `slife2
     down` looks like from the agent server's side.  Port 9 rather than the
-    configured 8010, which would make this pass or fail on whether the developer
+    configured 24010, which would make this pass or fail on whether the developer
     happens to have slife2 running.
 
     **The sentence asserted is `open_server`'s, so the dial is the subject** and

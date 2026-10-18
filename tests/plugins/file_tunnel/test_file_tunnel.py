@@ -821,5 +821,5 @@ def test_the_shipped_config_reaches_the_plugin() -> None:
     or the plugin starts with no address to forward to."""
     root = REPO
     config = load(root / "slife2.yaml")
-    assert config.server("file-tunnel").port == 8038
+    assert config.server("file-tunnel").port == 24038
     assert "file-tunnel" in config.plugins()

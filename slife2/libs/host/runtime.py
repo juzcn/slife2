@@ -46,8 +46,8 @@ _LOG_KEEP_BYTES = 4 * 1024 * 1024
 def normalize_url(url: str) -> str:
     """Canonical form of an endpoint, so two spellings are one server.
 
-    Records are keyed by this.  Without it ``http://localhost:8001/mcp`` and
-    ``http://127.0.0.1:8001/mcp`` would be two servers sharing one port.
+    Records are keyed by this.  Without it ``http://localhost:24001/mcp`` and
+    ``http://127.0.0.1:24001/mcp`` would be two servers sharing one port.
     """
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
@@ -76,7 +76,7 @@ def endpoint_key(url: str) -> str:
 def agent_key(name: str) -> str:
     """The digest naming one agent's files.
 
-    Prefixed so an agent called ``http://127.0.0.1:8000/mcp`` cannot collide
+    Prefixed so an agent called ``http://127.0.0.1:24000/mcp`` cannot collide
     with the server at that address.
     """
     return digest(f"agent:{name}")

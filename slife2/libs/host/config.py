@@ -450,7 +450,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.llm.openai_server",
         name="slife2-llm-openai",
         probe=MODEL_TOOL,
-        port=8001,
+        port=24001,
         api=True,
     ),
     Plugin(
@@ -458,7 +458,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.llm.anthropic_server",
         name="slife2-llm-anthropic",
         probe=MODEL_TOOL,
-        port=8002,
+        port=24002,
         api=True,
     ),
     Plugin(
@@ -466,7 +466,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.llm.openai_responses_server",
         name="slife2-llm-openai-responses",
         probe=MODEL_TOOL,
-        port=8003,
+        port=24003,
         api=True,
     ),
     # Embeddings are an OpenAI-protocol endpoint and *not* one of the three
@@ -481,7 +481,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.llm.embeddings_server",
         name="slife2-llm-embeddings",
         probe="describe",
-        port=8004,
+        port=24004,
     ),
     # A conversation's memory: the turn log, and the decision about which of its
     # turns a turn runs on.  It identifies itself by `remember`, the write
@@ -491,7 +491,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.context.server",
         name="slife2-context",
         probe="remember",
-        port=8010,
+        port=24010,
     ),
     # The two families that are not tools but have to be findable, each owned by
     # the process that owns its config section: the playbooks in `<data>/skills/`
@@ -508,14 +508,14 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.skills.server",
         name="slife2-skills",
         probe="skill_use",
-        port=8031,
+        port=24031,
     ),
     Plugin(
         key="cli-server",
         module="slife2.plugins.cli.server",
         name="slife2-cli",
         probe="list_sources",
-        port=8032,
+        port=24032,
     ),
     # The two whose whole job is somebody else's servers: the `mcp:` section and
     # the `rest-api:` one.  They hold the connections the toolhub used to hold,
@@ -527,14 +527,14 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.mcp_tools.server",
         name="slife2-mcp-tools",
         probe="list_sources",
-        port=8033,
+        port=24033,
     ),
     Plugin(
         key="restapi-tools",
         module="slife2.plugins.restapi.server",
         name="slife2-restapi-tools",
         probe="list_sources",
-        port=8034,
+        port=24034,
     ),
     # WeChat, and the one plugin here that is nobody's family: it declares no
     # catalogue rows and owns no entries, and what it holds is a login per agent
@@ -551,7 +551,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.wechat.server",
         name="slife2-wechat",
         probe="wechat_check_status",
-        port=8030,
+        port=24030,
     ),
     # The private cabinet: notes, a diary, saved files and reports, one corpus
     # per agent under `<data>/agents/<agent>/cabinet/`.  It reads no config
@@ -564,7 +564,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.cabinet.server",
         name="slife2-cabinet",
         probe="note_list",
-        port=8035,
+        port=24035,
     ),
     # Rendering, speech and transcription, behind `media:`.  A plugin for §1.1's
     # table — it holds a provider's key and speaks to somebody else's endpoint —
@@ -576,7 +576,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.media.server",
         name="slife2-media",
         probe="generate_image",
-        port=8036,
+        port=24036,
     ),
     # A public HTTPS URL for a local file, so something that cannot read this
     # machine's disk — a vision model, a chat API that takes links — can fetch
@@ -592,7 +592,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.file_tunnel.server",
         name="slife2-file-tunnel",
         probe="expose_local_image",
-        port=8038,
+        port=24038,
     ),
     # The terminal's own inbox: where a channel hands a message so that the
     # window showing that conversation runs it as something the person typed.
@@ -609,7 +609,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.tui.server",
         name="slife2-tui",
         probe="attach",
-        port=8005,
+        port=24005,
     ),
     # The model's tools, and the only process that decides what they are.  It
     # holds no credential and no connection to anybody's server: every plugin
@@ -622,7 +622,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.toolhub.server",
         name="slife2-toolhub",
         probe="list_tools",
-        port=8020,
+        port=24020,
     ),
     # The loop itself, shared by every conversation on this machine and
     # stateless: the agent name is passed in on each call.  A plugin because what
@@ -634,7 +634,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.agent.server",
         name="slife2-agent",
         probe="send_message",
-        port=8000,
+        port=24000,
     ),
     # Background tasks: a loop of the calling agent's own, one per task, answered
     # by a message in the conversation that asked for it.  A plugin because what
@@ -651,7 +651,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.agent_task.server",
         name="slife2-agent-task",
         probe="agent_task_list",
-        port=8037,
+        port=24037,
     ),
     # The clock: the one thing here that starts work nobody asked for at the
     # moment it starts, and the ledger of what it fired — what one agent has
@@ -664,7 +664,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.schedule.server",
         name="slife2-schedule",
         probe="schedule_list",
-        port=8039,
+        port=24039,
     ),
     # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT profile.
     # A plugin for §1.1's reason — what it holds is somebody else's connection —
@@ -686,7 +686,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.a2a.server",
         name="slife2-a2a",
         probe=REMOTE.tool(LIST),
-        port=8040,
+        port=24040,
     ),
     # The **local** network: the same module, one port over, and the other half
     # of sdd §3.5's pair.  It is here rather than absent for `a2a`'s reason read
@@ -705,7 +705,7 @@ PLUGINS: tuple[Plugin, ...] = (
         module="slife2.plugins.a2a.local_server",
         name="slife2-subagent",
         probe=LOCAL.tool(LIST),
-        port=8041,
+        port=24041,
     ),
 )
 
@@ -963,7 +963,7 @@ class ServerSettings:
     """Where one MCP server listens."""
 
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 24000
     path: str = "/mcp"
 
     @property
@@ -2152,7 +2152,7 @@ def default_config() -> Config:
 #: reuse, the servers a WSL instance started.  Two WSL distributions in mirrored
 #: mode still share one another's loopback; the shift moves one stack aside, not
 #: every stack on the machine.
-WSL_MIRRORED_PORT_OFFSET = 1000
+WSL_MIRRORED_PORT_OFFSET = 100
 
 #: Whether this process already asked the platform.  WSL's networking mode
 #: cannot change under a running process, and every server loads this config.
@@ -2471,7 +2471,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     # `tui:` used to be a section of its own, and a config written before that
     # changed would still parse — every other key in it is optional, so the
     # section would simply be ignored and a port somebody chose would quietly
-    # revert to 8005.  Refused rather than migrated, because the fix is one
+    # revert to 24005.  Refused rather than migrated, because the fix is one
     # indentation and the failure is silent either way.
     if raw.get("tui") is not None:
         raise ConfigError(
@@ -3461,12 +3461,12 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         # **The first of the three fields, and the last to be refused.**  `port`
         # and `path` are refused below and the host was copied through,
         # so `host: "::1"` — the natural spelling of an IPv6 loopback, and one
-        # `a2a.broker.host` accepts — built `http://::1:8010/mcp`.
+        # `a2a.broker.host` accepts — built `http://::1:24010/mcp`.
         # `ServerSettings.url` writes the address as `host:port` and puts no
         # brackets on it, so the first thing to *read* that URL
         # (`runtime.normalize_url`'s `urlsplit(...).port`, inside `start_lock`)
         # raised `ValueError: Port could not be cast to integer value as
-        # ':1:8010'` — after some servers were already up, in a command that
+        # ':1:24010'` — after some servers were already up, in a command that
         # answers every bad field with one sentence and catches `ConfigError`.
         # A `/` is the same mistake the other way: `host: 0.0.0.0/x` moves the
         # path into the address, and the port is then not there at all.
@@ -3494,7 +3494,7 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         # `port` are read one line up and `path` was copied through, so `path: mcp`
         # was accepted and `ServerSettings.url` concatenates the two halves
         # with nothing between them: the endpoint became
-        # `http://127.0.0.1:8005mcp`, whose *port* is the string `8005mcp`.
+        # `http://127.0.0.1:24005mcp`, whose *port* is the string `24005mcp`.
         # Nothing raised here — the first thing to read the URL does
         # (`runtime.normalize_url`'s `urlsplit(...).port`, inside
         # `start_lock`), so the typo arrived as a `ValueError` out of the

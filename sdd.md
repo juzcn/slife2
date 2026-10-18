@@ -1967,26 +1967,26 @@ The following table is informative and reflects the registry at version 0.2.0.
 
 | Key | MCP name | Module | Default port |
 |---|---|---|---|
-| `openai-completions` | `slife2-llm-openai` | `slife2.plugins.llm.openai_server` | 8001 |
-| `anthropic-messages` | `slife2-llm-anthropic` | `slife2.plugins.llm.anthropic_server` | 8002 |
-| `openai-responses` | `slife2-llm-openai-responses` | `slife2.plugins.llm.openai_responses_server` | 8003 |
-| `embeddings` | `slife2-llm-embeddings` | `slife2.plugins.llm.embeddings_server` | 8004 |
-| `context` | `slife2-context` | `slife2.plugins.context.server` | 8010 |
-| `skills-server` | `slife2-skills` | `slife2.plugins.skills.server` | 8031 |
-| `cli-server` | `slife2-cli` | `slife2.plugins.cli.server` | 8032 |
-| `mcp-tools` | `slife2-mcp-tools` | `slife2.plugins.mcp_tools.server` | 8033 |
-| `restapi-tools` | `slife2-restapi-tools` | `slife2.plugins.restapi.server` | 8034 |
-| `wechat` | `slife2-wechat` | `slife2.plugins.wechat.server` | 8030 |
-| `cabinet` | `slife2-cabinet` | `slife2.plugins.cabinet.server` | 8035 |
-| `media` | `slife2-media` | `slife2.plugins.media.server` | 8036 |
-| `file-tunnel` | `slife2-file-tunnel` | `slife2.plugins.file_tunnel.server` | 8038 |
-| `tui` | `slife2-tui` | `slife2.plugins.tui.server` | 8005 |
-| `toolhub` | `slife2-toolhub` | `slife2.plugins.toolhub.server` | 8020 |
-| `agent` | `slife2-agent` | `slife2.plugins.agent.server` | 8000 |
-| `agent-task` | `slife2-agent-task` | `slife2.plugins.agent_task.server` | 8037 |
-| `schedule` | `slife2-schedule` | `slife2.plugins.schedule.server` | 8039 |
-| `peer_agent` | `slife2-a2a` | `slife2.plugins.a2a.server` | 8040 |
-| `subagent` | `slife2-subagent` | `slife2.plugins.a2a.local_server` | 8041 |
+| `openai-completions` | `slife2-llm-openai` | `slife2.plugins.llm.openai_server` | 24001 |
+| `anthropic-messages` | `slife2-llm-anthropic` | `slife2.plugins.llm.anthropic_server` | 24002 |
+| `openai-responses` | `slife2-llm-openai-responses` | `slife2.plugins.llm.openai_responses_server` | 24003 |
+| `embeddings` | `slife2-llm-embeddings` | `slife2.plugins.llm.embeddings_server` | 24004 |
+| `context` | `slife2-context` | `slife2.plugins.context.server` | 24010 |
+| `skills-server` | `slife2-skills` | `slife2.plugins.skills.server` | 24031 |
+| `cli-server` | `slife2-cli` | `slife2.plugins.cli.server` | 24032 |
+| `mcp-tools` | `slife2-mcp-tools` | `slife2.plugins.mcp_tools.server` | 24033 |
+| `restapi-tools` | `slife2-restapi-tools` | `slife2.plugins.restapi.server` | 24034 |
+| `wechat` | `slife2-wechat` | `slife2.plugins.wechat.server` | 24030 |
+| `cabinet` | `slife2-cabinet` | `slife2.plugins.cabinet.server` | 24035 |
+| `media` | `slife2-media` | `slife2.plugins.media.server` | 24036 |
+| `file-tunnel` | `slife2-file-tunnel` | `slife2.plugins.file_tunnel.server` | 24038 |
+| `tui` | `slife2-tui` | `slife2.plugins.tui.server` | 24005 |
+| `toolhub` | `slife2-toolhub` | `slife2.plugins.toolhub.server` | 24020 |
+| `agent` | `slife2-agent` | `slife2.plugins.agent.server` | 24000 |
+| `agent-task` | `slife2-agent-task` | `slife2.plugins.agent_task.server` | 24037 |
+| `schedule` | `slife2-schedule` | `slife2.plugins.schedule.server` | 24039 |
+| `peer_agent` | `slife2-a2a` | `slife2.plugins.a2a.server` | 24040 |
+| `subagent` | `slife2-subagent` | `slife2.plugins.a2a.local_server` | 24041 |
 
 The probe tool for each plugin is the tool that identifies it when its
 `server_info` does not carry the expected name. The four model backends probe

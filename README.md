@@ -271,36 +271,36 @@ or for debugging a single server.
 
 | Executable | Server | Default port |
 |---|---|---|
-| `slife2-agent` | Agent loop and conversations | 8000 |
-| `slife2-llm-openai` | OpenAI-compatible chat completions | 8001 |
-| `slife2-llm-anthropic` | Anthropic Messages | 8002 |
-| `slife2-llm-openai-responses` | OpenAI Responses | 8003 |
-| `slife2-llm-embeddings` | Embeddings | 8004 |
-| `slife2-tui` | Terminal inbox, one session per agent | 8005 |
-| `slife2-context` | Turn log and context decision | 8010 |
-| `slife2-toolhub` | Tool catalogue and model tool list | 8020 |
-| `slife2-wechat` | WeChat login and messaging | 8030 |
-| `slife2-skills` | Playbooks and `skill_use` | 8031 |
-| `slife2-cli` | The `cli:` section | 8032 |
-| `slife2-mcp-tools` | The `mcp:` section | 8033 |
-| `slife2-restapi-tools` | The `rest-api:` section | 8034 |
-| `slife2-cabinet` | Notes, diary, files, reports, dumps | 8035 |
-| `slife2-media` | Image, video, speech, transcription | 8036 |
-| `slife2-agent-task` | Background agent tasks | 8037 |
-| `slife2-file-tunnel` | Public HTTPS URL for a local file | 8038 |
-| `slife2-schedule` | Scheduled tasks and their ledger | 8039 |
-| `slife2-a2a` | Peer-agent network over MQTT | 8040 |
+| `slife2-agent` | Agent loop and conversations | 24000 |
+| `slife2-llm-openai` | OpenAI-compatible chat completions | 24001 |
+| `slife2-llm-anthropic` | Anthropic Messages | 24002 |
+| `slife2-llm-openai-responses` | OpenAI Responses | 24003 |
+| `slife2-llm-embeddings` | Embeddings | 24004 |
+| `slife2-tui` | Terminal inbox, one session per agent | 24005 |
+| `slife2-context` | Turn log and context decision | 24010 |
+| `slife2-toolhub` | Tool catalogue and model tool list | 24020 |
+| `slife2-wechat` | WeChat login and messaging | 24030 |
+| `slife2-skills` | Playbooks and `skill_use` | 24031 |
+| `slife2-cli` | The `cli:` section | 24032 |
+| `slife2-mcp-tools` | The `mcp:` section | 24033 |
+| `slife2-restapi-tools` | The `rest-api:` section | 24034 |
+| `slife2-cabinet` | Notes, diary, files, reports, dumps | 24035 |
+| `slife2-media` | Image, video, speech, transcription | 24036 |
+| `slife2-agent-task` | Background agent tasks | 24037 |
+| `slife2-file-tunnel` | Public HTTPS URL for a local file | 24038 |
+| `slife2-schedule` | Scheduled tasks and their ledger | 24039 |
+| `slife2-a2a` | Peer-agent network over MQTT | 24040 |
 
-The subagent network is served by the same module on port 8041 and is started
+The subagent network is served by the same module on port 24041 and is started
 as `python -m slife2.plugins.a2a.local_server`; it has no separate console
 script.
 
 **On WSL2 with `networkingMode=mirrored`, the WSL instance shifts these ports
-by 1000** (agent 9000, toolhub 9020, the local MQTT broker 2883). Mirrored mode
+by 100** (agent 24100, toolhub 24120, the local MQTT broker 1983). Mirrored mode
 makes the Windows and WSL loopbacks one, so a WSL stack on the default ports
 would be visible to — and silently reused by — a Windows instance. The Windows
 side keeps the documented ports. `wsl_port_offset` in the WSL `slife2.yaml`
-changes the shift: it defaults to 1000, may be `0` to disable it, and is
+changes the shift: it defaults to 100, may be `0` to disable it, and is
 ignored outside WSL's mirrored mode.
 
 ## Using the terminal UI

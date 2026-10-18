@@ -13,34 +13,34 @@
 
 # Shift every port by this much in WSL2 mirrored mode (Windows and WSL share
 # loopback); ignored elsewhere. 0 disables it.
-wsl_port_offset: 1000
+wsl_port_offset: 100
 
 servers:
   # One process per wire protocol; the address is 127.0.0.1:<port>/mcp.
-  openai-completions: {port: 8001}
-  anthropic-messages: {port: 8002}
-  openai-responses: {port: 8003}
-  embeddings: {port: 8004}
+  openai-completions: {port: 24001}
+  anthropic-messages: {port: 24002}
+  openai-responses: {port: 24003}
+  embeddings: {port: 24004}
   # The agent loop, the context store and the tool set.
-  agent: {port: 8000}
-  context: {port: 8010}
-  toolhub: {port: 8020}
+  agent: {port: 24000}
+  context: {port: 24010}
+  toolhub: {port: 24020}
   # The two families that hold other people's servers.
-  mcp-tools: {port: 8033}
-  restapi-tools: {port: 8034}
+  mcp-tools: {port: 24033}
+  restapi-tools: {port: 24034}
   # The two families built from documents.
-  cli-server: {port: 8032}
-  skills-server: {port: 8031}
+  cli-server: {port: 24032}
+  skills-server: {port: 24031}
   # Capabilities.
-  wechat: {port: 8030}
-  cabinet: {port: 8035}
-  tui: {port: 8005}
-  schedule: {port: 8039}
-  peer_agent: {port: 8040}
-  subagent: {port: 8041}
-  media: {port: 8036}
-  file-tunnel: {port: 8038}
-  agent-task: {port: 8037}
+  wechat: {port: 24030}
+  cabinet: {port: 24035}
+  tui: {port: 24005}
+  schedule: {port: 24039}
+  peer_agent: {port: 24040}
+  subagent: {port: 24041}
+  media: {port: 24036}
+  file-tunnel: {port: 24038}
+  agent-task: {port: 24037}
 
 providers:
   # `api` selects the wire protocol. Models are referenced as `provider/model`.

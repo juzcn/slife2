@@ -522,11 +522,11 @@ def test_specs_carry_where_each_server_listens() -> None:
     )
     assert (spec.host, spec.port, spec.expected_name, spec.expected_tool) == (
         "127.0.0.1",
-        8001,
+        24001,
         "slife2-llm-openai",
         "stream_chat",
     )
-    assert spec.url == "http://127.0.0.1:8001/mcp"
+    assert spec.url == "http://127.0.0.1:24001/mcp"
 
 
 # --- ensure ------------------------------------------------------------------
@@ -535,9 +535,9 @@ def test_specs_carry_where_each_server_listens() -> None:
 SPEC = ServerSpec(
     name="llm:openai-completions",
     module="slife2.plugins.llm.openai_server",
-    url="http://127.0.0.1:8001/mcp",
+    url="http://127.0.0.1:24001/mcp",
     host="127.0.0.1",
-    port=8001,
+    port=24001,
     expected_name="slife2-llm-openai",
     expected_tool="stream_chat",
 )
@@ -807,7 +807,7 @@ def test_a_held_port_that_is_not_ours_is_a_conflict(
     outcome = launcher.ensure(SPEC)
     assert outcome.status is Status.CONFLICT
     assert not outcome.ok
-    assert "8001" in outcome.detail
+    assert "24001" in outcome.detail
 
 
 def test_a_missing_server_is_spawned_and_recorded(
