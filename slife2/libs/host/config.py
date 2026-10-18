@@ -2266,6 +2266,11 @@ def _with_port_offset(config: Config, offset: int) -> Config:
     return replace(
         config,
         servers=servers,
+        # `AgentSettings.server` is the same object `servers["agent"]` was at
+        # build time; replacing the mapping alone would leave the window
+        # connecting to the unshifted address while the launcher started the
+        # shifted one.
+        agent=replace(config.agent, server=servers["agent"]),
         subagent=replace(
             config.subagent,
             network=_shift_broker(

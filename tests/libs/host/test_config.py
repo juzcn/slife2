@@ -919,6 +919,9 @@ def test_wsl_mirrored_networking_moves_every_port(
 
     assert config.port_offset == 1000
     assert config.server("agent").port == 9000
+    assert config.agent.server.url == "http://127.0.0.1:9000/mcp", (
+        "the window connects to the same shifted agent the launcher starts"
+    )
     assert config.server("toolhub").port == 9020
     assert config.server("embeddings").port == 9004
     assert config.subagent.network.broker_port == 2883
