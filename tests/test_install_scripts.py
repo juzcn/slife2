@@ -350,6 +350,69 @@ install_cloudflared
     assert not list(binaries.glob(".cloudflared.*")), "no temporary file is left"
 
 
+def test_cloudflared_upgrade_is_skipped_when_the_version_matches(
+    tmp_path: Path,
+) -> None:
+    """`ensure_tool` asks before downloading forty megabytes again.
+
+    The release's "latest" URL redirects to a tag; reading that redirect is one
+    small request where the binary is tens of megabytes, and an install that
+    changed nothing should not re-download it.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the installer's cloudflared path is POSIX-only")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(
+        stub_bin / "curl",
+        """\
+#!/bin/sh
+printf 'https://github.com/cloudflare/cloudflared/releases/tag/%s\\n' "$LATEST"
+""",
+    )
+    home = tmp_path / "home"
+    binaries = home / ".local" / "bin"
+    binaries.mkdir(parents=True)
+    _write_executable(
+        binaries / "cloudflared",
+        """\
+#!/bin/sh
+echo "cloudflared version $INSTALLED (built now)"
+""",
+    )
+
+    match = re.search(
+        r"^cloudflared_current\(\) \{.*?^\}$",
+        SHELL.read_text(encoding="utf-8"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "cloudflared_current is missing from install.sh"
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+
+    def current(installed: str) -> int:
+        return subprocess.run(
+            [bash, "-c", '. "$FUNCTION_FILE"; cloudflared_current'],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{stub_bin}:{os.environ['PATH']}",
+                "FUNCTION_FILE": str(function_file),
+                "LATEST": "2026.10.1",
+                "INSTALLED": installed,
+            },
+        ).returncode
+
+    assert current("2026.10.1") == 0
+    assert current("2026.9.0") == 1
+
+
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(HELPER), "require", "--home", str(home)],

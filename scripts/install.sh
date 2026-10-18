@@ -284,6 +284,16 @@ install_node() {
     refresh_path
 }
 
+cloudflared_current() {
+    local installed latest
+    installed=$("$HOME/.local/bin/cloudflared" --version 2>/dev/null | awk '{print $3}')
+    [ -n "$installed" ] || return 1
+    latest=$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+        "https://github.com/cloudflare/cloudflared/releases/latest" 2>/dev/null \
+        | sed -n 's|.*/tag/||p')
+    [ -n "$latest" ] && [ "$latest" = "$installed" ]
+}
+
 install_cloudflared() {
     local arch tmp
     case "$(uname -m)" in
@@ -385,7 +395,9 @@ ensure_tool() {  # executable provenance
             ;;
         cloudflared)
             if [ -e "$HOME/.local/bin/cloudflared" ]; then
-                if install_cloudflared; then
+                if cloudflared_current; then
+                    say "  cloudflared is up to date"
+                elif install_cloudflared; then
                     say "  upgraded cloudflared"
                 fi
                 return 0
