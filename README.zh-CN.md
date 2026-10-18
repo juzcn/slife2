@@ -278,7 +278,8 @@ subagent 网络由同一个模块在 24041 端口提供，通过
 `python -m slife2.plugins.a2a.local_server` 启动；它没有单独的命令行脚本。
 
 **在 WSL2 的 `networkingMode=mirrored` 模式下，WSL 实例会把这些端口整体偏移
-100**（agent 24100、toolhub 24120、本机 MQTT broker 1983）。mirrored 模式让
+100**（agent 24100、toolhub 24120）。本机 MQTT broker 不偏移：两套 stack 共用它，
+这正是两个 agent 能互相看见的原因。mirrored 模式让
 Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，会被 Windows
 实例发现并静默复用。Windows 侧保持文档中的默认端口。偏移量由 WSL 的
 `slife2.yaml` 里的 `wsl_port_offset` 控制：默认 100，设为 `0` 可关闭，

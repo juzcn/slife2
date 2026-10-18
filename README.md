@@ -296,7 +296,8 @@ as `python -m slife2.plugins.a2a.local_server`; it has no separate console
 script.
 
 **On WSL2 with `networkingMode=mirrored`, the WSL instance shifts these ports
-by 100** (agent 24100, toolhub 24120, the local MQTT broker 1983). Mirrored mode
+by 100** (agent 24100, toolhub 24120). The local MQTT broker is not shifted:
+both stacks share it, which is what makes them peers. Mirrored mode
 makes the Windows and WSL loopbacks one, so a WSL stack on the default ports
 would be visible to — and silently reused by — a Windows instance. The Windows
 side keeps the documented ports. `wsl_port_offset` in the WSL `slife2.yaml`

@@ -11,8 +11,8 @@
 # `keyring:<service>/<key>` reads the keyring directly. An unresolved reference
 # is left verbatim and fails at the API call, where the error can name it.
 
-# Shift every port by this much in WSL2 mirrored mode (Windows and WSL share
-# loopback); ignored elsewhere. 0 disables it.
+# Shift every server port by this much in WSL2 mirrored mode; ignored
+# elsewhere. 0 disables it. The MQTT broker is shared and not shifted.
 wsl_port_offset: 100
 
 servers:

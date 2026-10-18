@@ -104,7 +104,6 @@ per process for a credential only one of them uses.
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import logging
 import os
 import re
@@ -2225,27 +2224,6 @@ def _shift_port(port: int, offset: int, where: str) -> int:
     return shifted
 
 
-def _is_local_broker(host: str) -> bool:
-    host = host.strip().lower()
-    if host in {"localhost", "::1"}:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _shift_broker(settings: A2ASettings, offset: int, where: str) -> A2ASettings:
-    """Move a local broker's port; a remote broker is somebody else's address."""
-    if settings.overridden or not settings.configured:
-        return settings
-    if not _is_local_broker(settings.broker_host):
-        return settings
-    return replace(
-        settings, broker_port=_shift_port(settings.broker_port, offset, where)
-    )
-
-
 def _with_port_offset(config: Config, offset: int) -> Config:
     """Apply the instance's port shift to the config every process reads.
 
@@ -2254,6 +2232,12 @@ def _with_port_offset(config: Config, offset: int) -> Config:
     server's URL from this file, not from an argv — so a shift the launcher kept
     to itself would move the processes' own ports and leave every hop between
     them pointing at the unshifted stack.
+
+    **The MQTT broker is not shifted.**  It is the mesh's rendezvous, not an
+    instance endpoint: a WSL stack and a Windows stack that share the broker
+    are peers, while the server ports stay apart.  Shifting it made the two
+    meshes invisible to one another, which is the opposite of what the broker
+    is for.
     """
     if offset == 0:
         return replace(config, port_offset=0) if config.port_offset else config
@@ -2271,13 +2255,6 @@ def _with_port_offset(config: Config, offset: int) -> Config:
         # connecting to the unshifted address while the launcher started the
         # shifted one.
         agent=replace(config.agent, server=servers["agent"]),
-        subagent=replace(
-            config.subagent,
-            network=_shift_broker(
-                config.subagent.network, offset, "subagent.broker.port"
-            ),
-        ),
-        peer_agent=_shift_broker(config.peer_agent, offset, "peer_agent.broker.port"),
         port_offset=offset,
     )
 
