@@ -65,10 +65,10 @@ def run_helper(code: str, *, env: dict[str, str] | None = None) -> subprocess.Po
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        ("http://127.0.0.1:8001/mcp", "http://127.0.0.1:8001/mcp"),
-        ("http://localhost:8001/mcp", "http://127.0.0.1:8001/mcp"),
-        ("http://LOCALHOST:8001/mcp", "http://127.0.0.1:8001/mcp"),
-        ("http://127.0.0.1:8001/mcp/", "http://127.0.0.1:8001/mcp"),
+        ("http://127.0.0.1:24001/mcp", "http://127.0.0.1:24001/mcp"),
+        ("http://localhost:24001/mcp", "http://127.0.0.1:24001/mcp"),
+        ("http://LOCALHOST:24001/mcp", "http://127.0.0.1:24001/mcp"),
+        ("http://127.0.0.1:24001/mcp/", "http://127.0.0.1:24001/mcp"),
         ("http://127.0.0.1:80/mcp", "http://127.0.0.1/mcp"),
     ],
 )
@@ -78,14 +78,14 @@ def test_urls_that_are_the_same_server_share_a_key(left: str, right: str) -> Non
 
 
 def test_different_ports_are_different_servers() -> None:
-    assert runtime.endpoint_key("http://127.0.0.1:8001/mcp") != runtime.endpoint_key(
-        "http://127.0.0.1:8002/mcp"
+    assert runtime.endpoint_key("http://127.0.0.1:24001/mcp") != runtime.endpoint_key(
+        "http://127.0.0.1:24002/mcp"
     )
 
 
 def test_an_agent_name_cannot_collide_with_a_server_address() -> None:
     """The prefix is why `--agent http://...` is harmless."""
-    url = "http://127.0.0.1:8000/mcp"
+    url = "http://127.0.0.1:24000/mcp"
     assert runtime.agent_key(url) != runtime.endpoint_key(url)
 
 
@@ -95,7 +95,7 @@ def test_an_agent_name_cannot_collide_with_a_server_address() -> None:
 def test_record_round_trips() -> None:
     record = runtime.ServerRecord.now(
         name="agent",
-        url="http://127.0.0.1:8000/mcp",
+        url="http://127.0.0.1:24000/mcp",
         pid=1234,
         config="c.yaml",
         version="1",
@@ -116,7 +116,7 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     is why `live_clients` does not delete a damaged record while its pid is
     alive — there the cost is a live client nobody counts.
     """
-    url = "http://127.0.0.1:8000/mcp"
+    url = "http://127.0.0.1:24000/mcp"
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
     assert runtime.read_record(url) is None
@@ -129,7 +129,7 @@ def test_a_record_that_is_not_a_record_reads_as_absent() -> None:
     object that parses but is not a record is the `KeyError` the factory raises
     — the arm a caller's own fields are the only way to reach.
     """
-    url = "http://127.0.0.1:8000/mcp"
+    url = "http://127.0.0.1:24000/mcp"
     runtime.record_path(url).write_text('{"url": "x"}', encoding="utf-8")
     assert runtime.read_record(url) is None
 
@@ -245,7 +245,7 @@ def test_a_delete_that_failed_is_reported(
     said.  An absent file is still tolerated; a failed unlink is logged naming
     the path (`DESIGN.md` §10.2).
     """
-    url = "http://127.0.0.1:8000/mcp"
+    url = "http://127.0.0.1:24000/mcp"
     path = runtime.record_path(url)
 
     def deny(self: Path, *, missing_ok: bool = False) -> None:
@@ -275,7 +275,7 @@ def test_a_log_that_cannot_be_read_is_named_not_empty() -> None:
     server printed nothing when the file could not be opened.  The failure is
     named in the text instead (`DESIGN.md` §10.1).
     """
-    url = "http://127.0.0.1:8000/mcp"
+    url = "http://127.0.0.1:24000/mcp"
     path = runtime.log_path(url)
     path.mkdir()  # a directory where the log should be: reading it is an OSError
 
@@ -579,7 +579,7 @@ def test_only_linux_reads_proc_for_a_zombie() -> None:
 def test_same_process_rejects_a_record_with_no_token() -> None:
     """An unprovable match is treated as no match, so `down` leaves it alone."""
     record = runtime.ServerRecord(
-        name="agent", url="http://127.0.0.1:8000/mcp", pid=os.getpid(), start_token=""
+        name="agent", url="http://127.0.0.1:24000/mcp", pid=os.getpid(), start_token=""
     )
     assert runtime.same_process(record) is False
 
@@ -588,7 +588,7 @@ def test_same_process_matches_our_own_pid_and_token() -> None:
     pid = os.getpid()
     record = runtime.ServerRecord(
         name="agent",
-        url="http://127.0.0.1:8000/mcp",
+        url="http://127.0.0.1:24000/mcp",
         pid=pid,
         start_token=runtime.process_start_token(pid) or "",
     )
@@ -599,7 +599,7 @@ def test_same_process_rejects_a_reused_pid() -> None:
     """A live pid whose token says it is not ours must never be signalled."""
     record = runtime.ServerRecord(
         name="agent",
-        url="http://127.0.0.1:8000/mcp",
+        url="http://127.0.0.1:24000/mcp",
         pid=os.getpid(),
         start_token="not-the-token-this-process-was-born-with",
     )
@@ -800,7 +800,7 @@ def test_a_spawned_server_outlives_its_spawner() -> None:
         "import sys\n"
         "from slife2.libs.host import runtime\n"
         "p = runtime.spawn([sys.executable, '-c', 'import time; time.sleep(30)'],\n"
-        "                  url='http://127.0.0.1:8000/mcp')\n"
+        "                  url='http://127.0.0.1:24000/mcp')\n"
         "print(p.pid, flush=True)\n"
     )
     try:

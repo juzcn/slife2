@@ -156,9 +156,9 @@ def test_a_broker_the_running_mesh_was_not_started_on_is_refused(
     spec = ServerSpec(
         name="peer_agent",
         module="slife2.plugins.a2a.server",
-        url="http://127.0.0.1:8040/mcp",
+        url="http://127.0.0.1:24040/mcp",
         host="127.0.0.1",
-        port=8040,
+        port=24040,
         expected_name=A2A_SERVER_NAME,
         expected_tool="join",
     )
@@ -190,9 +190,9 @@ def test_a_mesh_this_command_started_honours_the_flag(
     spec = ServerSpec(
         name="peer_agent",
         module="slife2.plugins.a2a.server",
-        url="http://127.0.0.1:8040/mcp",
+        url="http://127.0.0.1:24040/mcp",
         host="127.0.0.1",
-        port=8040,
+        port=24040,
         expected_name=A2A_SERVER_NAME,
         expected_tool="join",
     )

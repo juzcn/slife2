@@ -402,7 +402,7 @@ async def test_a_home_spelled_on_another_platform_is_refused(
 
 #: The address the tests below serve on.  Nothing is bound on it: `serve` writes
 #: its record *before* it binds, which is the whole of what they are about.
-URL = "http://127.0.0.1:8000/mcp"
+URL = "http://127.0.0.1:24000/mcp"
 
 
 class RefusingMCP:
@@ -421,7 +421,7 @@ def serve_once() -> None:
     """Run `serve` far enough to write its record, and no further."""
     protocol_module.serve(
         RefusingMCP(),
-        ServerSettings(port=8000),
+        ServerSettings(port=24000),
         SimpleNamespace(host=None, port=None),
         name="slife2-agent",
     )
@@ -432,7 +432,7 @@ def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
 
     A server records itself rather than being recorded, so a hand-started one is
     indistinguishable from a launched one — which is the point, and it is why
-    `python -m slife2.plugins.agent.server --port 8000` beside a running stack is
+    `python -m slife2.plugins.agent.server --port 24000` beside a running stack is
     a thing people do.  That process cannot bind, so it exits; what it must not
     do on the way through is take the *running* server's record with it.  It
     did: the record is keyed by the URL alone, so the newcomer's write replaced

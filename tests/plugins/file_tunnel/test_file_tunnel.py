@@ -572,7 +572,7 @@ async def test_a_call_during_an_in_flight_start_waits_for_it(
         tunnel.finish()
 
     finisher = asyncio.create_task(finish_soon())
-    await _ensure(tunnel, 8038)
+    await _ensure(tunnel, 24038)
 
     # The wait is the fix: with the old early return, `_ensure` comes back
     # before the finisher runs and this is still False.
@@ -594,7 +594,7 @@ async def test_a_start_that_outlives_its_budget_is_left_alone(
     monkeypatch.setattr(_T.timeouts.ready, "tunnel_start", 0.05)
     tunnel = SlowStartTunnel()  # never finishes
 
-    await _ensure(tunnel, 8038)  # must return, not hang
+    await _ensure(tunnel, 24038)  # must return, not hang
 
     assert tunnel.is_active is False
     assert tunnel.started == []

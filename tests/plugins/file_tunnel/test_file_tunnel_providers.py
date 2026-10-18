@@ -485,10 +485,10 @@ def test_localhost_run_forwards_the_port_without_a_prompt(monkeypatch) -> None:
     """Unattended, so no host-key prompt can be answered and no key is read;
     `ExitOnForwardFailure` so a taken remote port exits rather than holding a
     session that tunnels nothing."""
-    argv = LocalhostRunTunnel()._argv("ssh", 8038)
+    argv = LocalhostRunTunnel()._argv("ssh", 24038)
     assert argv[0] == "ssh"
     assert argv[-1] == "nokey@localhost.run"
-    assert "-R" in argv and "80:localhost:8038" in argv
+    assert "-R" in argv and "80:localhost:24038" in argv
     assert "BatchMode=yes" in argv
     assert "StrictHostKeyChecking=accept-new" in argv
     assert "ExitOnForwardFailure=yes" in argv
@@ -515,27 +515,27 @@ def test_a_malformed_remote_port_is_refused() -> None:
 
 
 def test_cloudflare_runs_a_quick_tunnel_for_the_local_port() -> None:
-    argv = CloudflareQuickTunnel()._argv("cloudflared", 8038)
+    argv = CloudflareQuickTunnel()._argv("cloudflared", 24038)
     assert argv[:2] == ["cloudflared", "tunnel"]
     assert "--no-autoupdate" in argv  # a self-update must not swap the binary
-    assert "http://localhost:8038" in argv
+    assert "http://localhost:24038" in argv
 
 
 def test_cloudflare_defaults_to_http2(monkeypatch) -> None:
     """QUIC is cloudflared's own default and the one that dies behind a proxy
     or a TUN adapter — registering, then losing the connection repeatedly."""
-    argv = CloudflareQuickTunnel()._argv("cloudflared", 8038)
+    argv = CloudflareQuickTunnel()._argv("cloudflared", 24038)
     assert argv[argv.index("--protocol") + 1] == "http2"
-    other = CloudflareQuickTunnel({"protocol": "quic"})._argv("cloudflared", 8038)
+    other = CloudflareQuickTunnel({"protocol": "quic"})._argv("cloudflared", 24038)
     assert other[other.index("--protocol") + 1] == "quic"
 
 
 def test_a_missing_binary_is_terminal_and_names_itself(monkeypatch) -> None:
     install_missing_binary(monkeypatch)
     with pytest.raises(RuntimeError, match="cloudflared not found"):
-        CloudflareQuickTunnel().start(8038)
+        CloudflareQuickTunnel().start(24038)
     with pytest.raises(RuntimeError, match="ssh client not found"):
-        LocalhostRunTunnel().start(8038)
+        LocalhostRunTunnel().start(24038)
 
 
 def test_the_resolved_binary_path_is_reported(monkeypatch) -> None:
@@ -551,7 +551,7 @@ def test_the_resolved_binary_path_is_reported(monkeypatch) -> None:
         providers, "_which", lambda binary, extra=(): "/opt/cf/cloudflared"
     )
     tunnel = CloudflareQuickTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     assert tunnel.binary_path == "/opt/cf/cloudflared"
     assert tunnel.status()["binary"] == "/opt/cf/cloudflared"
     tunnel.stop()
@@ -563,7 +563,7 @@ def test_the_resolved_binary_path_is_reported(monkeypatch) -> None:
 def test_localhost_run_publishes_the_url_it_prints(monkeypatch) -> None:
     install_popen(monkeypatch, LinesStdout([lhr_line("abc.lhr.life")]))
     tunnel = LocalhostRunTunnel()
-    assert tunnel.start(8038) == "https://abc.lhr.life"
+    assert tunnel.start(24038) == "https://abc.lhr.life"
     assert tunnel.is_active is True
     tunnel.stop()
 
@@ -578,7 +578,7 @@ def test_a_child_that_dies_early_reports_its_output(monkeypatch) -> None:
         returncode=1,
     )
     with pytest.raises(RuntimeError, match="exited before the tunnel was up"):
-        CloudflareQuickTunnel().start(8038)
+        CloudflareQuickTunnel().start(24038)
 
 
 def test_silence_times_out_instead_of_hanging(monkeypatch) -> None:
@@ -588,7 +588,7 @@ def test_silence_times_out_instead_of_hanging(monkeypatch) -> None:
     )  # timeouts: the value this test is built around, not a budget
     install_popen(monkeypatch, SilentStdout())
     with pytest.raises(RuntimeError, match="timed out"):
-        CloudflareQuickTunnel().start(8038)
+        CloudflareQuickTunnel().start(24038)
 
 
 def test_a_url_without_a_connector_is_never_published(monkeypatch) -> None:
@@ -602,14 +602,14 @@ def test_a_url_without_a_connector_is_never_published(monkeypatch) -> None:
     banner = CF_BANNER.splitlines(keepends=True)
     install_popen(monkeypatch, lambda: BannerThenSilent(banner))
     with pytest.raises(RuntimeError, match="registered no connection to the edge"):
-        CloudflareQuickTunnel().start(8038)
+        CloudflareQuickTunnel().start(24038)
 
 
 def test_the_url_publishes_once_a_connector_registers(monkeypatch) -> None:
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED]
     install_popen(monkeypatch, LinesStdout(lines))
     tunnel = CloudflareQuickTunnel()
-    assert tunnel.start(8038) == "https://random-words.trycloudflare.com"
+    assert tunnel.start(24038) == "https://random-words.trycloudflare.com"
     tunnel.stop()
 
 
@@ -618,7 +618,7 @@ def test_localhost_run_needs_no_registration_vocabulary(monkeypatch) -> None:
     itself the proof — no second signal to wait for."""
     install_popen(monkeypatch, LinesStdout([lhr_line("abc.lhr.life")]))
     tunnel = LocalhostRunTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     assert tunnel._registered == set()
     tunnel.stop()
 
@@ -730,7 +730,7 @@ def test_is_alive_follows_the_child() -> None:
 def test_stop_kills_the_child_and_is_idempotent(monkeypatch) -> None:
     install_popen(monkeypatch, LinesStdout([lhr_line("abc.lhr.life")]))
     tunnel = LocalhostRunTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     child = tunnel._proc
     tunnel.stop()
     assert child.terminated is True
@@ -749,7 +749,7 @@ def test_a_lost_connection_that_is_never_unregistered(monkeypatch) -> None:
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED, CF_SERVE_ERROR]
     install_popen(monkeypatch, LinesStdout(lines))
     tunnel = CloudflareQuickTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     # The scraped set is fooled...
     assert tunnel._registered == {"0"}
     # ...and the child's own metrics API is what answers instead.
@@ -762,7 +762,7 @@ def test_a_healthy_transport_reads_as_alive(monkeypatch) -> None:
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED]
     install_popen(monkeypatch, LinesStdout(lines))
     tunnel = CloudflareQuickTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     monkeypatch.setattr(tunnel, "_metrics_ready", lambda: True)
     assert tunnel._transport_alive() is True
     tunnel.stop()
@@ -772,7 +772,7 @@ def test_losing_every_connector_reads_as_not_alive(monkeypatch) -> None:
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED, CF_UNREGISTERED]
     install_popen(monkeypatch, LinesStdout(lines))
     tunnel = CloudflareQuickTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     monkeypatch.setattr(tunnel, "_metrics_ready", lambda: None)  # no metrics API
     assert tunnel._transport_alive() is False
     tunnel.stop()
@@ -819,7 +819,7 @@ def test_the_metrics_port_is_picked_up_from_the_child(monkeypatch) -> None:
     install_popen(monkeypatch, LinesStdout([CF_METRICS]))
     tunnel = CloudflareQuickTunnel()
     with pytest.raises(RuntimeError):
-        tunnel.start(8038)  # no URL: it only announced the metrics server
+        tunnel.start(24038)  # no URL: it only announced the metrics server
     assert tunnel._metrics_base == "http://127.0.0.1:20241"
 
 
@@ -917,6 +917,6 @@ def test_the_edge_address_is_really_read_from_the_child(monkeypatch) -> None:
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED]
     install_popen(monkeypatch, LinesStdout(lines))
     tunnel = CloudflareQuickTunnel()
-    tunnel.start(8038)
+    tunnel.start(24038)
     assert tunnel.edge_ip == "203.0.113.7"
     tunnel.stop()

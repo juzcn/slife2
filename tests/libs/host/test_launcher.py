@@ -713,8 +713,8 @@ def test_each_server_is_reported_before_the_next_one_is_asked_for(
     config and `status` use rather than the name of an enum member.
     """
     printed_before_the_second: list[str] = []
-    second = replace(SPEC, name="second", url="http://127.0.0.1:8002/mcp")
-    third = replace(SPEC, name="third", url="http://127.0.0.1:8003/mcp")
+    second = replace(SPEC, name="second", url="http://127.0.0.1:24002/mcp")
+    third = replace(SPEC, name="third", url="http://127.0.0.1:24003/mcp")
 
     def fake_ensure_all(config, *, config_path=None):
         yield launcher.Outcome(SPEC, Status.STARTED, seconds=1.5)
