@@ -456,6 +456,44 @@ def test_the_installers_run_slife2_as_a_module() -> None:
         )
 
 
+def test_invoke_quiet_judges_a_native_command_by_its_exit_code(
+    tmp_path: Path,
+) -> None:
+    """A native warning on stderr is output, not a failed command.
+
+    Windows PowerShell 5.1 turns redirected native stderr into an error record;
+    with the installer's `$ErrorActionPreference = 'Stop'`, uv's experimental
+    warning stopped `Invoke-Quiet` and failed the Python install.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    match = re.search(r"^function Invoke-Quiet.*?^\}", text, re.MULTILINE | re.DOTALL)
+    assert match, "Invoke-Quiet is missing from install.ps1"
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{function_file}'\n"
+        "$ok = Invoke-Quiet { cmd /c 'echo native-warning 1>&2 & exit /b 0' }\n"
+        'Write-Output "RESULT=$ok"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert "RESULT=True" in result.stdout, result.stdout + result.stderr
+
+
 def test_requirements_report_unknown_commands_with_their_source(
     tmp_path: Path,
 ) -> None:

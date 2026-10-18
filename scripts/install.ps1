@@ -32,6 +32,13 @@ function Die([string]$Message) { Write-Host "error: $Message" -ForegroundColor R
 
 function Invoke-Quiet([scriptblock]$Body) {
     $log = Join-Path $env:TEMP ("slife2-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.log')
+    # **Native stderr is output, not a failure.**  With the caller's
+    # `$ErrorActionPreference = 'Stop'`, Windows PowerShell 5.1 turns a native
+    # command's stderr into an error record once `*>` redirects it, and stops
+    # the function: uv's "experimental option" warning failed the Python
+    # install.  The exit code is the only verdict this function is entitled to.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         & $Body *> $log
         $code = $LASTEXITCODE
@@ -46,6 +53,7 @@ function Invoke-Quiet([scriptblock]$Body) {
         return $false
     }
     finally {
+        $ErrorActionPreference = $previous
         Remove-Item $log -Force -ErrorAction SilentlyContinue
     }
 }
@@ -260,7 +268,7 @@ function Ensure-Venv {
     }
     & $script:Py -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)'
     if ($LASTEXITCODE -ne 0) { Die 'the existing .venv uses another Python; rebuild it with: uv venv --python 3.13' }
-    & $script:Py -c 'import sqlite3; c = sqlite3.connect(":memory:"); c.enable_load_extension(True)'
+    & $script:Py -c "import sqlite3; c = sqlite3.connect(':memory:'); c.enable_load_extension(True)"
     if ($LASTEXITCODE -ne 0) { Die 'the existing .venv cannot load SQLite extensions' }
 }
 
@@ -461,7 +469,7 @@ function Invoke-Verification([object[]]$Requirements) {
     else { Fail 'python3 is missing' }
     & $script:Py -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)'
     if ($LASTEXITCODE -ne 0) { Fail 'Python 3.13 is not available' }
-    & $script:Py -c 'import sqlite3, sqlite_vec; c = sqlite3.connect(":memory:"); c.enable_load_extension(True); sqlite_vec.load(c)'
+    & $script:Py -c "import sqlite3, sqlite_vec; c = sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)"
     if ($LASTEXITCODE -ne 0) { Fail 'SQLite extensions are not available' }
     & $script:Py -c 'import slife2'
     if ($LASTEXITCODE -ne 0) { Fail 'slife2 does not import' }
