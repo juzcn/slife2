@@ -904,9 +904,9 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
         "the load keeps the reference; the connection resolves it"
     )
     assert serper.resolved_env()["SERPER_API_KEY"] == "resolved"
-    assert config.mcp["arxiv"].resolved_headers()["Authorization"] == "Bearer resolved", (
-        "a header is a credential too"
-    )
+    assert (
+        config.mcp["arxiv"].resolved_headers()["Authorization"] == "Bearer resolved"
+    ), "a header is a credential too"
 
 
 def test_a_tool_servers_reference_is_not_resolved_by_the_load(
