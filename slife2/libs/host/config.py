@@ -104,11 +104,13 @@ per process for a credential only one of them uses.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import re
+import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -1999,6 +2001,10 @@ class Config:
     peer_agent: A2ASettings = field(default_factory=A2ASettings)
     #: `"provider/model"`, the model the agent starts with.
     default: str = ""
+    #: How far this instance's ports moved from the configured numbers — 0
+    #: unless WSL's mirrored networking was detected.  Kept for the start-up
+    #: report; the ports themselves are already shifted.
+    port_offset: int = 0
 
     def provider(self, name: str) -> ProviderSettings:
         try:
@@ -2139,6 +2145,138 @@ def default_config() -> Config:
     )
 
 
+#: The default shift when WSL2's mirrored networking shares loopback with
+#: Windows.  Windows is the native side and keeps the documented ports; the WSL
+#: instance moves, because mirrored mode is the one configuration where the two
+#: share loopback — the Windows launcher would otherwise probe, and silently
+#: reuse, the servers a WSL instance started.  Two WSL distributions in mirrored
+#: mode still share one another's loopback; the shift moves one stack aside, not
+#: every stack on the machine.
+WSL_MIRRORED_PORT_OFFSET = 1000
+
+#: Whether this process already asked the platform.  WSL's networking mode
+#: cannot change under a running process, and every server loads this config.
+_MIRRORED: bool | None = None
+
+
+def _is_wsl() -> bool:
+    """Whether this Linux is WSL, without starting anything to ask."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return False
+    return "microsoft" in release.lower()
+
+
+def _wsl_mirrored() -> bool:
+    """Whether WSL's shared loopback is in use.
+
+    `wslinfo --networking-mode` is the platform's own answer and is consulted
+    first; `loopback0` is the interface mirrored mode creates, and is the
+    fallback for a WSL that predates the tool.  Either is read once per process.
+    """
+    global _MIRRORED
+    if _MIRRORED is None:
+        mirrored = False
+        if _is_wsl():
+            try:
+                result = subprocess.run(
+                    ["wslinfo", "--networking-mode"],
+                    capture_output=True,
+                    text=True,
+                    timeout=_T.timeouts.ready.probe,
+                )
+                mirrored = result.stdout.strip() == "mirrored"
+            except (OSError, subprocess.SubprocessError):
+                mirrored = Path("/sys/class/net/loopback0").exists()
+        _MIRRORED = mirrored
+    return _MIRRORED
+
+
+def port_offset(value: object | None = None) -> int:
+    """How far this instance's ports move: only inside WSL's mirrored mode.
+
+    **The platform decides whether**, and the config decides *how far*.
+    `wsl_port_offset` is ignored on Windows, a normal Linux and WSL in NAT
+    mode; inside WSL mirrored it defaults to `WSL_MIRRORED_PORT_OFFSET`, and an
+    explicit value there — including `0` — is the operator's adjustment for a
+    port conflict.
+    """
+    if not _wsl_mirrored():
+        return 0
+    if value is None:
+        return WSL_MIRRORED_PORT_OFFSET
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"wsl_port_offset: {value!r} is not an integer")
+    return value
+
+
+def _shift_port(port: int, offset: int, where: str) -> int:
+    shifted = port + offset
+    if not 0 < shifted < 65536:
+        raise ConfigError(
+            f"{where}: {port} + {offset} = {shifted} is not a port (1-65535); "
+            f"adjust wsl_port_offset"
+        )
+    return shifted
+
+
+def _is_local_broker(host: str) -> bool:
+    host = host.strip().lower()
+    if host in {"localhost", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _shift_broker(settings: A2ASettings, offset: int, where: str) -> A2ASettings:
+    """Move a local broker's port; a remote broker is somebody else's address."""
+    if settings.overridden or not settings.configured:
+        return settings
+    if not _is_local_broker(settings.broker_host):
+        return settings
+    return replace(
+        settings, broker_port=_shift_port(settings.broker_port, offset, where)
+    )
+
+
+def _with_port_offset(config: Config, offset: int) -> Config:
+    """Apply the instance's port shift to the config every process reads.
+
+    **Applied here, in the config loader, and not in the launcher alone.**  A
+    server resolves its peers from *its own* config — the agent reads its model
+    server's URL from this file, not from an argv — so a shift the launcher kept
+    to itself would move the processes' own ports and leave every hop between
+    them pointing at the unshifted stack.
+    """
+    if offset == 0:
+        return replace(config, port_offset=0) if config.port_offset else config
+    servers = {
+        name: replace(
+            server, port=_shift_port(server.port, offset, f"servers.{name}.port")
+        )
+        for name, server in config.servers.items()
+    }
+    return replace(
+        config,
+        servers=servers,
+        subagent=replace(
+            config.subagent,
+            network=_shift_broker(
+                config.subagent.network, offset, "subagent.broker.port"
+            ),
+        ),
+        peer_agent=_shift_broker(config.peer_agent, offset, "peer_agent.broker.port"),
+        port_offset=offset,
+    )
+
+
 def find_config_path(explicit: str | Path | None = None) -> Path | None:
     """The config file, which lives *inside* the data directory.
 
@@ -2177,7 +2315,7 @@ def load(explicit: str | Path | None = None) -> Config:
             raise ConfigError(f"config file not found: {path}")
         # No config is not an error: the defaults are a working single-provider
         # setup, and a fresh data directory has nothing in it yet.
-        return default_config()
+        return _with_port_offset(default_config(), port_offset())
 
     yaml = YAML(typ="safe")
     try:
@@ -2426,7 +2564,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     # `peer_agent:` section that names a broker keeps it (`--a2a-broker`, somebody else's,
     # likewise: it is applied inside `_a2a`, after this).
     subagent = _subagent(raw.get("subagent"), base.subagent)
-    return Config(
+    config = Config(
         servers=servers,
         providers=providers,
         mcp=mcp,
@@ -2454,6 +2592,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         ),
         default=str(raw.get("default") or _first_reference(providers)),
     )
+    return _with_port_offset(config, port_offset(raw.get("wsl_port_offset")))
 
 
 def _a2a(

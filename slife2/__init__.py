@@ -597,6 +597,12 @@ def main(argv: list[str] | None = None) -> int:
             # and the walks it does on the way up — already knows about this
             # home rather than learning about it one call later.
             _open_home()
+            if offset := config.port_offset:
+                # Said out loud because the addresses below are not the ones a
+                # reader who knows the config expects: on WSL in mirrored mode
+                # every port moves so that the native Windows stack keeps the
+                # documented ones.
+                print(f"  port offset: {offset}")
             code = _ensure(config, config_path)
             if code == 0:
                 # **And the home is made whole before the window opens.**  One

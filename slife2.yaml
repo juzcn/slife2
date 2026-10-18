@@ -11,6 +11,10 @@
 # `keyring:<service>/<key>` reads the keyring directly. An unresolved reference
 # is left verbatim and fails at the API call, where the error can name it.
 
+# Shift every port by this much in WSL2 mirrored mode (Windows and WSL share
+# loopback); ignored elsewhere. 0 disables it.
+wsl_port_offset: 1000
+
 servers:
   # One process per wire protocol; the address is 127.0.0.1:<port>/mcp.
   openai-completions: {port: 8001}

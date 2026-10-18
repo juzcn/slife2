@@ -197,6 +197,11 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
+    # The platform rule shifts ports on WSL in mirrored mode; a test asserts the
+    # config it names, not the networking mode of the machine it runs on.
+    import slife2.libs.host.config as config_module
+
+    monkeypatch.setattr(config_module, "_wsl_mirrored", lambda: False)
     return tmp_path / "data"
 
 

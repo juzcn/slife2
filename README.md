@@ -295,6 +295,14 @@ The subagent network is served by the same module on port 8041 and is started
 as `python -m slife2.plugins.a2a.local_server`; it has no separate console
 script.
 
+**On WSL2 with `networkingMode=mirrored`, the WSL instance shifts these ports
+by 1000** (agent 9000, toolhub 9020, the local MQTT broker 2883). Mirrored mode
+makes the Windows and WSL loopbacks one, so a WSL stack on the default ports
+would be visible to — and silently reused by — a Windows instance. The Windows
+side keeps the documented ports. `wsl_port_offset` in the WSL `slife2.yaml`
+changes the shift: it defaults to 1000, may be `0` to disable it, and is
+ignored outside WSL's mirrored mode.
+
 ## Using the terminal UI
 
 ### Keys

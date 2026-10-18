@@ -894,6 +894,96 @@ def test_an_entry_with_a_url_is_http(tmp_path) -> None:
     assert server.url == "https://example.test/mcp"
 
 
+NETWORKS = """
+subagent:
+  broker: {host: localhost, port: 1883}
+peer_agent:
+  provider: mosquitto
+"""
+
+
+def test_wsl_mirrored_networking_moves_every_port(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows is the native side; the WSL instance is the one that moves.
+
+    Mirrored mode makes the two loopbacks one, so a WSL stack on 8000/1883 is
+    visible to — and silently reused by — the Windows launcher.  The shift is
+    applied in the config loader, which is what makes every server process
+    resolve the same addresses: a client reads its peers from this config, not
+    from argv.
+    """
+    monkeypatch.setattr(slife2.libs.host.config, "_wsl_mirrored", lambda: True)
+
+    config = load(write(tmp_path, NETWORKS))
+
+    assert config.port_offset == 1000
+    assert config.server("agent").port == 9000
+    assert config.server("toolhub").port == 9020
+    assert config.server("embeddings").port == 9004
+    assert config.subagent.network.broker_port == 2883
+    assert config.peer_agent.broker_port == 2883
+
+
+def test_wsl_port_offset_overrides_the_default(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(slife2.libs.host.config, "_wsl_mirrored", lambda: True)
+
+    config = load(write(tmp_path, "wsl_port_offset: 250\n" + NETWORKS))
+
+    assert config.port_offset == 250
+    assert config.server("agent").port == 8250
+    assert config.subagent.network.broker_port == 2133
+
+
+def test_zero_wsl_port_offset_disables_the_shift(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(slife2.libs.host.config, "_wsl_mirrored", lambda: True)
+
+    config = load(write(tmp_path, "wsl_port_offset: 0\n" + NETWORKS))
+
+    assert config.port_offset == 0
+    assert config.server("agent").port == 8000
+    assert config.subagent.network.broker_port == 1883
+
+
+def test_the_offset_is_ignored_outside_wsl_mirrored(tmp_path) -> None:
+    """The key is about WSL's shared loopback, not a general port knob."""
+    config = load(write(tmp_path, "wsl_port_offset: 1000\n" + NETWORKS))
+
+    assert config.port_offset == 0
+    assert config.server("agent").port == 8000
+    assert config.subagent.network.broker_port == 1883
+
+
+def test_a_remote_broker_is_not_moved_by_the_offset(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(slife2.libs.host.config, "_wsl_mirrored", lambda: True)
+
+    config = load(
+        write(
+            tmp_path,
+            "wsl_port_offset: 1000\n"
+            "peer_agent:\n  broker: {host: mq.example.test, port: 1883}\n",
+        )
+    )
+
+    assert config.server("agent").port == 9000
+    assert config.peer_agent.broker_port == 1883
+
+
+def test_an_offset_past_the_port_range_is_refused(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(slife2.libs.host.config, "_wsl_mirrored", lambda: True)
+
+    with pytest.raises(ConfigError, match="is not a port"):
+        load(write(tmp_path, "wsl_port_offset: 70000\n" + NETWORKS))
+
+
 def test_a_tool_servers_secrets_go_through_the_same_chain(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
