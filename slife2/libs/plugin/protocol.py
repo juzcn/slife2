@@ -93,6 +93,8 @@ from slife2.libs.host.runtime import (
     write_record,
 )
 from slife2.libs.plugin.audience import (
+    FOREIGN_HOME,
+    foreign_home,
     request_client,
     request_home,
     unaddressed,
@@ -626,7 +628,17 @@ class ServeTheCallersHome(Middleware):
     async def on_message(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
     ) -> Any:
-        with in_home(request_home(context.fastmcp_context)):
+        named = request_home(context.fastmcp_context)
+        # **A home this machine cannot resolve is refused, not relativised.**
+        # The caller's path was absolute where it was written; here it is a name
+        # with a drive letter or a leading slash, and `in_home` would hand it to
+        # every `agent_dir` as a relative path — writing the caller's work into
+        # a directory called `D:\...` under this daemon's working directory.
+        # That is how a Windows instance reusing a WSL server's ports ended up
+        # with its catalogue under `runtime/D:\Dev\Workspace\slife2`.
+        if foreign := foreign_home(named):
+            raise ToolError(FOREIGN_HOME.format(home=foreign))
+        with in_home(named):
             return await call_next(context)
 
 

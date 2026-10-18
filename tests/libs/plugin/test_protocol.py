@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -366,6 +367,35 @@ async def test_the_home_does_not_leak_out_of_a_call_that_raised(
         after = await client.call_tool("where", {})
 
     assert paths.Path(after.data) == mine
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelled_on_another_platform_is_refused(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A home from another OS is refused, not resolved as a relative name.**
+
+    Windows and WSL share a loopback under mirrored networking, so a server can
+    receive the other machine's spelling (`D:\\...` on POSIX, `/home/...` on
+    Windows).  Handed to `in_home` it would be a relative path and the caller's
+    work would land in a directory literally called `D:\\...` under this
+    daemon's working directory.  The refusal names the home; the server stays
+    usable for the homes it can serve.
+    """
+    mine = tmp_path / "mine"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    foreign = (
+        "/home/jack/.slife2" if sys.platform == "win32" else r"D:\Dev\Workspace\slife2"
+    )
+
+    server = _home_server()
+    async with Client(server) as client:
+        with pytest.raises(ToolError) as caught:
+            await client.call_tool("where", {}, meta=client_meta("jack", home=foreign))
+        after = await client.call_tool("where", {})
+
+    assert "not an absolute path on this machine" in str(caught.value)
+    assert paths.Path(after.data) == mine, "the refusal is this call's, not a wedge"
 
 
 # --- the record a server leaves behind ---------------------------------------

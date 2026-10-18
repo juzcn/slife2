@@ -214,6 +214,30 @@ def home_of(meta: Mapping[str, Any] | None) -> str:
     return named if isinstance(named, str) else ""
 
 
+#: The refusal for a home spelled on another platform.  Two machines can share a
+#: loopback — Windows and WSL under mirrored networking are the measured case —
+#: and then a call arrives naming its home in the other OS's spelling.
+FOREIGN_HOME = (
+    "This call says its home is {home!r}, which is not an absolute path on "
+    "this machine — a server shared across machines can only serve a home in "
+    "its own filesystem. Give this instance its own servers rather than "
+    "reusing ones started by another machine."
+)
+
+
+def foreign_home(home: str) -> str:
+    """*home* when it is not a path this machine can resolve, else `""`.
+
+    A home travels as an absolute path in the **caller's** spelling
+    (`_for_the_wire`), and the far end resolves it in its own filesystem.  A
+    Windows path (`D:\\...`) is not absolute on Linux, nor a POSIX one on
+    Windows; treated as a relative name it would create a directory literally
+    called `D:\\...` under the daemon's working directory and write the caller's
+    work there — a file layout failure no message reports.
+    """
+    return home if home and not Path(home).is_absolute() else ""
+
+
 def with_home(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     """`meta`, with this process's home in it unless it already names one.
 

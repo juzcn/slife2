@@ -10,6 +10,7 @@ it.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from slife2.libs.plugin.audience import (
     client_key,
     client_meta,
     client_of,
+    foreign_home,
     forwarded_client,
     home_of,
     with_home,
@@ -105,6 +107,23 @@ def test_a_relative_home_is_made_absolute_before_it_travels(
     assert Path(sent).is_absolute(), "a relative home is a different directory"
     assert sent == str((tmp_path / "rel" / "chk").resolve())
     assert home_of(with_home(None)) == sent, "the same answer for the bare case"
+
+
+def test_a_home_spelled_on_another_platform_is_foreign(tmp_path: Path) -> None:
+    """A home is absolute only in the spelling of the machine that wrote it.
+
+    Mirrored WSL networking puts Windows and Linux on one loopback, so the same
+    server receives `D:\\...` on POSIX and `/home/...` on Windows.  Both are
+    names here, not roots, and resolving one as a relative path is the bug
+    `foreign_home` exists to stop.
+    """
+    assert foreign_home("") == ""
+    assert foreign_home(str(tmp_path)) == "", "this machine's own absolute path"
+
+    foreign = (
+        "/home/jack/.slife2" if sys.platform == "win32" else r"D:\Dev\Workspace\slife2"
+    )
+    assert foreign_home(foreign) == foreign
 
 
 def test_one_conversation_is_keyed_by_the_three_things_that_identify_it(

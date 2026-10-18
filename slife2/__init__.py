@@ -347,17 +347,25 @@ def _open_catalogue(config: Config) -> int:
     not come up: a hub that cannot say what the model may call is this system come
     apart, and a window opened against it fails its first turn instead — later,
     and with less to go on.  Two rather than a traceback, for `_ensure`'s reason.
-    Only a `ConnectionError` is caught, so a programming error (this being called
-    with a loop already running) is still a traceback rather than a start-up
-    message about the catalogue.
+    A `ToolError` is caught beside a `ConnectionError` because the hub's
+    *refusal* is an operational answer too — a home this machine cannot serve —
+    where a programming error (this being called with a loop already running)
+    is still a traceback rather than a start-up message about the catalogue.
     """
+    from fastmcp.exceptions import ToolError
+
     from slife2.libs.host.launcher import open_catalogue
     from slife2.libs.host.paths import catalogue_db
 
     started = time.monotonic()
     try:
         count = open_catalogue(config)
-    except ConnectionError as exc:
+    except (ConnectionError, ToolError) as exc:
+        # A `ConnectionError` is a hub that could not be reached or read; a
+        # `ToolError` is the hub refusing the call — the home named by this
+        # instance is not a path on the machine that would serve it (a Windows
+        # client attached to a WSL server, say).  Both are start-up answers, not
+        # tracebacks; the message names the fix.
         print(f"slife2: the tool catalogue could not be built: {exc}", file=sys.stderr)
         return 2
     _report(
