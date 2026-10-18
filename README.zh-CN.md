@@ -228,6 +228,10 @@ slife2 [COMMAND] [OPTIONS]
   down      停掉配置所命名的 server。
 ```
 
+`down` 只停共享 server 和 broker，不会关闭已经打开的窗口。遗留窗口在下一次输入
+时自动重连，并从 turns 日志恢复对话。它持有的 agent 名字要到窗口退出才释放，
+所以在它退出前，用同一个 `--agent` 名字启动新实例会被拒绝。
+
 选项：
 
 | 选项 | 含义 |

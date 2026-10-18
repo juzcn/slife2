@@ -242,6 +242,12 @@ Commands:
   down      Stop the servers named by the configuration.
 ```
 
+`down` stops the shared servers and the broker; it does not close windows that
+are already open. A window left open reconnects on its next prompt once the
+servers are started again, and its conversation is restored from the turn log.
+Its agent name stays claimed until the window exits, so a new instance started
+with the same `--agent` name is refused until then.
+
 Options:
 
 | Option | Meaning |
