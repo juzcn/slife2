@@ -1,22 +1,27 @@
-"""The two facts the installer needs from inside the project.
+"""The facts the installer needs from inside the project.
 
 `seed` puts the shipped configuration where slife2 will read it, without ever
 overwriting a file the user already has.  `require` reads the *effective*
 configuration with the project's own loader and prints every external program
 it names, with the place that names it.  The installer maps those names to
-packages and installs them; nothing here installs anything.
+packages and installs them; nothing here installs anything.  `secrets` reads the
+same configuration for the credentials it cannot resolve, so the installer can
+say which `credstore set` commands would make it work.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --home <dir>
+    python install_helper.py secrets --home <dir>
 
-`seed` is stdlib-only and can run on any Python 3.  `require` imports slife2,
-so it runs with the project virtualenv's interpreter after `uv sync`.
+`seed` is stdlib-only and can run on any Python 3.  `require` and `secrets`
+import slife2, so they run with the project virtualenv's interpreter after
+`uv sync`.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -116,6 +121,69 @@ def _add(needed: dict[str, set[str]], executable: str, origin: str) -> None:
         needed.setdefault(executable, set()).add(origin)
 
 
+#: The reference syntax `slife2.libs.host.config` resolves.  Kept here rather
+#: than imported: this reads the file before the project decides whether it is
+#: valid, and the loader's pattern is private.
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _record(found: dict[str, list[str]], name: str, origin: str) -> None:
+    origins = found.setdefault(name, [])
+    if origin not in origins:
+        origins.append(origin)
+
+
+def _references(value: object, path: str, found: dict[str, list[str]]) -> None:
+    """Walk one configuration value, recording every credential it names."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _references(item, f"{path}.{key}" if path else str(key), found)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _references(item, f"{path}[{index}]", found)
+    elif isinstance(value, str):
+        if value.startswith("keyring:"):
+            _record(found, value.removeprefix("keyring:"), path)
+            return
+        for match in _REFERENCE.finditer(value):
+            # A `:-default` is a value, not a credential — the config supplies
+            # what to use when nothing is stored (`${SSH_BINARY:-ssh}`).
+            if match.group(2) is None:
+                _record(found, match.group(1), path)
+
+
+def secrets(home: Path) -> int:
+    """Print the credentials the configuration references, and where.
+
+    **A hint, not a check.**  Whether a key is already in the environment or
+    in credstore is deliberately not asked: resolving every reference would
+    consult the keyring once per key, and the operator can read that off
+    `credstore list` — a key already configured is simply a line to ignore.
+
+    One line per credential, in the order the file first names it:
+    ``<credential><TAB><origin>, <origin>``.
+    """
+    path = home / CONFIG_NAME
+    if not path.is_file():
+        _warn(f"no {CONFIG_NAME} at {path}; nothing to suggest.")
+        return 0
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        raw = YAML(typ="safe").load(path) or {}
+    except (YAMLError, OSError) as exc:
+        _warn(f"cannot read {path}: {exc}")
+        return 2
+
+    found: dict[str, list[str]] = {}
+    _references(raw, "", found)
+    for name, origins in found.items():
+        print(f"{name}\t{', '.join(origins)}")
+    return 0
+
+
 def require(home: Path) -> int:
     """Print `<executable><TAB><origin>` for every program the config names.
 
@@ -197,10 +265,17 @@ def main(argv: list[str] | None = None) -> int:
     require_parser = commands.add_parser("require", help="list configured programs")
     require_parser.add_argument("--home", required=True)
 
+    secrets_parser = commands.add_parser(
+        "secrets", help="list the credentials the configuration references"
+    )
+    secrets_parser.add_argument("--home", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "seed":
         return seed(Path(args.source), Path(args.home), args.dry_run)
-    return require(Path(args.home))
+    if args.command == "require":
+        return require(Path(args.home))
+    return secrets(Path(args.home))
 
 
 if __name__ == "__main__":

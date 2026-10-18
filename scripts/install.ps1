@@ -476,6 +476,22 @@ function Invoke-Verification([object[]]$Requirements) {
     else { Fail 'slife2 is missing' }
 }
 
+function Show-Credentials {
+    if (-not $script:Py -or -not $script:Helper) { return }
+    $lines = & $script:Py $script:Helper secrets --home $script:HomeDir 2>$null
+    if ($LASTEXITCODE -ne 0) { return }
+    $needs = @($lines | Where-Object { $_ })
+    if ($needs.Count -eq 0) { return }
+    Say ''
+    Say "  credentials: store the ones you have not set with 'credstore set':"
+    foreach ($line in $needs) {
+        $parts = $line.TrimEnd("`r") -split "`t", 2
+        $key = $parts[0]
+        $origins = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+        Say ("    credstore set {0}    ({1})" -f $key, $origins)
+    }
+}
+
 function Show-Next {
     Write-Host ''
     if ($script:Failed) { Say 'Installation failed.'; return }
@@ -490,7 +506,7 @@ function Show-Next {
     }
     Say "  data:    $($script:HomeDir)"
     Say "  config:  $(Join-Path $script:HomeDir 'slife2.yaml')"
-    Say '  api key: credstore set DEEPSEEK_API_KEY'
+    Show-Credentials
 }
 
 function Invoke-Install {

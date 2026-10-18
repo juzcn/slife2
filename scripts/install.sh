@@ -478,6 +478,24 @@ verify() {
     fi
 }
 
+print_credentials() {
+    local file key origins
+    [ -n "${PY:-}" ] && [ -n "${HELPER:-}" ] || return 0
+    file=$(mktemp) || return 0
+    # `tr` because a Windows Python writes CRLF; the installer itself runs on a
+    # POSIX host, but a checkout on a mounted drive may hand it one.
+    "$PY" "$HELPER" secrets --home "$HOME_DIR" 2>/dev/null | tr -d '\r' > "$file"
+    if [ -s "$file" ]; then
+        say ""
+        say "  credentials: store the ones you have not set with 'credstore set':"
+        while IFS=$(printf '\t') read -r key origins; do
+            [ -n "$key" ] || continue
+            say "    credstore set $key    ($origins)"
+        done < "$file"
+    fi
+    rm -f "$file"
+}
+
 print_next() {
     local version
     say ""
@@ -495,7 +513,7 @@ print_next() {
     fi
     say "  data:    $HOME_DIR"
     say "  config:  $HOME_DIR/slife2.yaml"
-    say "  api key: credstore set DEEPSEEK_API_KEY"
+    print_credentials
 }
 
 do_install() {

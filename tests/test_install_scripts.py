@@ -311,6 +311,53 @@ def test_requirements_report_unknown_commands_with_their_source(
     assert "yt-dlp\tcli:yt" in result.stdout
 
 
+def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
+    """The installer's hint, read off the file rather than resolved.
+
+    A `:-default` is a value the config already supplies, so `${SSH_BINARY:-ssh}`
+    is not a credential; a `keyring:` value is named the way `credstore set`
+    takes it.  The same credential named twice is one line with both places.
+    """
+    (tmp_path / "slife2.yaml").write_text(
+        "providers:\n"
+        "  main:\n"
+        "    api_key: ${MAIN_KEY}\n"
+        "mcp:\n"
+        "  serper:\n"
+        "    env:\n"
+        "      SERPER_API_KEY: ${SERPER_API_KEY}\n"
+        "      OPTIONAL: ${OPTIONAL_KEY:-fallback}\n"
+        "skills:\n"
+        "  search:\n"
+        "    env:\n"
+        "      SERPER_API_KEY: ${SERPER_API_KEY}\n"
+        "file-tunnel:\n"
+        "  providers:\n"
+        "    ssh:\n"
+        "      binary: ${SSH_BINARY:-ssh}\n"
+        "    ngrok:\n"
+        "      token: keyring:slife2/ngrok\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(HELPER), "secrets", "--home", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert "MAIN_KEY\tproviders.main.api_key" in lines
+    assert (
+        "SERPER_API_KEY\tmcp.serper.env.SERPER_API_KEY, "
+        "skills.search.env.SERPER_API_KEY" in lines
+    )
+    assert "slife2/ngrok\tfile-tunnel.providers.ngrok.token" in lines
+    assert not any("OPTIONAL_KEY" in line or "SSH_BINARY" in line for line in lines)
+
+
 def test_requirements_refuse_a_malformed_config(tmp_path: Path) -> None:
     (tmp_path / "slife2.yaml").write_text("foo: [unclosed\n", encoding="utf-8")
     result = _requirements(tmp_path)
