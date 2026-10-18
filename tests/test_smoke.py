@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_version_is_exposed() -> None:
-    assert slife2.__version__ == "0.2.0"
+    assert slife2.__version__ == "0.3.0"
 
 
 def test_package_import_does_not_pull_in_textual() -> None:
