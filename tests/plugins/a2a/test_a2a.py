@@ -2849,6 +2849,47 @@ async def test_the_local_roster_takes_its_own_place_and_lists_the_members(
 
 
 @pytest.mark.asyncio
+async def test_a_removed_subagents_retained_card_is_not_listed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A subagent is present or absent, not online or offline.**
+
+    It cannot take itself onto or off the mesh — its maker places it when a
+    message is sent — so its directory is the whole of whether it exists.
+    `subagent_remove` forgets the session and deletes the directory, but the
+    broker keeps the offline card published on the way out; the roster used to
+    list that card as a member that had left.  It is not a member any more.
+    """
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    def list_agents(self: Any) -> list[AgentCard]:
+        return [
+            AgentCard(agent_name=AgentName(AGENT), status="online"),
+            AgentCard(agent_name=AgentName("tester"), status="offline"),
+            AgentCard(agent_name=AgentName("probe"), status="offline"),
+        ]
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "list_agents", list_agents)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            answer = await client.call_tool(
+                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
+            )
+
+    assert answer.data["agents"] == [
+        {"agent_name": AGENT, "status": "online"},
+        # Existing, not yet placed: present, and nothing is listening yet.
+        {"agent_name": "tester", "status": "offline"},
+    ], "a card with no directory behind it is not a member"
+
+
+@pytest.mark.asyncio
 async def test_a_local_roster_that_cannot_connect_says_why(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

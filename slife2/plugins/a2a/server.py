@@ -1536,6 +1536,13 @@ def build_server(
         whose card is still retained on the broker but which have said they are
         leaving, so they are listed rather than hidden.
 
+        **On the local network a subagent is present or absent, not online or
+        offline.**  It cannot take itself onto or off the mesh — the maker
+        places it when something is sent to it — so its directory is the whole
+        of whether it exists.  A retained card with no directory behind it is a
+        removed subagent, not a member that left, and it is not listed; on a
+        listed member `offline` only says that nothing is listening for it yet.
+
         **On the local network the roster is the maker's subagents, awake or
         not**, and that is the difference the vocabulary turns on: a member with
         no card is not a peer that left, it is one nothing has woken yet, and a
@@ -1602,6 +1609,15 @@ def build_server(
         own, *peers = mesh.list_agents()
         found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}
         if net is LOCAL:
+            members = membership(agent)
+            # **A card can outlive the directory it was held for.**  A removed
+            # subagent's session is forgotten and its directory deleted, but the
+            # broker keeps the offline card it published on the way out; the
+            # local roster is the membership (`subagent_dirs`), so a name with no
+            # directory behind it is not a member.  The maker's own name stays:
+            # a subagent's roster lists it as a peer.
+            wanted = {safe_name(agent)} | {safe_name(one) for one in members}
+            found = {name: status for name, status in found.items() if name in wanted}
             # `offline` is the card vocabulary's word and the honest one here:
             # nothing is listening for this member at this moment.  It says
             # nothing about whether a message would reach it — that is the one
@@ -1613,7 +1629,7 @@ def build_server(
             # this question — which has itself in `membership` like any other
             # member — would otherwise be listed twice, once as `you` and once as
             # a member nothing has woken.
-            for name in membership(agent):
+            for name in members:
                 if name != mesh.agent_name:
                     found.setdefault(safe_name(name), "offline")
         cards = [
