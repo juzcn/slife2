@@ -526,6 +526,16 @@ def test_an_inline_installer_run_returns_to_the_caller(tmp_path: Path) -> None:
     assert "AFTER" in result.stdout, result.stdout + result.stderr
 
 
+def test_the_installers_announce_extraction_the_same_way() -> None:
+    """One step, one line — and the Windows extraction stays quiet."""
+    for path in (SHELL, POWERSHELL):
+        assert "extracting slife2" in path.read_text(encoding="utf-8"), path.name
+    powershell = POWERSHELL.read_text(encoding="utf-8")
+    assert re.search(r"^\s*Expand-Archive\b", powershell, re.MULTILINE) is None, (
+        "Expand-Archive redraws the console; the .NET extraction is quiet"
+    )
+
+
 def test_requirements_report_unknown_commands_with_their_source(
     tmp_path: Path,
 ) -> None:

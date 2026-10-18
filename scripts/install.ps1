@@ -231,7 +231,12 @@ function Download-Source {
         }
     }
     Say '  extracting slife2'
-    Expand-Archive -Path $zip -DestinationPath $script:WorkDir -Force
+    # **Silent, and without the Archive module.**  `Expand-Archive` loads a
+    # module and redraws the console while it works; the .NET call is the same
+    # extraction with none of that, and matches the shell installer's quiet
+    # `tar`.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $script:WorkDir)
     $source = Get-ChildItem $script:WorkDir -Directory |
         Where-Object { Test-Path (Join-Path $_.FullName 'pyproject.toml') } |
         Select-Object -First 1
@@ -357,7 +362,8 @@ function Install-Node {
         return $false
     }
     Say '  extracting node'
-    Expand-Archive -Path $zip -DestinationPath $expand -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $expand)
     $inner = Get-ChildItem $expand -Directory | Select-Object -First 1
     if (-not $inner) { return $false }
     if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }

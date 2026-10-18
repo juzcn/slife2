@@ -185,6 +185,7 @@ download_source() {
     curl -fL --progress-bar -o "$archive" "https://github.com/juzcn/slife2/archive/refs/heads/main.tar.gz" \
         || curl -fL --progress-bar -o "$archive" "https://gitee.com/juzcn/slife2/repository/archive/main.tar.gz" \
         || die "slife2 could not be downloaded"
+    say "  extracting slife2"
     tar -xzf "$archive" -C "$SOURCE" --strip-components=1 || die "slife2 could not be extracted"
     HELPER="$SOURCE/scripts/install_helper.py"
     [ -f "$HELPER" ] || die "the downloaded source is incomplete"
