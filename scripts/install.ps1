@@ -465,15 +465,11 @@ function Invoke-Verification([object[]]$Requirements) {
     if ($LASTEXITCODE -ne 0) { Fail 'SQLite extensions are not available' }
     & $script:Py -c 'import slife2'
     if ($LASTEXITCODE -ne 0) { Fail 'slife2 does not import' }
-    if ($script:Mode -eq 'checkout') {
-        & uv run --no-sync slife2 --help | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail 'uv run slife2 does not run' }
-    }
-    elseif (Get-Command slife2 -ErrorAction SilentlyContinue) {
-        & slife2 --help | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail 'slife2 does not run' }
-    }
-    else { Fail 'slife2 is missing' }
+    # The module, not the console script: `slife2 --help` on PATH can be a
+    # stale shim or profile alias that runs the TUI instead of answering the
+    # flag.  `-m slife2` is this environment's code and argparse handles it.
+    & $script:Py -m slife2 --help | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail 'slife2 does not run' }
 }
 
 function Show-Credentials {
@@ -597,9 +593,10 @@ try {
     Parse-Arguments @args
     Resolve-Mode
     Resolve-DataHome
-    if ($script:Action -eq 'install' -and $script:DryRun) { Invoke-DryRun }
-    if ($script:Action -eq 'install') { Invoke-Install }
-    Invoke-Uninstall
+    if ($script:Action -eq 'install') {
+        if ($script:DryRun) { Invoke-DryRun } else { Invoke-Install }
+    }
+    else { Invoke-Uninstall }
 }
 catch {
     Fail $_.Exception.Message

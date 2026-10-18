@@ -491,11 +491,9 @@ verify() {
     "$PY" -c 'import sqlite3, sqlite_vec; c = sqlite3.connect(":memory:"); c.enable_load_extension(True); sqlite_vec.load(c)' \
         || fail "SQLite extensions are not available"
     "$PY" -c 'import slife2' || fail "slife2 does not import"
-    if [ "$MODE" = checkout ]; then
-        uv run --no-sync slife2 --help >/dev/null 2>&1 || fail "uv run slife2 does not run"
-    else
-        slife2 --help >/dev/null 2>&1 || fail "slife2 does not run"
-    fi
+    # The module, not the console script: `slife2 --help` on PATH can be a
+    # stale shim or function that runs the TUI instead of answering the flag.
+    "$PY" -m slife2 --help >/dev/null 2>&1 || fail "slife2 does not run"
 }
 
 print_credentials() {

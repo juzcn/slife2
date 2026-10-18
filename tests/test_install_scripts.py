@@ -442,6 +442,20 @@ def test_requirements_cover_the_shipped_configuration() -> None:
     } <= named
 
 
+def test_the_installers_run_slife2_as_a_module() -> None:
+    """**Never the console script.**  `slife2 --help` is a path lookup, and a
+    stale shim or a profile function on that name can run the TUI instead of
+    answering the flag — which is an installation that starts the stack.  The
+    module is this environment's code, and argparse owns the flag.
+    """
+    for path in (SHELL, POWERSHELL):
+        text = path.read_text(encoding="utf-8")
+        assert "-m slife2 --help" in text, path.name
+        assert re.search(r"^\s*(?:&\s*)?slife2 --help", text, re.MULTILINE) is None, (
+            f"{path.name} invokes the console script"
+        )
+
+
 def test_requirements_report_unknown_commands_with_their_source(
     tmp_path: Path,
 ) -> None:
