@@ -494,6 +494,38 @@ def test_invoke_quiet_judges_a_native_command_by_its_exit_code(
     assert "RESULT=True" in result.stdout, result.stdout + result.stderr
 
 
+def test_an_inline_installer_run_returns_to_the_caller(tmp_path: Path) -> None:
+    """**`irm ... | iex` runs in the caller's shell.**
+
+    The installer used to `exit 0` when it finished, which closes the
+    PowerShell window or pane the command was pasted into — Windows Terminal
+    then switches to another window, which looks like something was started.
+    A dry run is the cheapest path through the same dispatch.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the PowerShell installer runs on Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$text = '$args = @(''--dry-run'')' + [Environment]::NewLine + "
+        f"(Get-Content '{POWERSHELL}' -Raw)\n"
+        "iex $text\n"
+        "Write-Output 'AFTER'\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+    assert "AFTER" in result.stdout, result.stdout + result.stderr
+
+
 def test_requirements_report_unknown_commands_with_their_source(
     tmp_path: Path,
 ) -> None:

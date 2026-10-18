@@ -28,7 +28,7 @@ $script:Failed = $false
 function Say([string]$Message) { Write-Host $Message }
 function Step([string]$Number, [string]$Message) { Write-Host ""; Write-Host "[$Number] $Message" }
 function Fail([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; $script:Failed = $true }
-function Die([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; exit 2 }
+function Die([string]$Message) { throw [System.Exception]::new($Message) }
 
 function Invoke-Quiet([scriptblock]$Body, [switch]$Silent) {
     $log = Join-Path $env:TEMP ("slife2-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.log')
@@ -69,7 +69,8 @@ function Parse-Arguments {
         elseif ($lower -eq '--dry-run' -or $lower -eq '-dryrun') { $script:DryRun = $true }
         elseif ($lower -eq '--help' -or $lower -eq '-help' -or $lower -eq '-h') {
             Say 'usage: install.ps1 [install|uninstall] [--dry-run]'
-            exit 0
+            $script:Action = 'help'
+            return
         }
         elseif ($lower.StartsWith('-')) { Die "unknown option: $arg" }
         else { Die "unknown action: $arg" }
@@ -540,8 +541,8 @@ function Invoke-Install {
     Install-Dependencies $requirements
     Invoke-Verification $requirements
     Show-Next
-    if ($script:Failed) { exit 1 }
-    exit 0
+    if ($script:Failed) { return 1 }
+    return 0
 }
 
 function Invoke-DryRun {
@@ -552,11 +553,11 @@ function Invoke-DryRun {
     else {
         Say '  would install slife2 as a uv tool and install configured programs'
     }
-    exit 0
+    return 0
 }
 
 function Invoke-Uninstall {
-    if (-not (Test-Path $script:State)) { Say 'Nothing to uninstall.'; exit 0 }
+    if (-not (Test-Path $script:State)) { Say 'Nothing to uninstall.'; return 0 }
     $entries = @()
     foreach ($line in Get-Content $script:State -Encoding UTF8) {
         if ($line.StartsWith('#') -or [string]::IsNullOrWhiteSpace($line)) { continue }
@@ -565,7 +566,7 @@ function Invoke-Uninstall {
             $entries += [pscustomobject]@{ Manager = $parts[0]; Package = $parts[1]; Tool = $parts[2] }
         }
     }
-    if ($entries.Count -eq 0) { Say 'Nothing to uninstall.'; exit 0 }
+    if ($entries.Count -eq 0) { Say 'Nothing to uninstall.'; return 0 }
 
     Say 'Uninstalling slife2 components...'
     $keep = @()
@@ -598,19 +599,28 @@ function Invoke-Uninstall {
     [IO.File]::WriteAllText($script:State, $text, $Utf8NoBom)
     if ($code -eq 0) { Say 'Uninstalled.' }
     else { Say 'Some components could not be removed.' }
-    exit $code
+    return $code
 }
 
+$code = 0
 try {
     Parse-Arguments @args
-    Resolve-Mode
-    Resolve-DataHome
-    if ($script:Action -eq 'install') {
-        if ($script:DryRun) { Invoke-DryRun } else { Invoke-Install }
+    if ($script:Action -ne 'help') {
+        Resolve-Mode
+        Resolve-DataHome
+        if ($script:Action -eq 'install') {
+            if ($script:DryRun) { $code = Invoke-DryRun } else { $code = Invoke-Install }
+        }
+        else { $code = Invoke-Uninstall }
     }
-    else { Invoke-Uninstall }
 }
 catch {
     Fail $_.Exception.Message
-    exit 2
+    $code = 2
 }
+# **An inline run (`irm ... | iex`) lives in the caller's shell.**  `exit` here
+# closes the window or pane the command was pasted into — Windows Terminal then
+# switches to another window, which looks like something was started.  Return
+# to the prompt instead; a script file (`-File`, install.cmd) still reports its
+# code.
+if ($PSScriptRoot) { exit $code }
