@@ -30,7 +30,7 @@ function Step([string]$Number, [string]$Message) { Write-Host ""; Write-Host "[$
 function Fail([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; $script:Failed = $true }
 function Die([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; exit 2 }
 
-function Invoke-Quiet([scriptblock]$Body) {
+function Invoke-Quiet([scriptblock]$Body, [switch]$Silent) {
     $log = Join-Path $env:TEMP ("slife2-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.log')
     # **Native stderr is output, not a failure.**  With the caller's
     # `$ErrorActionPreference = 'Stop'`, Windows PowerShell 5.1 turns a native
@@ -43,13 +43,17 @@ function Invoke-Quiet([scriptblock]$Body) {
         & $Body *> $log
         $code = $LASTEXITCODE
         if ($code -ne 0) {
-            Get-Content $log -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            if (-not $Silent) {
+                Get-Content $log -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            }
             return $false
         }
         return $true
     }
     catch {
-        Get-Content $log -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        if (-not $Silent) {
+            Get-Content $log -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        }
         return $false
     }
     finally {
@@ -192,7 +196,7 @@ function Ensure-Uv {
     Update-ProcessPath
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         Say '  updating uv'
-        [void](Invoke-Quiet { & uv self update })
+        [void](Invoke-Quiet { & uv self update } -Silent)
         return
     }
     Say '  installing uv'
