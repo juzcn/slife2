@@ -60,6 +60,7 @@ from slife2.libs.host.runtime import (
     read_record,
     same_process,
     spawn,
+    start_lock,
     tail_log,
     tcp_listening,
     terminate,
@@ -211,12 +212,24 @@ def ensure(
     reachable by everybody, so it fails with the reason rather than being
     started.  The operator who wants a reachable broker runs one, with
     authentication, and points `a2a.broker.host` at it.
+
+    **The start is serialised by the broker's own endpoint lock.**  `peer_agent:`
+    and `subagent:` are two server processes, and the launcher starts them in
+    the same wave: both probe, both find nothing, and both spawn a mosquitto —
+    one binds and the other exits 1 with "Address already in use", which the
+    loser's server reports as its own failure and takes the whole stack down
+    with it.  `start_lock` is the lock a server start already uses, keyed here
+    by `mqtt://…`; whoever waits re-probes inside it and finds the broker the
+    holder started.
     """
     probe = listening or _probe
-    if probe(settings.broker_host, settings.broker_port):
-        return f"broker already listening on {settings.address}"
-
+    # The two addresses this build never starts are checked before the lock: it
+    # is keyed by an MQTT URL, and a wildcard (`::`, `0.0.0.0`, ``""``) is not
+    # one `urlsplit` can take a port from — which is also why it is refused
+    # rather than started.
     if is_wildcard(settings.broker_host):
+        if probe(settings.broker_host, settings.broker_port):
+            return f"broker already listening on {settings.address}"
         raise BrokerUnavailable(
             f"nothing is listening on {settings.address}, and "
             f"{settings.broker_host!r} binds every interface — a broker started "
@@ -224,14 +237,37 @@ def ensure(
             f"and let any host impersonate a peer. Start a broker yourself on a "
             f"concrete address, or point `a2a.broker.host` at `localhost`."
         )
-
     if not is_local(settings.broker_host):
+        if probe(settings.broker_host, settings.broker_port):
+            return f"broker already listening on {settings.address}"
         raise BrokerUnavailable(
             f"nothing is listening on {settings.address}, and "
             f"{settings.broker_host!r} is not this machine — a broker on somebody "
             f"else's host is theirs to start, and a local one cannot stand in for "
             f"it. Start it there, or point `a2a.broker.host` at this one."
         )
+
+    with start_lock(log_url(settings)):
+        return _bring_up(
+            settings,
+            probe=probe,
+            which=which,
+            start=start,
+            ready_seconds=ready_seconds,
+        )
+
+
+def _bring_up(
+    settings: A2ASettings,
+    *,
+    probe: Callable[[str, int], bool | None],
+    which: Callable[[str], str | None],
+    start: Callable[..., subprocess.Popen],
+    ready_seconds: float | None,
+) -> str:
+    """`ensure`'s body, under the broker's start lock."""
+    if probe(settings.broker_host, settings.broker_port):
+        return f"broker already listening on {settings.address}"
 
     binary = which(MOSQUITTO)
     if binary is None:

@@ -26,6 +26,8 @@ import contextlib
 import json
 import logging
 import os
+import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -579,6 +581,59 @@ def test_a_missing_broker_on_this_machine_is_started() -> None:
     config = Path(started[0]["argv"][2]).read_text(encoding="utf-8")
     assert "listener 1883 localhost" in config
     assert "allow_anonymous true" in config
+
+
+def test_two_servers_starting_together_spawn_one_broker() -> None:
+    """**The two a2a servers start in one wave, and the broker must be one too.**
+
+    `peer_agent:` and `subagent:` are separate processes.  Without the start
+    lock both probed an absent broker and both spawned a mosquitto; the one
+    that lost the bind exited 1 — "Address already in use" — and its server
+    failed the whole start.  The fake keeps the winner inside `start` long
+    enough for the loser to have probed if the lock were absent.
+    """
+    started: list[str] = []
+    ready = threading.Event()
+
+    class Child:
+        returncode = None
+        pid = os.getpid()
+
+        def poll(self) -> None:
+            return None
+
+    def start(argv: list[str], *, url: str) -> Any:
+        started.append(url)
+        time.sleep(0.15)
+        ready.set()
+        return Child()
+
+    def listening(host: str, port: int) -> bool:
+        return ready.is_set()
+
+    results: list[str] = []
+
+    def run() -> None:
+        results.append(
+            broker.ensure(
+                settings(),
+                listening=listening,
+                which=lambda name: "/usr/bin/mosquitto",
+                start=start,
+            )
+        )
+
+    first = threading.Thread(target=run)
+    second = threading.Thread(target=run)
+    first.start()
+    second.start()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert len(results) == 2, "both servers answered"
+    assert len(started) == 1, "one mosquitto, not a race to bind"
+    assert sum("started" in said for said in results) == 1
+    assert sum("already listening" in said for said in results) == 1
 
 
 def test_a_missing_mosquitto_fails_and_says_what_to_install() -> None:
