@@ -46,10 +46,19 @@ def test_shell_syntax() -> None:
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is not available")
+    # **The script goes in on stdin, as bytes.**  On Windows `bash` may be
+    # WSL's alias (`System32\bash.exe`), whose arguments are translated to Linux
+    # paths — a Windows path this test passed as an operand arrived as
+    # `D:DevWorkspaceslife2scriptsinstall.sh`.  Bytes rather than text because
+    # subprocess's text mode translates `\n` to `\r\n` on the way in, and a
+    # shell script with CRLF endings is a syntax error in bash.
     result = subprocess.run(
-        [bash, "-n", str(SHELL)], capture_output=True, text=True, cwd=ROOT
+        [bash, "-n"],
+        input=SHELL.read_text(encoding="utf-8").encode("utf-8"),
+        capture_output=True,
+        cwd=ROOT,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
 
 
 def test_powershell_syntax() -> None:
