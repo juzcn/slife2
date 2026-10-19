@@ -36,6 +36,7 @@ from typing import Any
 
 from slife2.helpers.timeutil import can_place
 from slife2.libs.turn.prompt import render
+from slife2.libs.turn.tools import INTERRUPTED
 
 #: The discriminator's instruction, shipped as a template for the reason the
 #: system prompt is: it is text with holes in it, and a template says where they
@@ -76,11 +77,6 @@ RECALL_KEYS = ("query", "since", "until", "anchor")
 #: answered the question and refusing it would spend a turn to learn nothing.
 KEEP_ALL = "keep"
 KEEP_NONE = "clear"
-
-#: The message a repaired history gets where a tool result should have been.
-#: ASCII, and the same words v1 uses, because it is a sentence in a transcript
-#: that a person also reads.
-INTERRUPTED = "(Tool execution interrupted)"
 
 #: The prefix and suffix a turn's footnote is wrapped in, and the marker is what
 #: makes the footnote *findable* rather than merely present: a reader looking for
@@ -581,10 +577,12 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     list that is already correct changes nothing, which is what makes it safe to
     run unconditionally here rather than only where a problem is suspected.
 
-    The placeholder is `INTERRUPTED`, and it has exactly one producer — this
-    function.  The agent server's own cancellation repair *truncates* back to
-    the user's message and leaves nothing behind, so the two do not have to
-    agree on a sentence: they never both write one.
+    The placeholder is `INTERRUPTED`, and it has two producers: this function,
+    and the loop completing a batch an interruption cut short
+    (`slife2.libs.turn.loop`, which keeps the batch rather than dropping it).  They
+    share the one constant because both write the same sentence into a
+    conversation, and a model reading one must not see two descriptions of one
+    interruption.
 
     **What is deliberately not ported is v1's second invariant** — a history
     ending on `user` or `tool` gets a closing assistant line.  That exists for a

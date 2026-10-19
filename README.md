@@ -318,8 +318,8 @@ ignored outside WSL's mirrored mode.
 |---|---|
 | `Enter` | Send the message. |
 | `Shift+Enter` | Insert a line break. |
-| `Esc` | Cancel the running turn. |
-| `Ctrl+C` | Copy when something is selected; otherwise cancel the running turn; otherwise quit. |
+| `Esc` | Interrupt the running turn. |
+| `Ctrl+C` | Copy when something is selected; otherwise interrupt the running turn; otherwise quit. |
 | `Ctrl+S` | Open the model picker. `↑`/`↓` move, `Enter` selects, `Esc` closes. |
 | `Ctrl+O` | Open the subagent picker. Choosing one opens a read-only view of its conversation; `Esc` closes it. |
 | `Ctrl+Q` | Quit (the standard Textual binding). It is not shown in the status bar because terminals with flow control may consume it before the application sees it. |
@@ -335,7 +335,7 @@ the end.
 
 If a message is sent while a turn is running, it is queued. The running turn
 finishes, then the queued message runs. The status bar shows the queue depth.
-`Esc` cancels the running turn but leaves the queue intact.
+`Esc` interrupts the running turn but leaves the queue intact.
 
 A message that arrives while a turn is running is delivered to that turn at the
 next iteration boundary, not held for a later turn. This applies to text typed
@@ -391,10 +391,13 @@ once. A source that cannot be read is named in the answer without failing the
 rest. A URL is passed to the provider, which fetches it.
 
 Images are available only when the model's entry lists `image` under `input`.
-The image goes to the model and no further. The turn log keeps the sentence, the
-tool's answer naming the file, and a note recording that the image was attached
-and how large it was. A restored conversation is therefore text; a later turn
-that needs the picture attaches it again from the named path.
+The live conversation carries the pixels; the turn log keeps the sentence, the
+tool call and answer naming the file, and an `[Image:…]` reference to a cabinet
+copy keyed by its content digest. The pixels never enter the row. A restored
+conversation is therefore text plus that reference, and a later turn that needs
+the picture calls `attach_image` with the reference's key — the cabinet answers
+a `data:` URL — or with the image's URL. A provider that refuses an image drops
+it and says so; that turn's row is note-only.
 
 ## Configuration
 
@@ -757,7 +760,7 @@ tool and is not exposed to the model.
 ### Cabinet
 
 The cabinet is a per-agent store of notes, diary entries, saved files, reports,
-and dumps.
+dumps, and images.
 
 | Kind | Key | A second write |
 |---|---|---|
@@ -766,11 +769,12 @@ and dumps.
 | `file` | Its path inside the cabinet | Copies the file in. |
 | `report` | A title | Appends a section. |
 | `dump` | The tool call that produced the output | Written by the harness. |
+| `image` | Its content digest | Written by the harness; bytes in `pictures/`. |
 
-Notes and files are documents: the second write is their content, which is why
-only those two kinds have remove tools. A diary and a report are logs: two
-entries under one date or title are two facts, and nothing in the later text says
-which part of the earlier one it replaces.
+Notes, files and images are documents: the second write is their content, which
+is why only notes and files have remove tools. A diary and a report are logs:
+two entries under one date or title are two facts, and nothing in the later text
+says which part of the earlier one it replaces.
 
 A dump is a tool output too large for the conversation. The output is stored
 whole, keyed by the tool call id, and the conversation carries a selection of the
@@ -782,6 +786,13 @@ model reads any part of the dump back with `dump_read`, a searching reader:
 line (negative counts from the end), and `limit` reads fewer lines. Every answer
 stays within the same token budget. A search does not see dumps unless `kind` is
 `dump`.
+
+An image is a picture a turn carried. It is stored whole under `pictures/`,
+keyed by its content digest, and the turn row carries an `[Image:…]` reference
+instead of the pixels. `image_source` resolves that reference and `attach_image`
+is how the model sees the picture again. An `http(s)` image is never fetched
+here: the row keeps the URL and the provider fetches it. A no-kind search sees
+images; they are content a person attached, unlike dumps.
 
 Every document is written twice: a row in the cabinet index and a Markdown file
 under `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`), which can be
@@ -796,7 +807,8 @@ Text in another encoding is decoded and the encoding is named in the answer.
 words that must all be present, and `sentences` are questions matched by
 meaning. Several sentences are several questions, and each can only add results.
 `cabinet_summarize` writes a description for a document; writing one for a file
-re-embeds it, because the description is part of what its vector is built from.
+or an image re-embeds it, because the description is part of what its vector is
+built from.
 
 `file_save` copies files already on the machine. It does not fetch URLs. The
 cabinet has no `grep` search leg.

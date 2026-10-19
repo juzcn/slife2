@@ -37,11 +37,10 @@ said.  A task reads the agent's context and adds nothing to it.
 Two things it deliberately does not have, each because nothing needs it rather
 than because it was left out:
 
-* **No cancellation repair.**  A cancelled turn in the agent server is truncated
-  back to the user's message, because an assistant message with half its tool
-  calls answered is a 400 from every provider and *that* conversation has to
-  survive.  A task's list is local and dies with it, so there is no next request
-  to poison.
+* **No cancellation repair of its own.**  The loop completes an interrupted
+  batch for every caller (`slife2.libs.turn.loop`), so the list it leaves is well
+  formed; and a task's list is local and dies with it, so there is no next
+  request to poison either way.
 * **No filtering of the tool set.**  The catalogue is one list for the whole
   system (`slife2-toolhub`), so a task may start a task and the registry here is
   **flat** — no parents, no depth.  `agent-task: max_running` is the bound

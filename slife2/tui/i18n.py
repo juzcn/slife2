@@ -143,9 +143,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "zh": "保留 {turns}，召回 {recalled}",
     },
     # A turn the person stopped.
-    "cancelled": {
-        "en": "cancelled",
-        "zh": "已取消",
+    "interrupted": {
+        "en": "interrupted",
+        "zh": "已中断",
     },
     # The window could not put its agent on the mesh, and why.  `reason` is the
     # transport's own sentence, quoted rather than restated.
@@ -440,8 +440,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # — because they are what is printed on the keyboard and a translated one
     # breaks the key-to-action scan; the words after them are the words.
     "status_keybinds": {
-        "en": "Esc/Ctrl+C cancel  Ctrl+S model  Ctrl+O subagents  Ctrl+C quit",
-        "zh": "Esc/Ctrl+C 取消  Ctrl+S 模型  Ctrl+O subagent  Ctrl+C 退出",
+        "en": "Esc/Ctrl+C interrupt  Ctrl+S model  Ctrl+O subagents  Ctrl+C quit",
+        "zh": "Esc/Ctrl+C 中断  Ctrl+S 模型  Ctrl+O subagent  Ctrl+C 退出",
     },
 }
 

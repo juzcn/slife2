@@ -613,7 +613,7 @@ class ChatView(VerticalScroll):
         """A line from the harness rather than from anyone in the conversation.
 
         **The brackets are applied here, and every harness line wears them.**
-        `[restored 3 turns]`, `[cancelled]`, `[⚡ jill online]` — the shape is
+        `[restored 3 turns]`, `[interrupted]`, `[⚡ jill online]` — the shape is
         what tells a reader this line is not somebody speaking, so it belongs to
         the one widget that draws them rather than to each producer.  A caller
         passing text that already carried them would be a caller spelling the
@@ -630,7 +630,7 @@ class ChatView(VerticalScroll):
         nobody.  So ending a turn is something a caller asks for.
 
         `ends_turn` is for the one note that *is* the end of a turn:
-        `[cancelled]`.  A cancelled turn has no rest to stream, and leaving it
+        `[interrupted]`.  A cancelled turn has no rest to stream, and leaving it
         open is what let a delta already in the pump for it be drawn under this
         line as though the turn had gone on — the trigger the module docstring
         names for the finish boundary, arriving from the other side.
@@ -697,7 +697,7 @@ class ChatView(VerticalScroll):
         line first closed it again: `add_note` closes the block it is given, so a
         note arriving before the first delta left an empty assistant block in the
         transcript, a blank gap between the prompt and the answer.  The
-        discriminator's note is such a line, and so is `[cancelled]` on a turn
+        discriminator's note is such a line, and so is `[interrupted]` on a turn
         that streamed nothing before it was interrupted.
 
         Text, reasoning and the final answer each open the block they need —
@@ -1953,8 +1953,8 @@ class StatusBar(Static):
         #
         # Both are worth the space.  Reasoning explains the pause before an
         # answer and the block above it, and vision is the one thing a person
-        # has to know *before* typing — `@picture.png` is either going to work
-        # or be refused, and the config already knows which.
+        # has to know *before* typing — a picture the person names is either
+        # going to work or be refused, and the config already knows which.
         if thinking:
             parts.append(
                 f"[{PALETTE['dim']}]{GLYPHS['thinking']} {t('model_thinking')}[/]"

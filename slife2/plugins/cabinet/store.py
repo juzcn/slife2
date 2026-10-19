@@ -1,8 +1,9 @@
-"""The cabinet's index: five kinds of document, and one corpus to find them in.
+"""The cabinet's index: six kinds of document, and one corpus to find them in.
 
 The cabinet holds **notes** (keyed by subject), a **diary** (keyed by date),
-**files** (bytes on disk, metadata here), **reports** (keyed by title) and
-**dumps** (one tool's own output, keyed by the call that produced it).  v1
+**files** (bytes on disk, metadata here), **reports** (keyed by title),
+**dumps** (one tool's own output, keyed by the call that produced it) and
+**images** (a picture a turn carried, keyed by its digest).  v1
 called this plugin `memfiles` and its store had four tables, a `cabinet_docs`
 view that unioned them and twelve triggers keeping a shared FTS table in step
 (`slife/plugins/memfiles/schema.sql`).  What is kept is the *design* that made
@@ -52,8 +53,8 @@ A second write under one key replaces, because it is the same call re-shortened
 and not a second fact about anything.
 
 **One table, and the kinds are a column.**  A note, a day, a saved file, a
-report and a dump are five *values* of `kind` in `cabinet_doc`, with the union
-of the columns they need.  That is the "four kinds are ONE corpus" rule read literally:
+report, a dump and an image are six *values* of `kind` in `cabinet_doc`, with
+the union of the columns they need.  That is the "four kinds are ONE corpus" rule read literally:
 the rowid **is** the corpus id, so the two legs of a search fuse on `rowid` the
 way the turns and the tool catalogue already do (`slife2.libs.store.index.fuse_ranked`), where
 v1 had to synthesise a global id out of a per-kind offset.  Four tables also
@@ -167,7 +168,15 @@ REPORT = "report"
 #: conversation, and `dump_read` is how a model reads back the part it did not
 #: get — a bounded answer, for the reason the module docstring gives.
 DUMP = "dump"
-KINDS = (NOTE, DIARY, FILE, REPORT, DUMP)
+#: An image attached to a turn, kept whole because the turn log is text.
+#: **The second bytes-backed kind**, and the one whose reader is not a text
+#: tool: the conversation keeps an `[Image:{…}]` reference and `attach_image`
+#: is how the picture comes back (`slife2.libs.turn.attachments`).  A local
+#: path or `data:` URI is stored as bytes under `pictures/`; an `http(s)` URL
+#: has no bytes here at all — this system never fetches one — so the row keeps
+#: the URL as its `source` and the provider fetches it.
+IMAGE = "image"
+KINDS = (NOTE, DIARY, FILE, REPORT, DUMP, IMAGE)
 
 #: The sentence a caller gets for a kind that is not one of these.  Spelled
 #: from `KINDS` so that another one cannot be added without this agreeing.
@@ -195,8 +204,8 @@ class Spec:
     The key is what a read tool and a remove tool take, and it is the only
     column a kind is addressed by: a note by its subject, a day by its date, a
     file by the path it was saved to, a report by its title, a dump by the
-    tool call it is the output of.  Five kinds and five keys, which is why this
-    is a column and not five tables.
+    tool call it is the output of, and an image by its digest.  Six kinds and
+    six keys, which is why this is a column and not six tables.
     """
 
     #: The column a list orders by and a since/until window filters on.  v1's
@@ -239,6 +248,11 @@ SPECS: dict[str, Spec] = {
     # marker in the transcript points a reader at.  What that costs is a second
     # copy of the text, in a directory nothing searches.
     DUMP: Spec(time="created_at", day=False, appends=False, mirror="dumps"),
+    # An image is a saved-file's shape with a different reader: bytes on disk
+    # (`pictures/`), no markdown mirror, one row per content digest so a
+    # picture attached twice is stored once.  An `http(s)` source has no file
+    # and is found by its URL; the row is still one per digest of that URL.
+    IMAGE: Spec(time="created_at", day=False, appends=False, mirror=""),
 }
 
 
@@ -307,15 +321,16 @@ def search_text(row: Mapping[str, Any]) -> str:
 def vector_text(row: Mapping[str, Any]) -> str:
     """The text a document is **about** — what its vector is a vector of.
 
-    The body alone for three kinds, which is the document itself.  A **file** is
-    the exception and the reason this is a function: it has no text of its own,
-    so what it is about is what it **is** — its title, the paths that place it,
-    and the summary once a model writes one.  That is not decoration: without
-    the identity in it, a file would have nothing to embed until somebody
-    described it, so a cabinet of saved files would be missing from the vector
-    index from the moment it was saved — and `sync` would report every one of
-    them as a document with no vector, a "failed save" it could never clear.
-    v1's rule, and why v1 composed a file's body the same way (DESIGN.md §5.3).
+    The body alone for the text kinds, which is the document itself.  A **file**
+    and an **image** are the exceptions and the reason this is a function: they
+    have no text of their own, so what each is about is what it **is** — its
+    title, the paths that place it, and the summary once a model writes one.
+    That is not decoration: without the identity in it, a file would have
+    nothing to embed until somebody described it, so a cabinet of saved files
+    would be missing from the vector index from the moment it was saved — and
+    `sync` would report every one of them as a document with no vector, a
+    "failed save" it could never clear.  v1's rule, and why v1 composed a
+    file's body the same way (DESIGN.md §5.3).
 
     Tags are out of it, unlike the keyword text: a tag is a word somebody chose
     to file a document under, and a vector built from one describes the filing
@@ -323,7 +338,7 @@ def vector_text(row: Mapping[str, Any]) -> str:
     """
     parts = (
         [row.get("title"), row.get("source"), row.get("file_path"), row.get("summary")]
-        if str(row.get("kind") or "") == FILE
+        if str(row.get("kind") or "") in (FILE, IMAGE)
         # **Body alone, and the summary is deliberately not here.**  A summary is
         # something a model wrote *about* the row, and it is read by the keyword
         # leg on either side; the vector is what the document *is*.  Only a file
@@ -476,7 +491,7 @@ def resolve(root: Path, relative: str) -> Path:
 # ── The schema ──────────────────────────────────────────────────────────────
 
 _SCHEMA = f"""
--- The corpus: five kinds of document in one table.
+-- The corpus: six kinds of document in one table.
 --
 -- **One table rather than one per kind plus a view**, which is the design v1
 -- reached for a view to express: the kinds are one corpus, and a corpus whose
@@ -1251,7 +1266,7 @@ class CabinetStore:
             )
         if mirror := str(row.get("mirror") or ""):
             (self.root / mirror).unlink(missing_ok=True)
-        if kind == FILE and (saved := str(row.get("file_path") or "")):
+        if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
             discard_file(self.root / saved)
         return row
 
@@ -1266,12 +1281,13 @@ class CabinetStore:
     ) -> dict[str, Any] | None:
         """`cabinet_summarize`: a model's description of a row already saved.
 
-        **A file is re-embedded and the other kinds are not**, which is the one
-        asymmetry DESIGN.md §5.3 states: a summary is part of the text a file's vector is
-        built from (a file has no text of its own), so the stored vector is now
-        the wrong vector for its row and has to be replaced.  A note's vector is
-        its body, which a summary does not change — and rebuilding it anyway
-        would be spending an embedding call to store the same vector.
+        **A file or an image is re-embedded and the text kinds are not**, which
+        is the one asymmetry DESIGN.md §5.3 states: a summary is part of the text
+        a file's (or an image's) vector is built from, since neither has text of
+        its own, so the stored vector is now the wrong vector for its row and
+        has to be replaced.  A note's vector is its body, which a summary does
+        not change — and rebuilding it anyway would be spending an embedding
+        call to store the same vector.
 
         **The re-embedding happens before anything is written**, which is
         `write`'s order and not a detail: the summary was committed first and
@@ -1298,11 +1314,11 @@ class CabinetStore:
         row["summary"] = summary or row.get("summary") or ""
         row["tags"] = tags or row.get("tags") or ""
         row["updated_at"] = now()
-        # A file's vector is of its identity *including* the summary
-        # (`vector_text`), so the model is asked about the row as it will be —
-        # and asked here, before the `UPDATE`, because a summary that cannot be
-        # embedded is a summary that is not written.
-        vectors = await self.vectors(row, embedder) if kind == FILE else None
+        # A file's (and an image's) vector is of its identity *including* the
+        # summary (`vector_text`), so the model is asked about the row as it
+        # will be — and asked here, before the `UPDATE`, because a summary that
+        # cannot be embedded is a summary that is not written.
+        vectors = await self.vectors(row, embedder) if kind in (FILE, IMAGE) else None
         with self._connect() as connection:
             connection.execute(
                 "UPDATE cabinet_doc SET summary = ?, tags = ?, updated_at = ? WHERE id = ?",
@@ -1390,8 +1406,8 @@ class CabinetStore:
         """A since/until window on **this kind's** time axis.
 
         Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
-        because both of its callers have one; a cabinet's kinds have five
-        different axes and v1 made the same distinction.  The bound grammar is
+        because both of its callers have one; a cabinet's kinds use their own
+        axes and v1 made the same distinction.  The bound grammar is
         the shared one (`slife2.helpers.timeutil`), so a model writes `yesterday` here
         as it does anywhere else.
 
@@ -1453,8 +1469,8 @@ class CabinetStore:
 
         The window is the one `listing` uses, per kind — and with no kind it is
         the *document's* `updated_at`, which every kind has, because a window
-        has to have a column and "when was this written" is the only axis all
-        five share.
+        has to have a column and "when was this written" is the only axis every
+        kind shares.
         """
         limit = page_limit(limit, MAX_PAGE)
         if kind and kind not in SPECS:
@@ -1813,12 +1829,13 @@ def line_text(row: Mapping[str, Any]) -> str:
 
 
 #: The columns a *kind* has and the others do not: `size`, `mime` and `source`
-#: are a saved file's — what the bytes are and where they came from — and
-#: `period_*` a report's.  A kind that cannot have one answers nothing about it
-#: rather than answering "0" and "", which a model reads as a fact about the
-#: document.
+#: are a saved file's and an image's — what the bytes are and where they came
+#: from — and `period_*` a report's.  A kind that cannot have one answers
+#: nothing about it rather than answering "0" and "", which a model reads as a
+#: fact about the document.
 _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     FILE: ("size", "mime", "source"),
+    IMAGE: ("size", "mime", "source"),
     REPORT: ("period_start", "period_end"),
 }
 

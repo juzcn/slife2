@@ -1254,6 +1254,36 @@ async def test_a_restored_subagent_message_unwraps_its_own_envelope() -> None:
         assert "[Subagent:" not in shown(app), "the marker reached the screen"
 
 
+async def test_a_restored_image_reference_is_not_drawn() -> None:
+    """The `[Image:…]` address is the model's, like `[TURN:…]`.
+
+    A kept picture leaves a cabinet address in the row.  The transcript shows
+    what was *said*; the JSON is what the model reads to attach the picture
+    again, and a person looking over its shoulder has no use for it.
+    """
+    client = answering_with(
+        stored(
+            Message(
+                role="user",
+                content=[
+                    {"type": "text", "text": "看看这张图"},
+                    {
+                        "type": "text",
+                        "text": '[Image:{"key": "pictures/ab12.png", "mime": "image/png"}]',
+                    },
+                ],
+            ),
+            asked="2020-03-04T09:05:00+08:00",
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "看看这张图" in shown(app)
+        assert "[Image:" not in shown(app), "the marker reached the screen"
+        assert "pictures/ab12.png" not in shown(app)
+
+
 async def test_the_persons_own_words_are_never_unwrapped() -> None:
     """Typing a marker-shaped message is not a way to lose the front of it.
 
@@ -2004,7 +2034,7 @@ async def test_ctrl_c_cancels_a_running_turn() -> None:
         await pilot.press("ctrl+c")
         await pilot.pause()
 
-        assert "[cancelled]" in shown(app)
+        assert "[interrupted]" in shown(app)
         assert app.is_running
 
 
@@ -2025,7 +2055,7 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
     docstring says so about `finish_assistant`, and the cancel is the same seam
     from the other side: an event already in Textual's pump, or one the client's
     reader task posted as it unwound.  Leaving the ticket on the cancelled turn
-    accepted them, and `[cancelled]` is drawn by `add_note`, which does not close
+    accepted them, and `[interrupted]` is drawn by `add_note`, which does not close
     a turn — so a late delta opened a fresh block under the cancel line and a late
     tool call mounted a panel there, a transcript reading as though the turn had
     gone on after the person stopped it.
@@ -2055,7 +2085,7 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
 
         await pilot.press("escape")
         await pilot.pause()
-        assert "[cancelled]" in shown(app)
+        assert "[interrupted]" in shown(app)
         assert app.query_one(ChatView)._turn_open is False
 
         # Both halves of the seam, on the ticket the turn really used.
@@ -2067,7 +2097,7 @@ async def test_a_cancelled_turn_accepts_nothing_more() -> None:
 
     assert "LATE-FRAGMENT" not in text, "a late delta reopened the cancelled turn"
     assert names == [], "a late tool call mounted a panel under the cancel"
-    assert text.index("partial") < text.index("[cancelled]")
+    assert text.index("partial") < text.index("[interrupted]")
 
 
 async def test_a_tool_panel_still_running_is_settled_by_the_cancel() -> None:
@@ -2119,7 +2149,7 @@ async def test_a_tool_panel_still_running_is_settled_by_the_cancel() -> None:
 
         # Read from the panel that was already there, and not from a fresh query:
         # what is under test is that this one stopped claiming to run.
-        assert "[cancelled]" in shown(app)
+        assert "[interrupted]" in shown(app)
         settled = app.query_one(ToolCallWidget)
         assert settled is panel, "the panel was settled, not replaced"
         assert "running" not in settled.plain_text()
@@ -2594,7 +2624,7 @@ async def test_a_selection_keeps_ctrl_c_off_a_running_turn() -> None:
 
         await pilot.press("escape")
         await pilot.pause()
-        assert "[cancelled]" in shown(app)
+        assert "[interrupted]" in shown(app)
 
 
 async def test_a_second_prompt_waits_and_both_are_answered() -> None:
@@ -2815,7 +2845,7 @@ async def test_a_cancelled_turn_does_not_take_the_queue_with_it() -> None:
 
         # The turn the user gave up on stopped; the one they are still waiting
         # for ran.
-        assert "[cancelled]" in shown(app)
+        assert "[interrupted]" in shown(app)
         assert "answer to beta" in shown(app)
         assert "answer to alpha" not in shown(app)
 
@@ -2824,8 +2854,9 @@ async def test_the_model_s_capabilities_are_shown_beside_its_name() -> None:
     """Reasoning and vision, from the model's config, before anything is typed.
 
     Both are facts about the model rather than about a turn, so they are there
-    from the first frame.  Vision especially: `@picture.png` is either going to
-    work or be refused, and a person should know which before they type it.
+    from the first frame.  Vision especially: a picture the person names is
+    either going to work or be refused, and a person should know which before
+    they type it.
     """
     client = FakeAgentClient(answering("hi"))
     app = SlifeApp(

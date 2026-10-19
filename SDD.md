@@ -971,19 +971,30 @@ provider error, or unreadable answer does not.
 
 ### 5.6 Cancellation and repair
 
-A cancelled turn leaves the person's message in the conversation and nothing the
-model produced, because an assistant message whose tool calls are only partly
-answered is a history state every provider rejects.
+An interrupted turn keeps what it completed. The batch of tool calls it was in
+is completed on the way out, not dropped: the calls that already returned keep
+their own answers (including a call whose result was in hand when its fit was
+cut), and every call that produced no answer is answered
+`(Tool execution interrupted)`. The person's message is kept with it, so a
+follow-up "continue" resumes from the work that was done.
 
 A batch of tool calls is written atomically:
 
-1. run every call;
+1. run every call, keeping each answer as it arrives;
 2. fit every result;
-3. append the assistant message and its answers together, with no `await`
-   between them.
+3. append the assistant message and its complete set of answers together, with
+   no `await` between them — on the interruption path this happens inside the
+   `except` that is unwinding the turn.
 
-Nothing that ends a turn mid-batch — a cancellation or a failure — can leave an
-unanswered tool call in the history.
+Nothing that ends a turn mid-batch — an interruption or a failure — can leave an
+unanswered tool call in the history. A failure keeps the messages the turn had
+completed; an interruption keeps those and the completed batch.
+
+An interrupted turn's write is detached, and the next turn takes its id up
+(`settle_record`), so the turn carries a `[TURN:…]` footnote and a keep-list can
+name it. A write the store or cabinet refuses is a hard failure: the turn is
+unrecorded, so its messages are rolled back to the last backed prefix and the
+caller sees the refusal.
 
 The model's tool result is authoritative. Display chunks are not: progress
 notifications may be dropped, delayed, or coalesced without affecting the
@@ -991,20 +1002,30 @@ conversation.
 
 ### 5.7 Images
 
-An attached image is live state, not record. The turn log keeps:
+An attached image is live state **and a cabinet document**. The live user message
+keeps the `image_url` parts the model reads; when the turn is recorded, each part
+becomes an `[Image:{…}]` reference to a cabinet row of the `image` kind, keyed by
+the content digest. The turn log keeps:
 
 - the sentence that named the file;
-- the tool answer naming it;
-- a note saying the image was attached and how large it was.
+- the tool call and answer naming it;
+- the reference: the cabinet key for stored bytes, or the source URL when the
+  provider fetches it.
 
-The bytes never enter the row. A rebuilt conversation is therefore text; a turn
-that needs the picture again attaches it again from the named path.
+The bytes never enter the row. A rebuilt conversation is therefore text plus
+references; a model that needs the picture again calls `attach_image` with the
+reference's key (the cabinet answers a `data:` URL via `image_source`) or with
+the URL.
+
+A cabinet refusal fails the turn like a store refusal: a row that names an image
+the cabinet does not hold is a marker that can never be attached again.
 
 A failed image attachment is dropped from the live conversation with the same
 note the record keeps, and the error says so. A provider that refuses an image
 refuses every request that carries it; a failed turn's messages are re-sent by
 every later turn, so one bad attachment could otherwise make the conversation
-unusable.
+unusable. Such a turn is note-only: the image was dropped before the turn was
+recorded.
 
 ## 6. Model backends
 
@@ -1350,7 +1371,7 @@ Rules:
 
 ### 8.3 Cabinet
 
-`plugins/cabinet/` stores five kinds of document:
+`plugins/cabinet/` stores six kinds of document:
 
 | Kind | Key | Write behavior |
 |---|---|---|
@@ -1359,6 +1380,7 @@ Rules:
 | `file` | Its path inside the cabinet | Copies the file in. |
 | `report` | A title | Appends a section. |
 | `dump` | The tool call that produced the output | Written by the harness. |
+| `image` | The content digest | Written by the harness; bytes in `pictures/`. |
 
 One table holds all kinds. The kinds are one corpus; a corpus whose rows live in
 four tables would have to be unioned before it could be ranked. `kind` says what
@@ -1380,14 +1402,19 @@ A subject that is not already lowercase carries a short digest in its filename.
 sharing one file would let the second write replace the first's Markdown while
 both rows stayed correct.
 
-A file's bytes are never indexed. What is indexed is what the file is: its name,
-the paths that place it, and a summary once one is written. A file embedded from
-its summary alone leaves every summary-less file with no vector, which the sync
-pass then reports forever as a document it cannot catch up.
+A file's or an image's bytes are never indexed. What is indexed is what the
+document is: its name, the paths that place it, and a summary once one is
+written. Embedded from a summary alone, every summary-less file would have no
+vector, which the sync pass then reports forever as a document it cannot catch
+up.
 
-A dump is the one kind no cabinet tool writes. The harness saves a tool output
-too large for the conversation; the dump is a file on disk with a row indexing
-it. `dump_read` is the one way back.
+A dump and an image have no model-facing writer. The harness saves a tool output
+too large for the conversation with `dump_save`, and a picture a turn carried
+with `image_save`; each is bytes or text on disk with a row indexing it.
+`dump_read` is the way back for a dump. For an image it is `attach_image`: the
+turn's `[Image:{…}]` reference names the key, `image_source` resolves it to a
+`data:` URL (or the source URL), and the tool attaches it. An `http(s)` image is
+never fetched here; the row keeps the URL and the provider fetches it.
 
 `dump_read` is a searching reader:
 
@@ -1402,7 +1429,9 @@ the system feeding itself. The bound is enforced where the answer leaves.
 
 A dump is in the same corpus as the other kinds, but a search that names no kind
 does not see dumps. The usual address for a dump is the marker in the
-transcript, not a search.
+transcript, not a search. An image *is* seen by a search that names no kind: it
+is content a person attached, and its title, key and source are what the
+keyword leg reads.
 
 ### 8.4 Embeddings
 

@@ -22,13 +22,13 @@ Four things here are worth knowing before changing them:
    land in it.  The ticket is what makes that a held event or a dropped fragment
    instead of a wrong transcript; the flush before a turn is declared over is
    what makes "finished" mean its events have been applied.
-4. **`ctrl+c` cancels the running turn, never the queue.**  The message the user
-   is still waiting on must not go with the one they gave up on.  With no turn
-   running it quits, because a user cannot stop a runaway turn otherwise.  It is
-   also the copy key — a selection in the prompt or in the transcript is copied
-   and nothing is cancelled — and that first refusal is why `escape` is bound to
-   the cancel alone: the interrupt that always fires, and the one that cannot
-   close the window.
+4. **`ctrl+c` interrupts the running turn, never the queue.**  The message the
+   user is still waiting on must not go with the one they gave up on.  With no
+   turn running it quits, because a user cannot stop a runaway turn otherwise.
+   It is also the copy key — a selection in the prompt or in the transcript is
+   copied and nothing is interrupted — and that first refusal is why `escape` is
+   bound to the interrupt alone: the one that always fires, and the one that
+   cannot close the window.
 
 **And another process can hand this window a message**, which is how a channel
 like WeChat reaches the screen: the message goes into the same queue the person's
@@ -220,12 +220,12 @@ class SlifeApp(App[None]):
         # selection").  Both skip themselves when there is nothing selected,
         # and that skip is what lands the key here — so ctrl+c copies when
         # there is a selection and interrupts when there is not.
-        Binding("ctrl+c", "interrupt", "Cancel or quit", show=False),
-        # Escape is the cancel and only the cancel; see `action_cancel`.  The
+        Binding("ctrl+c", "interrupt", "Interrupt or quit", show=False),
+        # Escape interrupts and only interrupts; see `action_cancel`.  The
         # two keys are separate actions rather than one because escape must not
         # be able to close the window — it is the interrupt to reach for while
         # something is selected, and that has to be safe to press.
-        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("escape", "cancel", "Interrupt", show=False),
         # The switch, and the key is v1's — `s` for switch.  Not ctrl+m, which
         # Textual aliases to enter, and not ctrl+g, which VS Code keeps for its
         # own goto-line.  What it opens is the picker; what applies the choice
@@ -829,12 +829,12 @@ class SlifeApp(App[None]):
                     # the fold.
                     self._transcript.jump_to_tail()
                     entry.drawn = True
-                # **Nothing is read out of the prompt here.**  The `@path`
-                # markers a person types are resolved by the *agent server* now,
-                # which is what lets every caller attach an image and not only
-                # this terminal (`slife2.libs.turn.attachments`).  The prompt goes as it was
-                # written, markers and all — and the picture arrives by way of
-                # `attach_image`, whose answer names it.
+                # **Nothing is read out of the prompt here.**  A picture arrives
+                # by way of `attach_image`, which the model calls for itself
+                # when the words name a path or a URL — so every caller can
+                # attach one, not only this terminal
+                # (`slife2.libs.turn.attachments`).  The prompt goes as it was
+                # written, and the tool's answer names the source.
                 #
                 # Opened even when the line came from a cut-in: a message that
                 # was folded into a turn which then failed runs a turn of its
@@ -858,7 +858,7 @@ class SlifeApp(App[None]):
                     # **Everything posted before this point is applied before
                     # the turn is declared over.**  A cancelled turn's ticket is
                     # retired below, so an event still in the pump would be
-                    # dropped — and `[cancelled]` is the last thing it is owed.
+                    # dropped — and `[interrupted]` is the last thing it is owed.
                     await self._flush_events()
                     if not entry.drawn:
                         self._transcript.add_user(entry.prompt, channel=entry.channel)
@@ -866,11 +866,11 @@ class SlifeApp(App[None]):
                     # `append_text` is guarded by `_turn_open`, which the
                     # `ends_turn` below clears, but `add_tool_start` is guarded
                     # by neither: a late `ToolCallStarted` mounted a panel under
-                    # `[cancelled]`, as though the turn had gone on.  Retiring
+                    # `[interrupted]`, as though the turn had gone on.  Retiring
                     # the ticket before the next entry does the same for the
                     # turn's tail — the cancel just does it early.
                     self._finish_entry(ticket)
-                    self._transcript.add_note(notes.cancelled(), ends_turn=True)
+                    self._transcript.add_note(notes.interrupted(), ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
                     # The same flush and retirement the cancel branch makes, for
@@ -948,7 +948,7 @@ class SlifeApp(App[None]):
         **A notification and the response that ends its turn travel on one
         connection but arrive as two things**: the event is posted to Textual's
         pump and the response resolves the awaited call, and nothing orders the
-        two task wakeups.  The turn's line, its answer and `[cancelled]` are all
+        two task wakeups.  The turn's line, its answer and `[interrupted]` are all
         written from the pump, so a renderer that finalised an entry on the
         response alone could retire the ticket while the event was still queued
         — and then drop it as a late fragment of a finished turn.  Posting a
@@ -968,10 +968,10 @@ class SlifeApp(App[None]):
         before the next turn opens a block.  Ordering against the deltas is the
         ticket's job, not the message queue's.
 
-        The prompt is sent as the person wrote it, `@path` markers included: what
-        those markers resolve to is the agent server's business now, and a caller
-        that resolved them itself would be a second implementation of one rule —
-        which is also how an image ends up attached twice.
+        The prompt is sent as the person wrote it: nothing here reads a path out
+        of it.  A picture is attached by the model's own `attach_image` call, and
+        a caller that resolved sources itself would be a second implementation
+        of one rule — which is also how an image ends up attached twice.
         """
         assert self._client is not None
 
@@ -1058,10 +1058,10 @@ class SlifeApp(App[None]):
     # --- keyboard ------------------------------------------------------------
 
     def _cancel_turn(self) -> bool:
-        """Cancel the turn in flight, reporting whether there was one.
+        """Interrupt the turn in flight, reporting whether there was one.
 
         The flag is set before the cancel so the drain can tell this
-        cancellation from the one an exit or a reset causes; see
+        interruption from the one an exit or a reset causes; see
         `_interrupting`.
         """
         # **The prompt is refused first.**  The loop is parked on that future,

@@ -244,9 +244,13 @@ rebuild.
 
 **Rule:** SDD §5.6.
 
-A cancelled turn leaves the user's message and nothing the model produced,
-because an assistant message whose tool calls are only partly answered is a
-history state every provider rejects.
+An interrupted turn keeps what it completed. A tool batch cut short is
+*completed* rather than dropped: the calls that already returned keep their own
+answers, and every call that produced no answer is answered
+`(Tool execution interrupted)`. The assistant message is written together with
+that complete set of answers, so the history never holds a tool call without a
+result — the one state every provider rejects — and a later "continue" resumes
+from the work that was done.
 
 Running a call cannot raise; the registry turns failure into text. Fitting a
 result can: the fit is the caller's callback, and a cabinet that will not open
@@ -254,29 +258,40 @@ or a discriminator that stalled raises there. Writing the assistant message
 before fitting leaves exactly the rejected history behind. A failed turn keeps
 its messages, so that conversation would fail every later turn.
 
-A cancelled turn's row is still written. The rule is not "remember to record the
-cancel path"; a write conditional on how a turn ended is one somebody can
-forget. The cancelled row is a user message with no answer, which is exactly
-what the turn was.
+An interrupted turn's row is still written. The rule is not "remember to record
+the cancel path"; a write conditional on how a turn ended is one somebody can
+forget. The row holds whatever the turn had completed when it was cut off — the
+person's message alone, or the exchange up to the interrupted batch. Its id is
+claimed on the next turn (`settle_record`), so the interrupted turn carries a
+`[TURN:…]` footnote like any other and a keep-list can name it.
 
 A write from a cancelled handler is detached, because a plain `await` in a
 cancelled scope is cancelled again at its next checkpoint. The ordinary write
 happens inside the lock, so a queued turn cannot start before the write that
-maintains the live-context list has landed.
+maintains the live-context list has landed. **A write the store or the cabinet
+refuses is a hard failure**: the turn is unrecorded, so its messages are rolled
+back to the last backed prefix and the caller sees the refusal. There is no
+silent turn that the transcript shows and no later turn can address.
 
 ### 2.6 Images
 
 **Rule:** SDD §5.7.
 
-An attached image is live state, not record. The bytes never enter the row, so a
-rebuilt conversation is text; a turn that needs the picture again attaches it
-again from the named path.
+An attached image is live state **and a cabinet document**. The live user message
+keeps the `image_url` parts the model reads; when the turn is recorded, each part
+becomes an `[Image:{…}]` reference to a cabinet copy (`image:` kind, keyed by its
+content digest). The pixels never enter the turn row. A rebuilt conversation is
+text plus those references, and a model that needs the picture again calls
+`attach_image` with the reference's key — the cabinet answers a `data:` URL — or
+with its source URL. A row never names an image the cabinet does not hold: a
+cabinet refusal fails the turn like a store refusal.
 
 A failed image attachment is dropped from the live conversation with the same
 note the record keeps, and the error says so. A provider that refuses an image
 refuses every request that carries it; a failed turn's messages are re-sent by
 every later turn, so one bad attachment could otherwise make the conversation
-unusable.
+unusable. Such a turn is note-only by design: the image was dropped before the
+turn was recorded, so the cabinet never saw it.
 
 ## 3. Model backends
 

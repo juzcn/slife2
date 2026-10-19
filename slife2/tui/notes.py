@@ -66,9 +66,9 @@ def kept(kept: int, recalled: int) -> str:
     return t("kept", turns=as_turns(kept), recalled=recalled)
 
 
-def cancelled() -> str:
+def interrupted() -> str:
     """A turn the person stopped."""
-    return t("cancelled")
+    return t("interrupted")
 
 
 def not_on_the_mesh(reason: str) -> str:

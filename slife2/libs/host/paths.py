@@ -22,9 +22,10 @@ root of its own rather than a copy per home.
                       schedule.db what this agent has scheduled, and every
                                   fire of it — the ledger `slife2-schedule`
                                   keeps, and the file it finds agents by
-                      cabinet/    notes, diary, saved files, reports — as
-                                  markdown and bytes a person can open, with
-                                  the index over them (`.index.db`) inside
+                      cabinet/    notes, diary, saved files, reports, dumps
+                                  and images — as markdown and bytes a person
+                                  can open, with the index over them
+                                  (`.index.db`) inside
                       media/      what this agent generated
                       wechat.yaml this agent's WeChat login
                       subagents/  what this agent made, one directory each —

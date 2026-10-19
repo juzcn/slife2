@@ -568,8 +568,8 @@ async def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
 
     Ten megabytes of screenshot on the first message would be megabytes carried
     into every later read of the turn — and `turn_read` is a tool a model calls
-    by itself.  What is *not* lost is which file it was: `@screenshot.png` is
-    still in the text, because that is where the user put it.
+    by itself.  What is *not* lost is which file it was: the person's words
+    naming it are still in the text.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     await store.save_turn(
@@ -578,7 +578,7 @@ async def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "what is this? @cat.png"},
+                    {"type": "text", "text": "what is this? cat.png"},
                     {
                         "type": "image_url",
                         "image_url": {"url": "data:image/png;base64," + "A" * 4000},
@@ -593,7 +593,7 @@ async def test_an_image_is_not_what_gets_stored(tmp_path) -> None:
     (record,), _ = store.turns(limit=1)
     text = message_text(record.messages[0]["content"])
 
-    assert "@cat.png" in text, "the file is still named, so it can be sent again"
+    assert "cat.png" in text, "the file is still named, so it can be sent again"
     assert "image/png" in text and "not stored" in text
     assert "~2 KB" in text, "how big it was, so a reader knows what it is missing"
     assert "A" * 100 not in text
@@ -616,7 +616,7 @@ async def test_the_image_is_still_there_for_the_turn_that_used_it(tmp_path) -> N
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "what is this? @cat.png"},
+                {"type": "text", "text": "what is this? cat.png"},
                 {
                     "type": "image_url",
                     "image_url": {"url": "data:image/png;base64,AAAA"},

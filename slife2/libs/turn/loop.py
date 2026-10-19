@@ -39,6 +39,7 @@ from slife2.libs.turn.events import (
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
     HARNESS_PREFIX,
+    INTERRUPTED,
     ToolRegistry,
     bind_timeout,
     split_meta,
@@ -108,6 +109,38 @@ def harness_call(name: str) -> ToolCall:
         name=name,
         arguments={},
     )
+
+
+def interrupted_results(
+    calls: Sequence[ToolCall], returned: str | None = None
+) -> list[Message]:
+    """The tool messages that complete a batch an interruption cut short.
+
+    **One answer per call, because the wire requires it**: an assistant message
+    whose tool calls are only partly answered is the one history state every
+    provider rejects.  A call that had already returned keeps its own text —
+    including the first of a cut-off tail, which is why `returned` exists: an
+    interruption that lands in the fit after the call ran has the tool's answer
+    in hand, and saying it was interrupted would be false.  It goes in
+    **unfitted**, because a fit is an await and the interruption is in flight;
+    the long result is the true one, and `_fit` is a size decision rather than a
+    truth one.  Every call that produced nothing says `INTERRUPTED`, the same
+    sentence a rebuilt list uses for an orphan
+    (`slife2.libs.turn.context.consistent`).
+
+    `returned` belongs to `calls[0]`, because the loop hands over the tail that
+    starts at the call it was working on.
+
+    Written by the loop synchronously on its way out: the interruption is in
+    flight, and an await here would be cut at its next checkpoint before the
+    cleanup finished (`slife2.libs.harness.async_tasks` measured the same thing
+    for detached writes).
+    """
+    answers: list[Message] = []
+    for index, call in enumerate(calls):
+        content = returned if index == 0 and returned is not None else INTERRUPTED
+        answers.append(Message(role="tool", content=content, tool_call_id=call.id))
+    return answers
 
 
 @dataclass(frozen=True)
@@ -423,19 +456,38 @@ class AgentLoop:
             # downstream repairs a failure — a failed turn keeps its messages,
             # so the conversation failed every later turn until it was rebuilt.
             #
+            # **An interruption is completed rather than dropped**, and that is
+            # a different rule from the failure above: nothing downstream could
+            # reconstruct the answers the batch had already produced, and a turn
+            # the person asks to continue cannot resume from a question alone.
+            # The completed batch is the one thing that survives the turn, and
+            # the agent server keeps it rather than truncating it
+            # (`send_message`'s cancellation repair).
+            #
             # What `_fit` is handed is therefore the conversation *before* this
             # iteration's answer, which is also the honest list to judge a
             # result
             # against: it no longer contains a half-written batch.
             answers: list[Message] = []
-            for call in result.tool_calls:
-                text, _ok = await self._one(call, observer, iteration, messages)
+            for index, call in enumerate(result.tool_calls):
+                text: str | None = None
+                try:
+                    text, _ok = await self._one(call, observer, iteration, messages)
+                    fitted = await self._fit(call, text, messages)
+                except asyncio.CancelledError:
+                    # **The batch is completed on the way out, not dropped.**
+                    # The calls that already ran keep the answers they gave, a
+                    # call whose fit was cut keeps the text it had returned, and
+                    # every call that produced nothing says so.  The appends
+                    # have no await between them for the reason the whole batch
+                    # does: the interruption is in flight, and the next checkpoint
+                    # would cancel this cleanup before it was written.
+                    answers.extend(interrupted_results(result.tool_calls[index:], text))
+                    messages.append(answer)
+                    messages.extend(answers)
+                    raise
                 answers.append(
-                    Message(
-                        role="tool",
-                        content=await self._fit(call, text, messages),
-                        tool_call_id=call.id,
-                    )
+                    Message(role="tool", content=fitted, tool_call_id=call.id)
                 )
             messages.append(answer)
             messages.extend(answers)

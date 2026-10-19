@@ -1,1 +1,1 @@
-"""slife2-cabinet — notes, a diary, saved files and reports."""
+"""slife2-cabinet — notes, a diary, saved files, reports, dumps and images."""

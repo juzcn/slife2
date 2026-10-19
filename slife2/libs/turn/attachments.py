@@ -25,24 +25,27 @@ worse than either.
 
 **Where the pixels go, and how long they live.**  They are content parts on the
 **user message** — the only place a wire here can carry an image, since a tool
-result is text on every backend this system speaks.  They are live-session state
-and nothing more: what is stored is the text plus a note naming every file
-(`image_note`, which `slife2.libs.store.db`'s save path uses too), so a restored conversation
-is text-only and a turn that needs the picture again attaches it again — the
-tool's own answer in its history is what names the file to re-attach.
+result is text on every backend this system speaks.  The live part is what the
+model reads now.  The **record** keeps an `[Image:…]` reference to a cabinet copy
+(`image_reference`, written by the agent server before the save), so a restored
+conversation is text plus that address and `attach_image` is how the picture
+comes back.  `image_note` is the fallback for a part that reached the store
+without being kept: a failed turn whose provider refused it, or a caller of the
+store that is not the agent server.
 
 **And a turn that dies at the provider drops them.**  A picture a provider
 refuses is refused again on every request that carries it, and a failed turn's
 messages are re-sent by every turn that follows — so one bad attachment would
 otherwise end the conversation, and in a server process that outlives the
-terminal there would be no way back.  The repair is `drop`, and what it leaves is
-exactly what a restore would have left: the live list and the stored row must
-never disagree about whether a picture is still in hand.
+terminal there would be no way back.  The repair is `drop`, and it leaves the
+same sentence in the live list that the row keeps: the two never disagree about
+a picture that is no longer in hand.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from collections.abc import MutableSequence, Sequence
 from pathlib import Path
@@ -139,8 +142,8 @@ def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
     answer the model reads has to say which files it was shown — which is also
     what its own history keeps after the pixels are gone.
 
-    **The one place a source becomes bytes**, so the tool the model calls and the
-    markers a prompt carries cannot come to different conclusions about the same
+    **The one place a source becomes bytes**, so the model's tool call and a
+    caller passing sources cannot come to different conclusions about the same
     file.  v1 learned the batch rule the hard way: its first version dropped the
     whole list on one unreadable source, so four good images went with the
     missing fifth.
@@ -231,6 +234,39 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
     ]
 
 
+#: The marker a **kept** image's part becomes in the turn log.  Capitals, like
+#: `[TURN:…]` and `[DUMP:…]`: this is what the process knows about the picture,
+#: not something anybody said (`DESIGN.md` §2.4).  The payload is the address
+#: the model attaches again from — `key` for bytes the cabinet holds, `source`
+#: for a URL the provider fetches — and the fields a reader acts on, nothing
+#: else.  The image note is what a picture that was **not** kept leaves.
+IMAGE_PREFIX = "[Image:"
+IMAGE_SUFFIX = "]"
+
+
+def image_reference(
+    *, key: str = "", source: str = "", mime: str = "", size: int = 0
+) -> str:
+    """The address a kept image leaves in the turn row.
+
+    One builder, because the agent server writes it and a test reads it and a
+    second spelling would be a second thing to keep in step.  Empty fields are
+    omitted rather than written as `""`: a bytes image has a `key` and no
+    `source`, a URL image the reverse, and a payload with both empty means the
+    caller had nothing to say.
+    """
+    payload: dict[str, Any] = {}
+    if key:
+        payload["key"] = key
+    if source:
+        payload["source"] = source
+    if mime:
+        payload["mime"] = mime
+    if size:
+        payload["size"] = int(size)
+    return f"{IMAGE_PREFIX}{json.dumps(payload, ensure_ascii=False)}{IMAGE_SUFFIX}"
+
+
 def image_note(part: dict[str, Any]) -> str:
     """What one image part leaves behind when the pixels are not kept.
 
@@ -256,7 +292,7 @@ def image_note(part: dict[str, Any]) -> str:
     media_type = media_type.removeprefix("data:") or "an unnamed source"
     size = f", ~{len(payload) * 3 // 4 // 1024} KB" if payload else ""
     return (
-        f"[image not stored: {media_type}{size} — the prompt names the file, "
+        f"[image not stored: {media_type}{size} — the source is in this turn, "
         f"and attaching it again sends it]"
     )
 

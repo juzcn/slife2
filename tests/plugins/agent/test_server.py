@@ -46,6 +46,7 @@ from ruamel.yaml import YAML
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     DEFAULT_AGENT,
+    LOCAL_AGENT,
     A2ASettings,
     ModelSettings,
     default_config,
@@ -55,7 +56,7 @@ from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
-from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX
+from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX, turn_footnote
 from slife2.libs.turn.events import (
     MessageCutIn,
     TextDelta,
@@ -64,6 +65,7 @@ from slife2.libs.turn.events import (
     decode,
 )
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.tools import INTERRUPTED
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -145,6 +147,23 @@ async def context():
 
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def cabinet():
+    """An in-memory cabinet, for the turns whose images are recorded.
+
+    A turn with an image in it now keeps that image here (`record`), so a test
+    that runs one needs the peer to answer.  Real and in-memory rather than a
+    stub, for the hub fixture's reason: what the agent server makes is a call,
+    and a stand-in answering a different shape would prove nothing about it.
+    """
+    from slife2.plugins.cabinet.server import build_server as build_cabinet
+
+    async with Client(
+        build_cabinet(default_config(), embedder=StubEmbedder())
     ) as client:
         yield client
 
@@ -440,6 +459,53 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
         answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
     stored = answer.data["turns"][0]["messages"][0]["content"]
     assert stored == "one"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
+    context, hub
+) -> None:
+    """The maker's annotation, in the subagent's own conversation.
+
+    A subagent owns its conversation, and its turns are written to its own
+    store — so the newest turn in its live list has to be as addressable as its
+    maker's.  Without the footnote the discriminator cannot name the turn it was
+    just given, and a keep-list silently drops it.  The second half of the key
+    is the half that used to decide this; the annotation must not read it.
+    """
+    base = default_config()
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    # Snapshotted when the call is made, for the reason the maker's test gives:
+    # `backend.calls` holds the loop's own Message objects, and the annotation
+    # that arrives after the call would otherwise be read back into it.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append(
+            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+        )
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(base, context_client=context, hub_client=hub, backend=backend)
+    inbound = f"{LOCAL_AGENT.channel}:{DEFAULT_AGENT}"
+
+    await send(server, "one", subagent="researcher", channel=inbound)
+    await send(server, "two", subagent="researcher", channel=inbound)
+
+    # A turn's own call cannot see its own footnote — it has no id until it is
+    # saved, which is after that call — and the call after it must.
+    assert as_sent[0] == ["user:one"]
+    assert as_sent[1][0].startswith("user:one [TURN:")
+    footnote = json.loads(as_sent[1][0].split("[TURN:", 1)[1].rstrip("]"))
+    assert footnote["turn_id"] > 0
+    assert footnote["channel"] == inbound
+    assert footnote["begin"], "a turn that cannot say when it happened"
+    assert as_sent[1][2] == "user:two", "and the newest turn has none yet"
 
 
 @pytest.mark.asyncio
@@ -1103,16 +1169,18 @@ async def test_a_cancelled_message_leaves_the_lock_free(context, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
+async def test_an_interrupted_stream_leaves_only_the_users_message(
     context, hub
 ) -> None:
-    """The sharpest edge in the system, and it is back because the state is.
+    """The stream case: nothing had been written, so only the question remains.
 
-    Two things have to hold at once.  The user's message survives — losing it is
-    the failure this whole arrangement exists to prevent — and nothing the
-    interrupted turn produced survives with it, because a cancellation can land
-    between an assistant message that asked for three tool calls and the second
-    of their results, and *that* list is a 400 from every provider.
+    The loop appends a response only after its stream completes, so an
+    interruption that lands in the stream has no work to keep.  What survives is
+    the user's message — losing it is the failure this whole arrangement exists
+    to prevent — and the next turn is sent that and its own message.  **It also
+    carries its `[TURN:…]`**: the write is taken up by `settle_record`, so an
+    interrupted turn is addressable like any other.  The batch case, where there
+    *is* work to keep, is `test_an_interrupted_turn_keeps_the_tool_batch_it_finished`.
 
     Asserted through the next turn rather than by reaching inside: what the
     model is sent is the only thing that actually matters.
@@ -1138,6 +1206,61 @@ async def test_an_interrupted_turn_keeps_the_users_message_and_drops_the_rest(
 
     await send(server, "two")
     assert prompts_seen(backend, 1) == ["user:one", "user:two"]
+    raw = [m for m in backend.calls[1][0] if m.role == "user"][0]
+    assert str(raw.content).startswith("one [TURN:"), (
+        "the interrupted turn is addressable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_keeps_the_tool_batch_it_finished(
+    context, hub
+) -> None:
+    """What the turn completed survives, and the next "continue" runs on it.
+
+    The first iteration asks for a tool and is answered; the interruption lands
+    in the second iteration's stream.  The exchange the turn had finished is
+    kept — in the live list, in the next model call, and in the row — which is
+    what makes a follow-up resume instead of restarting from the question.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(),
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("continued"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    interrupted = asyncio.create_task(send(server, "one"))
+    await wait_for_streams(backend, 2)
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+    # The row is written on the detached path; give it a moment before the
+    # transcript read below, as the other interruption tests do.
+    await asyncio.sleep(0.5)
+
+    await send(server, "continue")
+
+    sent = [m for m in backend.calls[2][0] if m.role != "system"]
+    assert [m.role for m in sent] == ["user", "assistant", "tool", "user"]
+    assert sent[1].content == "checking"
+    assert sent[1].tool_calls[0].id == "c1"
+    assert sent[1].tool_calls[0].name == "skill_list"
+    assert sent[2].tool_call_id == "c1"
+    assert sent[2].content and sent[2].content != INTERRUPTED, (
+        "the call answered before the interruption, so its result is the real one"
+    )
+
+    # And the record is what the conversation resumes from after a restart.
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    first = answer.data["turns"][0]
+    assert [m["role"] for m in first["messages"]] == ["user", "assistant", "tool"]
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1421,74 @@ async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
         "assistant:second answer",
         "user:three",
     ], "the unanswered message is still in the conversation, and nothing is twice"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_is_annotated_when_the_next_turn_settles_its_id(
+    context, hub
+) -> None:
+    """A failed turn's id and its footnote are written by the same step.
+
+    The write of a failed turn is detached, so the turn has no id when it ends
+    and `annotate_turn` cannot run there.  The next turn waits for the write
+    (`settle_record`) and is the first moment the id exists — so that is where
+    the footnote belongs too.  An id that joins `turn_ids` without one is a turn
+    the discriminator can never name in a keep-list, which is the whole reason
+    the footnote exists.
+
+    The spelling is checked against the row, not merely for being present: the
+    live footnote and the one a rebuild derives have to agree to the character,
+    or every rebuild costs a prompt-cache miss.
+    """
+
+    class RefusesOnce(FakeBackend):
+        """A provider that answers a 500 to the first call and works after it."""
+
+        def stream(self, messages, tools) -> Stream:
+            if not self.calls:
+                self.calls.append((list(messages), list(tools)))
+                raise RuntimeError("the provider answered 500")
+            return super().stream(messages, tools)
+
+    backend = RefusesOnce(text_turn("second answer"))
+    # Snapshotted when the call is made: `backend.calls` holds the loop's own
+    # Message objects, and the second turn's annotation arrives after its call.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append(
+            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+        )
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    with pytest.raises(Exception, match="500"):
+        await send(server, "one", channel="tui")
+    await send(server, "two", channel="tui")
+
+    # The failed turn's own call had no id to carry; the next turn's call is
+    # the first one after the write has been waited for.
+    assert as_sent[0] == ["user:one"]
+    assert as_sent[1][0].startswith("user:one [TURN:")
+    assert as_sent[1][1] == "user:two", "and the newest turn has none yet"
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    failed = answer.data["turns"][0]
+    expected = turn_footnote(
+        failed["turn_id"],
+        failed["created_at"],
+        failed["completed_at"],
+        failed["channel"],
+    )
+    assert as_sent[1][0] == f"user:one [TURN:{expected}]", (
+        "the live footnote is the row's, byte for byte"
+    )
 
 
 @pytest.mark.asyncio
@@ -1817,7 +2008,7 @@ async def test_opening_a_loop_fails_when_the_context_store_is_gone(
 
 
 @pytest.mark.asyncio
-async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
+async def test_images_reach_the_model_as_content_parts(context, hub, cabinet) -> None:
     """A prompt with an image is a list of parts, not a string."""
     from slife2.libs.host.config import ModelSettings, ProviderSettings
 
@@ -1838,7 +2029,11 @@ async def test_images_reach_the_model_as_content_parts(context, hub) -> None:
         },
     )
     server = build_server(
-        vision, context_client=context, hub_client=hub, backend=backend
+        vision,
+        context_client=context,
+        hub_client=hub,
+        cabinet_client=cabinet,
+        backend=backend,
     )
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
@@ -2002,6 +2197,342 @@ async def test_the_attachment_report_names_what_went_in_and_what_did_not(
     assert len(answer["refused"]) == 1
     assert str(tmp_path / "gone.png") in answer["refused"][0]
     assert "no such file" in answer["refused"][0], "and why, not just which"
+
+
+def marker_of(content: Any) -> dict[str, Any]:
+    """The `[Image:…]` payload in a stored message's parts, or fail."""
+    parts = (
+        content if isinstance(content, list) else [{"type": "text", "text": content}]
+    )
+    text = next(
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and str(part.get("text") or "").startswith("[Image:")
+    )
+    return json.loads(text[len("[Image:") : -1])
+
+
+@pytest.mark.asyncio
+async def test_a_kept_image_is_a_cabinet_reference_in_the_row(
+    context, hub, cabinet
+) -> None:
+    """The row names the cabinet copy; the live conversation keeps the pixels.
+
+    The image is a cabinet document now, so the row is text plus an address
+    rather than a note saying the picture is gone.  The live list is not
+    rewritten — the model may still be reasoning about it in this very turn —
+    and the next turn still sends the pixels.
+    """
+    backend = FakeBackend(text_turn("I see it"), text_turn("and again"))
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        cabinet_client=cabinet,
+        backend=backend,
+    )
+    data = "data:image/png;base64,AAAA"
+    await send(server, "what is this?", images=[data])
+    await send(server, "and now?")
+
+    live = [m for m in backend.calls[1][0] if m.role == "user"][0]
+    assert isinstance(live.content, list) and any(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for part in live.content
+    ), "the conversation still carries the pixels"
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    stored = answer.data["turns"][0]["messages"][0]["content"]
+    marker = marker_of(stored)
+    assert marker["key"].startswith("pictures/")
+    assert marker["mime"] == "image/png"
+    text = "".join(
+        str(part.get("text") or "") for part in stored if isinstance(part, dict)
+    )
+    assert "data:image" not in text and "AAAA" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_marker_key_attaches_the_image_again(context, hub, cabinet) -> None:
+    """The reference is an address: `attach_image` takes its key.
+
+    A rebuilt or restored conversation carries the marker instead of the
+    picture, and the cabinet is how the picture comes back.  No new syntax: the
+    key is an ordinary source to the tool that already attaches images.
+    """
+    backend = FakeBackend(text_turn("I see it"), text_turn("again"))
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        cabinet_client=cabinet,
+        backend=backend,
+    )
+    await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    key = marker_of(answer.data["turns"][0]["messages"][0]["content"])["key"]
+
+    attached = await attach(server, [key])
+    assert attached["attached"] == [key]
+
+    await send(server, "look again")
+    live = [m for m in backend.calls[1][0] if m.role == "user"][0]
+    urls = [
+        part["image_url"]["url"]
+        for part in live.content
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert any(url.startswith("data:image/png;base64,") for url in urls), (
+        "the cabinet key came back as the picture"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_image_turn_claims_its_id(context, hub, cabinet) -> None:
+    """The cabinet is what makes the id safe: the retry picture is durable.
+
+    The turn is interrupted mid-stream; its write is detached, and the next
+    turn takes the id up (`settle_record`) and writes the footnote.  A
+    keep-list can name it, which was impossible while the only copy of the
+    image was the live message a rebuild would replace.
+    """
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("continued"),
+    )
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        cabinet_client=cabinet,
+        backend=backend,
+    )
+
+    interrupted = asyncio.create_task(
+        send(server, "look", images=["data:image/png;base64,AAAA"])
+    )
+    await wait_for_streams(backend)
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+    await send(server, "continue")
+
+    live = [m for m in backend.calls[1][0] if m.role == "user"][0]
+    footnote = next(
+        part["text"]
+        for part in live.content
+        if isinstance(part, dict) and str(part.get("text") or "").startswith("[TURN:")
+    )
+    turn_id = json.loads(footnote[len("[TURN:") : -1])["turn_id"]
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    assert answer.data["turns"][0]["turn_id"] == turn_id
+    assert marker_of(answer.data["turns"][0]["messages"][0]["content"])["key"]
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_subagent_image_turn_claims_its_id(
+    context, hub, cabinet
+) -> None:
+    """The same rule on a subagent's own conversation and its own cabinet."""
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("continued"),
+    )
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        cabinet_client=cabinet,
+        backend=backend,
+    )
+
+    interrupted = asyncio.create_task(
+        send(
+            server,
+            "look",
+            subagent="researcher",
+            images=["data:image/png;base64,AAAA"],
+        )
+    )
+    await wait_for_streams(backend)
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+    await send(server, "continue", subagent="researcher")
+
+    live = [m for m in backend.calls[1][0] if m.role == "user"][0]
+    footnote = next(
+        part["text"]
+        for part in live.content
+        if isinstance(part, dict) and str(part.get("text") or "").startswith("[TURN:")
+    )
+    assert json.loads(footnote[len("[TURN:") : -1])["turn_id"] > 0
+
+    async with Client(server) as client:
+        answer = await client.call_tool(
+            "transcript", {"agent": DEFAULT_AGENT, "subagent": "researcher"}
+        )
+    assert marker_of(answer.data["turns"][0]["messages"][0]["content"])[
+        "key"
+    ].startswith("pictures/")
+
+
+def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
+    """A context store that refuses its next record and accepts after.
+
+    The `restore`/`rebuild` shapes are the real ones; `remember` is the refusal
+    under test.  A counter rather than an always-refusing store, because the
+    turn *after* the failed one has to be recordable for the test to see what
+    the conversation holds.
+    """
+    stub = FastMCP("context-stub")
+
+    @stub.tool
+    async def restore(
+        agent: str, messages: list[dict], subagent: str = ""
+    ) -> dict[str, Any]:
+        return {"messages": messages, "turn_ids": [], "turns": []}
+
+    @stub.tool
+    async def rebuild(
+        agent: str,
+        messages: list[dict],
+        turn_ids: list[int],
+        prompt: str,
+        model: str,
+        carried: int = 0,
+        subagent: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "messages": messages,
+            "turn_ids": turn_ids,
+            "changed": False,
+            "kept": len(turn_ids),
+            "recalled": 0,
+        }
+
+    state = {"refuse_next": True, "next_id": 1}
+
+    @stub.tool
+    async def remember(
+        agent: str,
+        messages: list[dict],
+        subagent: str = "",
+        token_count: int = 0,
+        context_tokens: int = 0,
+        who_helped: str = "",
+        what_model: str = "",
+        channel: str = "",
+        summary: str = "",
+        tags: str = "",
+        created_at: str = "",
+        completed_at: str = "",
+    ) -> dict[str, Any]:
+        if state["refuse_next"]:
+            state["refuse_next"] = False
+            raise ToolError("this store refuses the request")
+        turn_id = state["next_id"]
+        state["next_id"] += 1
+        return {"turn_id": turn_id}
+
+    return stub, state
+
+
+@pytest.mark.asyncio
+async def test_a_refused_record_fails_the_turn_and_rolls_it_back(context, hub) -> None:
+    """A turn the store will not write is a hard failure, not a silent memory.
+
+    The live list is rolled back to the prefix the turn began on: a later turn
+    must not run on a message no keep-list can name.  The same rule holds for an
+    agent's own conversation and for a subagent's.
+    """
+    stub, state = refusing_store()
+
+    async with Client(stub) as store:
+        for subagent in ("", "researcher"):
+            state["refuse_next"] = True
+            backend = FakeBackend(text_turn("first"), text_turn("second"))
+            server = build_server(
+                config(), context_client=store, hub_client=hub, backend=backend
+            )
+            with pytest.raises(Exception, match="refuses the request"):
+                await send(server, "one", subagent=subagent)
+            await send(server, "two", subagent=subagent)
+            assert prompts_seen(backend, 1) == ["user:two"], (
+                f"the unrecorded turn was not rolled back for {subagent!r}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_record_of_an_interrupted_turn_rolls_it_back(
+    context, hub
+) -> None:
+    """The detached path applies the same rule: no row, no message.
+
+    The interruption's write happens after its caller is gone, so
+    `settle_record` is where the refusal is seen — and it rolls the tail back
+    before the next turn runs.
+    """
+    stub, _state = refusing_store()
+    backend = FakeBackend(
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("second"),
+    )
+    async with Client(stub) as store:
+        server = build_server(
+            config(), context_client=store, hub_client=hub, backend=backend
+        )
+        interrupted = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        interrupted.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await interrupted
+        await send(server, "two")
+
+    assert prompts_seen(backend, 1) == ["user:two"], (
+        "the unrecorded interrupted turn was rolled back"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_image_keep_fails_the_turn(context, hub) -> None:
+    """The cabinet is a hard failure too, and leaves no half-recorded turn."""
+    stub = FastMCP("cabinet-stub")
+
+    @stub.tool
+    async def image_save(url: str) -> dict[str, Any]:
+        raise ToolError("the cabinet refuses the image")
+
+    backend = FakeBackend(text_turn("I see it"), text_turn("continued"))
+    async with Client(stub) as keeper:
+        server = build_server(
+            config(),
+            context_client=context,
+            hub_client=hub,
+            cabinet_client=keeper,
+            backend=backend,
+        )
+        with pytest.raises(Exception, match="refuses the image"):
+            await send(server, "look", images=["data:image/png;base64,AAAA"])
+        await send(server, "continue")
+
+    assert prompts_seen(backend, 1) == ["user:continue"], (
+        "the turn whose image could not be kept is not in the conversation"
+    )
 
 
 @pytest.mark.asyncio

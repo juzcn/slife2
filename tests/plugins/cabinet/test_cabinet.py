@@ -1,4 +1,4 @@
-"""`slife2-cabinet`: five kinds of document, one corpus, and the files beside it.
+"""`slife2-cabinet`: six kinds of document, one corpus, and the files beside it.
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
@@ -45,6 +45,7 @@ from slife2.plugins.cabinet.store import (
     DIARY,
     DUMP,
     FILE,
+    IMAGE,
     NOTE,
     CabinetStore,
     index_path,
@@ -153,19 +154,23 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
 
 
 @pytest.mark.asyncio
-async def test_the_tools_are_the_models_except_the_one_only_the_harness_calls() -> None:
-    """Every tool carries the mark **except `dump_save`**, and that is the rule.
+async def test_the_tools_are_the_models_except_the_ones_the_harness_calls() -> None:
+    """Every tool carries the mark **except the harness's three**, and that is the rule.
 
     The mark is the whole of what keeps a tool out of the model's hands: the hub
     merges only marked tools into the catalogue, so an unmarked one has no row to
     be listed from, searched for, or routed to — which is why the harness reaches
-    this one **directly**, as a peer, and why the model cannot keep an output
-    whole itself.  There is no `list_sources` and no catalogue row: a cabinet is
-    found through `cabinet_search`, over its own index.
+    them **directly**, as peers.  `dump_save` keeps a tool output whole;
+    `image_save` keeps a picture a turn carried; `image_source` resolves the
+    `[Image:…]` key in that turn's row back to something `attach_image` can take.
+    None of the three is a model's move.  There is no `list_sources` and no
+    catalogue row: a cabinet is found through `cabinet_search`, over its own
+    index.
     """
     async with Client(cabinet()) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
 
+    harness = {"dump_save", "image_save", "image_source"}
     assert set(listed) == {
         "note_edit",
         "note_remove",
@@ -183,12 +188,14 @@ async def test_the_tools_are_the_models_except_the_one_only_the_harness_calls() 
         "report_list",
         "dump_read",
         "dump_save",
+        "image_save",
+        "image_source",
         "cabinet_search",
         "cabinet_summarize",
     }
-    offered = {name: tool for name, tool in listed.items() if name != "dump_save"}
+    offered = {name: tool for name, tool in listed.items() if name not in harness}
     assert all(for_the_model(tool.meta) for tool in offered.values())
-    assert not for_the_model(listed["dump_save"].meta), (
+    assert not any(for_the_model(listed[name].meta) for name in harness), (
         "the harness's, and nobody else's"
     )
     assert "list_sources" not in listed
@@ -399,6 +406,56 @@ async def test_two_files_of_one_name_are_two_files() -> None:
     assert listed["total"] == 2
     assert (bag() / "documents" / "notes.txt").read_text(encoding="utf-8") == "one"
     assert (bag() / "documents" / "notes-2.txt").read_text(encoding="utf-8") == "two"
+
+
+# --- images: bytes, addressed by content ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_image_is_stored_once_and_read_back_as_a_data_url() -> None:
+    """Two attaches of one picture are one row; `image_source` answers a URL."""
+    async with Client(cabinet()) as client:
+        first = await payload(client, "image_save", url="data:image/png;base64,AAAA")
+        again = await payload(client, "image_save", url="data:image/png;base64,AAAA")
+        read = await payload(client, "image_source", key=first["key"])
+
+    assert first["key"] == again["key"], "content-addressed, so one file and row"
+    assert first["key"].startswith("pictures/")
+    assert first["mime"] == "image/png"
+    assert first["size"] == 3
+    assert read["url"].startswith("data:image/png;base64,")
+
+    async with Client(cabinet()) as client:
+        found = await payload(client, "cabinet_search", kind=IMAGE, limit=5)
+
+    assert [hit["key"] for hit in found["results"]].count(first["key"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_image_url_is_kept_without_being_fetched() -> None:
+    """The URL is the source; nothing here makes a request nobody asked for."""
+    url = "https://example.test/shot.png"
+    async with Client(cabinet()) as client:
+        saved = await payload(client, "image_save", url=url)
+        read = await payload(client, "image_source", key=saved["key"])
+
+    assert saved["source"] == url
+    assert saved["size"] == 0, "no bytes here: the provider fetches it"
+    assert read["url"] == url
+
+
+@pytest.mark.asyncio
+async def test_removing_an_image_takes_its_bytes_with_it() -> None:
+    """The kind is bytes-backed, so a removal is a row *and* a file."""
+    async with Client(cabinet()) as client:
+        saved = await payload(client, "image_save", url="data:image/png;base64,AAAA")
+
+    path = index_path("jack").parent / saved["key"]
+    assert path.is_file()
+
+    store = store_of(index_path("jack"))
+    assert await store.remove(IMAGE, saved["key"]) is not None
+    assert not path.is_file()
 
 
 @pytest.mark.asyncio
@@ -811,7 +868,7 @@ async def test_a_path_from_a_model_cannot_leave_the_cabinet() -> None:
 
 
 def test_one_corpus_is_one_table(tmp_path: Path) -> None:
-    """Four kinds are four values of a column, so the two legs fuse on a rowid.
+    """Six kinds are six values of a column, so the two legs fuse on a rowid.
 
     v1 had four tables and a view to union them, and had to synthesise a global
     id out of a per-kind offset for the fusion to have anything to rank. Here the
@@ -1451,22 +1508,23 @@ def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None
     """**The bill for adding a kind, paid once.**
 
     `kind` carries a `CHECK` listing the kinds and `CREATE TABLE IF NOT EXISTS`
-    leaves an existing table exactly as it was — so an index written when there
-    were four kinds refuses a dump, deep inside a transaction, in SQLite's own
-    words about a constraint.  Opening it rebuilds the table: the rows are the
-    truth, the columns have not changed, and the ids come with them because the
-    keyword index and the vectors are keyed by id.
+    leaves an existing table exactly as it was — so an index written before a
+    kind refuses it, deep inside a transaction, in SQLite's own words about a
+    constraint.  Opening it rebuilds the table: the rows are the truth, the
+    columns have not changed, and the ids come with them because the keyword
+    index and the vectors are keyed by id.
     """
     path = index_path("jack")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # The schema as it was before this kind existed: the `CHECK` is the only
-    # part of it that changed, which is the whole reason a rebuild is needed.
-    old = cabinet_store._SCHEMA.replace(",'dump'", "")
+    # The schema as it was before **the last two kinds** existed: the `CHECK` is
+    # the only part of it that changed, which is the whole reason a rebuild is
+    # needed.
+    old = cabinet_store._SCHEMA.replace(",'dump','image'", "")
     with sqlite3.connect(path) as connection:
         connection.executescript(old)
         connection.execute(
             "INSERT INTO cabinet_doc (kind, key, body, created_at, updated_at) "
-            "VALUES ('note', 'kept', 'a note that predates the dump kind', "
+            "VALUES ('note', 'kept', 'a note that predates both kinds', "
             "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
         )
         assert connection.execute("SELECT COUNT(*) FROM cabinet_doc").fetchone()[0] == 1
@@ -1480,22 +1538,25 @@ def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None
             "SELECT sql FROM sqlite_master WHERE name = 'cabinet_doc'"
         ).fetchone()[0]
     assert [tuple(row) for row in rows] == [(1, "note", "kept")], "its id came too"
-    assert "'dump'" in ddl, "and the table can hold one now"
+    assert "'dump'" in ddl and "'image'" in ddl, "and the table can hold both now"
     assert "rebuilt to hold it" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_a_dump_can_be_written_after_that_rebuild() -> None:
+async def test_an_image_can_be_written_after_that_rebuild() -> None:
     """The rebuild is not just a table: the kind it was rebuilt for has to work."""
     path = index_path("jack")
     path.parent.mkdir(parents=True, exist_ok=True)
-    old = cabinet_store._SCHEMA.replace(",'dump'", "")
+    # A schema from before the image kind but after the dump one.
+    old = cabinet_store._SCHEMA.replace(",'image'", "")
     with sqlite3.connect(path) as connection:
         connection.executescript(old)
 
     await save_dump("call_after", "one line\nand another")
 
     async with Client(cabinet()) as client:
+        saved = await payload(client, "image_save", url="data:image/png;base64,AAAA")
         answer = await ask(client, "dump_read", call="call_after")
 
     assert "one line" in answer
+    assert saved["key"].startswith("pictures/")

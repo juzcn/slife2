@@ -34,11 +34,11 @@ def _pin_language():
 
 class TestTranslation:
     def test_english(self):
-        assert t("cancelled") == "cancelled"
+        assert t("interrupted") == "interrupted"
 
     def test_chinese_when_set(self):
         set_language("zh")
-        assert t("cancelled") == "已取消"
+        assert t("interrupted") == "已中断"
 
     def test_format_placeholders(self):
         assert t("restored", turns="3 turns") == "restored 3 turns"

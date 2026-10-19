@@ -40,7 +40,7 @@ from slife2.libs.turn.messages import (
     ToolSpec,
     Usage,
 )
-from slife2.libs.turn.tools import Tool, ToolRegistry
+from slife2.libs.turn.tools import INTERRUPTED, Tool, ToolRegistry
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -460,6 +460,82 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
         await task
 
     assert [m.role for m in messages] == ["user"]
+
+
+async def test_an_interrupted_batch_keeps_the_answers_it_already_had() -> None:
+    """A batch cut short is completed, not dropped.
+
+    A call that answered has done something no later request can reconstruct,
+    so its answer is kept; the calls that never answered say so.  The assistant
+    message is appended with a full set of results, which is what makes the
+    list well formed *and* lets the next turn resume from the work that was
+    done.  The synthetic sentence is the one a rebuilt list uses for an orphan
+    (`slife2.libs.turn.context.consistent`), so the live list and a rebuilt one
+    describe the interruption the same way.
+    """
+    started = asyncio.Event()
+
+    async def first(_arguments: dict[str, Any]) -> str:
+        return "the first answer"
+
+    async def second(_arguments: dict[str, Any]) -> str:
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never arrives"
+
+    calls = (
+        ToolCall(id="c1", name="first", arguments={}),
+        ToolCall(id="c2", name="second", arguments={}),
+    )
+    backend = FakeBackend(tool_turn(*calls))
+    loop = AgentLoop(
+        backend,
+        ToolRegistry([a_tool("first", first), a_tool("second", second)]),
+    )
+    messages: list[Message] = []
+
+    task = asyncio.create_task(loop.run_turn(messages, "go"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool", "tool"]
+    assert [call.id for call in messages[1].tool_calls] == ["c1", "c2"]
+    assert [m.tool_call_id for m in messages[2:]] == ["c1", "c2"]
+    assert [m.content for m in messages[2:]] == ["the first answer", INTERRUPTED]
+
+
+async def test_an_interruption_in_the_fit_keeps_the_result_it_had() -> None:
+    """The result was in hand before the fit was cut, so it is not a lie.
+
+    `_fit` is an await, so an interruption can land after the tool answered and
+    before the windowed copy was chosen.  The answer goes in unfitted rather
+    than being replaced by `INTERRUPTED`: the tool did produce it, and a size
+    decision is not a fact about whether the call ran.
+    """
+    started = asyncio.Event()
+
+    async def fit(_call, _text, _messages) -> str:
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never chosen"
+
+    async def answer(_arguments: dict[str, Any]) -> str:
+        return "the real answer"
+
+    backend = FakeBackend(tool_turn(ToolCall(id="c1", name="tool", arguments={})))
+    loop = AgentLoop(backend, ToolRegistry([a_tool("tool", answer)]), compress=fit)
+    messages: list[Message] = []
+
+    task = asyncio.create_task(loop.run_turn(messages, "go"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == "the real answer"
 
 
 async def test_observer_receives_deltas_in_order() -> None:

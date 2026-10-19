@@ -1,4 +1,5 @@
-"""slife2-cabinet — the private cabinet: notes, a diary, saved files, reports.
+"""slife2-cabinet — the private cabinet: notes, a diary, saved files, reports,
+dumps and images.
 
 v1 called this plugin `memfiles` and described it as four typed knowledge stores
 dual-written to a markdown file and a SQLite index.  This is that, built the way
@@ -13,12 +14,13 @@ one transaction against a local file, it is already the shortest path through a
 sequence of awaited steps, and wrapping it would be a thread hop per write for a
 wait nobody is making.
 
-**Four kinds, one corpus.**  A note, a day, a saved file and a report are rows
-of one table with a `kind` column, so a search ranks them against each other
-rather than against their own kind — a rank only means something inside the
-corpus that produced it, and four indexes would be four corpora (DESIGN.md §5.3).  What
-differs per kind is what a *document* is, and that is `SPECS` in the store: its
-key, its time axis, whether a second write appends, and where its markdown goes.
+**Six kinds, one corpus.**  A note, a day, a saved file, a report, a dump and
+an image are rows of one table with a `kind` column, so a search ranks them
+against each other rather than against their own kind — a rank only means
+something inside the corpus that produced it, and one index per kind would be
+one corpus per kind (DESIGN.md §5.3).  What differs per kind is what a
+*document* is, and that is `SPECS` in the store: its key, its time axis, whether
+a second write appends, and where its markdown goes.
 
 **A document is written twice, and one of the two is for a person.**  The row is
 what a search reads; the markdown under `<data>/agents/<agent>/cabinet/` is what
@@ -29,6 +31,13 @@ operation.
 copies them into the cabinet (never moving, never deleting what it copied from);
 `file_read` returns a file's *text* or refuses with what it is instead, and the
 path to the bytes is what every other tool takes.
+
+**An image is the same shape with a different reader.**  `image_save` is the
+harness's — the agent server stores what a turn carried — and the model's way
+back is `attach_image`, not a cabinet read: the turn keeps an `[Image:{…}]`
+reference and `image_source` resolves its key to a `data:` URI or the original
+URL.  An `http(s)` image is never fetched here; the row keeps the URL and the
+provider fetches it.
 
 What this cut does **not** do, each named rather than half-built:
 
@@ -51,6 +60,8 @@ What this cut does **not** do, each named rather than half-built:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -79,6 +90,7 @@ from slife2.plugins.cabinet.store import (
     DIARY,
     DUMP,
     FILE,
+    IMAGE,
     KINDS,
     NOTE,
     REPORT,
@@ -99,10 +111,12 @@ SERVER_NAME = CABINET_SERVER_NAME
 CONFIG_KEY = "cabinet"
 
 INSTRUCTIONS = (
-    "The cabinet: private notes, a diary, saved files and reports, all in one "
-    "searchable corpus. A note and a report are keyed by a name you choose, a "
-    "diary by its date, a saved file by the path inside the cabinet. `file_save` "
-    "copies a file that is already on this machine — nothing here fetches a URL."
+    "The cabinet: private notes, a diary, saved files, reports and images, all "
+    "in one searchable corpus. A note and a report are keyed by a name you "
+    "choose, a diary by its date, a saved file by the path inside the cabinet, "
+    "an image by its content digest. `file_save` copies a file that is already "
+    "on this machine — nothing here fetches a URL; an image a turn carried is "
+    "`image_save`'s, and `attach_image` is how it comes back."
 )
 
 #: The most of a file `file_read` will read.  A cap rather than a preference: a
@@ -174,8 +188,10 @@ OTHER = "other"
 #: directories.  **The flattening is what makes this necessary**: the categories
 #: sit beside `notes/`, `diary/` and `reports/` at the cabinet root, so
 #: `category="notes"` would put a saved file among the notes' own mirrors and
-#: `file_list(category="notes")` would list both as one thing.
-RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports"})
+#: `file_list(category="notes")` would list both as one thing.  `pictures` is
+#: the `image` kind's directory: a file saved there would be indistinguishable
+#: from a picture a turn's `[Image:…]` reference points at.
+RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports", "pictures"})
 
 
 def category_for(name: str) -> str:
@@ -318,8 +334,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     # ── The three moves every kind makes ─────────────────────────────────
     #
-    # Five kinds are served below — notes, diary days, files, reports, and the
-    # tool outputs the harness dumps — and each is the same three moves: a page,
+    # Six kinds are served below — notes, diary days, files, reports, the tool
+    # outputs the harness dumps and the images it keeps — and each is the same
+    # three moves: a page,
     # one row, a delete.  What differs between them is the kind and the sentence
     # a miss answers with, and those are arguments; what must *not* differ, and
     # did while each kind had its own copy, is everything a copy gets wrong
@@ -934,6 +951,152 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         logger.info("dump_save call=%s tool=%s chars=%d", call, tool, len(output))
         return {"kept": call, "mirror": str(row["mirror"]), "chars": len(output)}
 
+    # ── Images ───────────────────────────────────────────────────────────
+    #
+    # The harness's kind, like a dump, and for the same reason: the writer is
+    # the agent server's `record`, and the model's way back is not a text
+    # reader but `attach_image`.  Both tools are therefore unmarked — they are
+    # not in the hub's catalogue, and a model reaches an image through the
+    # `[Image:{…}]` reference in its own conversation.
+    #
+    # **The bytes are content-addressed, so a picture attached twice is one
+    # file and one row.**  An `http(s)` URL is not downloaded: this system
+    # never makes a request nobody asked for, so such a row keeps the URL in
+    # `source` and the provider fetches it (`slife2.libs.turn.attachments`
+    # states the same rule for the encoder).
+
+    @mcp.tool(name="image_save")
+    async def image_save(ctx: Context, url: str) -> dict[str, Any]:
+        """Keep one image whole, keyed by its content digest.
+
+        Called by the agent server when a turn is recorded — never by a model.
+        A `data:` URI is decoded and written under `pictures/`; an `http(s)`
+        URL is kept as its own source and nothing is fetched here.
+
+        Args:
+            url: The `image_url` the conversation carries: a base64 `data:` URI
+                or an `http(s)` URL.
+
+        Returns:
+            `key` (the cabinet path, and what the turn's `[Image:…]` reference
+            names), `source` (the URL, empty for stored bytes), `mime` and
+            `size`.
+        """
+        opened = await cabinet(ctx)
+        if url.startswith(("http://", "https://")):
+            key = f"pictures/url-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]}"
+            mime = mimetypes.guess_type(url)[0] or ""
+            row = await opened.write(
+                IMAGE,
+                key,
+                title=mime or "image",
+                source=url,
+                mime=mime,
+                embedder=await embedding.get(),
+            )
+            return {
+                "key": key,
+                "source": url,
+                "mime": str(row.get("mime") or ""),
+                "size": int(row.get("size") or 0),
+            }
+        if not url.startswith("data:"):
+            raise ToolError("image_save takes a base64 data: URI or an http(s) URL")
+        header, _, payload = url.partition(",")
+        if not header.endswith(";base64") or not payload:
+            raise ToolError("image_save takes a base64 data: URI")
+        try:
+            data = base64.b64decode(payload, validate=True)
+        except Exception as exc:  # noqa: BLE001 - every decode failure is one refusal
+            raise ToolError(f"that data: URI is not valid base64: {exc}") from exc
+        mime = header.removeprefix("data:").removesuffix(";base64") or (
+            "application/octet-stream"
+        )
+        relative = (
+            f"pictures/{hashlib.sha256(data).hexdigest()[:16]}"
+            f"{mimetypes.guess_extension(mime) or '.img'}"
+        )
+        target = opened.root / relative
+        created = not target.exists()
+        if created:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
+            try:
+                with temporary.open("wb") as handle:
+                    handle.write(data)
+                os.replace(temporary, target)
+            except OSError as exc:
+                temporary.unlink(missing_ok=True)
+                raise ToolError(f"the image could not be written: {exc}") from exc
+        try:
+            row = await opened.write(
+                IMAGE,
+                relative,
+                title=mime or "image",
+                file_path=relative,
+                mime=mime,
+                size=len(data),
+                embedder=await embedding.get(),
+            )
+        except Exception:
+            # **Only a file this call created is taken back.**  A content
+            # address can already hold the bytes of an earlier save, and that
+            # row (and every marker pointing at it) still needs them.
+            if created:
+                discard_file(target)
+            raise
+        logger.info("image_save key=%s mime=%s bytes=%d", relative, mime, len(data))
+        return {
+            "key": relative,
+            "source": "",
+            "mime": str(row.get("mime") or ""),
+            "size": len(data),
+        }
+
+    @mcp.tool(name="image_source")
+    async def image_source(ctx: Context, key: str) -> dict[str, Any]:
+        """Resolve an image's cabinet key to a URL `attach_image` can take.
+
+        **Called by the model's own `attach_image`**, through the agent server,
+        when a `[Image:…]` reference names a key rather than a path.  A stored
+        image comes back as a `data:` URI built from its bytes — which is also
+        why a data: source with a type this build has no extension for can be
+        attached again — and a URL-only row comes back as its URL.
+
+        Args:
+            key: The cabinet path the reference names, e.g. `pictures/ab12.png`.
+
+        Returns:
+            `key`, `url`, `mime` and `size`.
+        """
+        opened = await cabinet(ctx)
+        row = await missing_row(ctx, IMAGE, key, f"there is no image at {key!r}.")
+        saved = str(row.get("file_path") or "")
+        if not saved:
+            source = str(row.get("source") or "")
+            if not source:
+                raise ToolError(f"the image at {key!r} has no source left to attach")
+            return {
+                "key": key,
+                "url": source,
+                "mime": str(row.get("mime") or ""),
+                "size": int(row.get("size") or 0),
+            }
+        try:
+            target = resolve(opened.root, saved)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not target.is_file():
+            raise ToolError(f"{key!r} is recorded but is not on disk any more.")
+        data = await off_loop(target.read_bytes)
+        mime = str(row.get("mime") or "application/octet-stream")
+        return {
+            "key": key,
+            "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+            "mime": mime,
+            "size": len(data),
+        }
+
     # ── Finding, and describing ──────────────────────────────────────────
     @mcp.tool(name="cabinet_search", meta=FOR_THE_MODEL)
     async def cabinet_search(
@@ -956,10 +1119,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 works here.
             sentences: What you are looking for, asked normally. One per
                 question you have.
-            kind: `note`, `diary`, `file`, `report` or `dump` — a tool's own
-                output, which the harness saves — to look in one of them. Empty
-                searches all of them but the dumps, which are reached by the
-                marker naming them rather than by a search.
+            kind: `note`, `diary`, `file`, `report`, `dump` or `image` — the
+                last two are the harness's (a tool's output and a picture a
+                turn carried) — to look in one of them. Empty searches all of
+                them but the dumps, which are reached by the marker naming them
+                rather than by a search.
             since: Only documents from this time on.
             until: Only documents up to this time.
             limit: How many hits this page may hold.
@@ -1002,7 +1166,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         describes it.
 
         Args:
-            kind: `note`, `diary`, `file`, `report` or `dump`.
+            kind: `note`, `diary`, `file`, `report`, `dump` or `image`.
             key: The document's key — a subject, a date, a cabinet path, a title
                 or the tool call a dump is the output of.
             summary: What it is, in words somebody would search with.
@@ -1026,7 +1190,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         if row is None:
             raise ToolError(f"there is no {wanted} with the key {key!r}.")
         logger.info("cabinet_summarize kind=%s key=%s", kind, key)
-        return {**facts(row), "reembedded": wanted == FILE and bool(summary)}
+        return {
+            **facts(row),
+            "reembedded": wanted in (FILE, IMAGE) and bool(summary),
+        }
 
     return mcp
 

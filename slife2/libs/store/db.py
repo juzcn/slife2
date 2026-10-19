@@ -306,9 +306,11 @@ _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS turn (
     -- The whole turn as OpenAI-shaped message JSON, the user's message first.
     -- An attachment arrives on that first entry as a base64 data URL and leaves
-    -- as a note in the same place: the bytes are the one thing a turn does not
-    -- keep (see `strip_images`).  There is no column for what was attached and
-    -- there is not meant to be — the file is named in the text.
+    -- as an `[Image:…]` reference to the cabinet copy the agent server wrote
+    -- before the save; a part that reached here without being kept leaves as a
+    -- note instead (see `strip_images`).  There is no column for what was
+    -- attached and there is not meant to be — the reference or the words that
+    -- named the source are in the text.
     messages       TEXT    NOT NULL DEFAULT '[]',
 
     -- Retrieval hooks.  `turn_summarize` writes them for a turn the model
@@ -391,17 +393,22 @@ CREATE TABLE IF NOT EXISTS context (
 
 
 def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace an attached image with a note saying it was there.
+    """Replace an image part that reached the store with a note saying it was there.
+
+    **The fallback, not the usual path.**  The agent server keeps every image a
+    recorded turn carried in the cabinet and replaces the part in the row with
+    an `[Image:…]` reference before calling here (`record`'s `keep_images`), so a
+    kept picture never reaches this function.  What does is a part from a caller
+    that did not keep it — a failed turn whose provider refused it (the repair
+    replaced it in place first), or a direct caller of this store.
 
     **The bytes are not kept, and the name is not needed.**  An attachment
     arrives as a base64 data URL — up to ten megabytes of it (`slife2.tui.
     attachments`) — and a turn is text that a model reads back; putting the
     picture in the database would mean every later read of that turn carries
-    megabytes to say what one line could.  The file it came from needs no field
-    of its own, because `@screenshot.png` is still in the prompt: the marker is
-    left in the text where the user put it (that is the whole of v1's
-    convention), so what is stored says which file it was, and attaching it
-    again is a new turn and a new model call.
+    megabytes to say what one line could.  The source needs no field of its own:
+    the person's own words are stored with the turn, and when those words name a
+    path or a URL, the model can attach it again in a new call.
 
     Announced, never silent, for the reason the tool-result digest is: a
     placeholder that reads as the real thing is a lie a model reasons from.

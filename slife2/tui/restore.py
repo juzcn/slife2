@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
@@ -246,13 +247,20 @@ def _text(content: Any) -> str:
     `content` is a string or a list of content parts — the OpenAI shape, which
     is what a message carrying an image is — so the parts are read rather than
     the list being rendered.  Images themselves are not drawn: the transcript
-    shows what was *said*, and `@path` in the prompt is where an attachment is
+    shows what was *said*, and the turn's own words are where a source is
     named.
+
+    **The `[Image:…]` reference is machinery, not speech.**  It is the address
+    a kept picture leaves in the row, and the model — not the person — is its
+    reader; showing its JSON in a restored bubble would be the same mistake as
+    drawing `[TURN:…]`.
     """
     if isinstance(content, list):
         return "".join(
             str(part.get("text") or "")
             for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and not str(part.get("text") or "").startswith(IMAGE_PREFIX)
         )
     return str(content) if content else ""

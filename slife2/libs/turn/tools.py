@@ -175,6 +175,15 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 
+#: What a tool call that never produced an answer is recorded as.  **One
+#: spelling, two producers**: the loop completes a batch an interruption cut
+#: short with it (`AgentLoop.run_turn`), and a rebuilt list repairs an orphaned
+#: call with it (`slife2.libs.turn.context.consistent`).  The model reads it as
+#: the call's answer, so the two must not describe one interruption two ways.
+#: v1's sentence, verbatim, because it is a sentence in a transcript a person
+#: also reads.
+INTERRUPTED = "(Tool execution interrupted)"
+
 
 def is_harness(name: str) -> bool:
     """Whether a tool name is the harness's rather than the model's.

@@ -278,9 +278,10 @@ class MCPAgentClient:
         #: is the name its turns are recorded under.
         self._agent = agent
         #: Which of that agent's conversations.  Empty for the one a person is
-        #: watching; a name for a worker, which is a different conversation with
-        #: its own history whose turns are not written to the db.  A TUI is
-        #: always the former, which is why it does not expose this as a flag.
+        #: watching; a name for a subagent's, which is a different conversation
+        #: with its own history and its own store.  A window is always the
+        #: former; the watch screen is the one caller that picks a name, which
+        #: is why the window does not expose this as a flag.
         self._subagent = subagent
         #: Which model to ask for, as `provider/model`.  The server reads it when
         #: a conversation *starts*, so sending it every turn is idempotent rather
