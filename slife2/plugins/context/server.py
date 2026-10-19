@@ -102,11 +102,11 @@ CONFIG_KEY = "context"
 INSTRUCTIONS = (
     "One conversation's memory, addressed by `(agent, subagent)`. Call "
     "`remember` after a turn: it is a record, not an interpretation, and it "
-    "writes what it is given. `turn_list` browses and `turn_read` returns one "
-    "turn whole — both are the model's, and neither names an agent, because they "
-    "answer about the conversation the call came from. `restore` and `rebuild` "
-    "are the harness's: they decide which turns a conversation is made of, and "
-    "no model calls them."
+    "writes what it is given. `turn_list` browses, `turn_search` finds a turn by "
+    "what it was about, and `turn_read` returns one turn whole — all three are "
+    "the model's, and none names an agent, because they answer about the "
+    "conversation the call came from. `restore` and `rebuild` are the harness's: "
+    "they decide which turns a conversation is made of, and no model calls them."
 )
 
 #: The discriminator call, as a seam: the conversation and the input in, whatever
@@ -455,6 +455,67 @@ def build_server(
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         return record.to_wire()
+
+    @mcp.tool(meta=FOR_THE_MODEL)
+    async def turn_search(
+        ctx: Context,
+        query: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Search your own history by what a turn was about.
+
+        Two legs decide the answer: the words a turn is found by, and what it
+        was about. A turn both legs find ranks first. Each hit is the one line
+        `turn_list` gives, plus `similarity` — the meaning score when the
+        meaning leg measured the turn, `null` when only its words matched.
+        Read one whole with `turn_read`.
+
+        Args:
+            query: What the turn was about.
+            since: Lower bound on when the turn was written — an ISO date or
+                datetime, or one of: today, yesterday, tomorrow, now,
+                last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
+                Omit for no lower bound.
+            until: Upper bound on the same grammar. A date means the whole day.
+                Omit for no upper bound.
+            limit: How many hits this page may hold.
+
+        Returns:
+            `entries` — `turn_id`, `created_at`, `user_message`,
+            `assistant_message`, `token_count` and `similarity` per hit, best
+            first — and `limit`.
+        """
+        agent, subagent = _caller(ctx)
+        if not terms(query):
+            raise ToolError(
+                "turn_search needs something to look for — `turn_list` browses "
+                "the history without a query."
+            )
+        store = await store_of(agent, subagent)
+        ranked = await store.recall(
+            query=query,
+            embedder=await embedding.get(),
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        records = {
+            record.turn_id: record
+            for record in await off_loop(
+                store.turns_by_ids, [turn_id for turn_id, _ in ranked]
+            )
+        }
+        entries: list[dict[str, Any]] = []
+        for turn_id, similarity in ranked:
+            record = records.get(turn_id)
+            if record is None:
+                continue
+            entry = record.to_listing()
+            entry["similarity"] = similarity
+            entries.append(entry)
+        return {"entries": entries, "limit": page_limit(limit)}
 
     # --- the two decisions ---------------------------------------------------
     #

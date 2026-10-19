@@ -1489,7 +1489,6 @@ answer costs.
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | More display traffic than necessary. |
 | The pass behind the context ceiling | The selection is bounded by construction; a turn whose tool results balloon while it runs is not caught. | A very large turn can exceed the ceiling until the next selection. |
-| `turn_search` for the model | The store’s search is used by recall; exposing it changes what a prompt is made of. | A model can browse its history but not semantically search it. |
 | A cap on total agent-task work | `max_running` bounds concurrency; a rate or depth is the missing number. | A task can start tasks without a total bound. |
 | A cap on the number of conversations | The inbox is capped because a queued call has a client-side timeout; the number of loops is not. | A client can create conversations without a machine-wide limit. |
 | A visible agent-task progress line | The four tools are the model’s; the window has no line for a running task and no key that stops one. | A person’s only lever is to ask the model. |

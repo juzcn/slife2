@@ -348,11 +348,12 @@ def test_the_tool_tells_the_model_the_grammar_it_implements() -> None:
     Compared with whitespace collapsed, because the sentence is wrapped in the
     source and arrives unwrapped.
     """
-    assert _flat(BOUND_GRAMMAR) in _flat(_since_schema()["description"])
+    assert _flat(BOUND_GRAMMAR) in _flat(_since_schema("turn_list")["description"])
+    assert _flat(BOUND_GRAMMAR) in _flat(_since_schema("turn_search")["description"])
 
 
-def _since_schema() -> dict:
-    """`turn_list`'s `since` as the model is handed it."""
+def _since_schema(tool: str) -> dict:
+    """That tool's `since` as the model is handed it."""
     from fastmcp import Client
 
     from slife2.libs.host.config import default_config
@@ -362,10 +363,10 @@ def _since_schema() -> dict:
         async with Client(
             build_server(default_config(), embedder=StubEmbedder())
         ) as client:
-            (tool,) = [
-                one for one in await client.list_tools() if one.name == "turn_list"
+            (found,) = [
+                one for one in await client.list_tools() if one.name == tool
             ]
-        return tool.input_schema["properties"]["since"]
+        return found.input_schema["properties"]["since"]
 
     return asyncio.run(read())
 

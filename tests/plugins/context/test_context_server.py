@@ -170,7 +170,7 @@ async def test_the_model_tools_name_no_agent() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    for name in ("turn_list", "turn_read"):
+    for name in ("turn_list", "turn_search", "turn_read"):
         assert "agent" not in tools[name].input_schema["properties"]
         assert "subagent" not in tools[name].input_schema["properties"]
     # And the ones the agent side calls still take it: `remember`, `restore` and
@@ -192,7 +192,7 @@ async def test_none_of_the_harness_tools_is_the_models() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
 
-    for name in ("turn_list", "turn_read"):
+    for name in ("turn_list", "turn_search", "turn_read"):
         assert listed[name].meta.get("slife2/audience") == "assistant"
     for name in ("remember", "restore", "rebuild", "forget"):
         assert "slife2/audience" not in (listed[name].meta or {})
@@ -315,6 +315,121 @@ async def test_reading_a_turn_that_is_not_there_says_which_one() -> None:
             await client.call_tool(
                 "turn_read", {"turn_id": 7}, meta=client_meta("jack")
             )
+
+
+@pytest.mark.asyncio
+async def test_search_answers_with_the_browse_line_and_a_score() -> None:
+    """One hit is `turn_list`'s line plus the meaning score, and nothing else.
+
+    The line is the contract: a model that has read `turn_list` already knows
+    what it is looking at, and `turn_read` takes the `turn_id` either tool gave.
+    """
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(
+            client,
+            "jack",
+            ("the trump rally", "a0"),
+            ("unrelated chatter", "a1"),
+        )
+        found = await client.call_tool(
+            "turn_search", {"query": "trump"}, meta=client_meta("jack")
+        )
+
+    entries = found.data["entries"]
+    assert entries[0]["user_message"] == "the trump rally"
+    assert entries[0]["similarity"] > 0
+    assert set(entries[0]) == {
+        "turn_id",
+        "created_at",
+        "user_message",
+        "assistant_message",
+        "token_count",
+        "similarity",
+    }
+    assert found.data["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_search_reads_only_the_callers_conversation() -> None:
+    """The same boundary `turn_list` has: no argument names whose memory."""
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("jack's trump note", "a"))
+        await _seed(client, "jill", ("jill's trump note", "a"))
+        found = await client.call_tool(
+            "turn_search", {"query": "trump"}, meta=client_meta("jack")
+        )
+
+    assert [e["user_message"] for e in found.data["entries"]] == [
+        "jack's trump note"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["", "***", "   "])
+async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
+    query: str,
+) -> None:
+    """An empty query is not a browse; `turn_list` is."""
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        with pytest.raises(ToolError, match="turn_list"):
+            await client.call_tool(
+                "turn_search", {"query": query}, meta=client_meta("jack")
+            )
+
+
+@pytest.mark.asyncio
+async def test_search_honours_the_same_time_window_as_the_browse() -> None:
+    """`since`/`until` reach the ranking, not only the listing."""
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await client.call_tool(
+            "remember",
+            {
+                "agent": "jack",
+                "messages": _exchange("old trump note", "a"),
+                "created_at": "2020-01-01T00:00:00",
+            },
+        )
+        await _seed(client, "jack", ("new trump note", "a"))
+        found = await client.call_tool(
+            "turn_search",
+            {"query": "trump", "since": "2025-01-01"},
+            meta=client_meta("jack"),
+        )
+
+    assert [e["user_message"] for e in found.data["entries"]] == [
+        "new trump note"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_finds_the_topic_a_person_names_in_chinese() -> None:
+    """“昨天讨论的首经贸发展问题，我们再继续” has to reach that turn.
+
+    The keyword leg splits CJK into characters (`textindex.normalize`) and the
+    meaning leg embeds the same text, so a Chinese topic is one query rather
+    than a translation step. `since` is the bound the sentence itself names.
+    """
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(
+            client,
+            "jack",
+            ("昨天讨论的首经贸发展问题", "我们决定先看数据。"),
+            ("无关的闲聊", "好的。"),
+        )
+        found = await client.call_tool(
+            "turn_search",
+            {"query": "首经贸发展", "since": "yesterday"},
+            meta=client_meta("jack"),
+        )
+
+    assert [e["user_message"] for e in found.data["entries"]][0] == (
+        "昨天讨论的首经贸发展问题"
+    )
 
 
 # --- restore: the exit-time context, replayed ---------------------------------

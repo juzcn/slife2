@@ -542,12 +542,15 @@ restored ones. Capitalized markers are annotations added by the harness and are
 not part of the stored record. A marker that reads as a word, such as
 `[Wechat:{…}]`, was written by a sender and is stored with the message.
 
-The model can browse its history with `turn_list` and `turn_read`.
-`turn_list` is newest first, one line per turn, with `since`/`until` accepting an
-ISO date or a phrase such as `yesterday`, `last month`, or `3 days ago`, and
-`limit`/`offset` paging against `total`. Neither tool takes an agent argument:
-the call itself carries the conversation, so a model reads its own history and
-nothing else.
+The model can browse its history with `turn_list`, search it by what a turn was
+about with `turn_search`, and read one whole with `turn_read`. `turn_list` is
+newest first, one line per turn, with `since`/`until` accepting an ISO date or a
+phrase such as `yesterday`, `last month`, or `3 days ago`, and `limit`/`offset`
+paging against `total`. `turn_search` takes the same time window, returns the
+same line plus a `similarity` score, and has no `offset` — it answers with the
+best matches, not a page of everything. None of the three takes an agent
+argument: the call itself carries the conversation, so a model reads its own
+history and nothing else.
 
 Every turn is indexed twice when stored: a keyword index over the text by which
 a turn is found, and a vector index over what it is about. Both indexes are
@@ -564,8 +567,9 @@ discriminator that times out, a provider that errors, or an unreadable answer
 keeps the existing context and runs the turn. A missing turn store fails the
 turn, like any missing plugin.
 
-The model can browse the turn log but cannot semantically search it; the recall
-used by the context decision belongs to the store.
+The recall used by the context decision belongs to the store; `turn_search` is
+the model's own way into the same index. Its result is a tool output, not a
+change to the selected context.
 
 ### Tools
 
@@ -1139,8 +1143,6 @@ CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
   text, and the model runs any commands itself.
 - The cabinet's `file_save` does not fetch URLs, and the cabinet has no `grep`
   search leg.
-- The model can browse the turn log with `turn_list` and `turn_read` but cannot
-  semantically search it.
 - There is no approval gate before a configuration edit, including `mcp_set`
   with a `command:` that records a program slife2 will start.
 - An agent task may start another agent task; `agent-task.max_running` bounds

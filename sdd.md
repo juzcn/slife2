@@ -1906,7 +1906,6 @@ The following are not implemented in this version:
 | Executing playbook scripts | `skill_use` returns the playbook text; the model runs commands itself. |
 | Fetching a URL in `file_save` | `file_save` copies local files only. |
 | A `grep` search leg | The cabinet has keyword and semantic search only. |
-| Semantic search of the turn log | `turn_list` and `turn_read` browse; the model cannot run an arbitrary semantic search. |
 | An approval gate before configuration edits | `mcp_set` with a `command:` records a program without asking. |
 | A bound on total agent-task work | `agent-task.max_running` bounds concurrency only. |
 

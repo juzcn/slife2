@@ -499,10 +499,13 @@ skills:
 添加的注解，不属于存储记录。读起来像词的 marker（例如 `[Wechat:{…}]`）是发送者
 写的，会随消息一起存储。
 
-模型可以用 `turn_list` 和 `turn_read` 浏览历史。`turn_list` 按最新优先，每轮一行；
-`since`/`until` 接受 ISO 日期或 `yesterday`、`last month`、`3 days ago` 之类的
-说法，`limit`/`offset` 按 `total` 翻页。两个工具都不接受 agent 参数：调用本身
-携带对话身份，因此模型只能读取自己的历史。
+模型可以用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用
+`turn_read` 读完整的某一轮。`turn_list` 按最新优先，每轮一行；`since`/`until`
+接受 ISO 日期或 `yesterday`、`last month`、`3 days ago` 之类的说法，
+`limit`/`offset` 按 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的
+一行外加 `similarity` 分数，并且没有 `offset`——它回答的是最匹配的几轮，而不是
+窗口内的全部轮次。三个工具都不接受 agent 参数：调用本身携带对话身份，因此模型
+只能读取自己的历史。
 
 每一轮存储时都会建立两个索引：一个按“这一轮靠什么被找到”的文本建立的关键词
 索引，一个按“它讲的是什么”建立的向量索引。两个索引都派生自轮次，也可以从轮次
@@ -517,7 +520,8 @@ skills:
 报错或回答无法解析时，会保留现有上下文并继续运行该轮。轮次存储缺失则会使该轮
 失败，和其他缺失的 plugin 一样。
 
-模型可以浏览轮次日志，但不能语义搜索它；上下文决策使用的召回属于存储自身。
+上下文决策使用的召回属于存储自身；`turn_search` 是模型自己进入同一索引的入口，
+它的结果只是工具输出，不会改变已经选定的上下文。
 
 ### 工具
 
@@ -1026,7 +1030,6 @@ CI 在 Ubuntu、macOS 和 Windows 上使用 Python 3.13 运行：
 - slife2 不执行 playbook 脚本；`skill_use` 返回 playbook 文本，由模型自己运行
   其中的命令。
 - 文件柜的 `file_save` 不获取 URL，文件柜也没有 `grep` 搜索腿。
-- 模型可以用 `turn_list` 和 `turn_read` 浏览轮次日志，但不能语义搜索它。
 - 编辑配置前没有批准闸，包括带 `command:` 的 `mcp_set`；该调用会记录一个
   slife2 将要启动的程序。
 - 一个 agent 任务可以启动另一个 agent 任务；`agent-task.max_running` 限制并发，
