@@ -284,7 +284,9 @@ def ast_tools(root: Path) -> dict[str, dict]:
             if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                 continue
             for decorator in node.decorator_list:
-                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                target = (
+                    decorator.func if isinstance(decorator, ast.Call) else decorator
+                )
                 if not (
                     isinstance(target, ast.Attribute)
                     and target.attr == "tool"
@@ -576,7 +578,9 @@ def main(argv: list[str] | None = None) -> int:
         if current == document:
             print(f"{args.out} is up to date")
             return 0
-        print(f"{args.out} is out of date; run scripts/gen_tools_doc.py", file=sys.stderr)
+        print(
+            f"{args.out} is out of date; run scripts/gen_tools_doc.py", file=sys.stderr
+        )
         return 1
 
     args.out.write_text(document, encoding="utf-8")

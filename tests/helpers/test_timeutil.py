@@ -363,9 +363,7 @@ def _since_schema(tool: str) -> dict:
         async with Client(
             build_server(default_config(), embedder=StubEmbedder())
         ) as client:
-            (found,) = [
-                one for one in await client.list_tools() if one.name == tool
-            ]
+            (found,) = [one for one in await client.list_tools() if one.name == tool]
         return found.input_schema["properties"]["since"]
 
     return asyncio.run(read())

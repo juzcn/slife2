@@ -371,9 +371,7 @@ async def test_search_reads_only_the_callers_conversation() -> None:
             "turn_search", {"query": "trump"}, meta=client_meta("jack")
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == [
-        "jack's trump note"
-    ]
+    assert [e["user_message"] for e in found.data["entries"]] == ["jack's trump note"]
 
 
 @pytest.mark.asyncio
@@ -410,9 +408,7 @@ async def test_search_honours_the_same_time_window_as_the_browse() -> None:
             meta=client_meta("jack"),
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == [
-        "new trump note"
-    ]
+    assert [e["user_message"] for e in found.data["entries"]] == ["new trump note"]
 
 
 @pytest.mark.asyncio
